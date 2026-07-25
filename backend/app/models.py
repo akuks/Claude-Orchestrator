@@ -91,3 +91,60 @@ class Artifact(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, default=_now)
 
     task: Mapped["Task"] = relationship(back_populates="artifacts")
+
+
+class McpServer(Base):
+    __tablename__ = "mcp_servers"
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=_uuid)
+    name: Mapped[str] = mapped_column(String(120), unique=True, index=True)
+    transport: Mapped[str] = mapped_column(String(16), default="stdio")  # stdio | http
+    scope: Mapped[str] = mapped_column(String(16), default="team")  # team | user | project
+    project: Mapped[str | None] = mapped_column(String(200), nullable=True, index=True)
+
+    # stdio transport
+    command: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    args: Mapped[list] = mapped_column(JSON, default=list)
+    # http transport
+    url: Mapped[str | None] = mapped_column(String(500), nullable=True)
+
+    # Encrypted {"env": {...}, "headers": {...}} — never returned in plaintext.
+    secrets_encrypted: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+    enabled: Mapped[bool] = mapped_column(default=True)
+    status: Mapped[str] = mapped_column(String(16), default="unknown")
+    status_detail: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    tools: Mapped[list] = mapped_column(JSON, default=list)
+    last_checked_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=_now)
+
+    policies: Mapped[list["McpToolPolicy"]] = relationship(
+        back_populates="server", cascade="all, delete-orphan"
+    )
+
+
+class McpToolPolicy(Base):
+    __tablename__ = "mcp_tool_policies"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    server_id: Mapped[str] = mapped_column(
+        ForeignKey("mcp_servers.id", ondelete="CASCADE"), index=True
+    )
+    tool_name: Mapped[str] = mapped_column(String(200))
+    classification: Mapped[str] = mapped_column(String(16), default="write")  # read|write|dangerous
+    action: Mapped[str] = mapped_column(String(20), default="require_approval")
+    # action: auto_approve | require_approval | block
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=_now)
+
+    server: Mapped["McpServer"] = relationship(back_populates="policies")
+
+
+class McpCall(Base):
+    __tablename__ = "mcp_calls"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    task_id: Mapped[str | None] = mapped_column(String(32), nullable=True, index=True)
+    server: Mapped[str] = mapped_column(String(120), index=True)
+    tool: Mapped[str] = mapped_column(String(200))
+    is_error: Mapped[bool] = mapped_column(default=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=_now, index=True)

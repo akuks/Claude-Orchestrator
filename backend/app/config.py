@@ -18,6 +18,14 @@ class Settings(BaseSettings):
     task_timeout_seconds: int = 1800
     claude_permission_mode: str = "bypassPermissions"
 
+    # Secrets / credential vault
+    secret_key: str | None = None
+    secret_key_file: Path = Path("./.secret.key")
+
+    # MCP management
+    mcp_health_interval_seconds: int = 300
+    mcp_probe_timeout_seconds: int = 15
+
     # API
     cors_origins: list[str] = [
         "http://localhost:5173",

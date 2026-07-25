@@ -73,3 +73,87 @@ class StatsOut(BaseModel):
     success_rate: float
     avg_duration_ms: Optional[float]
     by_status: dict
+
+
+# ---- MCP management --------------------------------------------------------
+
+
+class McpServerCreate(BaseModel):
+    name: str = Field(min_length=1, max_length=120)
+    transport: str = "stdio"  # stdio | http
+    scope: str = "team"  # team | user | project
+    project: Optional[str] = None
+    command: Optional[str] = None
+    args: list[str] = Field(default_factory=list)
+    url: Optional[str] = None
+    env: dict[str, str] = Field(default_factory=dict)
+    headers: dict[str, str] = Field(default_factory=dict)
+    enabled: bool = True
+
+
+class McpServerUpdate(BaseModel):
+    scope: Optional[str] = None
+    project: Optional[str] = None
+    command: Optional[str] = None
+    args: Optional[list[str]] = None
+    url: Optional[str] = None
+    env: Optional[dict[str, str]] = None
+    headers: Optional[dict[str, str]] = None
+    enabled: Optional[bool] = None
+
+
+class McpToolInfo(BaseModel):
+    name: Optional[str] = None
+    description: Optional[str] = None
+
+
+class McpServerOut(BaseModel):
+    id: str
+    name: str
+    transport: str
+    scope: str
+    project: Optional[str]
+    command: Optional[str]
+    args: list
+    url: Optional[str]
+    enabled: bool
+    status: str
+    status_detail: Optional[str]
+    tools: list
+    has_env: bool = False
+    has_headers: bool = False
+    last_checked_at: Optional[datetime]
+    created_at: datetime
+
+    model_config = {"from_attributes": True}
+
+
+class PolicyIn(BaseModel):
+    tool_name: str
+    classification: str = "write"
+    action: str = "require_approval"
+
+
+class PolicyOut(BaseModel):
+    id: int
+    server_id: str
+    tool_name: str
+    classification: str
+    action: str
+
+    model_config = {"from_attributes": True}
+
+
+class McpProbeOut(BaseModel):
+    ok: Optional[bool]
+    tools: list
+    error: Optional[str] = None
+
+
+class McpObservabilityOut(BaseModel):
+    window_days: int
+    total_calls: int
+    total_errors: int
+    failure_rate: float
+    by_server: list
+    top_tools: list
