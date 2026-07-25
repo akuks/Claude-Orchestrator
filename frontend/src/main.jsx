@@ -1,11 +1,12 @@
 import React from 'react'
 import ReactDOM from 'react-dom/client'
-import { ConfigProvider, theme } from 'antd'
+import { ConfigProvider } from 'antd'
 import App from './App.jsx'
+import { warmTheme } from './theme'
 
 ReactDOM.createRoot(document.getElementById('root')).render(
   <React.StrictMode>
-    <ConfigProvider theme={{ algorithm: theme.darkAlgorithm, token: { colorPrimary: '#d97757' } }}>
+    <ConfigProvider theme={warmTheme}>
       <App />
     </ConfigProvider>
   </React.StrictMode>,
