@@ -17,6 +17,7 @@ import {
   StopOutlined,
 } from '@ant-design/icons'
 import { api, PRIORITY_COLORS, STATUS_COLORS } from '../api'
+import { warm } from '../theme'
 
 const EVENT_STYLE = {
   started: { color: '#8c8c8c', prefix: '▶' },
@@ -180,8 +181,8 @@ export default function TaskDetail({ taskId, onClose, onChanged }) {
       <div
         ref={termRef}
         style={{
-          background: '#141414',
-          border: '1px solid #303030',
+          background: warm.bgTerminal,
+          border: `1px solid ${warm.border}`,
           borderRadius: 6,
           padding: 12,
           height: 320,
@@ -194,7 +195,7 @@ export default function TaskDetail({ taskId, onClose, onChanged }) {
         }}
       >
         {events.length === 0 && (
-          <span style={{ color: '#595959' }}>Waiting for output…</span>
+          <span style={{ color: warm.textMuted }}>Waiting for output…</span>
         )}
         {events.map((ev, i) => {
           const line = renderLine(ev)
@@ -213,8 +214,8 @@ export default function TaskDetail({ taskId, onClose, onChanged }) {
       {task?.result_text ? (
         <div
           style={{
-            background: '#1a1a1a',
-            border: '1px solid #303030',
+            background: warm.bgElevated,
+            border: `1px solid ${warm.border}`,
             borderRadius: 6,
             padding: 12,
             whiteSpace: 'pre-wrap',
