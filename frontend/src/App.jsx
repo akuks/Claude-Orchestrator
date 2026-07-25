@@ -3,6 +3,7 @@ import {
   Button,
   Input,
   Layout,
+  Segmented,
   Select,
   Space,
   Table,
@@ -10,13 +11,14 @@ import {
   Typography,
   message,
 } from 'antd'
-import { PlusOutlined, ReloadOutlined } from '@ant-design/icons'
+import { ApiOutlined, PlusOutlined, ReloadOutlined, UnorderedListOutlined } from '@ant-design/icons'
 import dayjs from 'dayjs'
 import relativeTime from 'dayjs/plugin/relativeTime'
 import { api, PRIORITY_COLORS, STATUS_COLORS } from './api'
 import StatsBar from './components/StatsBar'
 import CreateTaskModal from './components/CreateTaskModal'
 import TaskDetail from './components/TaskDetail'
+import McpRegistry from './components/McpRegistry'
 
 dayjs.extend(relativeTime)
 
@@ -30,6 +32,7 @@ export default function App() {
   const [selected, setSelected] = useState(null)
   const [statusFilter, setStatusFilter] = useState()
   const [projectFilter, setProjectFilter] = useState('')
+  const [view, setView] = useState('tasks')
 
   const refresh = useCallback(async () => {
     setLoading(true)
@@ -48,10 +51,11 @@ export default function App() {
   }, [statusFilter, projectFilter])
 
   useEffect(() => {
+    if (view !== 'tasks') return
     refresh()
     const id = setInterval(refresh, 3000) // poll for live feed updates
     return () => clearInterval(id)
-  }, [refresh])
+  }, [refresh, view])
 
   const columns = [
     {
@@ -106,15 +110,30 @@ export default function App() {
           paddingInline: 24,
         }}
       >
-        <Typography.Title level={4} style={{ color: '#fff', margin: 0 }}>
-          🪄 Claude Orchestrator
-        </Typography.Title>
-        <Button type="primary" icon={<PlusOutlined />} onClick={() => setCreateOpen(true)}>
-          New Task
-        </Button>
+        <Space size="large">
+          <Typography.Title level={4} style={{ color: '#fff', margin: 0 }}>
+            🪄 Claude Orchestrator
+          </Typography.Title>
+          <Segmented
+            value={view}
+            onChange={setView}
+            options={[
+              { value: 'tasks', label: 'Tasks', icon: <UnorderedListOutlined /> },
+              { value: 'mcp', label: 'MCP Servers', icon: <ApiOutlined /> },
+            ]}
+          />
+        </Space>
+        {view === 'tasks' && (
+          <Button type="primary" icon={<PlusOutlined />} onClick={() => setCreateOpen(true)}>
+            New Task
+          </Button>
+        )}
       </Header>
 
       <Content style={{ padding: 24 }}>
+        {view === 'mcp' && <McpRegistry />}
+        {view === 'tasks' && (
+        <>
         <StatsBar stats={stats} />
 
         <Space style={{ marginBottom: 12 }} wrap>
@@ -153,6 +172,8 @@ export default function App() {
           dataSource={tasks}
           pagination={{ pageSize: 15, showSizeChanger: false }}
         />
+        </>
+        )}
       </Content>
 
       <CreateTaskModal

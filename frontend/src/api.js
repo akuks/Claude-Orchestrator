@@ -35,6 +35,16 @@ export const api = {
   getArtifacts: (id) => req('GET', `/tasks/${id}/artifacts`),
   stats: () => req('GET', '/tasks/stats'),
   artifactUrl: (id, relPath) => `/tasks/${id}/artifacts/${relPath}`,
+
+  // ---- MCP management ----
+  listServers: () => req('GET', '/mcp/servers'),
+  createServer: (payload) => req('POST', '/mcp/servers', payload),
+  updateServer: (id, payload) => req('PATCH', `/mcp/servers/${id}`, payload),
+  deleteServer: (id) => req('DELETE', `/mcp/servers/${id}`),
+  testServer: (id) => req('POST', `/mcp/servers/${id}/test`),
+  getPolicies: (id) => req('GET', `/mcp/servers/${id}/policies`),
+  setPolicies: (id, policies) => req('PUT', `/mcp/servers/${id}/policies`, policies),
+  mcpObservability: (days = 7) => req('GET', `/mcp/observability?days=${days}`),
   streamUrl: (id, lastSeq = 0) => {
     const proto = window.location.protocol === 'https:' ? 'wss' : 'ws'
     return `${proto}://${window.location.host}/tasks/${id}/stream?last_seq=${lastSeq}`
@@ -55,4 +65,17 @@ export const PRIORITY_COLORS = {
   normal: 'default',
   high: 'orange',
   urgent: 'red',
+}
+
+export const MCP_STATUS_COLORS = {
+  healthy: 'success',
+  degraded: 'warning',
+  disconnected: 'error',
+  unknown: 'default',
+}
+
+export const POLICY_ACTION_COLORS = {
+  auto_approve: 'success',
+  require_approval: 'warning',
+  block: 'error',
 }
