@@ -1,12 +1,23 @@
+import asyncio
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
+from . import mcp_manager
 from .config import settings
 from .database import init_db
-from .routers import stream, tasks
+from .routers import mcp, stream, tasks
 from .worker import WorkerManager
+
+
+async def _mcp_health_loop():
+    while True:
+        await asyncio.sleep(settings.mcp_health_interval_seconds)
+        try:
+            await mcp_manager.health_check_all()
+        except Exception:  # noqa: BLE001
+            continue
 
 
 @asynccontextmanager
@@ -15,9 +26,11 @@ async def lifespan(app: FastAPI):
     worker = WorkerManager()
     app.state.worker = worker
     await worker.start()
+    health_task = asyncio.create_task(_mcp_health_loop())
     try:
         yield
     finally:
+        health_task.cancel()
         await worker.stop()
 
 
@@ -33,6 +46,7 @@ app.add_middleware(
 
 app.include_router(tasks.router)
 app.include_router(stream.router)
+app.include_router(mcp.router)
 
 
 @app.get("/health", tags=["meta"])

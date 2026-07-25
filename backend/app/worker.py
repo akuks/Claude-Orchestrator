@@ -14,11 +14,12 @@ from pathlib import Path
 
 from sqlalchemy import select
 
+from . import mcp_manager
 from .config import settings
 from .constants import Priority, Status
 from .database import SessionLocal
 from .events import broker
-from .models import Artifact, Task, TaskEvent
+from .models import Artifact, McpCall, Task, TaskEvent
 
 _MAX_TOOL_RESULT_CHARS = 2000
 
@@ -175,11 +176,16 @@ class WorkerManager:
             prompt = task.prompt
             model = task.model
             max_turns = task.max_turns
+            project = task.project
             workspace = Path(task.workspace_dir or (settings.workspaces_dir / task_id))
             await s.commit()
 
         workspace.mkdir(parents=True, exist_ok=True)
         await emit("started", {"model": model, "max_turns": max_turns})
+
+        # Resolve MCP servers for this task and write a per-task config BEFORE the
+        # baseline snapshot so the generated config file isn't logged as an artifact.
+        mcp = await mcp_manager.prepare_for_task(project, workspace)
 
         before = _snapshot(workspace)
 
@@ -196,6 +202,20 @@ class WorkerManager:
             "--permission-mode",
             settings.claude_permission_mode,
         ]
+        if mcp:
+            cmd += ["--mcp-config", mcp["config_path"], "--strict-mcp-config"]
+            if mcp["allowed"]:
+                cmd += ["--allowedTools", *mcp["allowed"]]
+            if mcp["disallowed"]:
+                cmd += ["--disallowedTools", *mcp["disallowed"]]
+            await emit(
+                "mcp",
+                {
+                    "servers": mcp["server_names"],
+                    "auto_approved": mcp["allowed"],
+                    "blocked": mcp["disallowed"],
+                },
+            )
 
         result = {
             "result_text": None,
@@ -237,9 +257,10 @@ class WorkerManager:
 
         stderr_task = asyncio.create_task(read_stderr())
 
+        ctx = {"task_id": task_id, "mcp_ids": {}}
         try:
             await asyncio.wait_for(
-                self._consume_stdout(proc, emit, result),
+                self._consume_stdout(proc, emit, result, ctx),
                 timeout=settings.task_timeout_seconds,
             )
             await proc.wait()
@@ -287,7 +308,7 @@ class WorkerManager:
             artifacts=artifacts,
         )
 
-    async def _consume_stdout(self, proc, emit, result) -> None:
+    async def _consume_stdout(self, proc, emit, result, ctx) -> None:
         assert proc.stdout is not None
         async for raw in proc.stdout:
             line = raw.decode(errors="replace").strip()
@@ -298,9 +319,9 @@ class WorkerManager:
             except json.JSONDecodeError:
                 await emit("log", {"text": line})
                 continue
-            await self._handle_stream_event(obj, emit, result)
+            await self._handle_stream_event(obj, emit, result, ctx)
 
-    async def _handle_stream_event(self, obj: dict, emit, result) -> None:
+    async def _handle_stream_event(self, obj: dict, emit, result, ctx) -> None:
         etype = obj.get("type")
         if etype == "system":
             await emit(
@@ -314,22 +335,45 @@ class WorkerManager:
                 if block.get("type") == "text" and block.get("text"):
                     await emit("text_output", {"text": block["text"]})
                 elif block.get("type") == "tool_use":
-                    await emit(
-                        "tool_use",
-                        {"name": block.get("name"), "input": block.get("input")},
-                    )
+                    name = block.get("name")
+                    await emit("tool_use", {"name": name, "input": block.get("input")})
+                    if name and name.startswith("mcp__"):
+                        await self._record_mcp_call(ctx, name, block.get("id"))
         elif etype == "user":
             content = obj.get("message", {}).get("content")
             if isinstance(content, list):
                 for block in content:
                     if isinstance(block, dict) and block.get("type") == "tool_result":
                         await emit("tool_result", {"content": _short(block.get("content"))})
+                        if block.get("is_error"):
+                            call_id = ctx["mcp_ids"].get(block.get("tool_use_id"))
+                            if call_id is not None:
+                                await self._mark_mcp_error(call_id)
         elif etype == "result":
             result["result_text"] = obj.get("result")
             result["num_turns"] = obj.get("num_turns")
             result["total_cost_usd"] = obj.get("total_cost_usd")
             result["duration_ms"] = obj.get("duration_ms")
             result["is_error"] = bool(obj.get("is_error"))
+
+    async def _record_mcp_call(self, ctx, name: str, tool_use_id) -> None:
+        # name is mcp__<server>__<tool>
+        rest = name[len("mcp__"):]
+        server, _, tool = rest.partition("__")
+        async with SessionLocal() as s:
+            call = McpCall(task_id=ctx["task_id"], server=server, tool=tool or rest)
+            s.add(call)
+            await s.commit()
+            call_id = call.id
+        if tool_use_id:
+            ctx["mcp_ids"][tool_use_id] = call_id
+
+    async def _mark_mcp_error(self, call_id: int) -> None:
+        async with SessionLocal() as s:
+            call = await s.get(McpCall, call_id)
+            if call is not None:
+                call.is_error = True
+                await s.commit()
 
     # ---- persistence -----------------------------------------------------
 
