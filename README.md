@@ -3,11 +3,14 @@
 A web-based team orchestration layer for Claude Code — run, stream, and manage
 Claude Code tasks from a dashboard instead of one-off terminal sessions.
 
-> **Status: Phase 1 (Core Engine) complete.** Task management, an isolated
-> Claude Code worker pool, live WebSocket streaming, a REST API, and a React
-> dashboard. Later phases (MCP management, project memory, scheduling,
-> approvals, team/auth, CLI) are on the roadmap in
-> `claude-orchestrator-features.md`.
+> **Status: Phases 1–2 complete.**
+> **Phase 1 (Core Engine):** task management, an isolated Claude Code worker
+> pool, live WebSocket streaming, a REST API, and a React dashboard.
+> **Phase 2 (MCP Management):** MCP server registry with scopes, an AES-256-GCM
+> credential vault, connection testing + tool discovery, per-tool policies
+> (auto-approve / require-approval / block), per-task config injection, and call
+> observability. Later phases (project memory, scheduling, approvals, team/auth,
+> CLI) are on the roadmap in `claude-orchestrator-features.md`.
 
 ---
 
@@ -105,8 +108,27 @@ curl -X POST localhost:8000/tasks -H 'Content-Type: application/json' -d '{
 }'
 ```
 
-Streamed events are normalized to: `started`, `system`, `text_output`,
+Streamed events are normalized to: `started`, `mcp`, `system`, `text_output`,
 `tool_use`, `tool_result`, `log`, `error`, `completed`.
+
+### MCP management API (Phase 2)
+
+| Method | Path | Description |
+|---|---|---|
+| `POST` | `/mcp/servers` | Register a server (stdio/http; `env`/`headers` encrypted) |
+| `GET` | `/mcp/servers` | List servers (secrets never returned) |
+| `PATCH` | `/mcp/servers/{id}` | Update config / secrets / enabled |
+| `DELETE` | `/mcp/servers/{id}` | Remove a server |
+| `POST` | `/mcp/servers/{id}/test` | Probe connection, discover tools, seed policies |
+| `GET`/`PUT` | `/mcp/servers/{id}/policies` | Read / set per-tool policies |
+| `GET` | `/mcp/observability` | Call counts, failure rate, top tools (`?days=`) |
+
+MCP servers are matched to a task by **scope** (team/user always; project-scoped
+only when the task's project matches), written to a per-task `.mcp-config.json`
+with decrypted credentials, and passed to the CLI via `--mcp-config`
+`--strict-mcp-config`, with `--allowedTools`/`--disallowedTools` derived from
+policy. Secrets are stored only as **AES-256-GCM** blobs; the vault key lives in
+`.secret.key` (gitignored) or `CO_SECRET_KEY`.
 
 ---
 
@@ -119,3 +141,22 @@ Streamed events are normalized to: `started`, `system`, `text_output`,
 - **Live streaming** — WebSocket stream + terminal viewer, reconnect with history replay.
 - **REST API** — full task lifecycle + artifacts + stats.
 - **Dashboard** — task feed, create-task form, live detail drawer, artifact browser, stats.
+
+## Phase 2 feature coverage
+
+- **MCP registry** — stdio + HTTP servers, three scopes (team / user / project),
+  add/edit/remove/enable, matched into tasks by scope.
+- **Credential vault** — env vars & HTTP headers stored only as AES-256-GCM blobs;
+  never returned by the API or written in plaintext.
+- **Connection testing** — real MCP stdio handshake, tool discovery, live status
+  (healthy / disconnected) plus a periodic health-check loop.
+- **Tool policies** — auto read/write classification with defaults (auto-approve
+  reads, require-approval writes, block dangerous); editable per tool and enforced
+  at task time via allow/deny tool lists.
+- **Observability** — MCP calls recorded from the task stream with error
+  attribution; call counts, failure rate, and top tools in the dashboard.
+
+> **Scope note:** Phase 2 injects a generated MCP config per task (stateless)
+> rather than running long-lived shared daemons; HTTP-transport health checks
+> are not yet validated (config is still injected). Full approval routing for
+> `require_approval` tools lands in Phase 5.
