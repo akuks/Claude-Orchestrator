@@ -1,0 +1,25 @@
+claude-orchestrator-features.md
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+
+# Backend runtime state
+backend/.venv/
+backend/*.db
+backend/workspaces/
+backend/.env
+
+# Node / frontend
+node_modules/
+frontend/dist/
+frontend/node_modules/
+
+# Env / editor / OS
+.env
+.DS_Store
+.vscode/
+.idea/
