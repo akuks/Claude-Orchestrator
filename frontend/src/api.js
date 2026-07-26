@@ -47,6 +47,18 @@ export const api = {
   getPolicies: (id) => req('GET', `/mcp/servers/${id}/policies`),
   setPolicies: (id, policies) => req('PUT', `/mcp/servers/${id}/policies`, policies),
   mcpObservability: (days = 7) => req('GET', `/mcp/observability?days=${days}`),
+
+  // ---- Projects & memory ----
+  listProjects: (includeArchived = false) =>
+    req('GET', `/projects?include_archived=${includeArchived}`),
+  createProject: (payload) => req('POST', '/projects', payload),
+  updateProject: (id, payload) => req('PATCH', `/projects/${id}`, payload),
+  deleteProject: (id) => req('DELETE', `/projects/${id}`),
+  getMemory: (id) => req('GET', `/projects/${id}/memory`),
+  regenerateMemory: (id) => req('POST', `/projects/${id}/memory/regenerate`),
+  listSummaries: (id) => req('GET', `/projects/${id}/summaries`),
+  projectStats: (id) => req('GET', `/projects/${id}/stats`),
+
   streamUrl: (id, lastSeq = 0) => {
     const proto = window.location.protocol === 'https:' ? 'wss' : 'ws'
     return `${proto}://${window.location.host}/tasks/${id}/stream?last_seq=${lastSeq}`

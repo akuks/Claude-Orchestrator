@@ -13,6 +13,7 @@ export default defineConfig({
     proxy: {
       '/tasks': { target, changeOrigin: true, ws: true },
       '/mcp': { target, changeOrigin: true },
+      '/projects': { target, changeOrigin: true },
       '/health': { target, changeOrigin: true },
     },
   },

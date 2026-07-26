@@ -1,7 +1,6 @@
 import { useCallback, useEffect, useState } from 'react'
 import {
   Button,
-  Input,
   Layout,
   Segmented,
   Select,
@@ -11,7 +10,13 @@ import {
   Typography,
   message,
 } from 'antd'
-import { ApiOutlined, PlusOutlined, ReloadOutlined, UnorderedListOutlined } from '@ant-design/icons'
+import {
+  ApiOutlined,
+  FolderOutlined,
+  PlusOutlined,
+  ReloadOutlined,
+  UnorderedListOutlined,
+} from '@ant-design/icons'
 import dayjs from 'dayjs'
 import relativeTime from 'dayjs/plugin/relativeTime'
 import { api, PRIORITY_COLORS, STATUS_COLORS } from './api'
@@ -19,6 +24,7 @@ import StatsBar from './components/StatsBar'
 import CreateTaskModal from './components/CreateTaskModal'
 import TaskDetail from './components/TaskDetail'
 import McpRegistry from './components/McpRegistry'
+import ProjectsView from './components/ProjectsView'
 
 dayjs.extend(relativeTime)
 
@@ -31,14 +37,27 @@ export default function App() {
   const [createOpen, setCreateOpen] = useState(false)
   const [selected, setSelected] = useState(null)
   const [statusFilter, setStatusFilter] = useState()
-  const [projectFilter, setProjectFilter] = useState('')
   const [view, setView] = useState('tasks')
+  const [projects, setProjects] = useState([])
+  const [activeProjectId, setActiveProjectId] = useState(null)
+
+  const loadProjects = useCallback(async () => {
+    try {
+      setProjects(await api.listProjects())
+    } catch (e) {
+      message.error(e.message)
+    }
+  }, [])
+
+  useEffect(() => {
+    loadProjects()
+  }, [loadProjects])
 
   const refresh = useCallback(async () => {
     setLoading(true)
     try {
       const [t, s] = await Promise.all([
-        api.listTasks({ status: statusFilter, project: projectFilter }),
+        api.listTasks({ status: statusFilter, project_id: activeProjectId }),
         api.stats(),
       ])
       setTasks(t)
@@ -48,7 +67,7 @@ export default function App() {
     } finally {
       setLoading(false)
     }
-  }, [statusFilter, projectFilter])
+  }, [statusFilter, activeProjectId])
 
   useEffect(() => {
     if (view !== 'tasks') return
@@ -56,6 +75,8 @@ export default function App() {
     const id = setInterval(refresh, 3000) // poll for live feed updates
     return () => clearInterval(id)
   }, [refresh, view])
+
+  const activeProject = projects.find((p) => p.id === activeProjectId) || null
 
   const columns = [
     {
@@ -126,19 +147,33 @@ export default function App() {
             onChange={setView}
             options={[
               { value: 'tasks', label: 'Tasks', icon: <UnorderedListOutlined /> },
+              { value: 'projects', label: 'Projects', icon: <FolderOutlined /> },
               { value: 'mcp', label: 'MCP Servers', icon: <ApiOutlined /> },
             ]}
           />
         </Space>
-        {view === 'tasks' && (
-          <Button type="primary" icon={<PlusOutlined />} onClick={() => setCreateOpen(true)}>
-            New Task
-          </Button>
-        )}
+        <Space>
+          {view === 'tasks' && (
+            <Select
+              allowClear
+              placeholder="All projects"
+              style={{ width: 200 }}
+              value={activeProjectId}
+              onChange={(v) => setActiveProjectId(v || null)}
+              options={projects.map((p) => ({ value: p.id, label: p.name }))}
+            />
+          )}
+          {view === 'tasks' && (
+            <Button type="primary" icon={<PlusOutlined />} onClick={() => setCreateOpen(true)}>
+              New Task
+            </Button>
+          )}
+        </Space>
       </Header>
 
       <Content style={{ padding: 24 }}>
         {view === 'mcp' && <McpRegistry />}
+        {view === 'projects' && <ProjectsView onProjectsChanged={loadProjects} />}
         {view === 'tasks' && (
         <>
         <StatsBar stats={stats} />
@@ -159,13 +194,6 @@ export default function App() {
               'cancelled',
             ].map((s) => ({ value: s, label: s }))}
           />
-          <Input.Search
-            allowClear
-            placeholder="Filter project"
-            style={{ width: 200 }}
-            onSearch={setProjectFilter}
-            onChange={(e) => !e.target.value && setProjectFilter('')}
-          />
           <Button icon={<ReloadOutlined />} onClick={refresh}>
             Refresh
           </Button>
@@ -185,6 +213,8 @@ export default function App() {
 
       <CreateTaskModal
         open={createOpen}
+        projects={projects}
+        activeProjectId={activeProjectId}
         onClose={() => setCreateOpen(false)}
         onCreated={refresh}
       />
