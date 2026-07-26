@@ -170,6 +170,9 @@ policy. Secrets are stored only as **AES-256-GCM** blobs; the vault key lives in
 - **Projects** — CRUD, mapped to a directory on disk; per-project instructions
   (injected, not written into the repo), default model, archive; a project
   switcher scopes the feed and new tasks.
+- **Discover** — scan `~/.claude/projects` (reading each session's real `cwd`) to
+  find every directory you've run Claude Code in, and bulk-add them as projects;
+  the orchestrator's own sandbox/temp dirs are filtered out.
 - **Repo-backed tasks** — a project task runs in the project's directory (acting on
   the real codebase) and inherits its default model.
 - **Context assembly** — before each project task, a preamble of project
