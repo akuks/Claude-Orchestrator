@@ -12,6 +12,7 @@ export default defineConfig({
     port: Number(process.env.VITE_PORT) || 5173,
     proxy: {
       '/tasks': { target, changeOrigin: true, ws: true },
+      '/mcp': { target, changeOrigin: true },
       '/health': { target, changeOrigin: true },
     },
   },
