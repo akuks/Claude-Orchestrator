@@ -1,7 +1,11 @@
+import json
+import os
 import re
+from datetime import datetime, timezone
 from pathlib import Path
 
 from fastapi import APIRouter, HTTPException
+from pydantic import BaseModel
 from sqlalchemy import func, select
 
 from .. import memory
@@ -18,6 +22,8 @@ from ..schemas import (
 )
 
 router = APIRouter(prefix="/projects", tags=["projects"])
+
+CLAUDE_PROJECTS_DIR = Path.home() / ".claude" / "projects"
 
 
 def _slugify(name: str) -> str:
@@ -92,6 +98,138 @@ async def list_projects(include_archived: bool = False):
         rows = (await s.execute(stmt)).scalars().all()
         counts = await _counts(s, [p.id for p in rows])
     return [_to_out(p, *counts.get(p.id, (0, 0.0))) for p in rows]
+
+
+def _read_cwd(jsonl_path: Path) -> str | None:
+    """The real working directory is stored on transcript lines as `cwd`."""
+    try:
+        with jsonl_path.open("r", errors="replace") as f:
+            for _ in range(20):
+                line = f.readline()
+                if not line:
+                    break
+                try:
+                    obj = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                cwd = obj.get("cwd")
+                if cwd:
+                    return cwd
+    except OSError:
+        return None
+    return None
+
+
+def _noise_roots() -> list[str]:
+    """Paths that shouldn't be offered as projects: our own managed dirs and temp."""
+    import tempfile
+
+    roots = [
+        str(settings.workspaces_dir.resolve()),
+        str(settings.projects_dir.resolve()),
+        os.path.normpath(tempfile.gettempdir()),
+        "/tmp",
+        "/private/tmp",
+        "/private/var/folders",
+        "/var/folders",
+    ]
+    return [os.path.normpath(r) for r in roots]
+
+
+def _is_noise(path: str, roots: list[str]) -> bool:
+    return any(path == r or path.startswith(r + os.sep) for r in roots)
+
+
+@router.get("/discover")
+async def discover_projects():
+    """Find directories where Claude Code has been run (from ~/.claude/projects).
+
+    Filters out non-existent paths, temp dirs, and the orchestrator's own
+    sandbox/project working directories.
+    """
+    roots = _noise_roots()
+    found: dict[str, dict] = {}
+    if CLAUDE_PROJECTS_DIR.exists():
+        for d in CLAUDE_PROJECTS_DIR.iterdir():
+            if not d.is_dir():
+                continue
+            jsonls = sorted(
+                d.glob("*.jsonl"), key=lambda p: p.stat().st_mtime, reverse=True
+            )
+            if not jsonls:
+                continue
+            cwd = next((c for j in jsonls[:3] if (c := _read_cwd(j))), None)
+            if not cwd:
+                continue
+            key = os.path.normpath(cwd)
+            if _is_noise(key, roots) or not Path(key).is_dir():
+                continue
+            last = max(p.stat().st_mtime for p in jsonls)
+            info = found.setdefault(key, {"sessions": 0, "last": 0.0})
+            info["sessions"] += len(jsonls)
+            info["last"] = max(info["last"], last)
+
+    async with SessionLocal() as s:
+        existing = {
+            os.path.normpath(p.directory)
+            for p in (await s.execute(select(Project))).scalars().all()
+        }
+
+    out = []
+    for key, info in found.items():
+        out.append(
+            {
+                "directory": key,
+                "name": Path(key).name or key,
+                "sessions": info["sessions"],
+                "last_active": datetime.fromtimestamp(
+                    info["last"], tz=timezone.utc
+                ).isoformat(),
+                "exists": Path(key).exists(),
+                "already_added": key in existing,
+            }
+        )
+    out.sort(key=lambda x: x["last_active"], reverse=True)
+    return out
+
+
+class ImportRequest(BaseModel):
+    directories: list[str]
+
+
+@router.post("/import", response_model=list[ProjectOut])
+async def import_projects(payload: ImportRequest):
+    """Bulk-create projects from a list of directories (skips already-added)."""
+    created: list[Project] = []
+    async with SessionLocal() as s:
+        rows = (await s.execute(select(Project))).scalars().all()
+        existing_dirs = {os.path.normpath(p.directory) for p in rows}
+        existing_slugs = {p.slug for p in rows}
+        for raw in payload.directories:
+            d = os.path.normpath(str(Path(raw).expanduser()))
+            if d in existing_dirs:
+                continue
+            name = Path(d).name or d
+            slug = base = _slugify(name)
+            i = 2
+            while slug in existing_slugs:
+                slug = f"{base}-{i}"
+                i += 1
+            project = Project(
+                name=name,
+                slug=slug,
+                directory=d,
+                default_model=settings.default_model,
+                memory_enabled=settings.memory_enabled_default,
+            )
+            s.add(project)
+            existing_dirs.add(d)
+            existing_slugs.add(slug)
+            created.append(project)
+        await s.commit()
+        for p in created:
+            await s.refresh(p)
+    return [_to_out(p) for p in created]
 
 
 async def _get_or_404(s, project_id: str) -> Project:
