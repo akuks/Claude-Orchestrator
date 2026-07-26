@@ -185,6 +185,7 @@ export default function App() {
         taskId={selected}
         onClose={() => setSelected(null)}
         onChanged={refresh}
+        onOpenTask={(id) => setSelected(id)}
       />
     </Layout>
   )

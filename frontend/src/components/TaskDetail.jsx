@@ -4,6 +4,7 @@ import {
   Descriptions,
   Drawer,
   Empty,
+  Input,
   List,
   Space,
   Tag,
@@ -11,9 +12,11 @@ import {
   message,
 } from 'antd'
 import {
+  ArrowUpOutlined,
   CopyOutlined,
   DownloadOutlined,
   ReloadOutlined,
+  SendOutlined,
   StopOutlined,
 } from '@ant-design/icons'
 import { api, PRIORITY_COLORS, STATUS_COLORS } from '../api'
@@ -64,10 +67,12 @@ function renderLine(ev) {
   return { color: s.color, prefix: s.prefix, text: text || '' }
 }
 
-export default function TaskDetail({ taskId, onClose, onChanged }) {
+export default function TaskDetail({ taskId, onClose, onChanged, onOpenTask }) {
   const [task, setTask] = useState(null)
   const [events, setEvents] = useState([])
   const [artifacts, setArtifacts] = useState([])
+  const [followup, setFollowup] = useState('')
+  const [sending, setSending] = useState(false)
   const wsRef = useRef(null)
   const termRef = useRef(null)
   const lastSeqRef = useRef(0)
@@ -78,6 +83,7 @@ export default function TaskDetail({ taskId, onClose, onChanged }) {
     let closed = false
     setEvents([])
     setArtifacts([])
+    setFollowup('')
     lastSeqRef.current = 0
 
     api.getTask(taskId).then((t) => !closed && setTask(t))
@@ -120,7 +126,24 @@ export default function TaskDetail({ taskId, onClose, onChanged }) {
     }
   }
 
+  const sendFollowup = async () => {
+    if (!followup.trim()) return
+    setSending(true)
+    try {
+      const child = await api.followupTask(taskId, followup.trim())
+      message.success('Follow-up started')
+      setFollowup('')
+      onChanged?.()
+      onOpenTask?.(child.id) // switch the drawer to the new run in the thread
+    } catch (e) {
+      message.error(e.message)
+    } finally {
+      setSending(false)
+    }
+  }
+
   const isActive = task && ['queued', 'running', 'awaiting_approval'].includes(task.status)
+  const canFollowUp = task && !isActive && task.session_id
 
   return (
     <Drawer
@@ -150,6 +173,18 @@ export default function TaskDetail({ taskId, onClose, onChanged }) {
         </Space>
       }
     >
+      {task?.parent_task_id && (
+        <Button
+          type="link"
+          size="small"
+          icon={<ArrowUpOutlined />}
+          style={{ paddingLeft: 0, marginBottom: 8 }}
+          onClick={() => onOpenTask?.(task.parent_task_id)}
+        >
+          Continued from previous step — view parent
+        </Button>
+      )}
+
       {task && (
         <Descriptions size="small" column={2} bordered style={{ marginBottom: 16 }}>
           <Descriptions.Item label="Status">
@@ -257,6 +292,40 @@ export default function TaskDetail({ taskId, onClose, onChanged }) {
         />
       ) : (
         <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="No artifacts" />
+      )}
+
+      <Typography.Title level={5} style={{ marginTop: 16 }}>
+        Follow up
+      </Typography.Title>
+      {canFollowUp ? (
+        <Space.Compact style={{ width: '100%' }}>
+          <Input.TextArea
+            autoSize={{ minRows: 1, maxRows: 4 }}
+            placeholder="Continue this thread — Claude resumes with full context…"
+            value={followup}
+            onChange={(e) => setFollowup(e.target.value)}
+            onPressEnter={(e) => {
+              if (!e.shiftKey) {
+                e.preventDefault()
+                sendFollowup()
+              }
+            }}
+          />
+          <Button
+            type="primary"
+            icon={<SendOutlined />}
+            loading={sending}
+            onClick={sendFollowup}
+          >
+            Send
+          </Button>
+        </Space.Compact>
+      ) : (
+        <Typography.Text type="secondary">
+          {isActive
+            ? 'Available once this run finishes.'
+            : 'This task has no resumable session to continue.'}
+        </Typography.Text>
       )}
     </Drawer>
   )

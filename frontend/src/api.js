@@ -31,6 +31,7 @@ export const api = {
   cancelTask: (id) => req('POST', `/tasks/${id}/cancel`),
   retryTask: (id) => req('POST', `/tasks/${id}/retry`),
   duplicateTask: (id) => req('POST', `/tasks/${id}/duplicate`),
+  followupTask: (id, prompt) => req('POST', `/tasks/${id}/followup`, { prompt }),
   getEvents: (id, afterSeq = 0) => req('GET', `/tasks/${id}/events?after_seq=${afterSeq}`),
   getArtifacts: (id) => req('GET', `/tasks/${id}/artifacts`),
   stats: () => req('GET', '/tasks/stats'),
