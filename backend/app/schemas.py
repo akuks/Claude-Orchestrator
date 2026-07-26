@@ -13,9 +13,10 @@ class TaskCreate(BaseModel):
     prompt: str = Field(min_length=1)
     title: Optional[str] = None
     project: Optional[str] = None
+    project_id: Optional[str] = None
     priority: str = "normal"
     tags: list[str] = Field(default_factory=list)
-    model: str = "sonnet"
+    model: Optional[str] = None
     max_turns: int = Field(default=25, ge=1, le=200)
     claude_md: Optional[str] = None
     input_files: list[InputFile] = Field(default_factory=list)
@@ -26,6 +27,7 @@ class TaskOut(BaseModel):
     title: str
     prompt: str
     project: Optional[str]
+    project_id: Optional[str]
     status: str
     priority: str
     tags: list[str]
@@ -164,3 +166,58 @@ class McpObservabilityOut(BaseModel):
     failure_rate: float
     by_server: list
     top_tools: list
+
+
+# ---- Projects & memory (Phase 3) ------------------------------------------
+
+
+class ProjectCreate(BaseModel):
+    name: str = Field(min_length=1, max_length=200)
+    directory: Optional[str] = None  # defaults to projects_dir/slug
+    instructions: Optional[str] = None
+    default_model: str = "sonnet"
+    memory_enabled: bool = True
+
+
+class ProjectUpdate(BaseModel):
+    name: Optional[str] = None
+    directory: Optional[str] = None
+    instructions: Optional[str] = None
+    default_model: Optional[str] = None
+    memory_enabled: Optional[bool] = None
+    memory: Optional[str] = None  # manual memory edit
+    archived: Optional[bool] = None
+
+
+class ProjectOut(BaseModel):
+    id: str
+    name: str
+    slug: str
+    directory: str
+    instructions: Optional[str]
+    default_model: str
+    memory: str
+    memory_enabled: bool
+    memory_updated_at: Optional[datetime]
+    archived: bool
+    created_at: datetime
+    task_count: int = 0
+    total_cost_usd: float = 0.0
+
+    model_config = {"from_attributes": True}
+
+
+class MemoryOut(BaseModel):
+    memory: str
+    memory_prev: Optional[str]
+    memory_updated_at: Optional[datetime]
+
+
+class TaskSummaryOut(BaseModel):
+    id: int
+    task_id: str
+    title: str
+    summary: str
+    created_at: datetime
+
+    model_config = {"from_attributes": True}

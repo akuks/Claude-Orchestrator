@@ -26,6 +26,14 @@ class Settings(BaseSettings):
     mcp_health_interval_seconds: int = 300
     mcp_probe_timeout_seconds: int = 15
 
+    # Projects & memory (Phase 3)
+    projects_dir: Path = Path("./projects")
+    context_budget_tokens: int = 6000
+    memory_enabled_default: bool = True
+    memory_model: str = "haiku"
+    memory_max_chars: int = 6000  # ~1500 tokens
+    memory_call_timeout_seconds: int = 120
+
     # API
     cors_origins: list[str] = [
         "http://localhost:5173",
@@ -36,3 +44,4 @@ class Settings(BaseSettings):
 
 settings = Settings()
 settings.workspaces_dir.mkdir(parents=True, exist_ok=True)
+settings.projects_dir.mkdir(parents=True, exist_ok=True)

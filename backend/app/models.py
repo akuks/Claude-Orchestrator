@@ -31,6 +31,7 @@ class Task(Base):
     title: Mapped[str] = mapped_column(String(200))
     prompt: Mapped[str] = mapped_column(Text)
     project: Mapped[str | None] = mapped_column(String(200), nullable=True, index=True)
+    project_id: Mapped[str | None] = mapped_column(String(32), nullable=True, index=True)
 
     status: Mapped[str] = mapped_column(String(32), default=Status.QUEUED, index=True)
     priority: Mapped[str] = mapped_column(String(16), default=Priority.NORMAL)
@@ -99,6 +100,40 @@ class Artifact(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, default=_now)
 
     task: Mapped["Task"] = relationship(back_populates="artifacts")
+
+
+class Project(Base):
+    __tablename__ = "projects"
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=_uuid)
+    name: Mapped[str] = mapped_column(String(200))
+    slug: Mapped[str] = mapped_column(String(120), unique=True, index=True)
+    directory: Mapped[str] = mapped_column(String(500))
+
+    # Dashboard-managed project instructions (injected into task context, not
+    # written into the repo, to avoid clobbering a real CLAUDE.md).
+    instructions: Mapped[str | None] = mapped_column(Text, nullable=True)
+    default_model: Mapped[str] = mapped_column(String(32), default="sonnet")
+
+    # Living memory — auto-updated after each task, plus a prior copy for diffing.
+    memory: Mapped[str] = mapped_column(Text, default="")
+    memory_prev: Mapped[str | None] = mapped_column(Text, nullable=True)
+    memory_enabled: Mapped[bool] = mapped_column(default=True)
+    memory_updated_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+
+    archived: Mapped[bool] = mapped_column(default=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=_now)
+
+
+class TaskSummary(Base):
+    __tablename__ = "task_summaries"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    task_id: Mapped[str] = mapped_column(String(32), index=True)
+    project_id: Mapped[str] = mapped_column(String(32), index=True)
+    title: Mapped[str] = mapped_column(String(200), default="")
+    summary: Mapped[str] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=_now, index=True)
 
 
 class McpServer(Base):
