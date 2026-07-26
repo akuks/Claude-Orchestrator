@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import {
   Button,
   Form,
@@ -22,10 +22,20 @@ function fileToBase64(file) {
   })
 }
 
-export default function CreateTaskModal({ open, onClose, onCreated }) {
+export default function CreateTaskModal({
+  open,
+  onClose,
+  onCreated,
+  projects = [],
+  activeProjectId = null,
+}) {
   const [form] = Form.useForm()
   const [submitting, setSubmitting] = useState(false)
   const [fileList, setFileList] = useState([])
+
+  useEffect(() => {
+    if (open) form.setFieldsValue({ project_id: activeProjectId || undefined })
+  }, [open, activeProjectId])
 
   const submit = async () => {
     let values
@@ -45,12 +55,12 @@ export default function CreateTaskModal({ open, onClose, onCreated }) {
       await api.createTask({
         prompt: values.prompt,
         title: values.title || undefined,
-        project: values.project || undefined,
-        model: values.model,
+        project_id: values.project_id || undefined,
+        model: values.model || undefined, // undefined => inherit project default
         priority: values.priority,
         max_turns: values.max_turns,
         tags: values.tags || [],
-        claude_md: values.claude_md || undefined,
+        claude_md: values.project_id ? undefined : values.claude_md || undefined,
         input_files,
       })
       message.success('Task created')
@@ -83,7 +93,7 @@ export default function CreateTaskModal({ open, onClose, onCreated }) {
       <Form
         form={form}
         layout="vertical"
-        initialValues={{ model: 'sonnet', priority: 'normal', max_turns: 25 }}
+        initialValues={{ priority: 'normal', max_turns: 25 }}
       >
         <Form.Item
           name="prompt"
@@ -96,13 +106,26 @@ export default function CreateTaskModal({ open, onClose, onCreated }) {
           <Form.Item name="title" label="Title (optional)" style={{ flex: 1 }}>
             <Input placeholder="Defaults to first line of prompt" />
           </Form.Item>
-          <Form.Item name="project" label="Project (optional)" style={{ flex: 1 }}>
-            <Input placeholder="e.g. opsmind" />
+          <Form.Item
+            name="project_id"
+            label="Project (optional)"
+            style={{ flex: 1 }}
+            extra="Runs in the project's directory with its memory & context."
+          >
+            <Select
+              allowClear
+              placeholder="No project (sandbox)"
+              options={projects
+                .filter((p) => !p.archived)
+                .map((p) => ({ value: p.id, label: p.name }))}
+            />
           </Form.Item>
         </div>
         <div style={{ display: 'flex', gap: 12 }}>
           <Form.Item name="model" label="Model" style={{ flex: 1 }}>
             <Select
+              allowClear
+              placeholder="Project default"
               options={[
                 { value: 'sonnet', label: 'Sonnet' },
                 { value: 'opus', label: 'Opus' },
