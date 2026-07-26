@@ -139,7 +139,8 @@ policy. Secrets are stored only as **AES-256-GCM** blobs; the vault key lives in
   priority (low/normal/high/urgent), tags, cancel, retry, duplicate, attach input files.
 - **Follow-up threads** — continue a finished task with a new prompt; the follow-up
   resumes the parent's Claude session (`--resume`) in the same workspace, so full
-  context (files, prior reasoning) carries across steps. Runs are linked parent→child.
+  context (files, prior reasoning) carries across steps. A thread shows as a single
+  row in the feed (with a step count); its steps are navigable in the detail drawer.
 - **Worker manager** — isolated workspaces, per-task model/max-turns, concurrency
   limit, timeout, CLAUDE.md injection, stdout/stderr/exit capture, artifact collection.
 - **Live streaming** — WebSocket stream + terminal viewer, reconnect with history replay.
