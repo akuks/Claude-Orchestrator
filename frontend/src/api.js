@@ -52,6 +52,8 @@ export const api = {
   listProjects: (includeArchived = false) =>
     req('GET', `/projects?include_archived=${includeArchived}`),
   createProject: (payload) => req('POST', '/projects', payload),
+  discoverProjects: () => req('GET', '/projects/discover'),
+  importProjects: (directories) => req('POST', '/projects/import', { directories }),
   updateProject: (id, payload) => req('PATCH', `/projects/${id}`, payload),
   deleteProject: (id) => req('DELETE', `/projects/${id}`),
   getMemory: (id) => req('GET', `/projects/${id}/memory`),

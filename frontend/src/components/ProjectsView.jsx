@@ -22,9 +22,13 @@ import {
   PlusOutlined,
   ReloadOutlined,
   BookOutlined,
+  RadarChartOutlined,
 } from '@ant-design/icons'
 import dayjs from 'dayjs'
+import relativeTime from 'dayjs/plugin/relativeTime'
 import { api } from '../api'
+
+dayjs.extend(relativeTime)
 
 const MODEL_OPTS = [
   { value: 'sonnet', label: 'Sonnet' },
@@ -211,10 +215,116 @@ function MemoryDrawer({ project, onClose, onSaved }) {
   )
 }
 
+function DiscoverModal({ open, onClose, onImported }) {
+  const [loading, setLoading] = useState(false)
+  const [candidates, setCandidates] = useState([])
+  const [selected, setSelected] = useState([])
+  const [importing, setImporting] = useState(false)
+
+  useEffect(() => {
+    if (!open) return
+    setSelected([])
+    setLoading(true)
+    api
+      .discoverProjects()
+      .then(setCandidates)
+      .catch((e) => message.error(e.message))
+      .finally(() => setLoading(false))
+  }, [open])
+
+  const doImport = async () => {
+    setImporting(true)
+    try {
+      const created = await api.importProjects(selected)
+      message.success(`Added ${created.length} project${created.length === 1 ? '' : 's'}`)
+      onImported?.()
+      onClose()
+    } catch (e) {
+      message.error(e.message)
+    } finally {
+      setImporting(false)
+    }
+  }
+
+  const addable = candidates.filter((c) => !c.already_added)
+
+  return (
+    <Modal
+      title="Discover Claude projects"
+      open={open}
+      onCancel={onClose}
+      width={760}
+      footer={[
+        <Button key="c" onClick={onClose}>
+          Cancel
+        </Button>,
+        <Button
+          key="a"
+          type="primary"
+          loading={importing}
+          disabled={!selected.length}
+          onClick={doImport}
+        >
+          Add {selected.length || ''} selected
+        </Button>,
+      ]}
+    >
+      <Typography.Paragraph type="secondary">
+        Directories where you've run Claude Code (from <code>~/.claude/projects</code>).
+        Pick the ones to manage as orchestrator projects.
+      </Typography.Paragraph>
+      <Table
+        rowKey="directory"
+        size="small"
+        loading={loading}
+        dataSource={candidates}
+        pagination={false}
+        scroll={{ y: 380 }}
+        rowSelection={{
+          selectedRowKeys: selected,
+          onChange: setSelected,
+          getCheckboxProps: (row) => ({ disabled: row.already_added }),
+        }}
+        columns={[
+          {
+            title: 'Project',
+            dataIndex: 'name',
+            render: (n, row) => (
+              <Space>
+                <b>{n}</b>
+                {row.already_added && <Tag color="success">added</Tag>}
+              </Space>
+            ),
+          },
+          {
+            title: 'Directory',
+            dataIndex: 'directory',
+            ellipsis: true,
+            render: (d) => <Typography.Text type="secondary">{d}</Typography.Text>,
+          },
+          { title: 'Sessions', dataIndex: 'sessions', width: 80 },
+          {
+            title: 'Last used',
+            dataIndex: 'last_active',
+            width: 110,
+            render: (d) => dayjs(d).fromNow(),
+          },
+        ]}
+      />
+      {!loading && !addable.length && (
+        <Typography.Text type="secondary">
+          Nothing new to add — all discovered projects are already managed.
+        </Typography.Text>
+      )}
+    </Modal>
+  )
+}
+
 export default function ProjectsView({ onProjectsChanged }) {
   const [projects, setProjects] = useState([])
   const [loading, setLoading] = useState(false)
   const [modalOpen, setModalOpen] = useState(false)
+  const [discoverOpen, setDiscoverOpen] = useState(false)
   const [editing, setEditing] = useState(null)
   const [memoryProject, setMemoryProject] = useState(null)
 
@@ -311,6 +421,9 @@ export default function ProjectsView({ onProjectsChanged }) {
         >
           New Project
         </Button>
+        <Button icon={<RadarChartOutlined />} onClick={() => setDiscoverOpen(true)}>
+          Discover
+        </Button>
         <Button icon={<ReloadOutlined />} onClick={refresh}>
           Refresh
         </Button>
@@ -335,6 +448,11 @@ export default function ProjectsView({ onProjectsChanged }) {
         project={memoryProject}
         onClose={() => setMemoryProject(null)}
         onSaved={refresh}
+      />
+      <DiscoverModal
+        open={discoverOpen}
+        onClose={() => setDiscoverOpen(false)}
+        onImported={refresh}
       />
     </>
   )
