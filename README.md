@@ -3,14 +3,18 @@
 A web-based team orchestration layer for Claude Code — run, stream, and manage
 Claude Code tasks from a dashboard instead of one-off terminal sessions.
 
-> **Status: Phases 1–2 complete.**
+> **Status: Phases 1–3 complete.**
 > **Phase 1 (Core Engine):** task management, an isolated Claude Code worker
 > pool, live WebSocket streaming, a REST API, and a React dashboard.
 > **Phase 2 (MCP Management):** MCP server registry with scopes, an AES-256-GCM
 > credential vault, connection testing + tool discovery, per-tool policies
 > (auto-approve / require-approval / block), per-task config injection, and call
-> observability. Later phases (project memory, scheduling, approvals, team/auth,
-> CLI) are on the roadmap in `claude-orchestrator-features.md`.
+> observability.
+> **Phase 3 (Project Memory):** projects mapped to directories with per-project
+> instructions & default model, tasks that run in the project's repo, a
+> context-assembly pipeline (instructions + living memory + relevant past-task
+> summaries within a token budget), and auto-updated living memory. Later phases
+> (scheduling, approvals, team/auth, CLI) are in `claude-orchestrator-features.md`.
 
 ---
 
@@ -161,7 +165,25 @@ policy. Secrets are stored only as **AES-256-GCM** blobs; the vault key lives in
 - **Observability** — MCP calls recorded from the task stream with error
   attribution; call counts, failure rate, and top tools in the dashboard.
 
-> **Scope note:** Phase 2 injects a generated MCP config per task (stateless)
+## Phase 3 feature coverage
+
+- **Projects** — CRUD, mapped to a directory on disk; per-project instructions
+  (injected, not written into the repo), default model, archive; a project
+  switcher scopes the feed and new tasks.
+- **Repo-backed tasks** — a project task runs in the project's directory (acting on
+  the real codebase) and inherits its default model.
+- **Context assembly** — before each project task, a preamble of project
+  instructions + living memory + the most relevant past-task summaries (keyword +
+  recency scored) is prepended within a token budget; the assembly is logged as a
+  `context` event.
+- **Living memory** — after each successful project task, a cheap background Claude
+  call writes a one-paragraph task summary and folds it into the project's
+  `memory.md`; editable and regenerable from the dashboard.
+
+> **Scope notes.** Phase 2 injects a generated MCP config per task (stateless)
 > rather than running long-lived shared daemons; HTTP-transport health checks
-> are not yet validated (config is still injected). Full approval routing for
-> `require_approval` tools lands in Phase 5.
+> are not yet validated (config is still injected); full approval routing for
+> `require_approval` tools lands in Phase 5. Phase 3 implements project management,
+> context assembly, and living memory; auto-extracted `decisions.md`, generated
+> codebase overviews, and full-text conversation search are deferred. Concurrent
+> tasks in the same project directory are not yet serialized.
