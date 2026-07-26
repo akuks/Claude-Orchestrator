@@ -14,7 +14,7 @@ from pathlib import Path
 
 from sqlalchemy import select
 
-from . import mcp_manager
+from . import mcp_manager, memory
 from .config import settings
 from .constants import Priority, Status
 from .database import SessionLocal
@@ -177,6 +177,7 @@ class WorkerManager:
             model = task.model
             max_turns = task.max_turns
             project = task.project
+            project_id = task.project_id
             resume_session_id = task.resume_session_id
             workspace = Path(task.workspace_dir or (settings.workspaces_dir / task_id))
             await s.commit()
@@ -184,11 +185,21 @@ class WorkerManager:
         workspace.mkdir(parents=True, exist_ok=True)
         await emit("started", {"model": model, "max_turns": max_turns})
 
+        # Project tasks: prepend assembled context (instructions + memory + relevant
+        # past-task summaries) so Claude starts with the project's accumulated state.
+        if project_id and not resume_session_id:
+            preamble, ctx_log = await memory.assemble_context(project_id, prompt)
+            if preamble:
+                prompt = f"{preamble}\n\n---\n\n# Task\n\n{prompt}"
+                await emit("context", ctx_log)
+
         # Resolve MCP servers for this task and write a per-task config BEFORE the
         # baseline snapshot so the generated config file isn't logged as an artifact.
         mcp = await mcp_manager.prepare_for_task(project, workspace)
 
-        before = _snapshot(workspace)
+        # Repo-backed project tasks: skip artifact diffing (git tracks changes and
+        # scanning a whole repo is slow/noisy). Sandbox tasks still collect outputs.
+        before = {} if project_id else _snapshot(workspace)
 
         cmd = [
             settings.claude_bin,
@@ -287,7 +298,7 @@ class WorkerManager:
             await self._finish(task_id, Status.CANCELLED, exit_code=exit_code)
             return
 
-        artifacts = _collect_artifacts(workspace, before)
+        artifacts = [] if project_id else _collect_artifacts(workspace, before)
         failed = result["is_error"] or (exit_code not in (0, None))
         status = Status.FAILED if failed else Status.COMPLETED
         await emit(
@@ -310,6 +321,11 @@ class WorkerManager:
             error=("".join(stderr_buf).strip() or None) if failed else None,
             artifacts=artifacts,
         )
+
+        # Fold the completed work into the project's living memory (background,
+        # non-blocking — it makes its own cheap Claude call).
+        if project_id and not failed:
+            asyncio.create_task(memory.update_after_task(task_id))
 
     async def _consume_stdout(self, proc, emit, result, ctx) -> None:
         assert proc.stdout is not None

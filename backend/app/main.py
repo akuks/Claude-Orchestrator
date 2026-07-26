@@ -7,7 +7,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from . import mcp_manager
 from .config import settings
 from .database import init_db
-from .routers import mcp, stream, tasks
+from .routers import mcp, projects, stream, tasks
 from .worker import WorkerManager
 
 
@@ -47,6 +47,7 @@ app.add_middleware(
 app.include_router(tasks.router)
 app.include_router(stream.router)
 app.include_router(mcp.router)
+app.include_router(projects.router)
 
 
 @app.get("/health", tags=["meta"])
