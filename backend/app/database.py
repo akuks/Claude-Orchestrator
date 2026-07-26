@@ -23,6 +23,7 @@ def _add_missing_columns(sync_conn) -> None:
         "tasks": [
             ("session_id", "VARCHAR(64)"),
             ("resume_session_id", "VARCHAR(64)"),
+            ("root_id", "VARCHAR(32)"),
         ],
     }
     for table, cols in wanted.items():
@@ -42,6 +43,13 @@ def _add_missing_columns(sync_conn) -> None:
                 sync_conn.exec_driver_sql(
                     f"ALTER TABLE {table} ADD COLUMN {name} {ddl}"
                 )
+    # Backfill thread roots: pre-existing tasks each become their own thread.
+    try:
+        sync_conn.exec_driver_sql(
+            "UPDATE tasks SET root_id = id WHERE root_id IS NULL"
+        )
+    except Exception:
+        pass
 
 
 async def init_db() -> None:

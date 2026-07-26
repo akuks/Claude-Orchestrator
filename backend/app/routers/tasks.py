@@ -64,6 +64,7 @@ async def create_task(payload: TaskCreate, request: Request):
         )
         s.add(task)
         await s.flush()  # assign id
+        task.root_id = task.id  # a fresh task starts its own thread
         ws = _write_workspace(task.id, payload)
         task.workspace_dir = str(ws)
         await s.commit()
@@ -74,14 +75,31 @@ async def create_task(payload: TaskCreate, request: Request):
     return out
 
 
+async def _thread_counts(s, root_ids: list[str]) -> dict[str, int]:
+    if not root_ids:
+        return {}
+    rows = (
+        await s.execute(
+            select(Task.root_id, func.count())
+            .where(Task.root_id.in_(root_ids))
+            .group_by(Task.root_id)
+        )
+    ).all()
+    return {rid: n for rid, n in rows}
+
+
 @router.get("", response_model=list[TaskOut])
 async def list_tasks(
     project: str | None = None,
     status: str | None = None,
+    roots_only: bool = True,
     limit: int = Query(100, ge=1, le=500),
     offset: int = Query(0, ge=0),
 ):
     stmt = select(Task).order_by(Task.created_at.desc())
+    if roots_only:
+        # A thread's root has root_id == its own id; hide follow-up steps.
+        stmt = stmt.where(Task.root_id == Task.id)
     if project:
         stmt = stmt.where(Task.project == project)
     if status:
@@ -89,7 +107,13 @@ async def list_tasks(
     stmt = stmt.limit(limit).offset(offset)
     async with SessionLocal() as s:
         rows = (await s.execute(stmt)).scalars().all()
-    return [TaskOut.model_validate(t) for t in rows]
+        counts = await _thread_counts(s, [t.root_id or t.id for t in rows])
+    out = []
+    for t in rows:
+        o = TaskOut.model_validate(t)
+        o.thread_count = counts.get(t.root_id or t.id, 1)
+        out.append(o)
+    return out
 
 
 @router.get("/stats", response_model=StatsOut)
@@ -160,7 +184,26 @@ async def _get_task_or_404(s, task_id: str) -> Task:
 async def get_task(task_id: str):
     async with SessionLocal() as s:
         task = await _get_task_or_404(s, task_id)
-        return TaskOut.model_validate(task)
+        counts = await _thread_counts(s, [task.root_id or task.id])
+        out = TaskOut.model_validate(task)
+        out.thread_count = counts.get(task.root_id or task.id, 1)
+        return out
+
+
+@router.get("/{task_id}/thread", response_model=list[TaskOut])
+async def get_thread(task_id: str):
+    """All steps in this task's thread (root + follow-ups), oldest first."""
+    async with SessionLocal() as s:
+        task = await _get_task_or_404(s, task_id)
+        root = task.root_id or task.id
+        rows = (
+            await s.execute(
+                select(Task)
+                .where(Task.root_id == root)
+                .order_by(Task.created_at.asc())
+            )
+        ).scalars().all()
+    return [TaskOut.model_validate(t) for t in rows]
 
 
 @router.get("/{task_id}/events", response_model=list[EventOut])
@@ -228,6 +271,7 @@ async def duplicate_task(task_id: str, request: Request):
         )
         s.add(new)
         await s.flush()
+        new.root_id = new.id  # a duplicate is an independent new thread
         ws = settings.workspaces_dir / new.id
         ws.mkdir(parents=True, exist_ok=True)
         # Carry over CLAUDE.md and input files from the source workspace.
@@ -262,6 +306,7 @@ async def followup_task(task_id: str, payload: FollowupCreate, request: Request)
             model=parent.model,
             max_turns=parent.max_turns,
             parent_task_id=parent.id,
+            root_id=parent.root_id or parent.id,  # join the parent's thread
             resume_session_id=parent.session_id,
             workspace_dir=parent.workspace_dir,  # same workspace = continues context
             status=Status.QUEUED,

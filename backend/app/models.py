@@ -40,6 +40,9 @@ class Task(Base):
     max_turns: Mapped[int] = mapped_column(Integer, default=25)
     workspace_dir: Mapped[str | None] = mapped_column(String(500), nullable=True)
     parent_task_id: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    # Thread identity: a root task's root_id == its own id; follow-ups inherit the
+    # parent's root_id. The feed lists only roots; the drawer lists thread steps.
+    root_id: Mapped[str | None] = mapped_column(String(32), nullable=True, index=True)
 
     # Claude Code session for this run, captured from the stream. A follow-up
     # sets resume_session_id to its parent's session_id so the CLI resumes it.

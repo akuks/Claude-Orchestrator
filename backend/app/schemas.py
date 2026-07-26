@@ -38,7 +38,9 @@ class TaskOut(BaseModel):
     total_cost_usd: Optional[float]
     duration_ms: Optional[int]
     parent_task_id: Optional[str]
+    root_id: Optional[str]
     session_id: Optional[str]
+    thread_count: int = 1  # number of steps in this task's thread
     created_at: datetime
     started_at: Optional[datetime]
     completed_at: Optional[datetime]
