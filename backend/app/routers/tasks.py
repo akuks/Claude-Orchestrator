@@ -10,7 +10,7 @@ from sqlalchemy import func, select
 from ..config import settings
 from ..constants import VALID_MODELS, Priority, Status
 from ..database import SessionLocal
-from ..models import Artifact, Task, TaskEvent
+from ..models import Artifact, Project, Task, TaskEvent
 from ..schemas import (
     ArtifactOut,
     EventOut,
@@ -48,25 +48,40 @@ def _write_workspace(task_id: str, payload: TaskCreate) -> Path:
 async def create_task(payload: TaskCreate, request: Request):
     if payload.priority not in Priority.ALL:
         raise HTTPException(400, f"Invalid priority. Use one of {sorted(Priority.ALL)}")
-    if payload.model not in VALID_MODELS:
-        raise HTTPException(400, f"Invalid model. Use one of {sorted(VALID_MODELS)}")
 
     async with SessionLocal() as s:
+        # Resolve project: task runs in the project's directory and inherits its
+        # default model unless the request overrides it.
+        project_obj = None
+        if payload.project_id:
+            project_obj = await s.get(Project, payload.project_id)
+            if project_obj is None:
+                raise HTTPException(404, "Project not found")
+
+        model = payload.model or (project_obj.default_model if project_obj else "sonnet")
+        if model not in VALID_MODELS:
+            raise HTTPException(400, f"Invalid model. Use one of {sorted(VALID_MODELS)}")
+
         task = Task(
             title=payload.title or _default_title(payload.prompt),
             prompt=payload.prompt,
-            project=payload.project,
+            project=(project_obj.name if project_obj else payload.project),
+            project_id=payload.project_id,
             priority=payload.priority,
             tags=payload.tags,
-            model=payload.model,
+            model=model,
             max_turns=payload.max_turns,
             status=Status.QUEUED,
         )
         s.add(task)
         await s.flush()  # assign id
         task.root_id = task.id  # a fresh task starts its own thread
-        ws = _write_workspace(task.id, payload)
-        task.workspace_dir = str(ws)
+        if project_obj:
+            # Repo-backed task: run in the project directory (no sandbox copy).
+            task.workspace_dir = project_obj.directory
+        else:
+            ws = _write_workspace(task.id, payload)
+            task.workspace_dir = str(ws)
         await s.commit()
         await s.refresh(task)
         out = TaskOut.model_validate(task)
@@ -91,6 +106,7 @@ async def _thread_counts(s, root_ids: list[str]) -> dict[str, int]:
 @router.get("", response_model=list[TaskOut])
 async def list_tasks(
     project: str | None = None,
+    project_id: str | None = None,
     status: str | None = None,
     roots_only: bool = True,
     limit: int = Query(100, ge=1, le=500),
@@ -100,6 +116,8 @@ async def list_tasks(
     if roots_only:
         # A thread's root has root_id == its own id; hide follow-up steps.
         stmt = stmt.where(Task.root_id == Task.id)
+    if project_id:
+        stmt = stmt.where(Task.project_id == project_id)
     if project:
         stmt = stmt.where(Task.project == project)
     if status:
