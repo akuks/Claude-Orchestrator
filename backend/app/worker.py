@@ -177,6 +177,7 @@ class WorkerManager:
             model = task.model
             max_turns = task.max_turns
             project = task.project
+            resume_session_id = task.resume_session_id
             workspace = Path(task.workspace_dir or (settings.workspaces_dir / task_id))
             await s.commit()
 
@@ -202,6 +203,8 @@ class WorkerManager:
             "--permission-mode",
             settings.claude_permission_mode,
         ]
+        if resume_session_id:
+            cmd += ["--resume", resume_session_id]
         if mcp:
             cmd += ["--mcp-config", mcp["config_path"], "--strict-mcp-config"]
             if mcp["allowed"]:
@@ -324,10 +327,10 @@ class WorkerManager:
     async def _handle_stream_event(self, obj: dict, emit, result, ctx) -> None:
         etype = obj.get("type")
         if etype == "system":
-            await emit(
-                "system",
-                {"subtype": obj.get("subtype"), "session_id": obj.get("session_id")},
-            )
+            sid = obj.get("session_id")
+            await emit("system", {"subtype": obj.get("subtype"), "session_id": sid})
+            if sid:
+                await self._store_session_id(ctx["task_id"], sid)
         elif etype == "assistant":
             for block in obj.get("message", {}).get("content", []) or []:
                 if not isinstance(block, dict):
@@ -355,6 +358,13 @@ class WorkerManager:
             result["total_cost_usd"] = obj.get("total_cost_usd")
             result["duration_ms"] = obj.get("duration_ms")
             result["is_error"] = bool(obj.get("is_error"))
+
+    async def _store_session_id(self, task_id: str, session_id: str) -> None:
+        async with SessionLocal() as s:
+            task = await s.get(Task, task_id)
+            if task is not None and task.session_id != session_id:
+                task.session_id = session_id
+                await s.commit()
 
     async def _record_mcp_call(self, ctx, name: str, tool_use_id) -> None:
         # name is mcp__<server>__<tool>

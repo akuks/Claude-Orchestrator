@@ -14,6 +14,7 @@ from ..models import Artifact, Task, TaskEvent
 from ..schemas import (
     ArtifactOut,
     EventOut,
+    FollowupCreate,
     StatsOut,
     TaskCreate,
     TaskOut,
@@ -239,6 +240,36 @@ async def duplicate_task(task_id: str, request: Request):
         await s.commit()
         await s.refresh(new)
         out = TaskOut.model_validate(new)
+    await request.app.state.worker.submit(out.id, out.priority, out.created_at)
+    return out
+
+
+@router.post("/{task_id}/followup", response_model=TaskOut, status_code=201)
+async def followup_task(task_id: str, payload: FollowupCreate, request: Request):
+    """Continue a task's Claude session with a new prompt (a resumable thread)."""
+    async with SessionLocal() as s:
+        parent = await _get_task_or_404(s, task_id)
+        if not parent.session_id:
+            raise HTTPException(
+                409, "Parent has no resumable session yet (must finish a run first)"
+            )
+        child = Task(
+            title=_default_title(payload.prompt),
+            prompt=payload.prompt,
+            project=parent.project,
+            priority=parent.priority,
+            tags=list(parent.tags or []),
+            model=parent.model,
+            max_turns=parent.max_turns,
+            parent_task_id=parent.id,
+            resume_session_id=parent.session_id,
+            workspace_dir=parent.workspace_dir,  # same workspace = continues context
+            status=Status.QUEUED,
+        )
+        s.add(child)
+        await s.commit()
+        await s.refresh(child)
+        out = TaskOut.model_validate(child)
     await request.app.state.worker.submit(out.id, out.priority, out.created_at)
     return out
 

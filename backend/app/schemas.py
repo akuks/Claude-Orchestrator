@@ -38,11 +38,16 @@ class TaskOut(BaseModel):
     total_cost_usd: Optional[float]
     duration_ms: Optional[int]
     parent_task_id: Optional[str]
+    session_id: Optional[str]
     created_at: datetime
     started_at: Optional[datetime]
     completed_at: Optional[datetime]
 
     model_config = {"from_attributes": True}
+
+
+class FollowupCreate(BaseModel):
+    prompt: str = Field(min_length=1)
 
 
 class ArtifactOut(BaseModel):

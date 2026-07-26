@@ -41,6 +41,11 @@ class Task(Base):
     workspace_dir: Mapped[str | None] = mapped_column(String(500), nullable=True)
     parent_task_id: Mapped[str | None] = mapped_column(String(32), nullable=True)
 
+    # Claude Code session for this run, captured from the stream. A follow-up
+    # sets resume_session_id to its parent's session_id so the CLI resumes it.
+    session_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    resume_session_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+
     # Results
     exit_code: Mapped[int | None] = mapped_column(Integer, nullable=True)
     error: Mapped[str | None] = mapped_column(Text, nullable=True)
