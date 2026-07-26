@@ -43,11 +43,28 @@ def _add_missing_columns(sync_conn) -> None:
                 sync_conn.exec_driver_sql(
                     f"ALTER TABLE {table} ADD COLUMN {name} {ddl}"
                 )
-    # Backfill thread roots: pre-existing tasks each become their own thread.
+    # Backfill thread roots: first, every task with no root becomes its own root.
     try:
         sync_conn.exec_driver_sql(
             "UPDATE tasks SET root_id = id WHERE root_id IS NULL"
         )
+    except Exception:
+        return
+    # Then thread follow-ups under their parent's root. A follow-up is identified
+    # by resume_session_id (duplicates set parent_task_id but not that), so
+    # duplicates correctly stay their own root. Repeat to resolve multi-step
+    # chains; idempotent — correctly-threaded rows already match and are skipped.
+    propagate = """
+        UPDATE tasks
+        SET root_id = (SELECT p.root_id FROM tasks p WHERE p.id = tasks.parent_task_id)
+        WHERE resume_session_id IS NOT NULL
+          AND parent_task_id IS NOT NULL
+          AND root_id <> (SELECT p.root_id FROM tasks p WHERE p.id = tasks.parent_task_id)
+    """
+    try:
+        for _ in range(50):
+            if not sync_conn.exec_driver_sql(propagate).rowcount:
+                break
     except Exception:
         pass
 
