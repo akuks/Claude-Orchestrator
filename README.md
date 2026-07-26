@@ -92,6 +92,7 @@ Open http://localhost:5173 and click **New Task**.
 | `POST` | `/tasks/{id}/cancel` | Cancel a queued/running task |
 | `POST` | `/tasks/{id}/retry` | Re-run a finished task |
 | `POST` | `/tasks/{id}/duplicate` | Clone a task into a fresh run |
+| `POST` | `/tasks/{id}/followup` | Continue the task's Claude session with a new prompt |
 | `GET` | `/tasks/{id}/artifacts` | List output files |
 | `GET` | `/tasks/{id}/artifacts/{path}` | Download an output file |
 | `GET` | `/tasks/stats` | Dashboard stats |
@@ -136,6 +137,9 @@ policy. Secrets are stored only as **AES-256-GCM** blobs; the vault key lives in
 
 - **Task management** — create, statuses (`queued → running → completed/failed/cancelled`),
   priority (low/normal/high/urgent), tags, cancel, retry, duplicate, attach input files.
+- **Follow-up threads** — continue a finished task with a new prompt; the follow-up
+  resumes the parent's Claude session (`--resume`) in the same workspace, so full
+  context (files, prior reasoning) carries across steps. Runs are linked parent→child.
 - **Worker manager** — isolated workspaces, per-task model/max-turns, concurrency
   limit, timeout, CLAUDE.md injection, stdout/stderr/exit capture, artifact collection.
 - **Live streaming** — WebSocket stream + terminal viewer, reconnect with history replay.
