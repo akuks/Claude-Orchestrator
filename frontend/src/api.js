@@ -33,6 +33,7 @@ export const api = {
   duplicateTask: (id) => req('POST', `/tasks/${id}/duplicate`),
   followupTask: (id, prompt) => req('POST', `/tasks/${id}/followup`, { prompt }),
   getEvents: (id, afterSeq = 0) => req('GET', `/tasks/${id}/events?after_seq=${afterSeq}`),
+  getThread: (id) => req('GET', `/tasks/${id}/thread`),
   getArtifacts: (id) => req('GET', `/tasks/${id}/artifacts`),
   stats: () => req('GET', '/tasks/stats'),
   artifactUrl: (id, relPath) => `/tasks/${id}/artifacts/${relPath}`,

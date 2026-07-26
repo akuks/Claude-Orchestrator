@@ -62,7 +62,14 @@ export default function App() {
       title: 'Title',
       dataIndex: 'title',
       render: (t, row) => (
-        <a onClick={() => setSelected(row.id)}>{t}</a>
+        <Space>
+          <a onClick={() => setSelected(row.id)}>{t}</a>
+          {row.thread_count > 1 && (
+            <Tag color="cyan" title={`${row.thread_count} steps in this thread`}>
+              🧵 {row.thread_count}
+            </Tag>
+          )}
+        </Space>
       ),
       ellipsis: true,
     },

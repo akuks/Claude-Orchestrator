@@ -12,7 +12,7 @@ import {
   message,
 } from 'antd'
 import {
-  ArrowUpOutlined,
+  ApartmentOutlined,
   CopyOutlined,
   DownloadOutlined,
   ReloadOutlined,
@@ -71,6 +71,7 @@ export default function TaskDetail({ taskId, onClose, onChanged, onOpenTask }) {
   const [task, setTask] = useState(null)
   const [events, setEvents] = useState([])
   const [artifacts, setArtifacts] = useState([])
+  const [thread, setThread] = useState([])
   const [followup, setFollowup] = useState('')
   const [sending, setSending] = useState(false)
   const wsRef = useRef(null)
@@ -87,6 +88,7 @@ export default function TaskDetail({ taskId, onClose, onChanged, onOpenTask }) {
     lastSeqRef.current = 0
 
     api.getTask(taskId).then((t) => !closed && setTask(t))
+    api.getThread(taskId).then((t) => !closed && setThread(t))
 
     const ws = new WebSocket(api.streamUrl(taskId, 0))
     wsRef.current = ws
@@ -173,16 +175,27 @@ export default function TaskDetail({ taskId, onClose, onChanged, onOpenTask }) {
         </Space>
       }
     >
-      {task?.parent_task_id && (
-        <Button
-          type="link"
-          size="small"
-          icon={<ArrowUpOutlined />}
-          style={{ paddingLeft: 0, marginBottom: 8 }}
-          onClick={() => onOpenTask?.(task.parent_task_id)}
-        >
-          Continued from previous step — view parent
-        </Button>
+      {thread.length > 1 && (
+        <div style={{ marginBottom: 12 }}>
+          <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+            <ApartmentOutlined /> Thread · {thread.length} steps
+          </Typography.Text>
+          <div style={{ marginTop: 6, display: 'flex', flexWrap: 'wrap', gap: 6 }}>
+            {thread.map((step, i) => (
+              <Button
+                key={step.id}
+                size="small"
+                type={step.id === taskId ? 'primary' : 'default'}
+                onClick={() => onOpenTask?.(step.id)}
+                title={step.title}
+              >
+                {i + 1}. <Tag color={STATUS_COLORS[step.status]} style={{ marginInlineStart: 4 }}>
+                  {step.status}
+                </Tag>
+              </Button>
+            ))}
+          </div>
+        </div>
       )}
 
       {task && (
