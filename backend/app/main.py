@@ -7,7 +7,8 @@ from fastapi.middleware.cors import CORSMiddleware
 from . import mcp_manager
 from .config import settings
 from .database import init_db
-from .routers import mcp, projects, stream, tasks
+from .routers import mcp, projects, schedules, stream, tasks, templates
+from .scheduler import Scheduler
 from .worker import WorkerManager
 
 
@@ -26,11 +27,15 @@ async def lifespan(app: FastAPI):
     worker = WorkerManager()
     app.state.worker = worker
     await worker.start()
+    scheduler = Scheduler(worker)
+    app.state.scheduler = scheduler
+    await scheduler.start()
     health_task = asyncio.create_task(_mcp_health_loop())
     try:
         yield
     finally:
         health_task.cancel()
+        await scheduler.stop()
         await worker.stop()
 
 
@@ -48,6 +53,8 @@ app.include_router(tasks.router)
 app.include_router(stream.router)
 app.include_router(mcp.router)
 app.include_router(projects.router)
+app.include_router(templates.router)
+app.include_router(schedules.router)
 
 
 @app.get("/health", tags=["meta"])
