@@ -122,10 +122,15 @@ export default function CreateTaskModal({
           </Form.Item>
         </div>
         <div style={{ display: 'flex', gap: 12 }}>
-          <Form.Item name="model" label="Model" style={{ flex: 1 }}>
+          <Form.Item
+            name="model"
+            label="Model"
+            style={{ flex: 1 }}
+            extra="Leave blank to use the project default or your Claude Code default."
+          >
             <Select
               allowClear
-              placeholder="Project default"
+              placeholder="Default"
               options={[
                 { value: 'sonnet', label: 'Sonnet' },
                 { value: 'opus', label: 'Opus' },

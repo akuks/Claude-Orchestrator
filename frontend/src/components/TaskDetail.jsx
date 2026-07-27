@@ -19,7 +19,7 @@ import {
   SendOutlined,
   StopOutlined,
 } from '@ant-design/icons'
-import { api, PRIORITY_COLORS, STATUS_COLORS } from '../api'
+import { api, PRIORITY_COLORS, STATUS_COLORS, shortModel } from '../api'
 import { warm } from '../theme'
 
 const EVENT_STYLE = {
@@ -206,7 +206,12 @@ export default function TaskDetail({ taskId, onClose, onChanged, onOpenTask }) {
           <Descriptions.Item label="Priority">
             <Tag color={PRIORITY_COLORS[task.priority]}>{task.priority}</Tag>
           </Descriptions.Item>
-          <Descriptions.Item label="Model">{task.model}</Descriptions.Item>
+          <Descriptions.Item label="Model">
+            {shortModel(task.model_used) || task.model || 'default'}
+            {task.model_used && task.model && shortModel(task.model_used) !== task.model && (
+              <Typography.Text type="secondary"> (requested {task.model})</Typography.Text>
+            )}
+          </Descriptions.Item>
           <Descriptions.Item label="Project">{task.project || '—'}</Descriptions.Item>
           <Descriptions.Item label="Turns">{task.num_turns ?? '—'}</Descriptions.Item>
           <Descriptions.Item label="Cost">
