@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState } from 'react'
 import {
   Button,
   Layout,
+  Popconfirm,
   Segmented,
   Select,
   Space,
@@ -12,6 +13,7 @@ import {
 } from 'antd'
 import {
   ApiOutlined,
+  DeleteOutlined,
   FolderOutlined,
   PlusOutlined,
   ReloadOutlined,
@@ -78,6 +80,16 @@ export default function App() {
 
   const activeProject = projects.find((p) => p.id === activeProjectId) || null
 
+  const deleteTask = async (id) => {
+    try {
+      await api.deleteTask(id)
+      message.success('Task deleted')
+      refresh()
+    } catch (e) {
+      message.error(e.message)
+    }
+  }
+
   const columns = [
     {
       title: 'Title',
@@ -134,6 +146,34 @@ export default function App() {
       dataIndex: 'created_at',
       width: 130,
       render: (d) => dayjs(d).fromNow(),
+    },
+    {
+      title: '',
+      key: 'actions',
+      width: 50,
+      render: (_, row) => {
+        const active = ['queued', 'running', 'awaiting_approval'].includes(row.status)
+        return (
+          <Popconfirm
+            title={
+              row.thread_count > 1
+                ? 'Delete this whole thread?'
+                : 'Delete this task?'
+            }
+            disabled={active}
+            onConfirm={() => deleteTask(row.id)}
+          >
+            <Button
+              type="text"
+              size="small"
+              danger
+              icon={<DeleteOutlined />}
+              disabled={active}
+              title={active ? 'Cancel before deleting' : 'Delete'}
+            />
+          </Popconfirm>
+        )
+      },
     },
   ]
 
