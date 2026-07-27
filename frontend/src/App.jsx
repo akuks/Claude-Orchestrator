@@ -19,7 +19,7 @@ import {
 } from '@ant-design/icons'
 import dayjs from 'dayjs'
 import relativeTime from 'dayjs/plugin/relativeTime'
-import { api, PRIORITY_COLORS, STATUS_COLORS } from './api'
+import { api, PRIORITY_COLORS, STATUS_COLORS, shortModel } from './api'
 import StatsBar from './components/StatsBar'
 import CreateTaskModal from './components/CreateTaskModal'
 import TaskDetail from './components/TaskDetail'
@@ -106,7 +106,16 @@ export default function App() {
       width: 100,
       render: (p) => <Tag color={PRIORITY_COLORS[p]}>{p}</Tag>,
     },
-    { title: 'Model', dataIndex: 'model', width: 90 },
+    {
+      title: 'Model',
+      dataIndex: 'model',
+      width: 120,
+      render: (m, row) => {
+        const actual = shortModel(row.model_used)
+        if (actual) return actual
+        return m || <Typography.Text type="secondary">default</Typography.Text>
+      },
+    },
     { title: 'Project', dataIndex: 'project', width: 120, render: (p) => p || '—' },
     {
       title: 'Turns',

@@ -67,6 +67,12 @@ export const api = {
   },
 }
 
+// "claude-haiku-4-5-20251001" -> "haiku-4-5"; null/undefined -> null
+export function shortModel(s) {
+  if (!s) return null
+  return s.replace(/^claude-/, '').replace(/-\d{8}$/, '')
+}
+
 export const STATUS_COLORS = {
   queued: 'default',
   running: 'processing',
