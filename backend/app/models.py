@@ -52,6 +52,8 @@ class Task(Base):
     # sets resume_session_id to its parent's session_id so the CLI resumes it.
     session_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
     resume_session_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    # Set when this task was created by a schedule (for run history).
+    schedule_id: Mapped[str | None] = mapped_column(String(32), nullable=True, index=True)
 
     # Results
     exit_code: Mapped[int | None] = mapped_column(Integer, nullable=True)
@@ -137,6 +139,46 @@ class TaskSummary(Base):
     title: Mapped[str] = mapped_column(String(200), default="")
     summary: Mapped[str] = mapped_column(Text)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=_now, index=True)
+
+
+class Template(Base):
+    __tablename__ = "templates"
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=_uuid)
+    name: Mapped[str] = mapped_column(String(200))
+    description: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    prompt: Mapped[str] = mapped_column(Text)
+    project_id: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    model: Mapped[str] = mapped_column(String(32), default="")
+    max_turns: Mapped[int] = mapped_column(Integer, default=25)
+    priority: Mapped[str] = mapped_column(String(16), default=Priority.NORMAL)
+    tags: Mapped[list] = mapped_column(JSON, default=list)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=_now)
+
+
+class Schedule(Base):
+    __tablename__ = "schedules"
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=_uuid)
+    name: Mapped[str] = mapped_column(String(200))
+    cron: Mapped[str] = mapped_column(String(120))
+    enabled: Mapped[bool] = mapped_column(default=True)
+
+    # Task config fired on each tick.
+    prompt: Mapped[str] = mapped_column(Text)
+    project_id: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    model: Mapped[str] = mapped_column(String(32), default="")
+    max_turns: Mapped[int] = mapped_column(Integer, default=25)
+    priority: Mapped[str] = mapped_column(String(16), default=Priority.NORMAL)
+    tags: Mapped[list] = mapped_column(JSON, default=list)
+
+    # Notifications: never | on_failure | always, sent to a Slack webhook.
+    notify: Mapped[str] = mapped_column(String(16), default="never")
+    notify_webhook: Mapped[str | None] = mapped_column(String(500), nullable=True)
+
+    last_run_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    next_run_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=_now)
 
 
 class McpServer(Base):

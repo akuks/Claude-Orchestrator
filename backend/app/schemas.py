@@ -43,6 +43,7 @@ class TaskOut(BaseModel):
     parent_task_id: Optional[str]
     root_id: Optional[str]
     session_id: Optional[str]
+    schedule_id: Optional[str]
     thread_count: int = 1  # number of steps in this task's thread
     created_at: datetime
     started_at: Optional[datetime]
@@ -219,6 +220,83 @@ class TaskSummaryOut(BaseModel):
     task_id: str
     title: str
     summary: str
+    created_at: datetime
+
+    model_config = {"from_attributes": True}
+
+
+# ---- Templates & schedules (Phase 4) --------------------------------------
+
+
+class TemplateCreate(BaseModel):
+    name: str = Field(min_length=1, max_length=200)
+    description: Optional[str] = None
+    prompt: str = Field(min_length=1)
+    project_id: Optional[str] = None
+    model: Optional[str] = None
+    max_turns: int = Field(default=25, ge=1, le=200)
+    priority: str = "normal"
+    tags: list[str] = Field(default_factory=list)
+
+
+class TemplateOut(BaseModel):
+    id: str
+    name: str
+    description: Optional[str]
+    prompt: str
+    project_id: Optional[str]
+    model: str
+    max_turns: int
+    priority: str
+    tags: list
+    created_at: datetime
+
+    model_config = {"from_attributes": True}
+
+
+class ScheduleCreate(BaseModel):
+    name: str = Field(min_length=1, max_length=200)
+    cron: str = Field(min_length=1)
+    prompt: str = Field(min_length=1)
+    project_id: Optional[str] = None
+    model: Optional[str] = None
+    max_turns: int = Field(default=25, ge=1, le=200)
+    priority: str = "normal"
+    tags: list[str] = Field(default_factory=list)
+    enabled: bool = True
+    notify: str = "never"  # never | on_failure | always
+    notify_webhook: Optional[str] = None
+
+
+class ScheduleUpdate(BaseModel):
+    name: Optional[str] = None
+    cron: Optional[str] = None
+    prompt: Optional[str] = None
+    project_id: Optional[str] = None
+    model: Optional[str] = None
+    max_turns: Optional[int] = None
+    priority: Optional[str] = None
+    tags: Optional[list[str]] = None
+    enabled: Optional[bool] = None
+    notify: Optional[str] = None
+    notify_webhook: Optional[str] = None
+
+
+class ScheduleOut(BaseModel):
+    id: str
+    name: str
+    cron: str
+    enabled: bool
+    prompt: str
+    project_id: Optional[str]
+    model: str
+    max_turns: int
+    priority: str
+    tags: list
+    notify: str
+    notify_webhook: Optional[str]
+    last_run_at: Optional[datetime]
+    next_run_at: Optional[datetime]
     created_at: datetime
 
     model_config = {"from_attributes": True}

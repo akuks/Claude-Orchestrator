@@ -26,6 +26,7 @@ def _add_missing_columns(sync_conn) -> None:
             ("root_id", "VARCHAR(32)"),
             ("project_id", "VARCHAR(32)"),
             ("model_used", "VARCHAR(64)"),
+            ("schedule_id", "VARCHAR(32)"),
         ],
     }
     for table, cols in wanted.items():
