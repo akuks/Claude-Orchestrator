@@ -31,7 +31,8 @@ class TaskOut(BaseModel):
     status: str
     priority: str
     tags: list[str]
-    model: str
+    model: Optional[str]
+    model_used: Optional[str]
     max_turns: int
     exit_code: Optional[int]
     error: Optional[str]

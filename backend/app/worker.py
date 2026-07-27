@@ -207,13 +207,15 @@ class WorkerManager:
             "--verbose",
             "--output-format",
             "stream-json",
-            "--model",
-            model,
             "--max-turns",
             str(max_turns),
             "--permission-mode",
             settings.claude_permission_mode,
         ]
+        # Only force a model when one was chosen; otherwise Claude Code uses its
+        # own configured default.
+        if model:
+            cmd += ["--model", model]
         if resume_session_id:
             cmd += ["--resume", resume_session_id]
         if mcp:
@@ -348,6 +350,10 @@ class WorkerManager:
             if sid:
                 await self._store_session_id(ctx["task_id"], sid)
         elif etype == "assistant":
+            actual = obj.get("message", {}).get("model")
+            if actual and not ctx.get("model_stored"):
+                ctx["model_stored"] = True
+                await self._store_model_used(ctx["task_id"], actual)
             for block in obj.get("message", {}).get("content", []) or []:
                 if not isinstance(block, dict):
                     continue
@@ -374,6 +380,13 @@ class WorkerManager:
             result["total_cost_usd"] = obj.get("total_cost_usd")
             result["duration_ms"] = obj.get("duration_ms")
             result["is_error"] = bool(obj.get("is_error"))
+
+    async def _store_model_used(self, task_id: str, model_used: str) -> None:
+        async with SessionLocal() as s:
+            task = await s.get(Task, task_id)
+            if task is not None and task.model_used != model_used:
+                task.model_used = model_used
+                await s.commit()
 
     async def _store_session_id(self, task_id: str, session_id: str) -> None:
         async with SessionLocal() as s:
