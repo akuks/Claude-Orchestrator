@@ -58,8 +58,9 @@ async def create_task(payload: TaskCreate, request: Request):
             if project_obj is None:
                 raise HTTPException(404, "Project not found")
 
-        model = payload.model or (project_obj.default_model if project_obj else "sonnet")
-        if model not in VALID_MODELS:
+        # "" => let Claude Code use its own configured default (don't force one).
+        model = payload.model or (project_obj.default_model if project_obj else "")
+        if model and model not in VALID_MODELS:
             raise HTTPException(400, f"Invalid model. Use one of {sorted(VALID_MODELS)}")
 
         task = Task(
