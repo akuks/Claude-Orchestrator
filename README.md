@@ -3,7 +3,7 @@
 A web-based team orchestration layer for Claude Code — run, stream, and manage
 Claude Code tasks from a dashboard instead of one-off terminal sessions.
 
-> **Status: Phases 1–3 complete.**
+> **Status: Phases 1–4 complete.**
 > **Phase 1 (Core Engine):** task management, an isolated Claude Code worker
 > pool, live WebSocket streaming, a REST API, and a React dashboard.
 > **Phase 2 (MCP Management):** MCP server registry with scopes, an AES-256-GCM
@@ -13,8 +13,12 @@ Claude Code tasks from a dashboard instead of one-off terminal sessions.
 > **Phase 3 (Project Memory):** projects mapped to directories with per-project
 > instructions & default model, tasks that run in the project's repo, a
 > context-assembly pipeline (instructions + living memory + relevant past-task
-> summaries within a token budget), and auto-updated living memory. Later phases
-> (scheduling, approvals, team/auth, CLI) are in `claude-orchestrator-features.md`.
+> summaries within a token budget), and auto-updated living memory.
+> **Phase 4 (Scheduling & Automation):** cron schedules with an in-process
+> scheduler loop, next-run preview, pause/resume, run-now and run history;
+> reusable task templates + pre-built automation presets; and Slack-webhook
+> notifications per schedule. Later phases (approvals, team/auth, CLI) are in
+> `claude-orchestrator-features.md`.
 
 ---
 
@@ -135,6 +139,19 @@ with decrypted credentials, and passed to the CLI via `--mcp-config`
 policy. Secrets are stored only as **AES-256-GCM** blobs; the vault key lives in
 `.secret.key` (gitignored) or `CO_SECRET_KEY`.
 
+### Scheduling & templates API (Phase 4)
+
+| Method | Path | Description |
+|---|---|---|
+| `GET` | `/schedules/preview?cron=` | Next run times for a cron expression |
+| `POST`/`GET` | `/schedules` | Create / list schedules |
+| `PATCH`/`DELETE` | `/schedules/{id}` | Edit (pause/resume via `enabled`) / delete |
+| `POST` | `/schedules/{id}/run` | Fire a schedule immediately |
+| `GET` | `/schedules/{id}/runs` | Run history for a schedule |
+| `GET` | `/templates/presets` | Pre-built automation templates |
+| `POST`/`GET` | `/templates` | Create / list templates |
+| `POST` | `/templates/{id}/run` | Run a template as a task |
+
 ---
 
 ## Phase 1 feature coverage
@@ -182,6 +199,17 @@ policy. Secrets are stored only as **AES-256-GCM** blobs; the vault key lives in
 - **Living memory** — after each successful project task, a cheap background Claude
   call writes a one-paragraph task summary and folds it into the project's
   `memory.md`; editable and regenerable from the dashboard.
+
+## Phase 4 feature coverage
+
+- **Cron schedules** — create recurring tasks (raw cron or common presets), with a
+  next-run preview, pause/resume, edit, delete, run-now, and per-schedule run
+  history. An in-process loop fires due schedules and advances their next run.
+- **Task templates** — save reusable task configs (prompt + model + project +
+  settings), run them on demand, plus six pre-built automation presets (morning
+  brief, PR digest, standup, code-quality, dependency check, changelog).
+- **Notifications** — per-schedule Slack incoming-webhook alerts (never /
+  on-failure / always).
 
 > **Scope notes.** Phase 2 injects a generated MCP config per task (stateless)
 > rather than running long-lived shared daemons; HTTP-transport health checks
