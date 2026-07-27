@@ -26,6 +26,9 @@ class Settings(BaseSettings):
     mcp_health_interval_seconds: int = 300
     mcp_probe_timeout_seconds: int = 15
 
+    # Scheduling (Phase 4)
+    scheduler_interval_seconds: int = 30
+
     # Projects & memory (Phase 3)
     projects_dir: Path = Path("./projects")
     context_budget_tokens: int = 6000
