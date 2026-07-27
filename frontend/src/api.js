@@ -62,6 +62,20 @@ export const api = {
   listSummaries: (id) => req('GET', `/projects/${id}/summaries`),
   projectStats: (id) => req('GET', `/projects/${id}/stats`),
 
+  // ---- Templates & schedules ----
+  listTemplates: () => req('GET', '/templates'),
+  templatePresets: () => req('GET', '/templates/presets'),
+  createTemplate: (payload) => req('POST', '/templates', payload),
+  deleteTemplate: (id) => req('DELETE', `/templates/${id}`),
+  runTemplate: (id) => req('POST', `/templates/${id}/run`),
+  listSchedules: () => req('GET', '/schedules'),
+  createSchedule: (payload) => req('POST', '/schedules', payload),
+  updateSchedule: (id, payload) => req('PATCH', `/schedules/${id}`, payload),
+  deleteSchedule: (id) => req('DELETE', `/schedules/${id}`),
+  runSchedule: (id) => req('POST', `/schedules/${id}/run`),
+  scheduleRuns: (id) => req('GET', `/schedules/${id}/runs`),
+  previewCron: (cron) => req('GET', `/schedules/preview?cron=${encodeURIComponent(cron)}`),
+
   streamUrl: (id, lastSeq = 0) => {
     const proto = window.location.protocol === 'https:' ? 'wss' : 'ws'
     return `${proto}://${window.location.host}/tasks/${id}/stream?last_seq=${lastSeq}`

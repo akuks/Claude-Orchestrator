@@ -13,6 +13,7 @@ import {
 } from 'antd'
 import {
   ApiOutlined,
+  ClockCircleOutlined,
   DeleteOutlined,
   FolderOutlined,
   PlusOutlined,
@@ -27,6 +28,7 @@ import CreateTaskModal from './components/CreateTaskModal'
 import TaskDetail from './components/TaskDetail'
 import McpRegistry from './components/McpRegistry'
 import ProjectsView from './components/ProjectsView'
+import AutomationView from './components/AutomationView'
 
 dayjs.extend(relativeTime)
 
@@ -197,6 +199,7 @@ export default function App() {
             options={[
               { value: 'tasks', label: 'Tasks', icon: <UnorderedListOutlined /> },
               { value: 'projects', label: 'Projects', icon: <FolderOutlined /> },
+              { value: 'automation', label: 'Automation', icon: <ClockCircleOutlined /> },
               { value: 'mcp', label: 'MCP Servers', icon: <ApiOutlined /> },
             ]}
           />
@@ -223,6 +226,7 @@ export default function App() {
       <Content style={{ padding: 24 }}>
         {view === 'mcp' && <McpRegistry />}
         {view === 'projects' && <ProjectsView onProjectsChanged={loadProjects} />}
+        {view === 'automation' && <AutomationView projects={projects} />}
         {view === 'tasks' && (
         <>
         <StatsBar stats={stats} />

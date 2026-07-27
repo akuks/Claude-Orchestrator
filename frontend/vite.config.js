@@ -14,6 +14,8 @@ export default defineConfig({
       '/tasks': { target, changeOrigin: true, ws: true },
       '/mcp': { target, changeOrigin: true },
       '/projects': { target, changeOrigin: true },
+      '/schedules': { target, changeOrigin: true },
+      '/templates': { target, changeOrigin: true },
       '/health': { target, changeOrigin: true },
     },
   },
