@@ -6,6 +6,7 @@ import {
   Empty,
   Input,
   List,
+  Popconfirm,
   Space,
   Tag,
   Typography,
@@ -14,6 +15,7 @@ import {
 import {
   ApartmentOutlined,
   CopyOutlined,
+  DeleteOutlined,
   DownloadOutlined,
   ReloadOutlined,
   SendOutlined,
@@ -172,6 +174,23 @@ export default function TaskDetail({ taskId, onClose, onChanged, onOpenTask }) {
           <Button icon={<CopyOutlined />} onClick={() => act(api.duplicateTask, 'Duplicated')}>
             Duplicate
           </Button>
+          {task && !isActive && (
+            <Popconfirm
+              title="Delete this task?"
+              onConfirm={async () => {
+                try {
+                  await api.deleteTask(taskId)
+                  message.success('Task deleted')
+                  onChanged?.()
+                  onClose()
+                } catch (e) {
+                  message.error(e.message)
+                }
+              }}
+            >
+              <Button danger icon={<DeleteOutlined />} />
+            </Popconfirm>
+          )}
         </Space>
       }
     >
