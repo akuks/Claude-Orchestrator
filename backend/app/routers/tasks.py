@@ -1,5 +1,6 @@
 import base64
 import os
+import shutil
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -336,6 +337,35 @@ async def followup_task(task_id: str, payload: FollowupCreate, request: Request)
         out = TaskOut.model_validate(child)
     await request.app.state.worker.submit(out.id, out.priority, out.created_at)
     return out
+
+
+@router.delete("/{task_id}", status_code=204)
+async def delete_task(task_id: str):
+    """Delete a task (and its events/artifacts). Deleting a thread root removes
+    the whole thread. Sandbox workspaces are removed; project repos are not."""
+    async with SessionLocal() as s:
+        task = await _get_task_or_404(s, task_id)
+        if task.status in Status.ACTIVE:
+            raise HTTPException(409, "Cancel the task before deleting it")
+        if task.root_id and task.root_id == task.id:
+            members = (
+                await s.execute(select(Task).where(Task.root_id == task.id))
+            ).scalars().all()
+        else:
+            members = [task]
+
+        ws_root = str(settings.workspaces_dir.resolve())
+        for m in members:
+            # Remove the isolated sandbox workspace only — never a project repo.
+            if m.project_id is None and m.workspace_dir:
+                try:
+                    wsp = Path(m.workspace_dir).resolve()
+                    if str(wsp).startswith(ws_root + os.sep):
+                        shutil.rmtree(wsp, ignore_errors=True)
+                except OSError:
+                    pass
+            await s.delete(m)
+        await s.commit()
 
 
 @router.get("/{task_id}/artifacts", response_model=list[ArtifactOut])
