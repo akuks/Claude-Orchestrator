@@ -9,6 +9,8 @@ import asyncio
 import json
 import os
 
+from .config import settings
+
 
 async def _send(proc, msg: dict) -> None:
     proc.stdin.write((json.dumps(msg) + "\n").encode())
@@ -76,6 +78,7 @@ async def probe_stdio(
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.DEVNULL,
             env=full_env,
+            limit=settings.stream_buffer_limit_bytes,
         )
     except FileNotFoundError:
         return {"ok": False, "tools": [], "error": f"command not found: {command}"}

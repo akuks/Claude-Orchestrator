@@ -17,6 +17,10 @@ class Settings(BaseSettings):
     worker_concurrency: int = 3
     task_timeout_seconds: int = 1800
     claude_permission_mode: str = "bypassPermissions"
+    # Max bytes for a single line of Claude's stream-json output. The default
+    # asyncio StreamReader limit is 64 KB, which large tool results (e.g. big PR
+    # diffs / file contents) exceed. 64 MB is generous headroom.
+    stream_buffer_limit_bytes: int = 64 * 1024 * 1024
 
     # Secrets / credential vault
     secret_key: str | None = None

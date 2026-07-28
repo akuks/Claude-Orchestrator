@@ -249,6 +249,8 @@ class WorkerManager:
                 stdin=asyncio.subprocess.PIPE,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
+                # Raise the per-line buffer limit; stream-json events can be large.
+                limit=settings.stream_buffer_limit_bytes,
             )
         except FileNotFoundError:
             await emit("error", {"message": f"Claude binary not found: {settings.claude_bin}"})
