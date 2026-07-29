@@ -55,6 +55,13 @@ class Task(Base):
     # Set when this task was created by a schedule (for run history).
     schedule_id: Mapped[str | None] = mapped_column(String(32), nullable=True, index=True)
 
+    # Approvals (Phase 5): a task requiring approval waits in `awaiting_approval`
+    # until a human approves (→ queued) or rejects (→ cancelled).
+    requires_approval: Mapped[bool] = mapped_column(default=False)
+    risk: Mapped[str] = mapped_column(String(16), default="info")  # info|warning|critical
+    decided_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    decision_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+
     # Results
     exit_code: Mapped[int | None] = mapped_column(Integer, nullable=True)
     error: Mapped[str | None] = mapped_column(Text, nullable=True)
@@ -175,6 +182,9 @@ class Schedule(Base):
     # Notifications: never | on_failure | always, sent to a Slack webhook.
     notify: Mapped[str] = mapped_column(String(16), default="never")
     notify_webhook: Mapped[str | None] = mapped_column(String(500), nullable=True)
+
+    # If set, each fired run waits in the approval inbox before executing.
+    requires_approval: Mapped[bool] = mapped_column(default=False)
 
     last_run_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     next_run_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)

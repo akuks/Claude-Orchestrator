@@ -33,6 +33,10 @@ class Settings(BaseSettings):
     # Scheduling (Phase 4)
     scheduler_interval_seconds: int = 30
 
+    # Approvals (Phase 5): auto-reject pending approvals older than this.
+    approval_timeout_seconds: int = 86400  # 24h; 0 disables auto-reject
+    approval_check_interval_seconds: int = 60
+
     # Projects & memory (Phase 3)
     projects_dir: Path = Path("./projects")
     context_budget_tokens: int = 6000

@@ -20,6 +20,7 @@ class TaskCreate(BaseModel):
     max_turns: int = Field(default=25, ge=1, le=200)
     claude_md: Optional[str] = None
     input_files: list[InputFile] = Field(default_factory=list)
+    requires_approval: bool = False
 
 
 class TaskOut(BaseModel):
@@ -44,6 +45,9 @@ class TaskOut(BaseModel):
     root_id: Optional[str]
     session_id: Optional[str]
     schedule_id: Optional[str]
+    requires_approval: bool = False
+    risk: str = "info"
+    decision_reason: Optional[str] = None
     thread_count: int = 1  # number of steps in this task's thread
     created_at: datetime
     started_at: Optional[datetime]
@@ -266,6 +270,7 @@ class ScheduleCreate(BaseModel):
     enabled: bool = True
     notify: str = "never"  # never | on_failure | always
     notify_webhook: Optional[str] = None
+    requires_approval: bool = False
 
 
 class ScheduleUpdate(BaseModel):
@@ -280,6 +285,7 @@ class ScheduleUpdate(BaseModel):
     enabled: Optional[bool] = None
     notify: Optional[str] = None
     notify_webhook: Optional[str] = None
+    requires_approval: Optional[bool] = None
 
 
 class ScheduleOut(BaseModel):
@@ -295,6 +301,7 @@ class ScheduleOut(BaseModel):
     tags: list
     notify: str
     notify_webhook: Optional[str]
+    requires_approval: bool = False
     last_run_at: Optional[datetime]
     next_run_at: Optional[datetime]
     created_at: datetime
