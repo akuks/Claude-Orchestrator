@@ -184,6 +184,14 @@ function ScheduleModal({ open, schedule, projects, onClose, onSaved }) {
             <Switch />
           </Form.Item>
         </div>
+        <Form.Item
+          name="requires_approval"
+          label="Require approval before each run"
+          valuePropName="checked"
+          extra="Each fired run waits in the Approval Inbox until you approve it."
+        >
+          <Switch />
+        </Form.Item>
       </Form>
     </Modal>
   )

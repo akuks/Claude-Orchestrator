@@ -6,6 +6,7 @@ import {
   InputNumber,
   Modal,
   Select,
+  Switch,
   Upload,
   message,
 } from 'antd'
@@ -61,6 +62,7 @@ export default function CreateTaskModal({
         max_turns: values.max_turns,
         tags: values.tags || [],
         claude_md: values.project_id ? undefined : values.claude_md || undefined,
+        requires_approval: !!values.requires_approval,
         input_files,
       })
       message.success('Task created')
@@ -154,6 +156,14 @@ export default function CreateTaskModal({
         </div>
         <Form.Item name="tags" label="Tags">
           <Select mode="tags" placeholder="Add tags" tokenSeparators={[',']} />
+        </Form.Item>
+        <Form.Item
+          name="requires_approval"
+          label="Require approval before running"
+          valuePropName="checked"
+          extra="Task waits in the Approval Inbox until you approve it."
+        >
+          <Switch />
         </Form.Item>
         <Form.Item name="claude_md" label="CLAUDE.md (optional, injected into workspace)">
           <Input.TextArea rows={2} placeholder="Project instructions for this task" />
