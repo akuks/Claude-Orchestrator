@@ -3,7 +3,7 @@
 A web-based team orchestration layer for Claude Code — run, stream, and manage
 Claude Code tasks from a dashboard instead of one-off terminal sessions.
 
-> **Status: Phases 1–4 complete.**
+> **Status: Phases 1–5 complete.**
 > **Phase 1 (Core Engine):** task management, an isolated Claude Code worker
 > pool, live WebSocket streaming, a REST API, and a React dashboard.
 > **Phase 2 (MCP Management):** MCP server registry with scopes, an AES-256-GCM
@@ -17,7 +17,11 @@ Claude Code tasks from a dashboard instead of one-off terminal sessions.
 > **Phase 4 (Scheduling & Automation):** cron schedules with an in-process
 > scheduler loop, next-run preview, pause/resume, run-now and run history;
 > reusable task templates + pre-built automation presets; and Slack-webhook
-> notifications per schedule. Later phases (approvals, team/auth, CLI) are in
+> notifications per schedule.
+> **Phase 5 (Approvals):** a task or scheduled run can be marked *requires
+> approval* — it waits in an **Approval Inbox** (with a risk level) until a human
+> approves (→ runs) or rejects (→ cancelled, reason recorded), plus timeout
+> auto-reject. Later phases (team/auth, CLI) are in
 > `claude-orchestrator-features.md`.
 
 ---
@@ -151,6 +155,9 @@ policy. Secrets are stored only as **AES-256-GCM** blobs; the vault key lives in
 | `GET` | `/templates/presets` | Pre-built automation templates |
 | `POST`/`GET` | `/templates` | Create / list templates |
 | `POST` | `/templates/{id}/run` | Run a template as a task |
+| `GET` | `/approvals` | Tasks awaiting approval |
+| `POST` | `/approvals/{id}/approve` · `/reject` | Approve (→ runs) / reject (with reason) |
+| `POST` | `/approvals/approve` | Bulk approve a list of task ids |
 
 ---
 
@@ -210,6 +217,22 @@ policy. Secrets are stored only as **AES-256-GCM** blobs; the vault key lives in
   brief, PR digest, standup, code-quality, dependency check, changelog).
 - **Notifications** — per-schedule Slack incoming-webhook alerts (never /
   on-failure / always).
+
+## Phase 5 feature coverage
+
+- **Approval inbox** — tasks/scheduled runs marked *requires approval* wait in
+  `awaiting_approval` before executing; the inbox shows each with a **risk level**
+  (info / warning / critical, auto-classified from the prompt) and its context.
+- **Approve / reject** — one-click approve (→ queued and runs) or reject with a
+  reason (→ cancelled, reason kept for audit); bulk "approve all".
+- **Timeout** — pending approvals auto-reject after a configurable window.
+
+> **Approval granularity.** Phase 5 gates at the **task level** (approve before the
+> run starts), not per-tool-call. True mid-run, per-action approval (pause at each
+> `merge`) requires the Claude **Agent SDK**'s `canUseTool` callback, which the
+> `claude --print` CLI this worker uses does not expose — a documented future
+> enhancement. For per-action safety today, combine task approval with MCP tool
+> policies (e.g. set `merge_pull_request` to Block for review-only runs).
 
 > **Scope notes.** Phase 2 injects a generated MCP config per task (stateless)
 > rather than running long-lived shared daemons; HTTP-transport health checks

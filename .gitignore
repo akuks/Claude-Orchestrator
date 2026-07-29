@@ -17,6 +17,9 @@ backend/.env
 .secret.key
 backend/.secret.key
 
+# Generated per-task MCP config (written into a project's directory at run time)
+.mcp-config.json
+
 # Node / frontend
 node_modules/
 frontend/dist/
