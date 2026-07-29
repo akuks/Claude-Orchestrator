@@ -18,6 +18,33 @@ def default_title(prompt: str) -> str:
     return line[:80]
 
 
+# Patterns that make an action hard to reverse / high-impact.
+_CRITICAL_PATTERNS = (
+    "merge",
+    "rm -rf",
+    "drop table",
+    "force push",
+    "force-push",
+    "--force",
+    "push --force",
+    "reset --hard",
+    "deploy",
+    "revert",
+    "delete branch",
+    "git push",
+)
+
+
+def classify_risk(prompt: str, project_id: str | None) -> str:
+    p = (prompt or "").lower()
+    if any(k in p for k in _CRITICAL_PATTERNS):
+        return "critical"
+    # A project task acts on a real repo/directory → at least a warning.
+    if project_id:
+        return "warning"
+    return "info"
+
+
 async def build_task(
     s,
     *,
@@ -31,8 +58,13 @@ async def build_task(
     claude_md: str | None = None,
     input_files: list | None = None,
     schedule_id: str | None = None,
+    requires_approval: bool = False,
 ) -> Task:
-    """Create a Task row (flushed, not committed) in the given session."""
+    """Create a Task row (flushed, not committed) in the given session.
+
+    When requires_approval is set, the task starts in `awaiting_approval` and is
+    NOT submitted to the worker until a human approves it.
+    """
     project_obj = await s.get(Project, project_id) if project_id else None
     resolved_model = model or (project_obj.default_model if project_obj else "")
 
@@ -45,8 +77,10 @@ async def build_task(
         tags=tags or [],
         model=resolved_model,
         max_turns=max_turns,
-        status=Status.QUEUED,
+        status=Status.AWAITING_APPROVAL if requires_approval else Status.QUEUED,
         schedule_id=schedule_id,
+        requires_approval=requires_approval,
+        risk=classify_risk(prompt, project_id),
     )
     s.add(task)
     await s.flush()  # assign id

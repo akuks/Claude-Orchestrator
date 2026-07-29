@@ -80,10 +80,13 @@ class Scheduler:
                     priority=sch.priority,
                     tags=sch.tags,
                     schedule_id=sch.id,
+                    requires_approval=sch.requires_approval,
                 )
                 sch.last_run_at = now
                 sch.next_run_at = next_run(sch.cron, now)
-                fired.append((task.id, task.priority, task.created_at))
+                # Approval-gated runs wait in the inbox; others are dispatched.
+                if not sch.requires_approval:
+                    fired.append((task.id, task.priority, task.created_at))
             await s.commit()
 
         for task_id, priority, created_at in fired:

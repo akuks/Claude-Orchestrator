@@ -68,12 +68,15 @@ async def create_task(payload: TaskCreate, request: Request):
             tags=payload.tags,
             claude_md=payload.claude_md,
             input_files=[f.model_dump() for f in payload.input_files],
+            requires_approval=payload.requires_approval,
         )
         await s.commit()
         await s.refresh(task)
         out = TaskOut.model_validate(task)
 
-    await request.app.state.worker.submit(out.id, out.priority, out.created_at)
+    # Approval-gated tasks wait in the inbox; others run immediately.
+    if not out.requires_approval:
+        await request.app.state.worker.submit(out.id, out.priority, out.created_at)
     return out
 
 
