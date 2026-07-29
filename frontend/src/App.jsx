@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState } from 'react'
 import {
+  Badge,
   Button,
   Layout,
   Popconfirm,
@@ -18,6 +19,7 @@ import {
   FolderOutlined,
   PlusOutlined,
   ReloadOutlined,
+  SafetyOutlined,
   UnorderedListOutlined,
 } from '@ant-design/icons'
 import dayjs from 'dayjs'
@@ -29,6 +31,7 @@ import TaskDetail from './components/TaskDetail'
 import McpRegistry from './components/McpRegistry'
 import ProjectsView from './components/ProjectsView'
 import AutomationView from './components/AutomationView'
+import ApprovalsView from './components/ApprovalsView'
 
 dayjs.extend(relativeTime)
 
@@ -44,6 +47,19 @@ export default function App() {
   const [view, setView] = useState('tasks')
   const [projects, setProjects] = useState([])
   const [activeProjectId, setActiveProjectId] = useState(null)
+  const [approvalCount, setApprovalCount] = useState(0)
+
+  const loadApprovalCount = useCallback(async () => {
+    try {
+      setApprovalCount((await api.listApprovals()).length)
+    } catch (_) {}
+  }, [])
+
+  useEffect(() => {
+    loadApprovalCount()
+    const id = setInterval(loadApprovalCount, 5000)
+    return () => clearInterval(id)
+  }, [loadApprovalCount])
 
   const loadProjects = useCallback(async () => {
     try {
@@ -200,6 +216,15 @@ export default function App() {
               { value: 'tasks', label: 'Tasks', icon: <UnorderedListOutlined /> },
               { value: 'projects', label: 'Projects', icon: <FolderOutlined /> },
               { value: 'automation', label: 'Automation', icon: <ClockCircleOutlined /> },
+              {
+                value: 'approvals',
+                icon: <SafetyOutlined />,
+                label: (
+                  <Badge count={approvalCount} size="small" offset={[8, -2]}>
+                    <span>Approvals</span>
+                  </Badge>
+                ),
+              },
               { value: 'mcp', label: 'MCP Servers', icon: <ApiOutlined /> },
             ]}
           />
@@ -227,6 +252,7 @@ export default function App() {
         {view === 'mcp' && <McpRegistry />}
         {view === 'projects' && <ProjectsView onProjectsChanged={loadProjects} />}
         {view === 'automation' && <AutomationView projects={projects} />}
+        {view === 'approvals' && <ApprovalsView onChanged={loadApprovalCount} />}
         {view === 'tasks' && (
         <>
         <StatsBar stats={stats} />

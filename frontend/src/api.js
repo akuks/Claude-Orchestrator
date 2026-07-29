@@ -76,6 +76,12 @@ export const api = {
   scheduleRuns: (id) => req('GET', `/schedules/${id}/runs`),
   previewCron: (cron) => req('GET', `/schedules/preview?cron=${encodeURIComponent(cron)}`),
 
+  // ---- Approvals ----
+  listApprovals: () => req('GET', '/approvals'),
+  approveTask: (id) => req('POST', `/approvals/${id}/approve`),
+  rejectTask: (id, reason) => req('POST', `/approvals/${id}/reject`, { reason }),
+  bulkApprove: (taskIds) => req('POST', '/approvals/approve', { task_ids: taskIds }),
+
   streamUrl: (id, lastSeq = 0) => {
     const proto = window.location.protocol === 'https:' ? 'wss' : 'ws'
     return `${proto}://${window.location.host}/tasks/${id}/stream?last_seq=${lastSeq}`
@@ -109,6 +115,12 @@ export const MCP_STATUS_COLORS = {
   degraded: 'warning',
   disconnected: 'error',
   unknown: 'default',
+}
+
+export const RISK_COLORS = {
+  info: 'blue',
+  warning: 'orange',
+  critical: 'red',
 }
 
 export const POLICY_ACTION_COLORS = {
