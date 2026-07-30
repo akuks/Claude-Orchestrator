@@ -270,8 +270,11 @@ class WorkerManager:
 
         async def read_stderr() -> None:
             assert proc.stderr is not None
-            async for line in proc.stderr:
-                stderr_buf.append(line.decode(errors="replace"))
+            while True:
+                chunk = await proc.stderr.read(65536)
+                if not chunk:
+                    break
+                stderr_buf.append(chunk.decode(errors="replace"))
 
         stderr_task = asyncio.create_task(read_stderr())
 
@@ -335,17 +338,36 @@ class WorkerManager:
         asyncio.create_task(notifications.notify_task_finished(task_id))
 
     async def _consume_stdout(self, proc, emit, result, ctx) -> None:
+        # Read raw chunks and split on newlines ourselves. A single stream-json
+        # line can be enormous (big PR diffs / tool results); asyncio's readline
+        # caps line length and raises "Separator is not found" past the limit, so
+        # we avoid readline entirely — chunked reads have no per-line limit.
         assert proc.stdout is not None
-        async for raw in proc.stdout:
-            line = raw.decode(errors="replace").strip()
-            if not line:
-                continue
-            try:
-                obj = json.loads(line)
-            except json.JSONDecodeError:
-                await emit("log", {"text": line})
-                continue
-            await self._handle_stream_event(obj, emit, result, ctx)
+        buf = b""
+        while True:
+            chunk = await proc.stdout.read(65536)
+            if not chunk:
+                break
+            buf += chunk
+            while True:
+                nl = buf.find(b"\n")
+                if nl == -1:
+                    break
+                raw, buf = buf[:nl], buf[nl + 1:]
+                await self._process_stdout_line(raw, emit, result, ctx)
+        if buf:
+            await self._process_stdout_line(buf, emit, result, ctx)
+
+    async def _process_stdout_line(self, raw: bytes, emit, result, ctx) -> None:
+        line = raw.decode(errors="replace").strip()
+        if not line:
+            return
+        try:
+            obj = json.loads(line)
+        except json.JSONDecodeError:
+            await emit("log", {"text": line[:2000]})
+            return
+        await self._handle_stream_event(obj, emit, result, ctx)
 
     async def _handle_stream_event(self, obj: dict, emit, result, ctx) -> None:
         etype = obj.get("type")
