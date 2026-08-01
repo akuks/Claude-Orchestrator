@@ -12,7 +12,7 @@ import mimetypes
 from datetime import datetime, timezone
 from pathlib import Path
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 
 from . import mcp_manager, memory, notifications, security
 from .config import settings
@@ -57,6 +57,35 @@ def _collect_artifacts(root: Path, before: dict[str, float]) -> list[dict]:
                 {"filename": p.name, "rel_path": rel, "size": st.st_size, "mime": mime}
             )
     return out
+
+
+_TRANSIENT_MARKERS = (
+    "rate limit",
+    "rate_limit",
+    "429",
+    "overloaded",
+    "529",
+    "api_error",
+    "internal server error",
+    " 500",
+    " 502",
+    " 503",
+    "econnreset",
+    "etimedout",
+    "connection reset",
+    "fetch failed",
+    "socket hang",
+    "network error",
+)
+
+
+def _is_transient(stderr: str) -> bool:
+    """True if a failure looks retryable (rate limit / overload / network).
+    Deliberately excludes max-turns and other non-transient stops."""
+    text = (stderr or "").lower()
+    if "max_turns" in text or "max turns" in text:
+        return False
+    return any(m in text for m in _TRANSIENT_MARKERS)
 
 
 def _short(value) -> str:
@@ -123,6 +152,12 @@ class WorkerManager:
             except ProcessLookupError:
                 pass
 
+    async def _retry_after(self, task_id, delay, priority, created_at) -> None:
+        await asyncio.sleep(delay)
+        if task_id in self._cancelled:
+            return
+        await self.submit(task_id, priority, created_at)
+
     # ---- dispatch --------------------------------------------------------
 
     async def _enqueue(self, task_id: str, priority: str, created_at: datetime) -> None:
@@ -147,7 +182,13 @@ class WorkerManager:
     # ---- execution -------------------------------------------------------
 
     async def _run_job(self, task_id: str) -> None:
-        seq = 0
+        # Continue the event sequence across retries so re-runs append cleanly.
+        async with SessionLocal() as s:
+            seq = (
+                await s.execute(
+                    select(func.max(TaskEvent.seq)).where(TaskEvent.task_id == task_id)
+                )
+            ).scalar() or 0
 
         async def emit(etype: str, payload: dict) -> None:
             nonlocal seq
@@ -180,6 +221,9 @@ class WorkerManager:
             project = task.project
             project_id = task.project_id
             resume_session_id = task.resume_session_id
+            attempt = task.attempt
+            task_priority = task.priority
+            task_created_at = task.created_at
             workspace = Path(task.workspace_dir or (settings.workspaces_dir / task_id))
             await s.commit()
 
@@ -314,6 +358,30 @@ class WorkerManager:
 
         artifacts = [] if project_id else _collect_artifacts(workspace, before)
         failed = result["is_error"] or (exit_code not in (0, None))
+
+        # Auto-retry transient failures (rate limits / overload / network) with
+        # exponential backoff, up to the configured attempt limit.
+        if (
+            failed
+            and attempt < settings.retry_max_attempts
+            and _is_transient("".join(stderr_buf))
+        ):
+            backoff = settings.retry_backoff_seconds * (2**attempt)
+            await emit(
+                "retry",
+                {"attempt": attempt + 1, "backoff_seconds": backoff, "reason": "transient error"},
+            )
+            async with SessionLocal() as s:
+                t = await s.get(Task, task_id)
+                if t is not None:
+                    t.attempt = attempt + 1
+                    t.status = Status.QUEUED
+                    await s.commit()
+            asyncio.create_task(
+                self._retry_after(task_id, backoff, task_priority, task_created_at)
+            )
+            return
+
         status = Status.FAILED if failed else Status.COMPLETED
         await emit(
             "completed",

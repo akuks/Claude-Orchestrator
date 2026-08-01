@@ -37,6 +37,7 @@ class TaskOut(BaseModel):
     model_used: Optional[str]
     max_turns: int
     max_budget_usd: Optional[float] = None
+    attempt: int = 0
     exit_code: Optional[int]
     error: Optional[str]
     result_text: Optional[str]
@@ -216,6 +217,8 @@ class ProjectCreate(BaseModel):
     default_model: str = "sonnet"
     memory_enabled: bool = True
     budget_usd: Optional[float] = None
+    github_repo: Optional[str] = None
+    auto_review_prs: bool = False
 
 
 class ProjectUpdate(BaseModel):
@@ -227,6 +230,8 @@ class ProjectUpdate(BaseModel):
     memory: Optional[str] = None  # manual memory edit
     archived: Optional[bool] = None
     budget_usd: Optional[float] = None
+    github_repo: Optional[str] = None
+    auto_review_prs: Optional[bool] = None
 
 
 class ProjectOut(BaseModel):
@@ -242,6 +247,8 @@ class ProjectOut(BaseModel):
     archived: bool
     created_at: datetime
     budget_usd: Optional[float] = None
+    github_repo: Optional[str] = None
+    auto_review_prs: bool = False
     task_count: int = 0
     total_cost_usd: float = 0.0
 

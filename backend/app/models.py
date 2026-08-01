@@ -44,6 +44,8 @@ class Task(Base):
     max_turns: Mapped[int] = mapped_column(Integer, default=25)
     # Hard spend cap passed to Claude (--max-budget-usd); None = uncapped.
     max_budget_usd: Mapped[float | None] = mapped_column(Float, nullable=True)
+    # Auto-retry attempt counter (0 = first run).
+    attempt: Mapped[int] = mapped_column(Integer, default=0)
     workspace_dir: Mapped[str | None] = mapped_column(String(500), nullable=True)
     parent_task_id: Mapped[str | None] = mapped_column(String(32), nullable=True)
     # Thread identity: a root task's root_id == its own id; follow-ups inherit the
@@ -132,6 +134,10 @@ class Project(Base):
     default_model: Mapped[str] = mapped_column(String(32), default="sonnet")
     # Optional monthly spend budget in USD; used for over-budget flags/alerts.
     budget_usd: Mapped[float | None] = mapped_column(Float, nullable=True)
+    # GitHub repo ("owner/name") this project maps to, for webhook triggers.
+    github_repo: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    # Auto-run a security review when a PR is opened/updated on this repo.
+    auto_review_prs: Mapped[bool] = mapped_column(default=False)
 
     # Living memory — auto-updated after each task, plus a prior copy for diffing.
     memory: Mapped[str] = mapped_column(Text, default="")

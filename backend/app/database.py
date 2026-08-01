@@ -34,12 +34,15 @@ def _add_missing_columns(sync_conn) -> None:
             ("input_tokens", "INTEGER"),
             ("output_tokens", "INTEGER"),
             ("max_budget_usd", "FLOAT"),
+            ("attempt", "INTEGER DEFAULT 0"),
         ],
         "schedules": [
             ("requires_approval", "BOOLEAN DEFAULT 0"),
         ],
         "projects": [
             ("budget_usd", "FLOAT"),
+            ("github_repo", "VARCHAR(200)"),
+            ("auto_review_prs", "BOOLEAN DEFAULT 0"),
         ],
     }
     for table, cols in wanted.items():

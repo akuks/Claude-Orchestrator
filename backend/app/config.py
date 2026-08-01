@@ -21,6 +21,10 @@ class Settings(BaseSettings):
     default_task_budget_usd: float | None = None
     # Fallback model(s) if the primary is unavailable (--fallback-model). "" = off.
     fallback_model: str = ""
+    # Auto-retry transient failures (rate limits / overload / network) with
+    # exponential backoff. 0 attempts disables it.
+    retry_max_attempts: int = 2
+    retry_backoff_seconds: int = 30
     # Max bytes for a single line of Claude's stream-json output. The default
     # asyncio StreamReader limit is 64 KB, which large tool results (e.g. big PR
     # diffs / file contents) exceed. 64 MB is generous headroom.
@@ -33,6 +37,10 @@ class Settings(BaseSettings):
     # MCP management
     mcp_health_interval_seconds: int = 300
     mcp_probe_timeout_seconds: int = 15
+
+    # GitHub webhook (auto-trigger reviews). Set the secret you configure in the
+    # repo's webhook settings; blank disables signature verification.
+    github_webhook_secret: str = ""
 
     # Scheduling (Phase 4)
     scheduler_interval_seconds: int = 30
