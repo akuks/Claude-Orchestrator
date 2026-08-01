@@ -141,6 +141,23 @@ export default function ApprovalsView({ onChanged }) {
                   {t.schedule_id ? 'From a schedule · ' : ''}
                   {dayjs(t.created_at).fromNow()}
                 </Typography.Text>
+                {t.context && (
+                  <Space size={4} wrap>
+                    {t.context.can_merge && <Tag color="red">⚠ can merge</Tag>}
+                    {t.context.can_write && !t.context.can_merge && (
+                      <Tag color="orange">can write</Tag>
+                    )}
+                    {(t.context.mcp_servers || []).map((srv) => (
+                      <Tag key={srv} color="geekblue">
+                        {srv}
+                      </Tag>
+                    ))}
+                    {t.context.blocked_tools?.length > 0 && (
+                      <Tag>{t.context.blocked_tools.length} tool(s) blocked</Tag>
+                    )}
+                    <Tag>mode: {t.context.permission_mode}</Tag>
+                  </Space>
+                )}
                 <Typography.Paragraph
                   style={{ marginBottom: 0, whiteSpace: 'pre-wrap' }}
                   ellipsis={{ rows: 3, expandable: true, symbol: 'more' }}
