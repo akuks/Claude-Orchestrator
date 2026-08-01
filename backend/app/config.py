@@ -36,6 +36,10 @@ class Settings(BaseSettings):
     # Approvals (Phase 5): auto-reject pending approvals older than this.
     approval_timeout_seconds: int = 86400  # 24h; 0 disables auto-reject
     approval_check_interval_seconds: int = 60
+    # Force approval for any task classified 'critical' risk (merge/deploy/delete/
+    # force-push), even if it wasn't explicitly flagged — so dangerous automations
+    # can never run unattended.
+    gate_critical_approval: bool = True
 
     # Projects & memory (Phase 3)
     projects_dir: Path = Path("./projects")

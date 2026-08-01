@@ -12,6 +12,7 @@ from croniter import croniter
 from sqlalchemy import select
 
 from .config import settings
+from .constants import Status
 from .database import SessionLocal
 from .models import Schedule
 from .task_service import build_task
@@ -84,8 +85,9 @@ class Scheduler:
                 )
                 sch.last_run_at = now
                 sch.next_run_at = next_run(sch.cron, now)
-                # Approval-gated runs wait in the inbox; others are dispatched.
-                if not sch.requires_approval:
+                # Approval-gated runs (schedule flag OR auto-gated critical) wait
+                # in the inbox; everything else is dispatched.
+                if task.status != Status.AWAITING_APPROVAL:
                     fired.append((task.id, task.priority, task.created_at))
             await s.commit()
 

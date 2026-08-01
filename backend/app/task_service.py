@@ -68,6 +68,10 @@ async def build_task(
     project_obj = await s.get(Project, project_id) if project_id else None
     resolved_model = model or (project_obj.default_model if project_obj else "")
 
+    risk = classify_risk(prompt, project_id)
+    # Auto-gate critical-risk work so it can't run unattended (config-controlled).
+    gated = requires_approval or (settings.gate_critical_approval and risk == "critical")
+
     task = Task(
         title=title or default_title(prompt),
         prompt=prompt,
@@ -77,10 +81,10 @@ async def build_task(
         tags=tags or [],
         model=resolved_model,
         max_turns=max_turns,
-        status=Status.AWAITING_APPROVAL if requires_approval else Status.QUEUED,
+        status=Status.AWAITING_APPROVAL if gated else Status.QUEUED,
         schedule_id=schedule_id,
-        requires_approval=requires_approval,
-        risk=classify_risk(prompt, project_id),
+        requires_approval=gated,
+        risk=risk,
     )
     s.add(task)
     await s.flush()  # assign id
