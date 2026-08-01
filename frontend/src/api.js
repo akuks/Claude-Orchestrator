@@ -63,6 +63,12 @@ export const api = {
   listSummaries: (id) => req('GET', `/projects/${id}/summaries`),
   projectStats: (id) => req('GET', `/projects/${id}/stats`),
 
+  // ---- Usage & cost ----
+  usageSummary: () => req('GET', '/usage/summary'),
+  usageTimeseries: (days = 30) => req('GET', `/usage/timeseries?days=${days}`),
+  usageByProject: () => req('GET', '/usage/by-project'),
+  usageByModel: () => req('GET', '/usage/by-model'),
+
   // ---- Templates & schedules ----
   listTemplates: () => req('GET', '/templates'),
   templatePresets: () => req('GET', '/templates/presets'),

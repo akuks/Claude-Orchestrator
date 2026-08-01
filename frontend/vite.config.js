@@ -17,6 +17,7 @@ export default defineConfig({
       '/schedules': { target, changeOrigin: true },
       '/templates': { target, changeOrigin: true },
       '/approvals': { target, changeOrigin: true },
+      '/usage': { target, changeOrigin: true },
       '/health': { target, changeOrigin: true },
     },
   },

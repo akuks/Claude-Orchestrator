@@ -16,6 +16,7 @@ import {
   ApiOutlined,
   ClockCircleOutlined,
   DeleteOutlined,
+  DollarOutlined,
   FolderOutlined,
   PlusOutlined,
   ReloadOutlined,
@@ -34,6 +35,7 @@ import McpRegistry from './components/McpRegistry'
 import ProjectsView from './components/ProjectsView'
 import AutomationView from './components/AutomationView'
 import ApprovalsView from './components/ApprovalsView'
+import UsageView from './components/UsageView'
 
 dayjs.extend(relativeTime)
 
@@ -228,6 +230,7 @@ export default function App() {
                   </Badge>
                 ),
               },
+              { value: 'usage', label: 'Usage', icon: <DollarOutlined /> },
               { value: 'mcp', label: 'MCP Servers', icon: <ApiOutlined /> },
             ]}
           />
@@ -264,6 +267,7 @@ export default function App() {
         {view === 'projects' && <ProjectsView onProjectsChanged={loadProjects} />}
         {view === 'automation' && <AutomationView projects={projects} />}
         {view === 'approvals' && <ApprovalsView onChanged={loadApprovalCount} />}
+        {view === 'usage' && <UsageView />}
         {view === 'tasks' && (
         <>
         <StatsBar stats={stats} />
