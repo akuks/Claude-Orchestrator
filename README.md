@@ -21,8 +21,11 @@ Claude Code tasks from a dashboard instead of one-off terminal sessions.
 > **Phase 5 (Approvals):** a task or scheduled run can be marked *requires
 > approval* — it waits in an **Approval Inbox** (with a risk level) until a human
 > approves (→ runs) or rejects (→ cancelled, reason recorded), plus timeout
-> auto-reject. Later phases (team/auth, CLI) are in
-> `claude-orchestrator-features.md`.
+> auto-reject.
+> **Cost & usage tracking:** per-task token capture + cost, a Usage dashboard
+> (spend over time, by project, by model) and per-project budgets with
+> over-budget flags. Remaining: team/auth and CLI (see
+> `claude-orchestrator-features.md`).
 
 ---
 
