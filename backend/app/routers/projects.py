@@ -82,6 +82,7 @@ async def create_project(payload: ProjectCreate):
             instructions=payload.instructions,
             default_model=payload.default_model,
             memory_enabled=payload.memory_enabled,
+            budget_usd=payload.budget_usd,
         )
         s.add(project)
         await s.commit()

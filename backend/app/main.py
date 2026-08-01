@@ -13,7 +13,16 @@ from .config import settings
 from .constants import Status
 from .database import SessionLocal, init_db
 from .models import Task
-from .routers import approvals, mcp, projects, schedules, stream, tasks, templates
+from .routers import (
+    approvals,
+    mcp,
+    projects,
+    schedules,
+    stream,
+    tasks,
+    templates,
+    usage,
+)
 from .scheduler import Scheduler
 from .worker import WorkerManager
 
@@ -93,6 +102,7 @@ app.include_router(projects.router)
 app.include_router(templates.router)
 app.include_router(schedules.router)
 app.include_router(approvals.router)
+app.include_router(usage.router)
 
 
 @app.get("/health", tags=["meta"])
