@@ -31,9 +31,14 @@ def _add_missing_columns(sync_conn) -> None:
             ("risk", "VARCHAR(16) DEFAULT 'info'"),
             ("decided_at", "DATETIME"),
             ("decision_reason", "TEXT"),
+            ("input_tokens", "INTEGER"),
+            ("output_tokens", "INTEGER"),
         ],
         "schedules": [
             ("requires_approval", "BOOLEAN DEFAULT 0"),
+        ],
+        "projects": [
+            ("budget_usd", "FLOAT"),
         ],
     }
     for table, cols in wanted.items():

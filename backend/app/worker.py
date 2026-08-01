@@ -239,6 +239,8 @@ class WorkerManager:
             "total_cost_usd": None,
             "duration_ms": None,
             "is_error": False,
+            "input_tokens": None,
+            "output_tokens": None,
         }
         stderr_buf: list[str] = []
 
@@ -325,6 +327,8 @@ class WorkerManager:
             num_turns=result["num_turns"],
             total_cost_usd=result["total_cost_usd"],
             duration_ms=result["duration_ms"],
+            input_tokens=result["input_tokens"],
+            output_tokens=result["output_tokens"],
             error=("".join(stderr_buf).strip() or None) if failed else None,
             artifacts=artifacts,
         )
@@ -407,6 +411,14 @@ class WorkerManager:
             result["total_cost_usd"] = obj.get("total_cost_usd")
             result["duration_ms"] = obj.get("duration_ms")
             result["is_error"] = bool(obj.get("is_error"))
+            usage = obj.get("usage") or {}
+            # Count cache reads/creations as input so totals reflect real usage.
+            result["input_tokens"] = (
+                (usage.get("input_tokens") or 0)
+                + (usage.get("cache_read_input_tokens") or 0)
+                + (usage.get("cache_creation_input_tokens") or 0)
+            ) or None
+            result["output_tokens"] = usage.get("output_tokens")
 
     async def _store_model_used(self, task_id: str, model_used: str) -> None:
         async with SessionLocal() as s:
@@ -453,6 +465,8 @@ class WorkerManager:
         num_turns: int | None = None,
         total_cost_usd: float | None = None,
         duration_ms: int | None = None,
+        input_tokens: int | None = None,
+        output_tokens: int | None = None,
         error: str | None = None,
         artifacts: list[dict] | None = None,
     ) -> None:
@@ -472,6 +486,10 @@ class WorkerManager:
                 task.total_cost_usd = total_cost_usd
             if duration_ms is not None:
                 task.duration_ms = duration_ms
+            if input_tokens is not None:
+                task.input_tokens = input_tokens
+            if output_tokens is not None:
+                task.output_tokens = output_tokens
             if error:
                 task.error = error[:5000]
             for a in artifacts or []:

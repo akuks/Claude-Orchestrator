@@ -41,6 +41,8 @@ class TaskOut(BaseModel):
     num_turns: Optional[int]
     total_cost_usd: Optional[float]
     duration_ms: Optional[int]
+    input_tokens: Optional[int] = None
+    output_tokens: Optional[int] = None
     parent_task_id: Optional[str]
     root_id: Optional[str]
     session_id: Optional[str]
@@ -183,6 +185,7 @@ class ProjectCreate(BaseModel):
     instructions: Optional[str] = None
     default_model: str = "sonnet"
     memory_enabled: bool = True
+    budget_usd: Optional[float] = None
 
 
 class ProjectUpdate(BaseModel):
@@ -193,6 +196,7 @@ class ProjectUpdate(BaseModel):
     memory_enabled: Optional[bool] = None
     memory: Optional[str] = None  # manual memory edit
     archived: Optional[bool] = None
+    budget_usd: Optional[float] = None
 
 
 class ProjectOut(BaseModel):
@@ -207,6 +211,7 @@ class ProjectOut(BaseModel):
     memory_updated_at: Optional[datetime]
     archived: bool
     created_at: datetime
+    budget_usd: Optional[float] = None
     task_count: int = 0
     total_cost_usd: float = 0.0
 

@@ -69,6 +69,8 @@ class Task(Base):
     num_turns: Mapped[int | None] = mapped_column(Integer, nullable=True)
     total_cost_usd: Mapped[float | None] = mapped_column(Float, nullable=True)
     duration_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    input_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    output_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
 
     # Timestamps
     created_at: Mapped[datetime] = mapped_column(DateTime, default=_now, index=True)
@@ -126,6 +128,8 @@ class Project(Base):
     # written into the repo, to avoid clobbering a real CLAUDE.md).
     instructions: Mapped[str | None] = mapped_column(Text, nullable=True)
     default_model: Mapped[str] = mapped_column(String(32), default="sonnet")
+    # Optional monthly spend budget in USD; used for over-budget flags/alerts.
+    budget_usd: Mapped[float | None] = mapped_column(Float, nullable=True)
 
     # Living memory — auto-updated after each task, plus a prior copy for diffing.
     memory: Mapped[str] = mapped_column(Text, default="")
