@@ -5,6 +5,7 @@ import {
   Empty,
   Form,
   Input,
+  InputNumber,
   List,
   Modal,
   Popconfirm,
@@ -51,6 +52,7 @@ function ProjectModal({ open, project, onClose, onSaved }) {
         instructions: project.instructions,
         memory_enabled: project.memory_enabled,
         archived: project.archived,
+        budget_usd: project.budget_usd,
       })
     } else {
       form.resetFields()
@@ -99,9 +101,19 @@ function ProjectModal({ open, project, onClose, onSaved }) {
         >
           <Input placeholder="/Users/you/code/opsmind" disabled={isEdit} />
         </Form.Item>
-        <Form.Item name="default_model" label="Default model">
-          <Select options={MODEL_OPTS} />
-        </Form.Item>
+        <div style={{ display: 'flex', gap: 12 }}>
+          <Form.Item name="default_model" label="Default model" style={{ flex: 1 }}>
+            <Select options={MODEL_OPTS} />
+          </Form.Item>
+          <Form.Item
+            name="budget_usd"
+            label="Budget (USD)"
+            style={{ flex: 1 }}
+            extra="Flags the project over budget in Usage."
+          >
+            <InputNumber min={0} step={1} prefix="$" style={{ width: '100%' }} placeholder="none" />
+          </Form.Item>
+        </div>
         <Form.Item
           name="instructions"
           label="Project instructions"
