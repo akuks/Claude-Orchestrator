@@ -217,8 +217,12 @@ export default function App() {
         }}
       >
         <Space size="large">
-          <Typography.Title level={4} style={{ color: '#fff', margin: 0 }}>
-            🪄 Claude Orchestrator
+          <Typography.Title
+            level={4}
+            style={{ color: '#fff', margin: 0, whiteSpace: 'nowrap' }}
+            title="Claude Orchestrator"
+          >
+            🪄 CO
           </Typography.Title>
           {claudeInfo &&
             (claudeInfo.found && claudeInfo.authenticated ? (
