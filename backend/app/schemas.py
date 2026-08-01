@@ -218,6 +218,11 @@ class ProjectOut(BaseModel):
     model_config = {"from_attributes": True}
 
 
+class ApprovalOut(TaskOut):
+    # Blast-radius context so the approver can decide safely before running.
+    context: dict = {}
+
+
 class MemoryOut(BaseModel):
     memory: str
     memory_prev: Optional[str]

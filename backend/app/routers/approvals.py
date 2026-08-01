@@ -4,12 +4,49 @@ from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel
 from sqlalchemy import select
 
+from .. import mcp_manager
+from ..config import settings
 from ..constants import Status
 from ..database import SessionLocal
-from ..models import Task
-from ..schemas import TaskOut
+from ..models import McpToolPolicy, Task
+from ..schemas import ApprovalOut, TaskOut
 
 router = APIRouter(prefix="/approvals", tags=["approvals"])
+
+
+async def _blast_radius(task: Task) -> dict:
+    """What the task could touch — MCP servers, write/merge capability, target."""
+    servers = await mcp_manager.servers_for_task(task.project)
+    ctx: dict = {
+        "project": task.project,
+        "permission_mode": settings.claude_permission_mode,
+        "mcp_servers": [s.name for s in servers],
+        "can_write": False,
+        "can_merge": False,
+        "writable_tools": [],
+        "blocked_tools": [],
+    }
+    if servers:
+        async with SessionLocal() as s:
+            policies = (
+                await s.execute(
+                    select(McpToolPolicy).where(
+                        McpToolPolicy.server_id.in_([sv.id for sv in servers])
+                    )
+                )
+            ).scalars().all()
+        writable = [
+            p.tool_name
+            for p in policies
+            if p.classification in ("write", "dangerous") and p.action != "block"
+        ]
+        ctx["writable_tools"] = sorted(writable)[:20]
+        ctx["blocked_tools"] = sorted(p.tool_name for p in policies if p.action == "block")[:20]
+        ctx["can_write"] = bool(writable)
+        ctx["can_merge"] = any(
+            "merge" in p.tool_name.lower() and p.action != "block" for p in policies
+        )
+    return ctx
 
 
 def _now() -> datetime:
@@ -24,9 +61,9 @@ class BulkBody(BaseModel):
     task_ids: list[str]
 
 
-@router.get("", response_model=list[TaskOut])
+@router.get("", response_model=list[ApprovalOut])
 async def list_pending():
-    """Tasks waiting for approval, most recent first."""
+    """Tasks waiting for approval, most recent first, with blast-radius context."""
     async with SessionLocal() as s:
         rows = (
             await s.execute(
@@ -35,7 +72,12 @@ async def list_pending():
                 .order_by(Task.created_at.desc())
             )
         ).scalars().all()
-    return [TaskOut.model_validate(t) for t in rows]
+    out = []
+    for t in rows:
+        card = ApprovalOut.model_validate(t)
+        card.context = await _blast_radius(t)
+        out.append(card)
+    return out
 
 
 async def _approve_one(s, task_id: str) -> Task | None:
