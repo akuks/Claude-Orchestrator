@@ -14,7 +14,7 @@ from pathlib import Path
 
 from sqlalchemy import select
 
-from . import mcp_manager, memory, notifications
+from . import mcp_manager, memory, notifications, security
 from .config import settings
 from .constants import Priority, Status
 from .database import SessionLocal
@@ -337,6 +337,8 @@ class WorkerManager:
         # non-blocking — it makes its own cheap Claude call).
         if project_id and not failed:
             asyncio.create_task(memory.update_after_task(task_id))
+            # Security review → extract structured findings into the tracker.
+            asyncio.create_task(security.extract_findings(task_id))
 
         # Notify if this run came from a schedule (honors its notify policy).
         asyncio.create_task(notifications.notify_task_finished(task_id))

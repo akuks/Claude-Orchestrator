@@ -195,6 +195,34 @@ class Schedule(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, default=_now)
 
 
+class Finding(Base):
+    """A security finding tracked across scans (per project, keyed by fingerprint)."""
+
+    __tablename__ = "findings"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    project_id: Mapped[str] = mapped_column(String(32), index=True)
+    fingerprint: Mapped[str] = mapped_column(String(64), unique=True, index=True)
+
+    severity: Mapped[str] = mapped_column(String(16), default="medium")
+    category: Mapped[str | None] = mapped_column(String(160), nullable=True)
+    cwe: Mapped[str | None] = mapped_column(String(40), nullable=True)
+    title: Mapped[str] = mapped_column(String(300))
+    file: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    line: Mapped[str | None] = mapped_column(String(40), nullable=True)
+    description: Mapped[str | None] = mapped_column(Text, nullable=True)
+    remediation: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+    # open | fixed | accepted | false_positive
+    status: Mapped[str] = mapped_column(String(20), default="open")
+    scans_count: Mapped[int] = mapped_column(Integer, default=1)
+    first_seen: Mapped[datetime] = mapped_column(DateTime, default=_now)
+    last_seen: Mapped[datetime] = mapped_column(DateTime, default=_now)
+    last_scan_id: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    resolved_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=_now)
+
+
 class McpServer(Base):
     __tablename__ = "mcp_servers"
 
