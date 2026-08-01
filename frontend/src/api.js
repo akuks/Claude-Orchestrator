@@ -38,6 +38,7 @@ export const api = {
   getArtifacts: (id) => req('GET', `/tasks/${id}/artifacts`),
   stats: () => req('GET', '/tasks/stats'),
   artifactUrl: (id, relPath) => `/tasks/${id}/artifacts/${relPath}`,
+  reportUrl: (id, format) => `/tasks/${id}/report?format=${format}`,
 
   // ---- MCP management ----
   listServers: () => req('GET', '/mcp/servers'),

@@ -280,9 +280,28 @@ export default function TaskDetail({ taskId, onClose, onChanged, onOpenTask }) {
         })}
       </div>
 
-      <Typography.Title level={5} style={{ marginTop: 16 }}>
-        Result
-      </Typography.Title>
+      <Space
+        style={{ marginTop: 16, width: '100%', justifyContent: 'space-between' }}
+        align="center"
+      >
+        <Typography.Title level={5} style={{ margin: 0 }}>
+          Result
+        </Typography.Title>
+        {task?.result_text && (
+          <Space size="small">
+            <a href={api.reportUrl(taskId, 'pdf')} target="_blank" rel="noreferrer">
+              <Button size="small" icon={<DownloadOutlined />}>
+                PDF
+              </Button>
+            </a>
+            <a href={api.reportUrl(taskId, 'docx')} target="_blank" rel="noreferrer">
+              <Button size="small" icon={<DownloadOutlined />}>
+                DOCX
+              </Button>
+            </a>
+          </Space>
+        )}
+      </Space>
       {task?.result_text ? (
         <div
           style={{
