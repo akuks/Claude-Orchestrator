@@ -42,6 +42,8 @@ class Task(Base):
     # Actual model Claude Code resolved to, captured from the stream.
     model_used: Mapped[str | None] = mapped_column(String(64), nullable=True)
     max_turns: Mapped[int] = mapped_column(Integer, default=25)
+    # Hard spend cap passed to Claude (--max-budget-usd); None = uncapped.
+    max_budget_usd: Mapped[float | None] = mapped_column(Float, nullable=True)
     workspace_dir: Mapped[str | None] = mapped_column(String(500), nullable=True)
     parent_task_id: Mapped[str | None] = mapped_column(String(32), nullable=True)
     # Thread identity: a root task's root_id == its own id; follow-ups inherit the

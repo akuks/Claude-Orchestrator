@@ -53,6 +53,7 @@ async def build_task(
     project_id: str | None = None,
     model: str | None = None,
     max_turns: int = 25,
+    max_budget_usd: float | None = None,
     priority: str = "normal",
     tags: list | None = None,
     claude_md: str | None = None,
@@ -81,6 +82,9 @@ async def build_task(
         tags=tags or [],
         model=resolved_model,
         max_turns=max_turns,
+        max_budget_usd=(
+            max_budget_usd if max_budget_usd is not None else settings.default_task_budget_usd
+        ),
         status=Status.AWAITING_APPROVAL if gated else Status.QUEUED,
         schedule_id=schedule_id,
         requires_approval=gated,

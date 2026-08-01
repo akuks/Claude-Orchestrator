@@ -176,6 +176,7 @@ class WorkerManager:
             prompt = task.prompt
             model = task.model
             max_turns = task.max_turns
+            max_budget_usd = task.max_budget_usd
             project = task.project
             project_id = task.project_id
             resume_session_id = task.resume_session_id
@@ -216,6 +217,10 @@ class WorkerManager:
         # own configured default.
         if model:
             cmd += ["--model", model]
+        if settings.fallback_model:
+            cmd += ["--fallback-model", settings.fallback_model]
+        if max_budget_usd:
+            cmd += ["--max-budget-usd", str(max_budget_usd)]
         if resume_session_id:
             cmd += ["--resume", resume_session_id]
         if mcp:

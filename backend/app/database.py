@@ -33,6 +33,7 @@ def _add_missing_columns(sync_conn) -> None:
             ("decision_reason", "TEXT"),
             ("input_tokens", "INTEGER"),
             ("output_tokens", "INTEGER"),
+            ("max_budget_usd", "FLOAT"),
         ],
         "schedules": [
             ("requires_approval", "BOOLEAN DEFAULT 0"),

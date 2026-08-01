@@ -66,6 +66,7 @@ async def create_task(payload: TaskCreate, request: Request):
             project_id=payload.project_id,
             model=payload.model,
             max_turns=payload.max_turns,
+            max_budget_usd=payload.max_budget_usd,
             priority=payload.priority,
             tags=payload.tags,
             claude_md=payload.claude_md,

@@ -18,6 +18,7 @@ class TaskCreate(BaseModel):
     tags: list[str] = Field(default_factory=list)
     model: Optional[str] = None
     max_turns: int = Field(default=25, ge=1, le=200)
+    max_budget_usd: Optional[float] = Field(default=None, ge=0)
     claude_md: Optional[str] = None
     input_files: list[InputFile] = Field(default_factory=list)
     requires_approval: bool = False
@@ -35,6 +36,7 @@ class TaskOut(BaseModel):
     model: Optional[str]
     model_used: Optional[str]
     max_turns: int
+    max_budget_usd: Optional[float] = None
     exit_code: Optional[int]
     error: Optional[str]
     result_text: Optional[str]
