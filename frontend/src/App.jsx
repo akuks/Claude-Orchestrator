@@ -19,6 +19,7 @@ import {
   FolderOutlined,
   PlusOutlined,
   ReloadOutlined,
+  SafetyCertificateOutlined,
   SafetyOutlined,
   UnorderedListOutlined,
 } from '@ant-design/icons'
@@ -27,6 +28,7 @@ import relativeTime from 'dayjs/plugin/relativeTime'
 import { api, PRIORITY_COLORS, STATUS_COLORS, shortModel } from './api'
 import StatsBar from './components/StatsBar'
 import CreateTaskModal from './components/CreateTaskModal'
+import CodeReviewModal from './components/CodeReviewModal'
 import TaskDetail from './components/TaskDetail'
 import McpRegistry from './components/McpRegistry'
 import ProjectsView from './components/ProjectsView'
@@ -42,6 +44,7 @@ export default function App() {
   const [stats, setStats] = useState(null)
   const [loading, setLoading] = useState(false)
   const [createOpen, setCreateOpen] = useState(false)
+  const [reviewOpen, setReviewOpen] = useState(false)
   const [selected, setSelected] = useState(null)
   const [statusFilter, setStatusFilter] = useState()
   const [view, setView] = useState('tasks')
@@ -241,6 +244,14 @@ export default function App() {
             />
           )}
           {view === 'tasks' && (
+            <Button
+              icon={<SafetyCertificateOutlined />}
+              onClick={() => setReviewOpen(true)}
+            >
+              Security Review
+            </Button>
+          )}
+          {view === 'tasks' && (
             <Button type="primary" icon={<PlusOutlined />} onClick={() => setCreateOpen(true)}>
               New Task
             </Button>
@@ -295,6 +306,12 @@ export default function App() {
         projects={projects}
         activeProjectId={activeProjectId}
         onClose={() => setCreateOpen(false)}
+        onCreated={refresh}
+      />
+      <CodeReviewModal
+        open={reviewOpen}
+        projects={projects}
+        onClose={() => setReviewOpen(false)}
         onCreated={refresh}
       />
       <TaskDetail
