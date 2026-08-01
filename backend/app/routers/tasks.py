@@ -1,16 +1,18 @@
 import base64
 import os
+import re
 import shutil
 from datetime import datetime, timezone
 from pathlib import Path
 
 from fastapi import APIRouter, HTTPException, Query, Request
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, Response
 from sqlalchemy import func, select
 
 from ..config import settings
 from ..constants import VALID_MODELS, Priority, Status
 from ..database import SessionLocal
+from .. import reports
 from ..models import Artifact, Project, Task, TaskEvent
 from ..task_service import build_task
 from ..schemas import (
@@ -354,6 +356,37 @@ async def delete_task(task_id: str):
                     pass
             await s.delete(m)
         await s.commit()
+
+
+def _safe_filename(task: Task, ext: str) -> str:
+    base = re.sub(r"[^A-Za-z0-9._-]+", "-", (task.title or "report")).strip("-")[:60]
+    return f"{base or 'report'}.{ext}"
+
+
+@router.get("/{task_id}/report")
+async def download_report(task_id: str, format: str = "pdf"):
+    """Download the task's result as a PDF or DOCX report."""
+    async with SessionLocal() as s:
+        task = await _get_task_or_404(s, task_id)
+    if format == "pdf":
+        data = reports.build_pdf(task)
+        media = "application/pdf"
+        ext = "pdf"
+    elif format == "docx":
+        data = reports.build_docx(task)
+        media = (
+            "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+        )
+        ext = "docx"
+    else:
+        raise HTTPException(400, "format must be 'pdf' or 'docx'")
+    return Response(
+        content=data,
+        media_type=media,
+        headers={
+            "Content-Disposition": f'attachment; filename="{_safe_filename(task, ext)}"'
+        },
+    )
 
 
 @router.get("/{task_id}/artifacts", response_model=list[ArtifactOut])
