@@ -93,8 +93,15 @@ export default function CodeReviewModal({ open, projects = [], onClose, onCreate
     }
     setSubmitting(true)
     try {
+      // Unique, readable title so repeated runs of the same branch don't collide.
+      const now = new Date()
+      const stamp = `${now.toLocaleDateString()} ${now.toLocaleTimeString([], {
+        hour: '2-digit',
+        minute: '2-digit',
+      })}`
+      const scopeTag = v.scope === 'full' ? 'full' : 'diff'
       await api.createTask({
-        title: `Security review: ${v.branch}`,
+        title: `Security review: ${v.branch} (${scopeTag}) — ${stamp}`,
         prompt: buildPrompt({ branch: v.branch, base: v.base || 'main', scope: v.scope }),
         project_id: v.project_id,
         model: v.model,
