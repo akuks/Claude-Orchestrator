@@ -80,6 +80,8 @@ export const api = {
     req('GET', `/findings/summary${projectId ? `?project_id=${projectId}` : ''}`),
   updateFinding: (id, payload) => req('PATCH', `/findings/${id}`, payload),
 
+  claudeStatus: () => req('GET', '/system/claude'),
+
   // ---- Templates & schedules ----
   listTemplates: () => req('GET', '/templates'),
   templatePresets: () => req('GET', '/templates/presets'),

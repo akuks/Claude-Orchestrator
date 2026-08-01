@@ -54,6 +54,11 @@ export default function App() {
   const [projects, setProjects] = useState([])
   const [activeProjectId, setActiveProjectId] = useState(null)
   const [approvalCount, setApprovalCount] = useState(0)
+  const [claudeInfo, setClaudeInfo] = useState(null)
+
+  useEffect(() => {
+    api.claudeStatus().then(setClaudeInfo).catch(() => setClaudeInfo(null))
+  }, [])
 
   const loadApprovalCount = useCallback(async () => {
     try {
@@ -215,6 +220,16 @@ export default function App() {
           <Typography.Title level={4} style={{ color: '#fff', margin: 0 }}>
             🪄 Claude Orchestrator
           </Typography.Title>
+          {claudeInfo &&
+            (claudeInfo.found && claudeInfo.authenticated ? (
+              <Tag color="green" title={`auth: ${claudeInfo.auth_method}`}>
+                claude {claudeInfo.version?.split(' ')[0] || 'ok'}
+              </Tag>
+            ) : (
+              <Tag color="red" title="Set ANTHROPIC_API_KEY or run 'claude auth login'">
+                claude {!claudeInfo.found ? 'not found' : 'not authed'}
+              </Tag>
+            ))}
           <Segmented
             value={view}
             onChange={setView}

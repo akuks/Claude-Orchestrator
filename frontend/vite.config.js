@@ -19,6 +19,7 @@ export default defineConfig({
       '/approvals': { target, changeOrigin: true },
       '/usage': { target, changeOrigin: true },
       '/findings': { target, changeOrigin: true },
+      '/system': { target, changeOrigin: true },
       '/health': { target, changeOrigin: true },
     },
   },
