@@ -176,6 +176,34 @@ class McpObservabilityOut(BaseModel):
     top_tools: list
 
 
+# ---- Security findings ----------------------------------------------------
+
+
+class FindingOut(BaseModel):
+    id: int
+    project_id: str
+    severity: str
+    category: Optional[str]
+    cwe: Optional[str]
+    title: str
+    file: Optional[str]
+    line: Optional[str]
+    description: Optional[str]
+    remediation: Optional[str]
+    status: str
+    scans_count: int
+    first_seen: datetime
+    last_seen: datetime
+    resolved_at: Optional[datetime]
+
+    model_config = {"from_attributes": True}
+
+
+class FindingUpdate(BaseModel):
+    status: Optional[str] = None  # open | fixed | accepted | false_positive
+    severity: Optional[str] = None
+
+
 # ---- Projects & memory (Phase 3) ------------------------------------------
 
 
