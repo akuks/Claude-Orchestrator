@@ -106,6 +106,7 @@ export default function CodeReviewModal({ open, projects = [], onClose, onCreate
         project_id: v.project_id,
         model: v.model,
         max_turns: v.max_turns,
+        max_budget_usd: v.max_budget_usd ?? undefined,
         tags: ['security', 'vapt', 'code-review'],
       })
       message.success('Security review started')
@@ -179,10 +180,18 @@ export default function CodeReviewModal({ open, projects = [], onClose, onCreate
           <Form.Item
             name="max_turns"
             label="Max turns"
-            style={{ width: 140 }}
+            style={{ width: 130 }}
             extra="Higher = more thorough"
           >
             <InputNumber min={10} max={200} style={{ width: '100%' }} />
+          </Form.Item>
+          <Form.Item
+            name="max_budget_usd"
+            label="Budget cap"
+            style={{ width: 130 }}
+            tooltip="Hard spend limit ($)."
+          >
+            <InputNumber min={0} step={0.5} prefix="$" style={{ width: '100%' }} placeholder="none" />
           </Form.Item>
         </div>
       </Form>

@@ -60,6 +60,7 @@ export default function CreateTaskModal({
         model: values.model || undefined, // undefined => inherit project default
         priority: values.priority,
         max_turns: values.max_turns,
+        max_budget_usd: values.max_budget_usd ?? undefined,
         tags: values.tags || [],
         claude_md: values.project_id ? undefined : values.claude_md || undefined,
         requires_approval: !!values.requires_approval,
@@ -152,6 +153,14 @@ export default function CreateTaskModal({
           </Form.Item>
           <Form.Item name="max_turns" label="Max Turns" style={{ flex: 1 }}>
             <InputNumber min={1} max={200} style={{ width: '100%' }} />
+          </Form.Item>
+          <Form.Item
+            name="max_budget_usd"
+            label="Budget cap"
+            style={{ flex: 1 }}
+            tooltip="Hard spend limit ($). Claude stops before exceeding it."
+          >
+            <InputNumber min={0} step={0.5} prefix="$" style={{ width: '100%' }} placeholder="none" />
           </Form.Item>
         </div>
         <Form.Item name="tags" label="Tags">
