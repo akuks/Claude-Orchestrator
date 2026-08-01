@@ -69,6 +69,17 @@ export const api = {
   usageByProject: () => req('GET', '/usage/by-project'),
   usageByModel: () => req('GET', '/usage/by-model'),
 
+  // ---- Security findings ----
+  listFindings: (params = {}) => {
+    const qs = new URLSearchParams(
+      Object.entries(params).filter(([, v]) => v != null && v !== '')
+    ).toString()
+    return req('GET', `/findings${qs ? `?${qs}` : ''}`)
+  },
+  findingsSummary: (projectId) =>
+    req('GET', `/findings/summary${projectId ? `?project_id=${projectId}` : ''}`),
+  updateFinding: (id, payload) => req('PATCH', `/findings/${id}`, payload),
+
   // ---- Templates & schedules ----
   listTemplates: () => req('GET', '/templates'),
   templatePresets: () => req('GET', '/templates/presets'),
@@ -128,6 +139,21 @@ export const RISK_COLORS = {
   info: 'blue',
   warning: 'orange',
   critical: 'red',
+}
+
+export const SEVERITY_COLORS = {
+  critical: 'red',
+  high: 'volcano',
+  medium: 'gold',
+  low: 'blue',
+  info: 'default',
+}
+
+export const FINDING_STATUS_COLORS = {
+  open: 'red',
+  fixed: 'green',
+  accepted: 'blue',
+  false_positive: 'default',
 }
 
 export const POLICY_ACTION_COLORS = {

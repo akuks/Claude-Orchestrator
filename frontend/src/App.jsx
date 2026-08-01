@@ -36,6 +36,7 @@ import ProjectsView from './components/ProjectsView'
 import AutomationView from './components/AutomationView'
 import ApprovalsView from './components/ApprovalsView'
 import UsageView from './components/UsageView'
+import SecurityView from './components/SecurityView'
 
 dayjs.extend(relativeTime)
 
@@ -230,6 +231,7 @@ export default function App() {
                   </Badge>
                 ),
               },
+              { value: 'security', label: 'Security', icon: <SafetyCertificateOutlined /> },
               { value: 'usage', label: 'Usage', icon: <DollarOutlined /> },
               { value: 'mcp', label: 'MCP Servers', icon: <ApiOutlined /> },
             ]}
@@ -268,6 +270,7 @@ export default function App() {
         {view === 'automation' && <AutomationView projects={projects} />}
         {view === 'approvals' && <ApprovalsView onChanged={loadApprovalCount} />}
         {view === 'usage' && <UsageView />}
+        {view === 'security' && <SecurityView projects={projects} />}
         {view === 'tasks' && (
         <>
         <StatsBar stats={stats} />
