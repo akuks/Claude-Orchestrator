@@ -100,6 +100,17 @@ Open http://localhost:5173 and click **New Task**.
 > **Cost caps.** Set a per-task budget in the New Task / Security Review forms, or
 > a global default via `CO_DEFAULT_TASK_BUDGET_USD` — Claude stops before it spends
 > more than the cap.
+>
+> **Auto-retry.** Transient failures (rate limit / overload / network) are retried
+> automatically with exponential backoff (`CO_RETRY_MAX_ATTEMPTS`,
+> `CO_RETRY_BACKOFF_SECONDS`); non-transient stops like max-turns are not retried.
+>
+> **GitHub PR auto-review.** Set a project's **GitHub repo** (`owner/name`) and
+> enable **Auto-review PRs**, then add a repo webhook (Payload URL
+> `<server>/webhooks/github`, event *Pull requests*, secret `CO_GITHUB_WEBHOOK_SECRET`).
+> Every PR opened/updated triggers a read-only VAPT security review whose findings
+> flow into the Security tracker. (Needs the server reachable by GitHub — deploy it
+> or use a tunnel like smee.io / ngrok for local testing.)
 
 > **Note on `bypassPermissions`:** tasks run autonomously in an isolated
 > workspace directory, so no human is present to answer permission prompts.
