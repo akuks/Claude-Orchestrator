@@ -6,6 +6,7 @@ report into JSON findings. Each is fingerprinted (project + title + file +
 category) so the same issue is tracked across scans — new / recurring / fixed.
 """
 
+import asyncio
 import hashlib
 import json
 import re
@@ -15,10 +16,67 @@ from sqlalchemy import select
 
 from .config import settings
 from .database import SessionLocal
-from .memory import _run_claude
 from .models import Finding, Task
 
 _SEV = {"critical", "high", "medium", "low", "info"}
+
+# Schema for structured extraction via Claude's --json-schema (reliable output).
+_FINDINGS_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "findings": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "severity": {"type": "string"},
+                    "category": {"type": "string"},
+                    "cwe": {"type": "string"},
+                    "title": {"type": "string"},
+                    "file": {"type": "string"},
+                    "line": {"type": "string"},
+                    "description": {"type": "string"},
+                    "remediation": {"type": "string"},
+                },
+                "required": ["severity", "title"],
+            },
+        }
+    },
+    "required": ["findings"],
+}
+
+
+async def _extract_json(prompt: str, model: str) -> dict:
+    """Run Claude with --json-schema so the output is guaranteed valid JSON."""
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            settings.claude_bin,
+            "--print",
+            "--model",
+            model,
+            "--json-schema",
+            json.dumps(_FINDINGS_SCHEMA),
+            stdin=asyncio.subprocess.PIPE,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.DEVNULL,
+        )
+    except (FileNotFoundError, OSError):
+        return {}
+    try:
+        out, _ = await asyncio.wait_for(
+            proc.communicate(prompt.encode()),
+            timeout=settings.memory_call_timeout_seconds,
+        )
+    except asyncio.TimeoutError:
+        try:
+            proc.kill()
+        except ProcessLookupError:
+            pass
+        return {}
+    try:
+        return json.loads(out.decode(errors="replace").strip() or "{}")
+    except json.JSONDecodeError:
+        return {}
 
 
 def _now() -> datetime:
@@ -35,28 +93,11 @@ def _fingerprint(project_id: str, title: str, file: str | None, category: str | 
     return hashlib.sha1(key.encode()).hexdigest()
 
 
-def _parse_json_array(text: str) -> list:
-    if not text:
-        return []
-    # Strip code fences and isolate the outermost JSON array.
-    text = re.sub(r"```(json)?", "", text)
-    start, end = text.find("["), text.rfind("]")
-    if start == -1 or end == -1 or end < start:
-        return []
-    try:
-        data = json.loads(text[start : end + 1])
-        return data if isinstance(data, list) else []
-    except json.JSONDecodeError:
-        return []
-
-
 _EXTRACT_PROMPT = (
-    "You are a parser. Extract every security finding from the report below into a "
-    "JSON array. Output ONLY valid JSON — no prose, no markdown fences. Each element:\n"
-    '{"severity":"critical|high|medium|low|info","category":"OWASP/CWE label or null",'
-    '"cwe":"CWE-89 or null","title":"short title","file":"path or null",'
-    '"line":"line/range or null","description":"one line","remediation":"one line"}\n'
-    "If the report states there are no issues, output []. Report:\n\n"
+    "Extract every distinct security finding from the report below. For each: a "
+    "severity (critical/high/medium/low/info), OWASP/CWE category, CWE id, short "
+    "title, file, line, one-line description, and one-line remediation. If the "
+    "report states there are no issues, return an empty findings list.\n\nReport:\n\n"
 )
 
 
@@ -71,8 +112,8 @@ async def extract_findings(task_id: str) -> None:
         report = task.result_text
         full_scan = "(full)" in (task.title or "")
 
-    raw = await _run_claude(_EXTRACT_PROMPT + report[:12000], settings.memory_model, None)
-    items = _parse_json_array(raw)
+    data = await _extract_json(_EXTRACT_PROMPT + report[:12000], settings.memory_model)
+    items = data.get("findings", []) if isinstance(data, dict) else []
 
     now = _now()
     seen_fps: set[str] = set()
