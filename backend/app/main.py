@@ -1,4 +1,5 @@
 import asyncio
+import os
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
@@ -110,3 +111,35 @@ app.include_router(findings.router)
 @app.get("/health", tags=["meta"])
 async def health():
     return {"status": "ok", "version": app.version}
+
+
+@app.get("/system/claude", tags=["meta"])
+async def claude_status():
+    """Report whether the Claude CLI is present and can authenticate — so a
+    headless deployment can be verified before running tasks."""
+
+    async def _run(args: list[str]):
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                settings.claude_bin,
+                *args,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.DEVNULL,
+            )
+            out, _ = await asyncio.wait_for(proc.communicate(), timeout=15)
+            return proc.returncode, out.decode(errors="replace").strip()
+        except FileNotFoundError:
+            return None, "not found"
+        except (asyncio.TimeoutError, OSError):
+            return None, "error"
+
+    vcode, version = await _run(["--version"])
+    acode, _ = await _run(["auth", "status"])
+    has_key = bool(os.environ.get("ANTHROPIC_API_KEY"))
+    return {
+        "claude_bin": settings.claude_bin,
+        "found": vcode is not None,
+        "version": version if vcode == 0 else None,
+        "authenticated": bool(has_key or acode == 0),
+        "auth_method": "ANTHROPIC_API_KEY" if has_key else ("login/token" if acode == 0 else None),
+    }
