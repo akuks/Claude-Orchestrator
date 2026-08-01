@@ -88,6 +88,18 @@ Open http://localhost:5173 and click **New Task**.
 | `CO_WORKER_CONCURRENCY` | `3` | Max simultaneous tasks |
 | `CO_TASK_TIMEOUT_SECONDS` | `1800` | Kill tasks exceeding this |
 | `CO_CLAUDE_PERMISSION_MODE` | `bypassPermissions` | Permission mode passed to the CLI |
+| `CO_DEFAULT_TASK_BUDGET_USD` | *(unset)* | Default per-task spend cap (`--max-budget-usd`) |
+| `CO_FALLBACK_MODEL` | *(unset)* | Fallback model if the primary is unavailable |
+| `ANTHROPIC_API_KEY` | *(unset)* | Headless auth for the spawned `claude` (deploy off your laptop) |
+
+> **Deployment / headless auth.** The worker inherits the server's environment,
+> so set `ANTHROPIC_API_KEY` (or run `claude setup-token`) to authenticate `claude`
+> without an interactive login. Check readiness at `GET /system/claude`
+> (also shown as a status tag in the dashboard header).
+>
+> **Cost caps.** Set a per-task budget in the New Task / Security Review forms, or
+> a global default via `CO_DEFAULT_TASK_BUDGET_USD` — Claude stops before it spends
+> more than the cap.
 
 > **Note on `bypassPermissions`:** tasks run autonomously in an isolated
 > workspace directory, so no human is present to answer permission prompts.
