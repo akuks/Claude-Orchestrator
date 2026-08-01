@@ -53,6 +53,8 @@ function ProjectModal({ open, project, onClose, onSaved }) {
         memory_enabled: project.memory_enabled,
         archived: project.archived,
         budget_usd: project.budget_usd,
+        github_repo: project.github_repo,
+        auto_review_prs: project.auto_review_prs,
       })
     } else {
       form.resetFields()
@@ -121,8 +123,23 @@ function ProjectModal({ open, project, onClose, onSaved }) {
         >
           <Input.TextArea rows={3} placeholder="Conventions, constraints, context…" />
         </Form.Item>
+        <Form.Item
+          name="github_repo"
+          label="GitHub repo"
+          extra="owner/name — enables the webhook to auto-run reviews on this repo's PRs."
+        >
+          <Input placeholder="akuks/Opsunity-Hydra" />
+        </Form.Item>
         <Space size="large">
           <Form.Item name="memory_enabled" label="Living memory" valuePropName="checked">
+            <Switch />
+          </Form.Item>
+          <Form.Item
+            name="auto_review_prs"
+            label="Auto-review PRs"
+            valuePropName="checked"
+            tooltip="Run a security review automatically when a PR is opened/updated (needs the GitHub webhook configured)."
+          >
             <Switch />
           </Form.Item>
           {isEdit && (
