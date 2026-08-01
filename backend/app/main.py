@@ -24,6 +24,7 @@ from .routers import (
     tasks,
     templates,
     usage,
+    webhooks,
 )
 from .scheduler import Scheduler
 from .worker import WorkerManager
@@ -106,6 +107,7 @@ app.include_router(schedules.router)
 app.include_router(approvals.router)
 app.include_router(usage.router)
 app.include_router(findings.router)
+app.include_router(webhooks.router)
 
 
 @app.get("/health", tags=["meta"])

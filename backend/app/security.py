@@ -87,6 +87,38 @@ def is_security_task(task: Task) -> bool:
     return bool(task.tags) and "vapt" in [str(t).lower() for t in task.tags]
 
 
+def build_security_prompt(branch: str, base: str = "main", scope: str = "changed") -> str:
+    """VAPT/STQC security-review prompt (read-only) — mirrors the dashboard form."""
+    if scope == "full":
+        gather = (
+            "1. git fetch --all --quiet\n"
+            "2. Create an ISOLATED read-only checkout without disturbing the working "
+            f"tree: git worktree add --detach /tmp/vapt-{branch} origin/{branch}; review "
+            "the code there (full-branch audit).\n"
+            "3. When finished: git worktree remove --force /tmp/vapt-" + branch
+        )
+    else:
+        gather = (
+            "1. git fetch --all --quiet\n"
+            f"2. Review the changes: git diff origin/{base}...origin/{branch} "
+            "(and git diff --stat).\n"
+            f"3. Read full file context with: git show origin/{branch}:<path>"
+        )
+    return (
+        "SECURITY CODE REVIEW for STQC / VAPT compliance. NON-INTERACTIVE, READ-ONLY: "
+        "never modify, commit, push, switch branches, or open/merge PRs. Do not ask "
+        f"questions.\n\nTarget branch: \"{branch}\". Base: \"{base}\".\n\n"
+        f"Gather the code (read-only git):\n{gather}\n\n"
+        "Audit for OWASP Top 10 / CWE Top 25 vulnerabilities: injection (SQL/command/"
+        "XSS/path), broken auth & access control (IDOR), crypto failures, hardcoded "
+        "secrets, sensitive-data exposure, SSRF/XXE/deserialization, security "
+        "misconfiguration, input-validation gaps, and vulnerable dependencies.\n\n"
+        "Produce a report:\n## Summary\n- Overall risk rating and counts by severity.\n"
+        "## Findings\nFor each: Severity | OWASP/CWE | file:line | Description | Impact | "
+        "Remediation.\nIf none, say so and list what you inspected. Report only."
+    )
+
+
 def _fingerprint(project_id: str, title: str, file: str | None, category: str | None) -> str:
     norm = re.sub(r"\s+", " ", (title or "").strip().lower())
     key = f"{project_id}|{norm}|{(file or '').lower()}|{(category or '').lower()}"
