@@ -35,7 +35,12 @@ _CRITICAL_PATTERNS = (
 )
 
 
-def classify_risk(prompt: str, project_id: str | None) -> str:
+def classify_risk(prompt: str, project_id: str | None, tags: list | None = None) -> str:
+    # Read-only reviews (VAPT/security) mention "merge"/"delete" in their own
+    # prohibitions — never gate those on keyword match.
+    tag_set = {str(t).lower() for t in (tags or [])}
+    if tag_set & {"vapt", "security"}:
+        return "warning"
     p = (prompt or "").lower()
     if any(k in p for k in _CRITICAL_PATTERNS):
         return "critical"
@@ -69,7 +74,7 @@ async def build_task(
     project_obj = await s.get(Project, project_id) if project_id else None
     resolved_model = model or (project_obj.default_model if project_obj else "")
 
-    risk = classify_risk(prompt, project_id)
+    risk = classify_risk(prompt, project_id, tags)
     # Auto-gate critical-risk work so it can't run unattended (config-controlled).
     gated = requires_approval or (settings.gate_critical_approval and risk == "critical")
 
