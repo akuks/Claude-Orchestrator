@@ -24,7 +24,11 @@ Claude Code tasks from a dashboard instead of one-off terminal sessions.
 > auto-reject.
 > **Cost & usage tracking:** per-task token capture + cost, a Usage dashboard
 > (spend over time, by project, by model) and per-project budgets with
-> over-budget flags. Remaining: team/auth and CLI (see
+> over-budget flags.
+> **Agents:** reusable, governed agent roles — a system prompt
+> (`--append-system-prompt`) + model + budget + optional default project — that
+> you run against any project under all the usual guardrails (approvals, cost
+> caps, tool policies). Remaining: team/auth (see
 > `claude-orchestrator-features.md`).
 
 ---
