@@ -35,6 +35,8 @@ def _add_missing_columns(sync_conn) -> None:
             ("output_tokens", "INTEGER"),
             ("max_budget_usd", "FLOAT"),
             ("attempt", "INTEGER DEFAULT 0"),
+            ("agent_id", "VARCHAR(32)"),
+            ("system_prompt", "TEXT"),
         ],
         "schedules": [
             ("requires_approval", "BOOLEAN DEFAULT 0"),

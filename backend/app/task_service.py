@@ -64,6 +64,8 @@ async def build_task(
     claude_md: str | None = None,
     input_files: list | None = None,
     schedule_id: str | None = None,
+    agent_id: str | None = None,
+    system_prompt: str | None = None,
     requires_approval: bool = False,
 ) -> Task:
     """Create a Task row (flushed, not committed) in the given session.
@@ -92,6 +94,8 @@ async def build_task(
         ),
         status=Status.AWAITING_APPROVAL if gated else Status.QUEUED,
         schedule_id=schedule_id,
+        agent_id=agent_id,
+        system_prompt=system_prompt or None,
         requires_approval=gated,
         risk=risk,
     )

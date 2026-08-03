@@ -58,6 +58,9 @@ class Task(Base):
     resume_session_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
     # Set when this task was created by a schedule (for run history).
     schedule_id: Mapped[str | None] = mapped_column(String(32), nullable=True, index=True)
+    # The agent that ran this task, and its role prompt (--append-system-prompt).
+    agent_id: Mapped[str | None] = mapped_column(String(32), nullable=True, index=True)
+    system_prompt: Mapped[str | None] = mapped_column(Text, nullable=True)
 
     # Approvals (Phase 5): a task requiring approval waits in `awaiting_approval`
     # until a human approves (→ queued) or rejects (→ cancelled).
@@ -158,6 +161,27 @@ class TaskSummary(Base):
     title: Mapped[str] = mapped_column(String(200), default="")
     summary: Mapped[str] = mapped_column(Text)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=_now, index=True)
+
+
+class Agent(Base):
+    """A reusable, governed agent profile: a role (system prompt) + model +
+    budget + optional default project. Run it against any project or its default."""
+
+    __tablename__ = "agents"
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=_uuid)
+    name: Mapped[str] = mapped_column(String(200))
+    description: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    system_prompt: Mapped[str] = mapped_column(Text, default="")  # the role
+    default_prompt: Mapped[str | None] = mapped_column(Text, nullable=True)  # default task
+
+    project_id: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    model: Mapped[str] = mapped_column(String(32), default="")
+    max_turns: Mapped[int] = mapped_column(Integer, default=25)
+    max_budget_usd: Mapped[float | None] = mapped_column(Float, nullable=True)
+    priority: Mapped[str] = mapped_column(String(16), default=Priority.NORMAL)
+    tags: Mapped[list] = mapped_column(JSON, default=list)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=_now)
 
 
 class Template(Base):

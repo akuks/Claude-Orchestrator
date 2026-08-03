@@ -305,6 +305,54 @@ class TemplateOut(BaseModel):
     model_config = {"from_attributes": True}
 
 
+class AgentCreate(BaseModel):
+    name: str = Field(min_length=1, max_length=200)
+    description: Optional[str] = None
+    system_prompt: str = ""  # the agent's role/instructions
+    default_prompt: Optional[str] = None  # default task input
+    project_id: Optional[str] = None  # optional default project (overridable)
+    model: Optional[str] = None
+    max_turns: int = Field(default=25, ge=1, le=200)
+    max_budget_usd: Optional[float] = Field(default=None, ge=0)
+    priority: str = "normal"
+    tags: list[str] = Field(default_factory=list)
+
+
+class AgentUpdate(BaseModel):
+    name: Optional[str] = None
+    description: Optional[str] = None
+    system_prompt: Optional[str] = None
+    default_prompt: Optional[str] = None
+    project_id: Optional[str] = None
+    model: Optional[str] = None
+    max_turns: Optional[int] = None
+    max_budget_usd: Optional[float] = None
+    priority: Optional[str] = None
+    tags: Optional[list[str]] = None
+
+
+class AgentOut(BaseModel):
+    id: str
+    name: str
+    description: Optional[str]
+    system_prompt: str
+    default_prompt: Optional[str]
+    project_id: Optional[str]
+    model: str
+    max_turns: int
+    max_budget_usd: Optional[float]
+    priority: str
+    tags: list
+    created_at: datetime
+
+    model_config = {"from_attributes": True}
+
+
+class AgentRun(BaseModel):
+    prompt: Optional[str] = None  # overrides the agent's default_prompt
+    project_id: Optional[str] = None  # overrides the agent's default project
+
+
 class ScheduleCreate(BaseModel):
     name: str = Field(min_length=1, max_length=200)
     cron: str = Field(min_length=1)

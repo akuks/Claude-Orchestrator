@@ -224,6 +224,7 @@ class WorkerManager:
             attempt = task.attempt
             task_priority = task.priority
             task_created_at = task.created_at
+            system_prompt = task.system_prompt
             workspace = Path(task.workspace_dir or (settings.workspaces_dir / task_id))
             await s.commit()
 
@@ -265,6 +266,8 @@ class WorkerManager:
             cmd += ["--fallback-model", settings.fallback_model]
         if max_budget_usd:
             cmd += ["--max-budget-usd", str(max_budget_usd)]
+        if system_prompt:
+            cmd += ["--append-system-prompt", system_prompt]
         if resume_session_id:
             cmd += ["--resume", resume_session_id]
         if mcp:
