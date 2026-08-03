@@ -15,6 +15,7 @@ from .constants import Status
 from .database import SessionLocal, init_db
 from .models import Task
 from .routers import (
+    agents,
     approvals,
     findings,
     mcp,
@@ -108,6 +109,7 @@ app.include_router(approvals.router)
 app.include_router(usage.router)
 app.include_router(findings.router)
 app.include_router(webhooks.router)
+app.include_router(agents.router)
 
 
 @app.get("/health", tags=["meta"])

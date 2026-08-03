@@ -61,6 +61,27 @@ def test_usage_summary(client):
     assert d["all_time"]["cost_usd"] > 0
 
 
+def test_agent_run(client):
+    a = client.post(
+        "/agents",
+        json={
+            "name": "Auditor",
+            "system_prompt": "You are a security auditor.",
+            "default_prompt": "audit the code",
+            "max_budget_usd": 1,
+        },
+    ).json()
+    # Run with defaults.
+    tid = client.post(f"/agents/{a['id']}/run", json={}).json()["id"]
+    t = wait_task(client, tid)
+    assert t["status"] == "completed"
+    assert t["title"].startswith("Auditor:")
+    assert t["max_budget_usd"] == 1
+    # Override the task input at run time.
+    t2 = client.post(f"/agents/{a['id']}/run", json={"prompt": "audit the auth module"}).json()
+    assert "auth module" in t2["title"]
+
+
 def test_github_webhook_triggers_review(client):
     client.post(
         "/projects",
