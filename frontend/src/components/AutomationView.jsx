@@ -26,10 +26,12 @@ import {
   HistoryOutlined,
   PlusOutlined,
   ReloadOutlined,
+  RobotOutlined,
   ThunderboltOutlined,
 } from '@ant-design/icons'
 import dayjs from 'dayjs'
 import { api, STATUS_COLORS } from '../api'
+import AgentsView from './AgentsView'
 
 const MODEL_OPTS = [
   { value: 'sonnet', label: 'Sonnet' },
@@ -518,6 +520,15 @@ export default function AutomationView({ projects = [] }) {
   return (
     <Tabs
       items={[
+        {
+          key: 'agents',
+          label: (
+            <span>
+              <RobotOutlined /> Agents
+            </span>
+          ),
+          children: <AgentsView projects={projects} />,
+        },
         {
           key: 'schedules',
           label: (

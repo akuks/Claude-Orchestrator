@@ -16,6 +16,7 @@ export default defineConfig({
       '/projects': { target, changeOrigin: true },
       '/schedules': { target, changeOrigin: true },
       '/templates': { target, changeOrigin: true },
+      '/agents': { target, changeOrigin: true },
       '/approvals': { target, changeOrigin: true },
       '/usage': { target, changeOrigin: true },
       '/findings': { target, changeOrigin: true },
