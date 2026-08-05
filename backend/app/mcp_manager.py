@@ -77,7 +77,9 @@ async def prepare_for_task(project: str | None, workspace: Path) -> dict | None:
         return None
 
     cfg = build_config(servers)
-    path = workspace / ".mcp-config.json"
+    # Absolute path — Claude resolves --mcp-config against its cwd (the workspace),
+    # so a relative path would be doubled and "not found".
+    path = (workspace / ".mcp-config.json").resolve()
     path.write_text(json.dumps(cfg, indent=2))
 
     name_by_id = {s.id: s.name for s in servers}

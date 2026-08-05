@@ -70,5 +70,8 @@ class Settings(BaseSettings):
 
 
 settings = Settings()
+# Absolute paths so workspace/MCP-config paths are unambiguous regardless of cwd.
+settings.workspaces_dir = settings.workspaces_dir.resolve()
+settings.projects_dir = settings.projects_dir.resolve()
 settings.workspaces_dir.mkdir(parents=True, exist_ok=True)
 settings.projects_dir.mkdir(parents=True, exist_ok=True)
