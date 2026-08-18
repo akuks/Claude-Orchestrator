@@ -182,18 +182,58 @@ guardrails (auto-gating, cost caps, tool policies from the project's MCP scope).
 "run the *Security Auditor* on *Hydra*" is one action, and the same role works on
 any project. Manage them in **Automation → Agents**.
 
+**Starter agents** — one-click presets (`GET /agents/presets`): *Morning Brief*,
+*Weekly Review*, *Security Auditor*. Click one under "Starter agents" to drop a
+ready-made role into your workspace, then edit it.
+
+**Schedules run agents.** A schedule can carry its own prompt *or* target an
+agent (`agent_id`). When it targets an agent, each fire builds a task from the
+agent's role, model, budget, and default project — so "every morning at 8am, run
+the *Morning Brief* agent" is a single, governed automation. Set it up in
+**Automation → Schedules** by picking an agent instead of typing a prompt.
+
+---
+
+## Personal automations (Life Dashboard)
+
+The engine is general-purpose, so the same primitives — agents + schedules +
+MCP connectors — power personal automations, not just dev work. The built-in
+**Morning Brief** preset is a chief-of-staff role that summarizes your day; on a
+daily schedule it becomes a Life Dashboard.
+
+**Wire it up:**
+
+1. **Add the agent** — Automation → Agents → *Morning Brief* (starter). Give it a
+   **Personal** project and a small **budget cap** (e.g. `$0.50`) so a daily run
+   can't run away.
+2. **Connect data sources (MCP).** The brief needs read access to your calendar
+   and mail. In **MCP**, add a server per source. Gmail and Google Calendar are
+   available in this Claude session as managed connectors — for the orchestrator's
+   own `claude` subprocess, register an MCP server (stdio command or HTTP URL) and
+   store any token in the vault. Set tool policies to **auto-approve** the
+   *read* tools (`list_events`, `search_email`…) and **block** anything that
+   sends or deletes. Use **scope = user** to make a connector available to every
+   task, or **scope = project** to limit it to *Personal*.
+3. **Schedule it** — Automation → Schedules → New, cron `0 8 * * *`, and pick the
+   *Morning Brief* **agent** (no prompt needed). Keep it **disabled** until the
+   connectors test green, then enable.
+
+Because it runs as a normal task, you get the brief as an artifact/report, cost
+tracking, and (if you flag it) an approval gate — same guardrails as everything
+else.
+
 ---
 
 ## Testing
 
 ```bash
-cd backend && python -m pytest -q      # 18 tests: units + API integration (mock claude)
+cd backend && python -m pytest -q      # 20 tests: units + API integration (mock claude)
 ```
 
 Unit tests cover the vault, risk classification, transient-failure detection,
 finding fingerprints, prompts, webhook signatures, and report generation.
 Integration tests exercise the task lifecycle, approval auto-gate/approve/reject,
-reports, usage, agents, and the GitHub webhook — all against a mock `claude`
+reports, usage, agents, schedules-run-agents, and the GitHub webhook — all against a mock `claude`
 binary. **GitHub Actions** (`.github/workflows/ci.yml`) runs the backend suite and
 the frontend build on every push/PR.
 
