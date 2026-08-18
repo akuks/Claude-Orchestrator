@@ -221,6 +221,9 @@ class Schedule(Base):
 
     # If set, each fired run waits in the approval inbox before executing.
     requires_approval: Mapped[bool] = mapped_column(default=False)
+    # If set, the schedule runs this agent (its role/model/budget) instead of the
+    # inline prompt config above.
+    agent_id: Mapped[str | None] = mapped_column(String(32), nullable=True)
 
     last_run_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     next_run_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)

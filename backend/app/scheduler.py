@@ -14,8 +14,42 @@ from sqlalchemy import select
 from .config import settings
 from .constants import Status
 from .database import SessionLocal
-from .models import Schedule
+from .models import Agent, Schedule
 from .task_service import build_task
+
+
+async def build_from_schedule(s, sch: Schedule, title_suffix: str):
+    """Build the task a schedule fires — resolving its agent (role/model/budget)
+    when agent_id is set, otherwise its inline prompt config."""
+    agent = await s.get(Agent, sch.agent_id) if sch.agent_id else None
+    if agent is not None:
+        return await build_task(
+            s,
+            prompt=agent.default_prompt or sch.prompt,
+            title=f"{agent.name} ({title_suffix})",
+            project_id=agent.project_id or sch.project_id,
+            model=agent.model or None,
+            max_turns=agent.max_turns,
+            max_budget_usd=agent.max_budget_usd,
+            priority=agent.priority,
+            tags=(agent.tags or []) + ["agent", "scheduled"],
+            schedule_id=sch.id,
+            agent_id=agent.id,
+            system_prompt=agent.system_prompt or None,
+            requires_approval=sch.requires_approval,
+        )
+    return await build_task(
+        s,
+        prompt=sch.prompt,
+        title=f"{sch.name} ({title_suffix})",
+        project_id=sch.project_id,
+        model=sch.model or None,
+        max_turns=sch.max_turns,
+        priority=sch.priority,
+        tags=sch.tags,
+        schedule_id=sch.id,
+        requires_approval=sch.requires_approval,
+    )
 
 
 def _now() -> datetime:
@@ -71,18 +105,7 @@ class Scheduler:
             for sch in due:
                 if not is_valid_cron(sch.cron):
                     continue
-                task = await build_task(
-                    s,
-                    prompt=sch.prompt,
-                    title=f"{sch.name} (scheduled)",
-                    project_id=sch.project_id,
-                    model=sch.model or None,
-                    max_turns=sch.max_turns,
-                    priority=sch.priority,
-                    tags=sch.tags,
-                    schedule_id=sch.id,
-                    requires_approval=sch.requires_approval,
-                )
+                task = await build_from_schedule(s, sch, "scheduled")
                 sch.last_run_at = now
                 sch.next_run_at = next_run(sch.cron, now)
                 # Approval-gated runs (schedule flag OR auto-gated critical) wait
@@ -100,18 +123,9 @@ class Scheduler:
             sch = await s.get(Schedule, schedule_id)
             if sch is None:
                 return None
-            task = await build_task(
-                s,
-                prompt=sch.prompt,
-                title=f"{sch.name} (manual run)",
-                project_id=sch.project_id,
-                model=sch.model or None,
-                max_turns=sch.max_turns,
-                priority=sch.priority,
-                tags=sch.tags,
-                schedule_id=sch.id,
-            )
-            info = (task.id, task.priority, task.created_at)
+            task = await build_from_schedule(s, sch, "manual run")
+            info = (task.id, task.priority, task.created_at, task.status)
             await s.commit()
-        await self._worker.submit(*info)
+        if info[3] != Status.AWAITING_APPROVAL:
+            await self._worker.submit(info[0], info[1], info[2])
         return info[0]

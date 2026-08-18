@@ -9,6 +9,57 @@ from ..task_service import build_task
 
 router = APIRouter(prefix="/agents", tags=["agents"])
 
+# One-click starter agents. The connector-based ones (brief) assume the relevant
+# MCP servers (Gmail, Google Calendar, GitHub…) are configured.
+PRESETS = [
+    {
+        "name": "Morning Brief",
+        "description": "A daily briefing: calendar, unread mail, open PRs, and what needs you.",
+        "system_prompt": (
+            "You are a concise personal chief-of-staff. Produce a scannable morning "
+            "brief in markdown with clear sections and short bullets. Lead with what "
+            "is time-sensitive or needs a decision today. Be factual; never invent "
+            "events or messages. If a data source is unavailable, note it and move on."
+        ),
+        "default_prompt": (
+            "Give me my morning brief: today's calendar events, unread/important email, "
+            "open pull requests awaiting my review, and anything urgent. End with a short "
+            "'Top 3 for today' list."
+        ),
+        "tags": ["personal", "brief"],
+    },
+    {
+        "name": "Weekly Review",
+        "description": "A Sunday roll-up of the week with what shipped, decisions, and open loops.",
+        "system_prompt": (
+            "You are a reflective weekly-review assistant. Summarize the week factually "
+            "and quote the user's own notes/commits back to them where relevant. Keep it "
+            "honest and specific — progress, decisions made, and unfinished threads."
+        ),
+        "default_prompt": (
+            "Produce my weekly review: what got done this week, key decisions, blockers, "
+            "and open loops to carry into next week. Group by theme and keep it tight."
+        ),
+        "tags": ["personal", "review"],
+    },
+    {
+        "name": "Security Auditor",
+        "description": "A read-only VAPT/STQC reviewer role you can point at any project.",
+        "system_prompt": (
+            "You are a meticulous application-security auditor (OWASP Top 10 / CWE Top 25). "
+            "Read-only: never modify, commit, push, or merge. Report findings by severity "
+            "with file:line, impact, and concrete remediation."
+        ),
+        "default_prompt": "Audit the changed files on the current branch for security issues.",
+        "tags": ["security", "vapt"],
+    },
+]
+
+
+@router.get("/presets")
+async def list_presets():
+    return PRESETS
+
 
 @router.post("", response_model=AgentOut, status_code=201)
 async def create_agent(payload: AgentCreate):

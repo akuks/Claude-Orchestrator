@@ -40,6 +40,7 @@ def _add_missing_columns(sync_conn) -> None:
         ],
         "schedules": [
             ("requires_approval", "BOOLEAN DEFAULT 0"),
+            ("agent_id", "VARCHAR(32)"),
         ],
         "projects": [
             ("budget_usd", "FLOAT"),

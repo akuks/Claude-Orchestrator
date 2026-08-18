@@ -3,7 +3,7 @@ from sqlalchemy import select
 
 from ..constants import VALID_MODELS
 from ..database import SessionLocal
-from ..models import Schedule, Task
+from ..models import Agent, Schedule, Task
 from ..schemas import ScheduleCreate, ScheduleOut, ScheduleUpdate, TaskOut
 from ..scheduler import is_valid_cron, next_run
 
@@ -32,11 +32,16 @@ async def create_schedule(payload: ScheduleCreate):
         raise HTTPException(400, f"Invalid model. Use one of {sorted(VALID_MODELS)}")
     if payload.notify not in _VALID_NOTIFY:
         raise HTTPException(400, f"notify must be one of {sorted(_VALID_NOTIFY)}")
+    if not payload.agent_id and not (payload.prompt or "").strip():
+        raise HTTPException(400, "Provide a prompt or an agent_id")
     async with SessionLocal() as s:
+        if payload.agent_id and (await s.get(Agent, payload.agent_id)) is None:
+            raise HTTPException(404, "Agent not found")
         sch = Schedule(
             name=payload.name,
             cron=payload.cron,
-            prompt=payload.prompt,
+            prompt=payload.prompt or "",
+            agent_id=payload.agent_id,
             project_id=payload.project_id,
             model=payload.model or "",
             max_turns=payload.max_turns,

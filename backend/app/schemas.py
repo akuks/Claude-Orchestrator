@@ -50,6 +50,7 @@ class TaskOut(BaseModel):
     root_id: Optional[str]
     session_id: Optional[str]
     schedule_id: Optional[str]
+    agent_id: Optional[str] = None
     requires_approval: bool = False
     risk: str = "info"
     decision_reason: Optional[str] = None
@@ -356,7 +357,8 @@ class AgentRun(BaseModel):
 class ScheduleCreate(BaseModel):
     name: str = Field(min_length=1, max_length=200)
     cron: str = Field(min_length=1)
-    prompt: str = Field(min_length=1)
+    prompt: Optional[str] = None  # required unless agent_id is set
+    agent_id: Optional[str] = None
     project_id: Optional[str] = None
     model: Optional[str] = None
     max_turns: int = Field(default=25, ge=1, le=200)
@@ -372,6 +374,7 @@ class ScheduleUpdate(BaseModel):
     name: Optional[str] = None
     cron: Optional[str] = None
     prompt: Optional[str] = None
+    agent_id: Optional[str] = None
     project_id: Optional[str] = None
     model: Optional[str] = None
     max_turns: Optional[int] = None
@@ -388,7 +391,8 @@ class ScheduleOut(BaseModel):
     name: str
     cron: str
     enabled: bool
-    prompt: str
+    prompt: Optional[str] = None
+    agent_id: Optional[str] = None
     project_id: Optional[str]
     model: str
     max_turns: int
