@@ -53,7 +53,12 @@ function ScheduleModal({ open, schedule, projects, onClose, onSaved }) {
   const [saving, setSaving] = useState(false)
   const [cron, setCron] = useState('0 9 * * 1-5')
   const [preview, setPreview] = useState([])
+  const [agents, setAgents] = useState([])
   const isEdit = !!schedule
+
+  useEffect(() => {
+    if (open) api.listAgents().then(setAgents).catch(() => {})
+  }, [open])
 
   useEffect(() => {
     if (!open) return
@@ -147,8 +152,28 @@ function ScheduleModal({ open, schedule, projects, onClose, onSaved }) {
           </Typography.Text>
         </Form.Item>
 
-        <Form.Item name="prompt" label="Prompt" rules={[{ required: true }]}>
-          <Input.TextArea rows={3} placeholder="What should the scheduled task do?" />
+        <Form.Item
+          name="agent_id"
+          label="Run an agent (optional)"
+          extra="Pick an agent to run its role/model/budget on each fire, or leave blank and write an inline prompt below."
+        >
+          <Select
+            allowClear
+            placeholder="Inline prompt (no agent)"
+            options={agents.map((a) => ({ value: a.id, label: a.name }))}
+          />
+        </Form.Item>
+        <Form.Item
+          noStyle
+          shouldUpdate={(p, c) => p.agent_id !== c.agent_id}
+        >
+          {({ getFieldValue }) =>
+            getFieldValue('agent_id') ? null : (
+              <Form.Item name="prompt" label="Prompt" rules={[{ required: true }]}>
+                <Input.TextArea rows={3} placeholder="What should the scheduled task do?" />
+              </Form.Item>
+            )
+          }
         </Form.Item>
 
         <div style={{ display: 'flex', gap: 12 }}>

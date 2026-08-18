@@ -89,6 +89,7 @@ export const api = {
   deleteTemplate: (id) => req('DELETE', `/templates/${id}`),
   runTemplate: (id) => req('POST', `/templates/${id}/run`),
   listAgents: () => req('GET', '/agents'),
+  agentPresets: () => req('GET', '/agents/presets'),
   createAgent: (payload) => req('POST', '/agents', payload),
   updateAgent: (id, payload) => req('PATCH', `/agents/${id}`, payload),
   deleteAgent: (id) => req('DELETE', `/agents/${id}`),

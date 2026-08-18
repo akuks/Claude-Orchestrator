@@ -194,6 +194,7 @@ function RunModal({ agent, projects, onClose, onRan }) {
 
 export default function AgentsView({ projects = [] }) {
   const [agents, setAgents] = useState([])
+  const [presets, setPresets] = useState([])
   const [loading, setLoading] = useState(false)
   const [modalOpen, setModalOpen] = useState(false)
   const [editing, setEditing] = useState(null)
@@ -204,7 +205,9 @@ export default function AgentsView({ projects = [] }) {
   const refresh = useCallback(async () => {
     setLoading(true)
     try {
-      setAgents(await api.listAgents())
+      const [a, p] = await Promise.all([api.listAgents(), api.agentPresets()])
+      setAgents(a)
+      setPresets(p)
     } catch (e) {
       message.error(e.message)
     } finally {
@@ -215,6 +218,22 @@ export default function AgentsView({ projects = [] }) {
   useEffect(() => {
     refresh()
   }, [refresh])
+
+  const addPreset = async (p) => {
+    try {
+      await api.createAgent({
+        name: p.name,
+        description: p.description,
+        system_prompt: p.system_prompt,
+        default_prompt: p.default_prompt,
+        tags: p.tags || [],
+      })
+      message.success(`Added agent “${p.name}”`)
+      refresh()
+    } catch (e) {
+      message.error(e.message)
+    }
+  }
 
   const remove = async (id) => {
     try {
@@ -302,6 +321,16 @@ export default function AgentsView({ projects = [] }) {
           Reusable, governed roles — a system prompt + model + budget + optional project.
         </Typography.Text>
       </Space>
+      {presets.length > 0 && (
+        <Space wrap style={{ marginBottom: 12 }}>
+          <Typography.Text type="secondary">Starter agents:</Typography.Text>
+          {presets.map((p) => (
+            <Button key={p.name} size="small" icon={<PlusOutlined />} onClick={() => addPreset(p)} title={p.description}>
+              {p.name}
+            </Button>
+          ))}
+        </Space>
+      )}
       <Table
         rowKey="id"
         size="middle"
