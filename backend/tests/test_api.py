@@ -82,6 +82,38 @@ def test_agent_run(client):
     assert "auth module" in t2["title"]
 
 
+def test_schedule_runs_an_agent(client):
+    # A schedule can target an agent instead of carrying its own prompt.
+    a = client.post(
+        "/agents",
+        json={
+            "name": "Brief",
+            "system_prompt": "You are a chief-of-staff.",
+            "default_prompt": "give me my brief",
+            "max_budget_usd": 0.5,
+            "tags": ["personal"],
+        },
+    ).json()
+    # No prompt needed when an agent is attached.
+    sch = client.post(
+        "/schedules",
+        json={"name": "Daily Brief", "cron": "0 8 * * *", "agent_id": a["id"], "enabled": False},
+    ).json()
+    assert sch["agent_id"] == a["id"]
+
+    # Run-now builds a task from the agent's role/budget, not the (empty) prompt.
+    t = client.post(f"/schedules/{sch['id']}/run").json()
+    assert t["agent_id"] == a["id"]
+    assert t["max_budget_usd"] == 0.5
+    assert set(["agent", "scheduled"]).issubset(set(t["tags"]))
+    assert wait_task(client, t["id"])["status"] == "completed"
+
+
+def test_schedule_requires_prompt_or_agent(client):
+    r = client.post("/schedules", json={"name": "Empty", "cron": "0 8 * * *"})
+    assert r.status_code == 400
+
+
 def test_github_webhook_triggers_review(client):
     client.post(
         "/projects",
