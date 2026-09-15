@@ -101,6 +101,27 @@ def test_agent_requires_approval_gates_every_run(client):
     assert wait_task(client, t["id"])["status"] == "completed"
 
 
+def test_allow_remote_is_opt_in_for_agents(client):
+    # Ad-hoc tasks keep remote access; agents are locked down unless opted in.
+    adhoc = client.post("/tasks", json={"prompt": "hello"}).json()
+    assert adhoc["allow_remote"] is True
+
+    locked = client.post(
+        "/agents", json={"name": "Local", "system_prompt": "x", "default_prompt": "go"}
+    ).json()
+    assert locked["allow_remote"] is False
+    t1 = client.post(f"/agents/{locked['id']}/run", json={}).json()
+    assert t1["allow_remote"] is False
+
+    remote = client.post(
+        "/agents",
+        json={"name": "SSHer", "system_prompt": "x", "default_prompt": "go", "allow_remote": True},
+    ).json()
+    assert remote["allow_remote"] is True
+    t2 = client.post(f"/agents/{remote['id']}/run", json={}).json()
+    assert t2["allow_remote"] is True
+
+
 def test_schedule_runs_an_agent(client):
     # A schedule can target an agent instead of carrying its own prompt.
     a = client.post(
