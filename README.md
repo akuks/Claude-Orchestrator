@@ -241,14 +241,20 @@ command, so read-only and mutating work are separate agents):
   **`requires_approval`**, so *every* run lands in Approvals first; you review the
   exact plan before it touches the server, then approve.
 
-`requires_approval` is an agent-level flag (Agents form → "Approval-gate every
-run") — any agent that changes state can use it.
+Two agent-level flags govern this (Agents form):
+
+- **"Approval-gate every run"** (`requires_approval`) — used by Remediation.
+- **"Allow remote login (SSH)"** (`allow_remote`) — **off by default**. Only agents
+  with it on can open SSH; for everything else, `ssh`/`scp`/`sftp` are added to
+  `--disallowedTools` and blocked (deny wins even under `bypassPermissions`). SSH
+  is opt-in, not implicit.
 
 **Setup:** create an `Infra` project; drop `docs/infra/servers.example.yaml` into
-its directory as `servers.yaml` and fill in real hosts; put PEM keys on the host
-(`~/.ssh/…`, `chmod 600`) — only their paths go in the inventory, never the keys.
-See [`docs/infra/RUNBOOK.md`](docs/infra/RUNBOOK.md) for the diagnostic playbook.
-Read-only is enforced by the agent's prompt; for a hard guarantee use a
+its directory as `servers.yaml` and fill in real hosts. PEM keys live **anywhere on
+the host you choose** (not necessarily `~/.ssh/`; e.g. `~/keys/…`, `chmod 600`) —
+only their *paths* go in the inventory, never the keys. Enable "Allow remote login"
+on the two Ops agents. See [`docs/infra/RUNBOOK.md`](docs/infra/RUNBOOK.md) for the
+playbook. Read-only is enforced by the agent's prompt; for a hard guarantee use a
 dedicated read-only SSH user with no sudo on the server.
 
 ---

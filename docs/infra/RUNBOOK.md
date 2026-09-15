@@ -10,6 +10,18 @@ How the two Remote Ops agents work, and the diagnostic playbook they follow.
   approval-gated: it lands in the Approvals inbox first, so you review the exact
   plan before anything touches the server.
 
+## Access control
+
+SSH is **opt-in per agent**. An agent can only connect out if its
+**"Allow remote login (SSH)"** flag is on; otherwise `ssh`/`scp`/`sftp` are added
+to the run's `--disallowedTools` and blocked (deny wins even under
+`bypassPermissions`). The two Remote Ops agents have it enabled; everything else
+is locked down by default.
+
+PEM keys live **anywhere on this host** you choose (not necessarily `~/.ssh/`) —
+`chmod 600`, and put only the *path* in `servers.yaml`. The key never enters the
+app DB.
+
 ## Connecting
 
 Targets are resolved from `servers.yaml`. The agent connects non-interactively:
