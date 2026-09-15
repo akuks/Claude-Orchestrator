@@ -12,6 +12,7 @@ venv/
 backend/.venv/
 backend/*.db
 backend/workspaces/
+backend/projects/       # per-project working dirs (may hold real hosts/keys, e.g. Infra servers.yaml)
 backend/.env
 
 # Credential vault key — NEVER commit
