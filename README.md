@@ -224,6 +224,35 @@ else.
 
 ---
 
+## Remote Ops (SSH troubleshooting)
+
+Point an agent at a server to diagnose it over SSH. Because a project task runs
+with its **cwd set to the project directory**, an `Infra` project holds a
+`servers.yaml` inventory the agents read at run time to resolve a target.
+
+**The safe split** (approvals are task-level — the CLI can't pause mid-run at one
+command, so read-only and mutating work are separate agents):
+
+- **Remote Diagnostics** — read-only. Resolves the named server from
+  `servers.yaml`, SSHes in (`ssh -o BatchMode=yes -o ConnectTimeout=10 -o
+  StrictHostKeyChecking=accept-new -i <pem> …`), runs only observational
+  commands, and reports *symptoms → evidence → root cause → proposed fix*.
+- **Remote Remediation** — applies an **approved** fix. Marked
+  **`requires_approval`**, so *every* run lands in Approvals first; you review the
+  exact plan before it touches the server, then approve.
+
+`requires_approval` is an agent-level flag (Agents form → "Approval-gate every
+run") — any agent that changes state can use it.
+
+**Setup:** create an `Infra` project; drop `docs/infra/servers.example.yaml` into
+its directory as `servers.yaml` and fill in real hosts; put PEM keys on the host
+(`~/.ssh/…`, `chmod 600`) — only their paths go in the inventory, never the keys.
+See [`docs/infra/RUNBOOK.md`](docs/infra/RUNBOOK.md) for the diagnostic playbook.
+Read-only is enforced by the agent's prompt; for a hard guarantee use a
+dedicated read-only SSH user with no sudo on the server.
+
+---
+
 ## Testing
 
 ```bash
