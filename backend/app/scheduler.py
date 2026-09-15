@@ -37,6 +37,7 @@ async def build_from_schedule(s, sch: Schedule, title_suffix: str):
             agent_id=agent.id,
             system_prompt=agent.system_prompt or None,
             requires_approval=sch.requires_approval or agent.requires_approval,
+            allow_remote=agent.allow_remote,
         )
     return await build_task(
         s,

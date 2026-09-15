@@ -51,6 +51,7 @@ class TaskOut(BaseModel):
     session_id: Optional[str]
     schedule_id: Optional[str]
     agent_id: Optional[str] = None
+    allow_remote: bool = True
     requires_approval: bool = False
     risk: str = "info"
     decision_reason: Optional[str] = None
@@ -318,6 +319,7 @@ class AgentCreate(BaseModel):
     priority: str = "normal"
     tags: list[str] = Field(default_factory=list)
     requires_approval: bool = False  # gate every run at the task level
+    allow_remote: bool = False  # permit outbound SSH/SCP/SFTP
 
 
 class AgentUpdate(BaseModel):
@@ -332,6 +334,7 @@ class AgentUpdate(BaseModel):
     priority: Optional[str] = None
     tags: Optional[list[str]] = None
     requires_approval: Optional[bool] = None
+    allow_remote: Optional[bool] = None
 
 
 class AgentOut(BaseModel):
@@ -347,6 +350,7 @@ class AgentOut(BaseModel):
     priority: str
     tags: list
     requires_approval: bool = False
+    allow_remote: bool = False
     created_at: datetime
 
     model_config = {"from_attributes": True}

@@ -225,6 +225,7 @@ class WorkerManager:
             task_priority = task.priority
             task_created_at = task.created_at
             system_prompt = task.system_prompt
+            allow_remote = task.allow_remote
             workspace = Path(task.workspace_dir or (settings.workspaces_dir / task_id))
             await s.commit()
 
@@ -270,12 +271,14 @@ class WorkerManager:
             cmd += ["--append-system-prompt", system_prompt]
         if resume_session_id:
             cmd += ["--resume", resume_session_id]
+        allowed_tools = list(mcp["allowed"]) if mcp else []
+        disallowed_tools = list(mcp["disallowed"]) if mcp else []
+        # SSH is opt-in per agent: unless the task is remote-enabled, deny outbound
+        # ssh/scp/sftp. Deny rules win even under --permission-mode bypassPermissions.
+        if not allow_remote:
+            disallowed_tools += ["Bash(ssh:*)", "Bash(scp:*)", "Bash(sftp:*)"]
         if mcp:
             cmd += ["--mcp-config", mcp["config_path"], "--strict-mcp-config"]
-            if mcp["allowed"]:
-                cmd += ["--allowedTools", *mcp["allowed"]]
-            if mcp["disallowed"]:
-                cmd += ["--disallowedTools", *mcp["disallowed"]]
             await emit(
                 "mcp",
                 {
@@ -284,6 +287,10 @@ class WorkerManager:
                     "blocked": mcp["disallowed"],
                 },
             )
+        if allowed_tools:
+            cmd += ["--allowedTools", *allowed_tools]
+        if disallowed_tools:
+            cmd += ["--disallowedTools", *disallowed_tools]
 
         result = {
             "result_text": None,

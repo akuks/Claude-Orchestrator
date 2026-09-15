@@ -67,6 +67,7 @@ async def build_task(
     agent_id: str | None = None,
     system_prompt: str | None = None,
     requires_approval: bool = False,
+    allow_remote: bool = True,
 ) -> Task:
     """Create a Task row (flushed, not committed) in the given session.
 
@@ -96,6 +97,7 @@ async def build_task(
         schedule_id=schedule_id,
         agent_id=agent_id,
         system_prompt=system_prompt or None,
+        allow_remote=allow_remote,
         requires_approval=gated,
         risk=risk,
     )

@@ -80,6 +80,7 @@ async def create_agent(payload: AgentCreate):
             priority=payload.priority,
             tags=payload.tags,
             requires_approval=payload.requires_approval,
+            allow_remote=payload.allow_remote,
         )
         s.add(agent)
         await s.commit()
@@ -148,6 +149,7 @@ async def run_agent(agent_id: str, payload: AgentRun, request: Request):
             agent_id=agent.id,
             system_prompt=agent.system_prompt or None,
             requires_approval=agent.requires_approval,
+            allow_remote=agent.allow_remote,
         )
         await s.commit()
         await s.refresh(task)

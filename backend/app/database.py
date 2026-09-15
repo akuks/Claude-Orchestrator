@@ -37,6 +37,7 @@ def _add_missing_columns(sync_conn) -> None:
             ("attempt", "INTEGER DEFAULT 0"),
             ("agent_id", "VARCHAR(32)"),
             ("system_prompt", "TEXT"),
+            ("allow_remote", "BOOLEAN DEFAULT 1"),
         ],
         "schedules": [
             ("requires_approval", "BOOLEAN DEFAULT 0"),
@@ -44,6 +45,7 @@ def _add_missing_columns(sync_conn) -> None:
         ],
         "agents": [
             ("requires_approval", "BOOLEAN DEFAULT 0"),
+            ("allow_remote", "BOOLEAN DEFAULT 0"),
         ],
         "projects": [
             ("budget_usd", "FLOAT"),

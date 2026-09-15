@@ -61,6 +61,10 @@ class Task(Base):
     # The agent that ran this task, and its role prompt (--append-system-prompt).
     agent_id: Mapped[str | None] = mapped_column(String(32), nullable=True, index=True)
     system_prompt: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Whether this task may open outbound SSH/SCP/SFTP. False → ssh/scp/sftp are
+    # added to --disallowedTools (deny wins even under bypassPermissions). Ad-hoc
+    # tasks default True; agent tasks inherit the agent's allow_remote flag.
+    allow_remote: Mapped[bool] = mapped_column(default=True)
 
     # Approvals (Phase 5): a task requiring approval waits in `awaiting_approval`
     # until a human approves (→ queued) or rejects (→ cancelled).
@@ -184,6 +188,9 @@ class Agent(Base):
     # When true, every run of this agent is approval-gated at the task level
     # (e.g. a remediation agent that changes remote state).
     requires_approval: Mapped[bool] = mapped_column(default=False)
+    # When true, this agent may open outbound SSH/SCP/SFTP (remote login).
+    # Off by default: SSH is opt-in per agent.
+    allow_remote: Mapped[bool] = mapped_column(default=False)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=_now)
 
 
