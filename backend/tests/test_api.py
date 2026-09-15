@@ -82,6 +82,25 @@ def test_agent_run(client):
     assert "auth module" in t2["title"]
 
 
+def test_agent_requires_approval_gates_every_run(client):
+    # An agent flagged requires_approval lands every run in the approvals inbox.
+    a = client.post(
+        "/agents",
+        json={
+            "name": "Remediation",
+            "system_prompt": "You apply approved fixes to servers.",
+            "default_prompt": "apply the fix",
+            "requires_approval": True,
+        },
+    ).json()
+    assert a["requires_approval"] is True
+    t = client.post(f"/agents/{a['id']}/run", json={}).json()
+    assert t["status"] == "awaiting_approval"
+    # Approve → it runs to completion.
+    client.post(f"/approvals/{t['id']}/approve")
+    assert wait_task(client, t["id"])["status"] == "completed"
+
+
 def test_schedule_runs_an_agent(client):
     # A schedule can target an agent instead of carrying its own prompt.
     a = client.post(
