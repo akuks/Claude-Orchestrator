@@ -317,6 +317,7 @@ class AgentCreate(BaseModel):
     max_budget_usd: Optional[float] = Field(default=None, ge=0)
     priority: str = "normal"
     tags: list[str] = Field(default_factory=list)
+    requires_approval: bool = False  # gate every run at the task level
 
 
 class AgentUpdate(BaseModel):
@@ -330,6 +331,7 @@ class AgentUpdate(BaseModel):
     max_budget_usd: Optional[float] = None
     priority: Optional[str] = None
     tags: Optional[list[str]] = None
+    requires_approval: Optional[bool] = None
 
 
 class AgentOut(BaseModel):
@@ -344,6 +346,7 @@ class AgentOut(BaseModel):
     max_budget_usd: Optional[float]
     priority: str
     tags: list
+    requires_approval: bool = False
     created_at: datetime
 
     model_config = {"from_attributes": True}

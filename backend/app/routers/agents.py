@@ -79,6 +79,7 @@ async def create_agent(payload: AgentCreate):
             max_budget_usd=payload.max_budget_usd,
             priority=payload.priority,
             tags=payload.tags,
+            requires_approval=payload.requires_approval,
         )
         s.add(agent)
         await s.commit()
@@ -146,6 +147,7 @@ async def run_agent(agent_id: str, payload: AgentRun, request: Request):
             tags=(agent.tags or []) + ["agent"],
             agent_id=agent.id,
             system_prompt=agent.system_prompt or None,
+            requires_approval=agent.requires_approval,
         )
         await s.commit()
         await s.refresh(task)

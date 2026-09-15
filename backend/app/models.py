@@ -181,6 +181,9 @@ class Agent(Base):
     max_budget_usd: Mapped[float | None] = mapped_column(Float, nullable=True)
     priority: Mapped[str] = mapped_column(String(16), default=Priority.NORMAL)
     tags: Mapped[list] = mapped_column(JSON, default=list)
+    # When true, every run of this agent is approval-gated at the task level
+    # (e.g. a remediation agent that changes remote state).
+    requires_approval: Mapped[bool] = mapped_column(default=False)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=_now)
 
 

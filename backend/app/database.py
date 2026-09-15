@@ -42,6 +42,9 @@ def _add_missing_columns(sync_conn) -> None:
             ("requires_approval", "BOOLEAN DEFAULT 0"),
             ("agent_id", "VARCHAR(32)"),
         ],
+        "agents": [
+            ("requires_approval", "BOOLEAN DEFAULT 0"),
+        ],
         "projects": [
             ("budget_usd", "FLOAT"),
             ("github_repo", "VARCHAR(200)"),
