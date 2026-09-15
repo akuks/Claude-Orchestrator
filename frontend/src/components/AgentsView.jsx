@@ -136,6 +136,14 @@ function AgentModal({ open, agent, projects, onClose, onSaved }) {
         >
           <Switch />
         </Form.Item>
+        <Form.Item
+          name="allow_remote"
+          label="Allow remote login (SSH)"
+          valuePropName="checked"
+          extra="Off by default. When off, ssh/scp/sftp are blocked for this agent's tasks. Enable only for remote-ops agents."
+        >
+          <Switch />
+        </Form.Item>
       </Form>
     </Modal>
   )
@@ -264,6 +272,11 @@ export default function AgentsView({ projects = [] }) {
           {row.requires_approval && (
             <Tag color="warning" style={{ marginLeft: 6 }}>
               approval-gated
+            </Tag>
+          )}
+          {row.allow_remote && (
+            <Tag color="geekblue" style={{ marginLeft: 6 }}>
+              SSH
             </Tag>
           )}
           {row.description && (
