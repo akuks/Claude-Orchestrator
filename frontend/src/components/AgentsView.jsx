@@ -8,6 +8,7 @@ import {
   Popconfirm,
   Select,
   Space,
+  Switch,
   Table,
   Tag,
   Typography,
@@ -126,6 +127,14 @@ function AgentModal({ open, agent, projects, onClose, onSaved }) {
         </div>
         <Form.Item name="tags" label="Tags">
           <Select mode="tags" placeholder="tags" tokenSeparators={[',']} />
+        </Form.Item>
+        <Form.Item
+          name="requires_approval"
+          label="Approval-gate every run"
+          valuePropName="checked"
+          extra="Each run lands in Approvals before it executes — for agents that change state (e.g. remediation)."
+        >
+          <Switch />
         </Form.Item>
       </Form>
     </Modal>
@@ -252,6 +261,11 @@ export default function AgentsView({ projects = [] }) {
       render: (n, row) => (
         <div>
           <b>{n}</b>
+          {row.requires_approval && (
+            <Tag color="warning" style={{ marginLeft: 6 }}>
+              approval-gated
+            </Tag>
+          )}
           {row.description && (
             <div style={{ fontSize: 12, color: '#8a7a6d' }}>{row.description}</div>
           )}
