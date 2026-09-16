@@ -154,6 +154,27 @@ def test_schedule_requires_prompt_or_agent(client):
     assert r.status_code == 400
 
 
+def test_server_inventory_crud(client):
+    p = client.post("/projects", json={"name": "InfraTest"}).json()
+    # Empty to start.
+    assert client.get(f"/projects/{p['id']}/servers").json() == []
+    # Replace with two servers.
+    servers = [
+        {"name": "web", "host": "1.2.3.4", "user": "ubuntu", "pem": "~/keys/web.pem", "notes": "nginx"},
+        {"name": "db", "host": "5.6.7.8", "user": "admin", "pem": "/keys/db.pem"},
+    ]
+    r = client.put(f"/projects/{p['id']}/servers", json=servers).json()
+    assert {x["name"] for x in r} == {"web", "db"}
+    # Persisted + round-trips.
+    got = {x["name"]: x for x in client.get(f"/projects/{p['id']}/servers").json()}
+    assert got["web"]["host"] == "1.2.3.4" and got["web"]["notes"] == "nginx"
+    assert got["db"]["pem"] == "/keys/db.pem"
+    # Duplicate names rejected.
+    dup = [{"name": "web", "host": "a", "user": "u", "pem": "p"},
+           {"name": "web", "host": "b", "user": "u", "pem": "p"}]
+    assert client.put(f"/projects/{p['id']}/servers", json=dup).status_code == 400
+
+
 def test_github_webhook_triggers_review(client):
     client.post(
         "/projects",
