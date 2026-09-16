@@ -413,3 +413,13 @@ class ScheduleOut(BaseModel):
     created_at: datetime
 
     model_config = {"from_attributes": True}
+
+
+class ServerEntry(BaseModel):
+    """One row of a project's servers.yaml inventory (Remote Ops)."""
+
+    name: str = Field(min_length=1, max_length=64)
+    host: str = Field(min_length=1, max_length=255)
+    user: str = Field(min_length=1, max_length=64)
+    pem: str = Field(min_length=1, max_length=500)  # path to the key on the host
+    notes: Optional[str] = None

@@ -18,8 +18,11 @@ from ..schemas import (
     ProjectCreate,
     ProjectOut,
     ProjectUpdate,
+    ServerEntry,
     TaskSummaryOut,
 )
+
+import yaml
 
 router = APIRouter(prefix="/projects", tags=["projects"])
 
@@ -346,3 +349,72 @@ async def project_stats(project_id: str):
         "total_cost_usd": round(float(total_cost or 0), 4),
         "completed": by_status.get(Status.COMPLETED, 0),
     }
+
+
+# ---- Server inventory (Remote Ops) ----------------------------------------
+# The inventory is a plain `servers.yaml` in the project's directory so the
+# Remote Ops agents can `cat` it at run time (their cwd IS the project dir).
+# These endpoints keep that file as the source of truth, editable from the UI.
+
+def _servers_path(project: Project) -> Path:
+    return Path(project.directory).expanduser() / "servers.yaml"
+
+
+def _read_servers(project: Project) -> list[dict]:
+    path = _servers_path(project)
+    if not path.exists():
+        return []
+    try:
+        data = yaml.safe_load(path.read_text()) or {}
+    except yaml.YAMLError as e:
+        raise HTTPException(400, f"servers.yaml is not valid YAML: {e}")
+    if not isinstance(data, dict):
+        raise HTTPException(400, "servers.yaml must be a mapping of name -> details")
+    out = []
+    for name, d in data.items():
+        d = d or {}
+        out.append(
+            {
+                "name": str(name),
+                "host": d.get("host", ""),
+                "user": d.get("user", ""),
+                "pem": d.get("pem", ""),
+                "notes": d.get("notes"),
+            }
+        )
+    return out
+
+
+@router.get("/{project_id}/servers", response_model=list[ServerEntry])
+async def list_servers(project_id: str):
+    async with SessionLocal() as s:
+        project = await _get_or_404(s, project_id)
+    return _read_servers(project)
+
+
+@router.put("/{project_id}/servers", response_model=list[ServerEntry])
+async def replace_servers(project_id: str, servers: list[ServerEntry]):
+    """Replace the whole inventory. Names must be unique."""
+    names = [x.name for x in servers]
+    if len(names) != len(set(names)):
+        raise HTTPException(400, "Server names must be unique")
+    async with SessionLocal() as s:
+        project = await _get_or_404(s, project_id)
+    mapping = {
+        x.name: {
+            "host": x.host,
+            "user": x.user,
+            "pem": x.pem,
+            **({"notes": x.notes} if x.notes else {}),
+        }
+        for x in servers
+    }
+    path = _servers_path(project)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    header = (
+        "# Server inventory for the Remote Ops agents (managed from the UI).\n"
+        "# PEM keys live on this host (chmod 600); only their PATH is stored here.\n\n"
+    )
+    body = yaml.safe_dump(mapping, sort_keys=True, default_flow_style=False) if mapping else ""
+    path.write_text(header + body)
+    return _read_servers(project)
