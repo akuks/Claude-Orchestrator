@@ -21,6 +21,7 @@ import {
 } from 'antd'
 import {
   ClockCircleOutlined,
+  CloudServerOutlined,
   DeleteOutlined,
   EditOutlined,
   HistoryOutlined,
@@ -32,6 +33,7 @@ import {
 import dayjs from 'dayjs'
 import { api, STATUS_COLORS } from '../api'
 import AgentsView from './AgentsView'
+import ServersView from './ServersView'
 
 const MODEL_OPTS = [
   { value: 'sonnet', label: 'Sonnet' },
@@ -562,6 +564,15 @@ export default function AutomationView({ projects = [] }) {
             </span>
           ),
           children: <SchedulesTab projects={projects} />,
+        },
+        {
+          key: 'servers',
+          label: (
+            <span>
+              <CloudServerOutlined /> Servers
+            </span>
+          ),
+          children: <ServersView projects={projects} />,
         },
         {
           key: 'templates',
