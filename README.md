@@ -249,12 +249,14 @@ Two agent-level flags govern this (Agents form):
   `--disallowedTools` and blocked (deny wins even under `bypassPermissions`). SSH
   is opt-in, not implicit.
 
-**Setup:** create an `Infra` project; drop `docs/infra/servers.example.yaml` into
-its directory as `servers.yaml` and fill in real hosts. PEM keys live **anywhere on
-the host you choose** (not necessarily `~/.ssh/`; e.g. `~/keys/…`, `chmod 600`) —
-only their *paths* go in the inventory, never the keys. Enable "Allow remote login"
-on the two Ops agents. See [`docs/infra/RUNBOOK.md`](docs/infra/RUNBOOK.md) for the
-playbook. Read-only is enforced by the agent's prompt; for a hard guarantee use a
+**Setup:** create an `Infra` project, then manage its inventory from
+**Automation → Servers** (add/edit/remove rows: name, host, user, PEM path, notes)
+— this writes the project's `servers.yaml`, which the agents read at run time. (You
+can still edit the file by hand; `docs/infra/servers.example.yaml` is a template.)
+PEM keys live **anywhere on the host you choose** (not necessarily `~/.ssh/`; e.g.
+`~/keys/…`, `chmod 600`) — only their *paths* are stored, never the keys. Enable
+"Allow remote login" on the two Ops agents. See
+[`docs/infra/RUNBOOK.md`](docs/infra/RUNBOOK.md) for the playbook. Read-only is enforced by the agent's prompt; for a hard guarantee use a
 dedicated read-only SSH user with no sudo on the server.
 
 ---
