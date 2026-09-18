@@ -33,11 +33,17 @@ function ServerModal({ open, server, existingNames, onClose, onSave }) {
     else form.resetFields()
   }, [open, server])
 
-  const submit = async () => {
-    const v = await form.validateFields().catch(() => null)
-    if (!v) return
-    onSave({ ...v, notes: v.notes || null })
-    onClose()
+  // NOTE: onOk must NOT return a promise. When it does, antd's async-close flow
+  // ignores the controlled `open={false}` and the modal stays stuck open. So we
+  // validate, close synchronously (like Cancel), and let the parent persist.
+  const submit = () => {
+    form
+      .validateFields()
+      .then((v) => {
+        onClose()
+        onSave({ ...v, notes: v.notes || null })
+      })
+      .catch(() => {}) // validation errors stay shown; modal stays open
   }
 
   return (
@@ -95,7 +101,6 @@ export default function ServersView({ projects = [] }) {
   const [projectId, setProjectId] = useState(null)
   const [servers, setServers] = useState([])
   const [loading, setLoading] = useState(false)
-  const [dirty, setDirty] = useState(false)
   const [saving, setSaving] = useState(false)
   const [modalOpen, setModalOpen] = useState(false)
   const [editing, setEditing] = useState(null)
@@ -112,7 +117,6 @@ export default function ServersView({ projects = [] }) {
     setLoading(true)
     try {
       setServers(await api.listServers(projectId))
-      setDirty(false)
     } catch (e) {
       message.error(e.message)
     } finally {
@@ -124,36 +128,30 @@ export default function ServersView({ projects = [] }) {
     refresh()
   }, [refresh])
 
-  const upsert = (row) => {
-    setServers((prev) => {
-      const i = editing ? prev.findIndex((x) => x.name === editing.name) : -1
-      if (i >= 0) {
-        const next = [...prev]
-        next[i] = row
-        return next
-      }
-      return [...prev, row]
-    })
-    setDirty(true)
-  }
-
-  const remove = (name) => {
-    setServers((prev) => prev.filter((x) => x.name !== name))
-    setDirty(true)
-  }
-
-  const save = async () => {
+  // Persist the whole inventory immediately — every add/edit/delete writes
+  // servers.yaml, so there's no separate "save" step to forget.
+  const persist = async (next, successMsg) => {
     setSaving(true)
     try {
-      setServers(await api.saveServers(projectId, servers))
-      setDirty(false)
-      message.success('Inventory saved to servers.yaml')
+      setServers(await api.saveServers(projectId, next))
+      message.success(successMsg)
     } catch (e) {
       message.error(e.message)
+      refresh() // roll back to what's actually on disk
+      throw e // let the caller (modal) know it failed so it stays open
     } finally {
       setSaving(false)
     }
   }
+
+  const upsert = (row) => {
+    const i = editing ? servers.findIndex((x) => x.name === editing.name) : -1
+    const next = i >= 0 ? servers.map((x, j) => (j === i ? row : x)) : [...servers, row]
+    return persist(next, `Server “${row.name}” saved`)
+  }
+
+  const remove = (name) =>
+    persist(servers.filter((x) => x.name !== name), `Server “${name}” removed`).catch(() => {})
 
   const columns = [
     { title: 'Name', dataIndex: 'name', render: (n) => <b>{n}</b>, width: 140 },
@@ -185,13 +183,14 @@ export default function ServersView({ projects = [] }) {
           <Button
             size="small"
             icon={<EditOutlined />}
+            disabled={saving}
             onClick={() => {
               setEditing(row)
               setModalOpen(true)
             }}
           />
           <Popconfirm title={`Remove ${row.name}?`} onConfirm={() => remove(row.name)}>
-            <Button size="small" danger icon={<DeleteOutlined />} />
+            <Button size="small" danger icon={<DeleteOutlined />} disabled={saving} />
           </Popconfirm>
         </Space>
       ),
@@ -212,7 +211,7 @@ export default function ServersView({ projects = [] }) {
         <Button
           type="primary"
           icon={<PlusOutlined />}
-          disabled={!projectId}
+          disabled={!projectId || saving}
           onClick={() => {
             setEditing(null)
             setModalOpen(true)
@@ -223,30 +222,32 @@ export default function ServersView({ projects = [] }) {
         <Button icon={<ReloadOutlined />} onClick={refresh} disabled={!projectId}>
           Reload
         </Button>
-        <Button type="primary" ghost onClick={save} loading={saving} disabled={!dirty}>
-          {dirty ? 'Save changes' : 'Saved'}
-        </Button>
         <Typography.Text type="secondary">
-          Edits the project's <code>servers.yaml</code>, read by the Remote Ops agents. Enable
-          “Allow remote login (SSH)” on an agent to let it connect.
+          Changes save to the project's <code>servers.yaml</code> immediately — read by the
+          Remote Ops agents. Enable “Allow remote login (SSH)” on an agent to let it connect.
         </Typography.Text>
       </Space>
       <Table
         rowKey="name"
         size="middle"
-        loading={loading}
+        loading={loading || saving}
         columns={columns}
         dataSource={servers}
         pagination={false}
         locale={{ emptyText: 'No servers yet — add one to build the inventory.' }}
       />
-      <ServerModal
-        open={modalOpen}
-        server={editing}
-        existingNames={servers.map((x) => x.name)}
-        onClose={() => setModalOpen(false)}
-        onSave={upsert}
-      />
+      {/* Mount only while open: setting modalOpen=false unmounts the modal
+          outright, which is reliable even when a state change during save would
+          otherwise leave an antd Modal's open={false} stuck on screen. */}
+      {modalOpen && (
+        <ServerModal
+          open
+          server={editing}
+          existingNames={servers.map((x) => x.name)}
+          onClose={() => setModalOpen(false)}
+          onSave={upsert}
+        />
+      )}
     </>
   )
 }
