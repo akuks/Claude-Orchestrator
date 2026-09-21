@@ -116,7 +116,7 @@ export default function ServersView({ projects = [] }) {
     if (!projectId) return
     setLoading(true)
     try {
-      setServers(await api.listServers(projectId))
+      setServers(await api.listProjectServers(projectId))
     } catch (e) {
       message.error(e.message)
     } finally {
@@ -133,7 +133,7 @@ export default function ServersView({ projects = [] }) {
   const persist = async (next, successMsg) => {
     setSaving(true)
     try {
-      setServers(await api.saveServers(projectId, next))
+      setServers(await api.saveProjectServers(projectId, next))
       message.success(successMsg)
     } catch (e) {
       message.error(e.message)
