@@ -358,6 +358,12 @@ export default function AgentsView({ projects = [] }) {
       </Space>
       {presets.length > 0 && (
         <div style={{ marginBottom: 12 }}>
+          <Typography.Text strong style={{ display: 'block', marginBottom: 6 }}>
+            Agent templates
+            <Typography.Text type="secondary" style={{ fontWeight: 400 }}>
+              {' '}— pick one to create a governed agent (roles, not runnable tasks)
+            </Typography.Text>
+          </Typography.Text>
           {Object.entries(
             presets.reduce((groups, p) => {
               const cat = p.category || 'Templates'

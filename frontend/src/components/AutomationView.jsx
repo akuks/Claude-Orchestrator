@@ -576,7 +576,7 @@ export default function AutomationView({ projects = [] }) {
         },
         {
           key: 'templates',
-          label: 'Templates',
+          label: 'Task Templates',
           children: <TemplatesTab projects={projects} />,
         },
       ]}
