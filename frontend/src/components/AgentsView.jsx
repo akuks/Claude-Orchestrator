@@ -29,7 +29,7 @@ const MODEL_OPTS = [
   { value: 'haiku', label: 'Haiku' },
 ]
 
-function AgentModal({ open, agent, projects, onClose, onSaved }) {
+function AgentModal({ open, agent, seed, projects, onClose, onSaved }) {
   const [form] = Form.useForm()
   const [saving, setSaving] = useState(false)
   const isEdit = !!agent
@@ -40,9 +40,10 @@ function AgentModal({ open, agent, projects, onClose, onSaved }) {
       form.setFieldsValue({ ...agent, model: agent.model || undefined })
     } else {
       form.resetFields()
-      form.setFieldsValue({ priority: 'normal', max_turns: 25 })
+      // Seed from a template (role + governance) when creating from a preset.
+      form.setFieldsValue({ priority: 'normal', max_turns: 25, ...(seed || {}) })
     }
-  }, [open, agent])
+  }, [open, agent, seed])
 
   const submit = async () => {
     let v
@@ -68,7 +69,7 @@ function AgentModal({ open, agent, projects, onClose, onSaved }) {
 
   return (
     <Modal
-      title={isEdit ? `Edit ${agent.name}` : 'New Agent'}
+      title={isEdit ? `Edit ${agent.name}` : seed ? `New agent from “${seed.name}” template` : 'New Agent'}
       open={open}
       onCancel={onClose}
       onOk={submit}
@@ -215,6 +216,7 @@ export default function AgentsView({ projects = [] }) {
   const [loading, setLoading] = useState(false)
   const [modalOpen, setModalOpen] = useState(false)
   const [editing, setEditing] = useState(null)
+  const [seed, setSeed] = useState(null)
   const [runAgent, setRunAgent] = useState(null)
 
   const projName = (id) => projects.find((p) => p.id === id)?.name
@@ -236,20 +238,24 @@ export default function AgentsView({ projects = [] }) {
     refresh()
   }, [refresh])
 
-  const addPreset = async (p) => {
-    try {
-      await api.createAgent({
-        name: p.name,
-        description: p.description,
-        system_prompt: p.system_prompt,
-        default_prompt: p.default_prompt,
-        tags: p.tags || [],
-      })
-      message.success(`Added agent “${p.name}”`)
-      refresh()
-    } catch (e) {
-      message.error(e.message)
-    }
+  // Open the Agent form pre-filled from a template (role + governance) so you can
+  // pick the project and review before creating.
+  const addPreset = (p) => {
+    setEditing(null)
+    setSeed({
+      name: p.name,
+      description: p.description,
+      system_prompt: p.system_prompt,
+      default_prompt: p.default_prompt,
+      model: p.model || undefined,
+      max_turns: p.max_turns ?? 25,
+      max_budget_usd: p.max_budget_usd ?? undefined,
+      priority: p.priority || 'normal',
+      requires_approval: p.requires_approval ?? false,
+      allow_remote: p.allow_remote ?? false,
+      tags: p.tags || [],
+    })
+    setModalOpen(true)
   }
 
   const remove = async (id) => {
@@ -316,6 +322,7 @@ export default function AgentsView({ projects = [] }) {
             size="small"
             icon={<EditOutlined />}
             onClick={() => {
+              setSeed(null)
               setEditing(row)
               setModalOpen(true)
             }}
@@ -335,6 +342,7 @@ export default function AgentsView({ projects = [] }) {
           type="primary"
           icon={<PlusOutlined />}
           onClick={() => {
+            setSeed(null)
             setEditing(null)
             setModalOpen(true)
           }}
@@ -349,14 +357,42 @@ export default function AgentsView({ projects = [] }) {
         </Typography.Text>
       </Space>
       {presets.length > 0 && (
-        <Space wrap style={{ marginBottom: 12 }}>
-          <Typography.Text type="secondary">Starter agents:</Typography.Text>
-          {presets.map((p) => (
-            <Button key={p.name} size="small" icon={<PlusOutlined />} onClick={() => addPreset(p)} title={p.description}>
-              {p.name}
-            </Button>
+        <div style={{ marginBottom: 12 }}>
+          {Object.entries(
+            presets.reduce((groups, p) => {
+              const cat = p.category || 'Templates'
+              ;(groups[cat] = groups[cat] || []).push(p)
+              return groups
+            }, {})
+          ).map(([cat, items]) => (
+            <Space wrap key={cat} style={{ marginBottom: 6, display: 'flex' }}>
+              <Typography.Text type="secondary" style={{ width: 90, display: 'inline-block' }}>
+                {cat}:
+              </Typography.Text>
+              {items.map((p) => (
+                <Button
+                  key={p.name}
+                  size="small"
+                  icon={<PlusOutlined />}
+                  onClick={() => addPreset(p)}
+                  title={p.description}
+                >
+                  {p.name}
+                  {p.requires_approval && (
+                    <Tag color="warning" style={{ marginLeft: 6, marginRight: 0 }}>
+                      gated
+                    </Tag>
+                  )}
+                  {p.allow_remote && (
+                    <Tag color="geekblue" style={{ marginLeft: 6, marginRight: 0 }}>
+                      SSH
+                    </Tag>
+                  )}
+                </Button>
+              ))}
+            </Space>
           ))}
-        </Space>
+        </div>
       )}
       <Table
         rowKey="id"
@@ -369,8 +405,12 @@ export default function AgentsView({ projects = [] }) {
       <AgentModal
         open={modalOpen}
         agent={editing}
+        seed={seed}
         projects={projects}
-        onClose={() => setModalOpen(false)}
+        onClose={() => {
+          setModalOpen(false)
+          setSeed(null)
+        }}
         onSaved={refresh}
       />
       <RunModal
