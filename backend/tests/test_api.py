@@ -122,6 +122,27 @@ def test_allow_remote_is_opt_in_for_agents(client):
     assert t2["allow_remote"] is True
 
 
+def test_presets_include_governed_dev_templates(client):
+    presets = {p["name"]: p for p in client.get("/agents/presets").json()}
+    # The dev-team roles exist.
+    for role in ["Frontend Developer", "Backend Developer", "Fullstack Developer",
+                 "Code Reviewer", "QA / Tester", "DevOps Engineer"]:
+        assert role in presets, role
+    # Governance is encoded, not just persona: DevOps is SSH-capable and gated.
+    devops = presets["DevOps Engineer"]
+    assert devops["allow_remote"] is True and devops["requires_approval"] is True
+    # Reviewer is not a remote/gated role.
+    assert not presets["Code Reviewer"].get("allow_remote")
+    # Creating an agent from the DevOps template carries its governance through.
+    a = client.post("/agents", json={
+        "name": "Deployer", "system_prompt": devops["system_prompt"],
+        "default_prompt": devops["default_prompt"],
+        "allow_remote": devops["allow_remote"],
+        "requires_approval": devops["requires_approval"],
+    }).json()
+    assert a["allow_remote"] is True and a["requires_approval"] is True
+
+
 def test_schedule_runs_an_agent(client):
     # A schedule can target an agent instead of carrying its own prompt.
     a = client.post(
