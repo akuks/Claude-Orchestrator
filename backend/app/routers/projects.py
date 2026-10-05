@@ -88,6 +88,7 @@ async def create_project(payload: ProjectCreate):
             budget_usd=payload.budget_usd,
             github_repo=payload.github_repo,
             auto_review_prs=payload.auto_review_prs,
+            env=payload.env,
         )
         s.add(project)
         await s.commit()

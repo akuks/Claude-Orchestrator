@@ -9,6 +9,7 @@ results + output artifacts. No external broker/queue needed for Phase 1.
 import asyncio
 import json
 import mimetypes
+import os
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -19,7 +20,7 @@ from .config import settings
 from .constants import Priority, Status
 from .database import SessionLocal
 from .events import broker
-from .models import Artifact, McpCall, Task, TaskEvent
+from .models import Artifact, McpCall, Project, Task, TaskEvent
 
 _MAX_TOOL_RESULT_CHARS = 2000
 
@@ -227,6 +228,12 @@ class WorkerManager:
             system_prompt = task.system_prompt
             allow_remote = task.allow_remote
             workspace = Path(task.workspace_dir or (settings.workspaces_dir / task_id))
+            # Per-project environment (toolchain scoping) for this task's subprocess.
+            project_env = {}
+            if task.project_id:
+                proj = await s.get(Project, task.project_id)
+                if proj and proj.env:
+                    project_env = dict(proj.env)
             await s.commit()
 
         workspace.mkdir(parents=True, exist_ok=True)
@@ -303,10 +310,22 @@ class WorkerManager:
         }
         stderr_buf: list[str] = []
 
+        # Build the subprocess environment: inherited env + the project's env.
+        # PATH_PREPEND is prepended to PATH (toolchain scoping, e.g. a project-
+        # specific PHP/Node) rather than replacing it.
+        sub_env = os.environ.copy()
+        if project_env:
+            prepend = project_env.pop("PATH_PREPEND", None)
+            sub_env.update({k: str(v) for k, v in project_env.items()})
+            if prepend:
+                sub_env["PATH"] = f"{prepend}{os.pathsep}{sub_env.get('PATH', '')}"
+            await emit("env", {"applied": sorted(project_env.keys()) + (["PATH_PREPEND"] if prepend else [])})
+
         try:
             proc = await asyncio.create_subprocess_exec(
                 *cmd,
                 cwd=str(workspace),
+                env=sub_env,
                 stdin=asyncio.subprocess.PIPE,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,

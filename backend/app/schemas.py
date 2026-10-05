@@ -1,7 +1,7 @@
 from datetime import datetime
 from typing import Optional
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 
 class InputFile(BaseModel):
@@ -221,6 +221,7 @@ class ProjectCreate(BaseModel):
     budget_usd: Optional[float] = None
     github_repo: Optional[str] = None
     auto_review_prs: bool = False
+    env: dict[str, str] = Field(default_factory=dict)
 
 
 class ProjectUpdate(BaseModel):
@@ -234,6 +235,7 @@ class ProjectUpdate(BaseModel):
     budget_usd: Optional[float] = None
     github_repo: Optional[str] = None
     auto_review_prs: Optional[bool] = None
+    env: Optional[dict[str, str]] = None
 
 
 class ProjectOut(BaseModel):
@@ -251,8 +253,14 @@ class ProjectOut(BaseModel):
     budget_usd: Optional[float] = None
     github_repo: Optional[str] = None
     auto_review_prs: bool = False
+    env: dict = {}
     task_count: int = 0
     total_cost_usd: float = 0.0
+
+    @field_validator("env", mode="before")
+    @classmethod
+    def _env_default(cls, v):
+        return v or {}  # existing rows store NULL
 
     model_config = {"from_attributes": True}
 

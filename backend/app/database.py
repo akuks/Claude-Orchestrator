@@ -51,6 +51,7 @@ def _add_missing_columns(sync_conn) -> None:
             ("budget_usd", "FLOAT"),
             ("github_repo", "VARCHAR(200)"),
             ("auto_review_prs", "BOOLEAN DEFAULT 0"),
+            ("env", "JSON"),
         ],
     }
     for table, cols in wanted.items():

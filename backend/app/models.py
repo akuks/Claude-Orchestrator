@@ -145,6 +145,11 @@ class Project(Base):
     github_repo: Mapped[str | None] = mapped_column(String(200), nullable=True)
     # Auto-run a security review when a PR is opened/updated on this repo.
     auto_review_prs: Mapped[bool] = mapped_column(default=False)
+    # Per-project environment for this project's task subprocesses (toolchain
+    # scoping). Merged over the inherited env. The special key PATH_PREPEND is
+    # prepended to PATH (e.g. a project-specific PHP/Node version) rather than
+    # replacing it.
+    env: Mapped[dict] = mapped_column(JSON, default=dict)
 
     # Living memory — auto-updated after each task, plus a prior copy for diffing.
     memory: Mapped[str] = mapped_column(Text, default="")
