@@ -196,6 +196,18 @@ def test_server_inventory_crud(client):
     assert client.put(f"/projects/{p['id']}/servers", json=dup).status_code == 400
 
 
+def test_project_env_roundtrips(client):
+    # Per-project env (toolchain scoping) is stored and returned.
+    p = client.post("/projects", json={
+        "name": "EnvProj",
+        "env": {"PATH_PREPEND": "/opt/homebrew/opt/php@7.4/bin", "APP_ENV": "development"},
+    }).json()
+    assert p["env"]["PATH_PREPEND"].endswith("php@7.4/bin")
+    # And can be updated.
+    u = client.patch(f"/projects/{p['id']}", json={"env": {"APP_ENV": "staging"}}).json()
+    assert u["env"] == {"APP_ENV": "staging"}
+
+
 def test_github_webhook_triggers_review(client):
     client.post(
         "/projects",
