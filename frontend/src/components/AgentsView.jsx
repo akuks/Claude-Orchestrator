@@ -1,6 +1,7 @@
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useMemo, useState } from 'react'
 import {
   Button,
+  Collapse,
   Form,
   Input,
   InputNumber,
@@ -17,6 +18,7 @@ import {
 import {
   DeleteOutlined,
   EditOutlined,
+  FolderOutlined,
   PlusOutlined,
   ReloadOutlined,
   ThunderboltOutlined,
@@ -126,6 +128,13 @@ function AgentModal({ open, agent, seed, projects, onClose, onSaved }) {
             <InputNumber min={0} step={0.5} prefix="$" style={{ width: '100%' }} placeholder="none" />
           </Form.Item>
         </div>
+        <Form.Item
+          name="folder"
+          label="Folder"
+          extra="Organise the list, e.g. “Canonizer/Dev”. Use “/” for subfolders. Blank = Ungrouped."
+        >
+          <Input placeholder="Canonizer/Dev" allowClear />
+        </Form.Item>
         <Form.Item name="tags" label="Tags">
           <Select mode="tags" placeholder="tags" tokenSeparators={[',']} />
         </Form.Item>
@@ -210,6 +219,78 @@ function RunModal({ agent, projects, onClose, onRan }) {
   )
 }
 
+// Build a folder tree from agents' slash-separated `folder` paths.
+function buildTree(agents) {
+  const root = { children: {}, agents: [] }
+  for (const a of agents) {
+    const segs = (a.folder || '').split('/').map((s) => s.trim()).filter(Boolean)
+    let node = root
+    for (const seg of segs) {
+      node.children[seg] = node.children[seg] || { children: {}, agents: [] }
+      node = node.children[seg]
+    }
+    node.agents.push(a)
+  }
+  // Ungrouped agents (no folder) become their own top-level group.
+  if (root.agents.length) {
+    root.children['Ungrouped'] = { children: {}, agents: root.agents }
+    root.agents = []
+  }
+  return root
+}
+
+function countAgents(node) {
+  return (
+    node.agents.length +
+    Object.values(node.children).reduce((s, c) => s + countAgents(c), 0)
+  )
+}
+
+// Recursively render folders as nested collapsible panels.
+function FolderGroups({ node, columns, path = '' }) {
+  const names = Object.keys(node.children).sort((a, b) => a.localeCompare(b))
+  if (names.length === 0) return null
+  const items = names.map((name) => {
+    const child = node.children[name]
+    const key = `${path}/${name}`
+    return {
+      key,
+      label: (
+        <span>
+          <FolderOutlined style={{ marginRight: 6 }} />
+          {name}{' '}
+          <Typography.Text type="secondary">({countAgents(child)})</Typography.Text>
+        </span>
+      ),
+      children: (
+        <>
+          {child.agents.length > 0 && (
+            <Table
+              rowKey="id"
+              size="small"
+              showHeader={false}
+              columns={columns}
+              dataSource={child.agents}
+              pagination={false}
+            />
+          )}
+          {Object.keys(child.children).length > 0 && (
+            <FolderGroups node={child} columns={columns} path={key} />
+          )}
+        </>
+      ),
+    }
+  })
+  return (
+    <Collapse
+      ghost
+      size="small"
+      items={items}
+      defaultActiveKey={names.map((n) => `${path}/${n}`)}
+    />
+  )
+}
+
 export default function AgentsView({ projects = [] }) {
   const [agents, setAgents] = useState([])
   const [presets, setPresets] = useState([])
@@ -220,6 +301,7 @@ export default function AgentsView({ projects = [] }) {
   const [runAgent, setRunAgent] = useState(null)
 
   const projName = (id) => projects.find((p) => p.id === id)?.name
+  const tree = useMemo(() => buildTree(agents), [agents])
 
   const refresh = useCallback(async () => {
     setLoading(true)
@@ -253,6 +335,7 @@ export default function AgentsView({ projects = [] }) {
       priority: p.priority || 'normal',
       requires_approval: p.requires_approval ?? false,
       allow_remote: p.allow_remote ?? false,
+      folder: p.category || '',
       tags: p.tags || [],
     })
     setModalOpen(true)
@@ -400,14 +483,11 @@ export default function AgentsView({ projects = [] }) {
           ))}
         </div>
       )}
-      <Table
-        rowKey="id"
-        size="middle"
-        loading={loading}
-        columns={columns}
-        dataSource={agents}
-        pagination={false}
-      />
+      {loading ? (
+        <Table rowKey="id" loading columns={columns} dataSource={[]} pagination={false} />
+      ) : (
+        <FolderGroups node={tree} columns={columns} />
+      )}
       <AgentModal
         open={modalOpen}
         agent={editing}
