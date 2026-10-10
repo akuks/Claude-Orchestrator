@@ -328,6 +328,7 @@ class AgentCreate(BaseModel):
     tags: list[str] = Field(default_factory=list)
     requires_approval: bool = False  # gate every run at the task level
     allow_remote: bool = False  # permit outbound SSH/SCP/SFTP
+    folder: str = ""  # UI grouping path, e.g. "Canonizer/Dev"
 
 
 class AgentUpdate(BaseModel):
@@ -343,6 +344,7 @@ class AgentUpdate(BaseModel):
     tags: Optional[list[str]] = None
     requires_approval: Optional[bool] = None
     allow_remote: Optional[bool] = None
+    folder: Optional[str] = None
 
 
 class AgentOut(BaseModel):
@@ -359,6 +361,7 @@ class AgentOut(BaseModel):
     tags: list
     requires_approval: bool = False
     allow_remote: bool = False
+    folder: str = ""
     created_at: datetime
 
     model_config = {"from_attributes": True}

@@ -46,6 +46,7 @@ def _add_missing_columns(sync_conn) -> None:
         "agents": [
             ("requires_approval", "BOOLEAN DEFAULT 0"),
             ("allow_remote", "BOOLEAN DEFAULT 0"),
+            ("folder", "VARCHAR(200) DEFAULT ''"),
         ],
         "projects": [
             ("budget_usd", "FLOAT"),

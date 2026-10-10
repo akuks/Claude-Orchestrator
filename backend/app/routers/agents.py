@@ -198,6 +198,7 @@ async def create_agent(payload: AgentCreate):
             tags=payload.tags,
             requires_approval=payload.requires_approval,
             allow_remote=payload.allow_remote,
+            folder=payload.folder,
         )
         s.add(agent)
         await s.commit()

@@ -196,6 +196,9 @@ class Agent(Base):
     # When true, this agent may open outbound SSH/SCP/SFTP (remote login).
     # Off by default: SSH is opt-in per agent.
     allow_remote: Mapped[bool] = mapped_column(default=False)
+    # Organisational folder path for the UI (slash-separated, e.g. "Canonizer/Dev").
+    # Empty = ungrouped. Purely for display grouping.
+    folder: Mapped[str] = mapped_column(String(200), default="")
     created_at: Mapped[datetime] = mapped_column(DateTime, default=_now)
 
 
