@@ -143,6 +143,16 @@ def test_presets_include_governed_dev_templates(client):
     assert a["allow_remote"] is True and a["requires_approval"] is True
 
 
+def test_agent_folder_roundtrips(client):
+    a = client.post("/agents", json={
+        "name": "Grouped", "system_prompt": "x", "default_prompt": "go",
+        "folder": "Canonizer/Dev",
+    }).json()
+    assert a["folder"] == "Canonizer/Dev"
+    u = client.patch(f"/agents/{a['id']}", json={"folder": "Ops"}).json()
+    assert u["folder"] == "Ops"
+
+
 def test_schedule_runs_an_agent(client):
     # A schedule can target an agent instead of carrying its own prompt.
     a = client.post(
