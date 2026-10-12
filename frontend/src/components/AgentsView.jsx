@@ -7,12 +7,14 @@ import {
   InputNumber,
   Modal,
   Popconfirm,
+  Segmented,
   Select,
   Space,
   Switch,
   Table,
   Tag,
   Typography,
+  Upload,
   message,
 } from 'antd'
 import {
@@ -22,6 +24,7 @@ import {
   PlusOutlined,
   ReloadOutlined,
   ThunderboltOutlined,
+  UploadOutlined,
 } from '@ant-design/icons'
 import { api } from '../api'
 
@@ -159,28 +162,96 @@ function AgentModal({ open, agent, seed, projects, onClose, onSaved }) {
   )
 }
 
+// Read a File into base64 (strips the data: URL prefix).
+function fileToBase64(file) {
+  return new Promise((resolve, reject) => {
+    const r = new FileReader()
+    r.onload = () => resolve(String(r.result).split(',')[1])
+    r.onerror = reject
+    r.readAsDataURL(file)
+  })
+}
+
+// Turn an uploaded/pasted task list into individual task prompts: one per line,
+// stripping markdown list/checkbox/number markers and skipping blanks/headings.
+function parseTaskList(text) {
+  return (text || '')
+    .split('\n')
+    .map((l) => l.trim())
+    .filter((l) => l && !l.startsWith('#'))
+    .map((l) =>
+      l
+        .replace(/^[-*+]\s+/, '')
+        .replace(/^\d+[.)]\s+/, '')
+        .replace(/^\[[ xX]\]\s+/, '')
+        .trim()
+    )
+    .filter(Boolean)
+}
+
 function RunModal({ agent, projects, onClose, onRan }) {
   const [form] = Form.useForm()
   const [running, setRunning] = useState(false)
+  const [mode, setMode] = useState('single')
+  const [files, setFiles] = useState([]) // single-run attachments
+  const [bulkText, setBulkText] = useState('')
+  const [projectId, setProjectId] = useState(undefined)
 
   useEffect(() => {
     if (agent) {
-      form.setFieldsValue({ prompt: agent.default_prompt, project_id: agent.project_id })
+      form.setFieldsValue({ prompt: agent.default_prompt })
+      setProjectId(agent.project_id || undefined)
+      setMode('single')
+      setFiles([])
+      setBulkText('')
     }
   }, [agent])
 
-  const run = async () => {
+  const projectOptions = projects
+    .filter((p) => !p.archived)
+    .map((p) => ({ value: p.id, label: p.name }))
+  const tasks = useMemo(() => parseTaskList(bulkText), [bulkText])
+
+  const runSingle = async () => {
     const v = await form.validateFields().catch(() => null)
     if (!v) return
     setRunning(true)
     try {
+      const input_files = await Promise.all(
+        files.map(async (f) => ({
+          name: f.name,
+          content_base64: await fileToBase64(f.originFileObj || f),
+        }))
+      )
       const task = await api.runAgent(agent.id, {
         prompt: v.prompt || undefined,
-        project_id: v.project_id || undefined,
+        project_id: projectId || undefined,
+        input_files,
       })
       message.success(
         task.status === 'awaiting_approval' ? 'Queued for approval' : 'Agent run started'
       )
+      onRan?.()
+      onClose()
+    } catch (e) {
+      message.error(e.message)
+    } finally {
+      setRunning(false)
+    }
+  }
+
+  const runBulk = async () => {
+    if (tasks.length === 0) {
+      message.warning('No tasks found — add one task per line.')
+      return
+    }
+    setRunning(true)
+    try {
+      const created = await api.bulkRunAgent(agent.id, {
+        prompts: tasks,
+        project_id: projectId || undefined,
+      })
+      message.success(`Created ${created.length} task${created.length === 1 ? '' : 's'}`)
       onRan?.()
       onClose()
     } catch (e) {
@@ -195,23 +266,82 @@ function RunModal({ agent, projects, onClose, onRan }) {
       title={agent ? `Run ${agent.name}` : ''}
       open={!!agent}
       onCancel={onClose}
-      onOk={run}
+      onOk={mode === 'single' ? runSingle : runBulk}
       confirmLoading={running}
-      okText="Run"
+      okText={mode === 'single' ? 'Run' : `Create ${tasks.length} task${tasks.length === 1 ? '' : 's'}`}
+      okButtonProps={{ disabled: mode === 'bulk' && tasks.length === 0 }}
+      width={620}
     >
+      <Segmented
+        block
+        value={mode}
+        onChange={setMode}
+        options={[
+          { label: 'Single task', value: 'single' },
+          { label: 'Bulk (task list)', value: 'bulk' },
+        ]}
+        style={{ marginBottom: 12 }}
+      />
       <Form form={form} layout="vertical">
-        <Form.Item
-          name="prompt"
-          label="Task"
-          rules={[{ required: true, message: 'Give the agent something to do' }]}
-        >
-          <Input.TextArea rows={3} placeholder="What should the agent do?" />
-        </Form.Item>
-        <Form.Item name="project_id" label="Project" extra="Override the agent's default for this run.">
+        {mode === 'single' ? (
+          <>
+            <Form.Item
+              name="prompt"
+              label="Task"
+              rules={[{ required: true, message: 'Give the agent something to do' }]}
+            >
+              <Input.TextArea rows={3} placeholder="What should the agent do?" />
+            </Form.Item>
+            <Form.Item
+              label="Attach files"
+              extra="Specs, tickets, sample data — the agent reads them for this task."
+            >
+              <Upload
+                multiple
+                beforeUpload={() => false}
+                fileList={files}
+                onChange={({ fileList }) => setFiles(fileList)}
+              >
+                <Button icon={<UploadOutlined />}>Attach files</Button>
+              </Upload>
+            </Form.Item>
+          </>
+        ) : (
+          <Form.Item
+            label="Task list"
+            extra="One task per line (markdown lists / checkboxes are fine). Each line becomes its own task the agent runs."
+          >
+            <Upload
+              maxCount={1}
+              accept=".md,.txt,.csv"
+              showUploadList={false}
+              beforeUpload={async (file) => {
+                setBulkText(await file.text())
+                return false
+              }}
+            >
+              <Button icon={<UploadOutlined />}>Upload a task file</Button>
+            </Upload>
+            <Input.TextArea
+              rows={7}
+              value={bulkText}
+              onChange={(e) => setBulkText(e.target.value)}
+              placeholder={'- Fix null crash on /topic\n- Add /health endpoint\n- Rate-limit /register'}
+              style={{ marginTop: 8 }}
+            />
+            <Typography.Text type="secondary">
+              {tasks.length} task{tasks.length === 1 ? '' : 's'} will be created
+              {agent?.requires_approval ? ' (each needs approval)' : ''}.
+            </Typography.Text>
+          </Form.Item>
+        )}
+        <Form.Item label="Project" extra="Override the agent's default for this run.">
           <Select
             allowClear
             placeholder="No project"
-            options={projects.filter((p) => !p.archived).map((p) => ({ value: p.id, label: p.name }))}
+            value={projectId}
+            onChange={setProjectId}
+            options={projectOptions}
           />
         </Form.Item>
       </Form>

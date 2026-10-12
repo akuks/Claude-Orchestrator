@@ -96,6 +96,7 @@ export const api = {
   updateAgent: (id, payload) => req('PATCH', `/agents/${id}`, payload),
   deleteAgent: (id) => req('DELETE', `/agents/${id}`),
   runAgent: (id, payload) => req('POST', `/agents/${id}/run`, payload),
+  bulkRunAgent: (id, payload) => req('POST', `/agents/${id}/bulk`, payload),
   listSchedules: () => req('GET', '/schedules'),
   createSchedule: (payload) => req('POST', '/schedules', payload),
   updateSchedule: (id, payload) => req('PATCH', `/schedules/${id}`, payload),
