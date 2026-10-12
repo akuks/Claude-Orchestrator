@@ -143,6 +143,34 @@ def test_presets_include_governed_dev_templates(client):
     assert a["allow_remote"] is True and a["requires_approval"] is True
 
 
+def test_agent_run_with_attached_file(client):
+    import base64
+    a = client.post("/agents", json={"name": "FileAgent", "system_prompt": "x",
+                                      "default_prompt": "do it"}).json()
+    content = base64.b64encode(b"# Spec\nBuild the thing.").decode()
+    t = client.post(f"/agents/{a['id']}/run", json={
+        "prompt": "Implement the attached spec",
+        "input_files": [{"name": "spec.md", "content_base64": content}],
+    }).json()
+    # The attachment is referenced in the task prompt so the agent can read it.
+    full = client.get(f"/tasks/{t['id']}").json()
+    assert "spec.md" in full["prompt"] and "uploads" in full["prompt"]
+    assert wait_task(client, t["id"])["status"] == "completed"
+
+
+def test_agent_bulk_run_creates_one_task_per_line(client):
+    a = client.post("/agents", json={"name": "BulkAgent", "system_prompt": "x",
+                                      "default_prompt": "go"}).json()
+    r = client.post(f"/agents/{a['id']}/bulk", json={
+        "prompts": ["Fix bug A", "Add feature B", "Write tests for C"],
+    })
+    tasks = r.json()
+    assert len(tasks) == 3
+    assert all(t["agent_id"] == a["id"] and "bulk" in t["tags"] for t in tasks)
+    # Empty list is rejected.
+    assert client.post(f"/agents/{a['id']}/bulk", json={"prompts": ["  "]}).status_code == 400
+
+
 def test_agent_folder_roundtrips(client):
     a = client.post("/agents", json={
         "name": "Grouped", "system_prompt": "x", "default_prompt": "go",
