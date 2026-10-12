@@ -4,7 +4,14 @@ from sqlalchemy import select
 from ..constants import VALID_MODELS
 from ..database import SessionLocal
 from ..models import Agent, Project
-from ..schemas import AgentCreate, AgentOut, AgentRun, AgentUpdate, TaskOut
+from ..schemas import (
+    AgentBulkRun,
+    AgentCreate,
+    AgentOut,
+    AgentRun,
+    AgentUpdate,
+    TaskOut,
+)
 from ..task_service import build_task
 
 router = APIRouter(prefix="/agents", tags=["agents"])
@@ -268,6 +275,7 @@ async def run_agent(agent_id: str, payload: AgentRun, request: Request):
             system_prompt=agent.system_prompt or None,
             requires_approval=agent.requires_approval,
             allow_remote=agent.allow_remote,
+            input_files=[f.model_dump() for f in payload.input_files],
         )
         await s.commit()
         await s.refresh(task)
@@ -277,3 +285,45 @@ async def run_agent(agent_id: str, payload: AgentRun, request: Request):
     if out.status != Status.AWAITING_APPROVAL:
         await request.app.state.worker.submit(out.id, out.priority, out.created_at)
     return out
+
+
+@router.post("/{agent_id}/bulk", response_model=list[TaskOut], status_code=201)
+async def bulk_run_agent(agent_id: str, payload: AgentBulkRun, request: Request):
+    """Create one task per prompt — upload a task list and the agent works each."""
+    prompts = [p.strip() for p in payload.prompts if p.strip()]
+    if not prompts:
+        raise HTTPException(400, "No tasks found in the upload")
+    if len(prompts) > 50:
+        raise HTTPException(400, "Too many tasks at once (max 50)")
+    async with SessionLocal() as s:
+        agent = await _get_or_404(s, agent_id)
+        project_id = payload.project_id or agent.project_id
+        tasks = []
+        for p in prompts:
+            tasks.append(
+                await build_task(
+                    s,
+                    prompt=p,
+                    title=f"{agent.name}: {p.splitlines()[0][:60]}",
+                    project_id=project_id,
+                    model=agent.model or None,
+                    max_turns=agent.max_turns,
+                    max_budget_usd=agent.max_budget_usd,
+                    priority=agent.priority,
+                    tags=(agent.tags or []) + ["agent", "bulk"],
+                    agent_id=agent.id,
+                    system_prompt=agent.system_prompt or None,
+                    requires_approval=agent.requires_approval,
+                    allow_remote=agent.allow_remote,
+                )
+            )
+        await s.commit()
+        for t in tasks:
+            await s.refresh(t)
+        outs = [TaskOut.model_validate(t) for t in tasks]
+    from ..constants import Status
+
+    for o in outs:
+        if o.status != Status.AWAITING_APPROVAL:
+            await request.app.state.worker.submit(o.id, o.priority, o.created_at)
+    return outs

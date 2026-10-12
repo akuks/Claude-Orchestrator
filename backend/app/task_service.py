@@ -112,9 +112,23 @@ async def build_task(
         ws.mkdir(parents=True, exist_ok=True)
         if claude_md:
             (ws / "CLAUDE.md").write_text(claude_md)
-        for f in input_files or []:
-            safe = os.path.basename(f["name"])
-            if safe:
-                (ws / safe).write_bytes(base64.b64decode(f["content_base64"]))
         task.workspace_dir = str(ws)
+
+    # Attachments (uploaded task files): written to a per-task uploads dir OUTSIDE
+    # the repo and referenced by absolute path, so project tasks get them too
+    # without polluting the working tree. The agent is told where to read them.
+    names = []
+    for f in input_files or []:
+        safe = os.path.basename(f["name"])
+        if safe:
+            up = settings.workspaces_dir / task.id / "uploads"
+            up.mkdir(parents=True, exist_ok=True)
+            (up / safe).write_bytes(base64.b64decode(f["content_base64"]))
+            names.append(safe)
+    if names:
+        up = (settings.workspaces_dir / task.id / "uploads").resolve()
+        task.prompt = (task.prompt or "") + (
+            f"\n\n---\nAttached files for this task (read them as needed), in {up}:\n"
+            + "\n".join(f"- {n}" for n in names)
+        )
     return task

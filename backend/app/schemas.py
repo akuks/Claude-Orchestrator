@@ -370,6 +370,13 @@ class AgentOut(BaseModel):
 class AgentRun(BaseModel):
     prompt: Optional[str] = None  # overrides the agent's default_prompt
     project_id: Optional[str] = None  # overrides the agent's default project
+    input_files: list[InputFile] = Field(default_factory=list)  # attached task files
+
+
+class AgentBulkRun(BaseModel):
+    # One task per prompt — upload a task list and the agent works through each.
+    prompts: list[str] = Field(min_length=1)
+    project_id: Optional[str] = None
 
 
 class ScheduleCreate(BaseModel):
