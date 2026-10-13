@@ -171,6 +171,35 @@ def test_agent_bulk_run_creates_one_task_per_line(client):
     assert client.post(f"/agents/{a['id']}/bulk", json={"prompts": ["  "]}).status_code == 400
 
 
+def test_coordinator_dispatch_creates_linked_children(client):
+    # A coordinator task fans out to specialists; children link to it + run.
+    coord = client.post("/agents", json={
+        "name": "Lead", "system_prompt": "delegate", "default_prompt": "coordinate",
+        "coordinator": True,
+    }).json()
+    assert coord["coordinator"] is True
+    fe = client.post("/agents", json={"name": "FE", "system_prompt": "ui", "default_prompt": "x"}).json()
+    be = client.post("/agents", json={"name": "BE", "system_prompt": "api", "default_prompt": "x"}).json()
+    parent = client.post(f"/agents/{coord['id']}/run", json={}).json()
+
+    children = client.post("/agents/dispatch", json={
+        "parent_task_id": parent["id"],
+        "items": [
+            {"agent": "FE", "prompt": "build the UI"},
+            {"agent": be["id"], "prompt": "add the API"},
+        ],
+    }).json()
+    assert len(children) == 2
+    # Children link to the coordinator and share its thread root.
+    for c in children:
+        assert c["parent_task_id"] == parent["id"]
+        assert c["root_id"] == parent["root_id"]
+        assert "delegated" in c["tags"]
+    # Unknown agent is rejected.
+    assert client.post("/agents/dispatch", json={
+        "items": [{"agent": "nope", "prompt": "x"}]}).status_code == 404
+
+
 def test_agent_folder_roundtrips(client):
     a = client.post("/agents", json={
         "name": "Grouped", "system_prompt": "x", "default_prompt": "go",
