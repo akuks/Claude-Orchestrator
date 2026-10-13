@@ -157,6 +157,14 @@ function AgentModal({ open, agent, seed, projects, onClose, onSaved }) {
         >
           <Switch />
         </Form.Item>
+        <Form.Item
+          name="coordinator"
+          label="Coordinator (delegates to other agents)"
+          valuePropName="checked"
+          extra="Injects the list of other agents + how to dispatch, so this agent analyses work and delegates it. Pair with approval-gating to review the plan first."
+        >
+          <Switch />
+        </Form.Item>
       </Form>
     </Modal>
   )
@@ -465,6 +473,7 @@ export default function AgentsView({ projects = [] }) {
       priority: p.priority || 'normal',
       requires_approval: p.requires_approval ?? false,
       allow_remote: p.allow_remote ?? false,
+      coordinator: p.coordinator ?? false,
       folder: p.category || '',
       tags: p.tags || [],
     })
@@ -496,6 +505,11 @@ export default function AgentsView({ projects = [] }) {
           {row.allow_remote && (
             <Tag color="geekblue" style={{ marginLeft: 6 }}>
               SSH
+            </Tag>
+          )}
+          {row.coordinator && (
+            <Tag color="purple" style={{ marginLeft: 6 }}>
+              coordinator
             </Tag>
           )}
           {row.description && (
