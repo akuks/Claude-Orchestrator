@@ -279,9 +279,11 @@ class WorkerManager:
                 proj = await s.get(Project, task.project_id)
                 if proj and proj.env:
                     project_env = dict(proj.env)
-            # Coordinator: inject the live agent registry + how to delegate.
+            # Coordinator: inject the live agent registry + how to delegate — but
+            # NOT inside a workflow, where the workflow owns the orchestration and a
+            # coordinator agent is used only as a planning step.
             coordinator_block = None
-            if task_agent_id:
+            if task_agent_id and not task.workflow_run_id:
                 me = await s.get(Agent, task_agent_id)
                 if me is not None and me.coordinator:
                     coordinator_block = await _coordinator_context(s, task_id, me.id)

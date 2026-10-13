@@ -31,12 +31,46 @@ RUN_FAILED = "failed"
 ACTIVE_RUN = {RUN_PENDING, RUN_RUNNING, RUN_PAUSED}
 
 
-def apply_input(prompt: str, run_input: str) -> str:
-    if "{{input}}" in (prompt or ""):
-        return prompt.replace("{{input}}", run_input or "")
-    if run_input:
-        return f"{prompt}\n\n{run_input}"
-    return prompt
+def substitute(prompt: str, run_input: str, stage_outputs: dict[int, str]) -> str:
+    """Fill placeholders in a stage prompt:
+      {{input}}   -> the run's input
+      {{prev}}    -> the previous stage's combined output
+      {{stageN}}  -> stage N's combined output (N is 1-based, matching the UI)
+    If no {{input}} placeholder exists, the input is appended (back-compat).
+    """
+    import re
+
+    p = prompt or ""
+    had_input = "{{input}}" in p
+    p = p.replace("{{input}}", run_input or "")
+    # {{prev}} = highest-numbered available stage output.
+    prev = ""
+    if stage_outputs:
+        prev = stage_outputs[max(stage_outputs)]
+    p = p.replace("{{prev}}", prev)
+    # {{stageN}} (1-based)
+    def _stage_sub(m):
+        n = int(m.group(1))
+        return stage_outputs.get(n - 1, "")
+    p = re.sub(r"\{\{stage(\d+)\}\}", _stage_sub, p)
+    if not had_input and run_input and "{{prev}}" not in (prompt or "") and not re.search(r"\{\{stage\d+\}\}", prompt or ""):
+        p = f"{p}\n\n{run_input}"
+    return p
+
+
+async def _stage_outputs(s, run_id: str, up_to_stage: int) -> dict[int, str]:
+    """Combined result_text of completed tasks per stage index, for stages < up_to_stage."""
+    rows = (
+        await s.execute(
+            select(Task).where(Task.workflow_run_id == run_id, Task.stage_index < up_to_stage)
+        )
+    ).scalars().all()
+    out: dict[int, str] = {}
+    for t in sorted(rows, key=lambda x: (x.stage_index or 0, x.created_at)):
+        if t.result_text:
+            out.setdefault(t.stage_index, "")
+            out[t.stage_index] += (("\n\n" if out[t.stage_index] else "") + t.result_text)
+    return out
 
 
 async def _start_stage(s, run: WorkflowRun, stage_index: int, worker) -> list[str]:
@@ -46,6 +80,9 @@ async def _start_stage(s, run: WorkflowRun, stage_index: int, worker) -> list[st
     agents = (await s.execute(select(Agent))).scalars().all()
     by_id = {a.id: a for a in agents}
     by_name = {a.name: a for a in agents}
+    # Prior stages' outputs so a stage can build on what came before (e.g. a lead
+    # planning stage feeding the dev stages via {{prev}}).
+    outputs = await _stage_outputs(s, run.id, stage_index) if stage_index > 0 else {}
     submits = []
     for item in stage.get("items", []):
         agent = by_id.get(item.get("agent")) or by_name.get(item.get("agent"))
@@ -53,7 +90,7 @@ async def _start_stage(s, run: WorkflowRun, stage_index: int, worker) -> list[st
             # Unknown agent -> fail the run rather than silently skip.
             run.status = RUN_FAILED
             return []
-        prompt = apply_input(item.get("prompt", ""), run.input)
+        prompt = substitute(item.get("prompt", ""), run.input, outputs)
         task = await build_task(
             s,
             prompt=prompt,

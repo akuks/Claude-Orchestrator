@@ -19,8 +19,39 @@ router = APIRouter(prefix="/workflows", tags=["workflows"])
 # reference agents by name; {{input}} is replaced with the run's input (PR/issue).
 PRESETS = [
     {
+        "name": "Feature (AI-planned): plan → develop → review → test → deploy",
+        "description": "Tech Lead analyses & plans first, then the dev stages build from that plan. Use for vaguer inputs.",
+        "stages": [
+            {
+                "name": "Plan",
+                "items": [
+                    {"agent": "Canonizer Tech Lead", "prompt": "Analyse this work and produce a precise implementation plan, split into a FRONTEND section and a BACKEND/API section with numbered, specific tasks. Do NOT write code or delegate — output only the plan.\n\nWork: {{input}}"},
+                ],
+            },
+            {
+                "name": "Develop",
+                "items": [
+                    {"agent": "Canonizer Frontend Dev", "prompt": "Implement the FRONTEND section of this plan. Branch off UI-UX-Overhaul and open a PR.\n\nPLAN:\n{{prev}}\n\n(Original request: {{input}})"},
+                    {"agent": "Canonizer API Dev", "prompt": "Implement the BACKEND/API section of this plan. Branch off UI-UX-Overhaul and open a PR.\n\nPLAN:\n{{prev}}\n\n(Original request: {{input}})"},
+                ],
+            },
+            {
+                "name": "Review",
+                "items": [{"agent": "Canonizer Code Reviewer", "prompt": "Review the open PR(s) for: {{input}}. Report findings."}],
+            },
+            {
+                "name": "Test",
+                "items": [{"agent": "Canonizer Server Test", "prompt": "Verify the change for: {{input}} on the dev server; run tests and smoke-test."}],
+            },
+            {
+                "name": "Deploy",
+                "items": [{"agent": "Canonizer Deploy", "prompt": "Deploy the change for: {{input}} to canonizer-development."}],
+            },
+        ],
+    },
+    {
         "name": "Feature: develop → review → test → deploy",
-        "description": "Full cycle: build in parallel, review, verify on server, then gated deploy.",
+        "description": "Full cycle: build in parallel, review, verify on server, then gated deploy. You control each stage (no AI planning).",
         "stages": [
             {
                 "name": "Develop",
