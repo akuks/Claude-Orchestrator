@@ -98,9 +98,12 @@ function WorkflowModal({ open, workflow, agents, onClose, onSaved }) {
           <Input placeholder="What this pipeline does" />
         </Form.Item>
         <Typography.Text type="secondary">
-          Stages run top-to-bottom. Agents within a stage run in parallel. Use{' '}
-          <code>{'{{input}}'}</code> in a prompt — it's replaced with what you run the workflow on
-          (a PR, issue, or description).
+          Stages run top-to-bottom; agents within a stage run in parallel. Placeholders in a
+          prompt: <code>{'{{input}}'}</code> = what you run the workflow on;{' '}
+          <code>{'{{prev}}'}</code> = the previous stage's output;{' '}
+          <code>{'{{stageN}}'}</code> = stage N's output. Add an optional{' '}
+          <b>Tech Lead “Plan”</b> stage first and feed its plan to the dev stages with{' '}
+          <code>{'{{prev}}'}</code> — or skip it and control each stage yourself.
         </Typography.Text>
         <Form.List name="stages">
           {(stages, { add: addStage, remove: removeStage }) => (
