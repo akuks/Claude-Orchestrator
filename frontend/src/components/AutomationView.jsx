@@ -20,6 +20,7 @@ import {
   message,
 } from 'antd'
 import {
+  ApartmentOutlined,
   ClockCircleOutlined,
   CloudServerOutlined,
   DeleteOutlined,
@@ -34,6 +35,7 @@ import dayjs from 'dayjs'
 import { api, STATUS_COLORS } from '../api'
 import AgentsView from './AgentsView'
 import ServersView from './ServersView'
+import WorkflowsView from './WorkflowsView'
 
 const MODEL_OPTS = [
   { value: 'sonnet', label: 'Sonnet' },
@@ -544,6 +546,10 @@ function TemplatesTab({ projects }) {
 }
 
 export default function AutomationView({ projects = [] }) {
+  const [allAgents, setAllAgents] = useState([])
+  useEffect(() => {
+    api.listAgents().then(setAllAgents).catch(() => {})
+  }, [])
   return (
     <Tabs
       items={[
@@ -555,6 +561,15 @@ export default function AutomationView({ projects = [] }) {
             </span>
           ),
           children: <AgentsView projects={projects} />,
+        },
+        {
+          key: 'workflows',
+          label: (
+            <span>
+              <ApartmentOutlined /> Workflows
+            </span>
+          ),
+          children: <WorkflowsView agents={allAgents} />,
         },
         {
           key: 'schedules',
