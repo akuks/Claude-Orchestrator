@@ -14,9 +14,15 @@ import {
 } from 'antd'
 import {
   ApartmentOutlined,
+  CheckCircleFilled,
+  ClockCircleFilled,
+  CloseCircleFilled,
   CopyOutlined,
   DeleteOutlined,
   DownloadOutlined,
+  ExclamationCircleFilled,
+  LoadingOutlined,
+  MinusCircleFilled,
   ReloadOutlined,
   SendOutlined,
   StopOutlined,
@@ -79,10 +85,22 @@ function titleBody(t) {
   return i > 0 ? t.title.slice(i + 2) : t.title
 }
 
-// A compact delegation/workflow tree built from parent_task_id links. Shows the
-// coordinator and its delegated children (and their follow-ups) as a nested,
-// status-coloured, clickable tree so a fan-out is trackable at a glance.
+// Status → icon + colour for the workflow tree.
+const STATUS_ICON = {
+  completed: { icon: <CheckCircleFilled />, color: '#52c41a' },
+  failed: { icon: <CloseCircleFilled />, color: '#ff4d4f' },
+  running: { icon: <LoadingOutlined spin />, color: '#1677ff' },
+  queued: { icon: <ClockCircleFilled />, color: '#8c8c8c' },
+  awaiting_approval: { icon: <ExclamationCircleFilled />, color: '#faad14' },
+  cancelled: { icon: <MinusCircleFilled />, color: '#8c8c8c' },
+}
+const fmtCost = (c) => (c == null ? null : `$${Number(c).toFixed(2)}`)
+
+// A delegation/workflow tree built from parent_task_id links: coordinator at the
+// top, parallel children + follow-ups nested under their parent with proper tree
+// connector lines, a status icon, agent chip and clean cost — trackable at a glance.
 function DelegationTree({ thread, currentId, onOpenTask }) {
+  const GUIDE = 'rgba(150,130,110,0.35)'
   const byParent = {}
   const ids = new Set(thread.map((t) => t.id))
   for (const t of thread) {
@@ -90,45 +108,100 @@ function DelegationTree({ thread, currentId, onOpenTask }) {
     ;(byParent[pid] = byParent[pid] || []).push(t)
   }
   const sortKey = (t) => t.created_at || ''
-  const render = (parentId, depth) =>
-    (byParent[parentId] || [])
-      .sort((a, b) => sortKey(a).localeCompare(sortKey(b)))
-      .map((t) => {
-        const agent = agentOf(t)
-        return (
-          <div key={t.id}>
-            <div
-              onClick={() => t.id !== currentId && onOpenTask?.(t.id)}
-              style={{
-                display: 'flex',
-                alignItems: 'center',
-                gap: 8,
-                padding: '4px 6px',
-                marginLeft: depth * 18,
-                borderRadius: 4,
-                cursor: t.id === currentId ? 'default' : 'pointer',
-                background: t.id === currentId ? 'rgba(255,170,100,0.12)' : 'transparent',
-                borderLeft: depth > 0 ? '2px solid rgba(140,120,100,0.3)' : 'none',
-              }}
-            >
-              <Tag color={STATUS_COLORS[t.status]} style={{ margin: 0, minWidth: 74, textAlign: 'center' }}>
-                {t.status}
-              </Tag>
-              {agent && <Tag style={{ margin: 0 }}>{agent}</Tag>}
-              <span style={{ flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                {titleBody(t)}
-              </span>
-              {t.total_cost_usd != null && (
-                <Typography.Text type="secondary" style={{ fontSize: 11 }}>
-                  ${t.total_cost_usd}
-                </Typography.Text>
-              )}
-            </div>
-            {render(t.id, depth + 1)}
+
+  const Node = ({ t, isChild }) => {
+    const st = STATUS_ICON[t.status] || { icon: <ClockCircleFilled />, color: '#8c8c8c' }
+    const agent = agentOf(t)
+    const active = t.id === currentId
+    const kids = (byParent[t.id] || []).sort((a, b) => sortKey(a).localeCompare(sortKey(b)))
+    return (
+      <div style={{ position: 'relative', paddingLeft: isChild ? 20 : 0 }}>
+        {/* horizontal connector from the trunk to this node */}
+        {isChild && (
+          <span
+            style={{
+              position: 'absolute',
+              left: 0,
+              top: 15,
+              width: 14,
+              height: 1,
+              background: GUIDE,
+            }}
+          />
+        )}
+        <div
+          onClick={() => !active && onOpenTask?.(t.id)}
+          style={{
+            display: 'flex',
+            alignItems: 'center',
+            gap: 8,
+            padding: '5px 8px',
+            borderRadius: 6,
+            cursor: active ? 'default' : 'pointer',
+            background: active ? 'rgba(255,170,100,0.14)' : 'transparent',
+            border: active ? '1px solid rgba(255,170,100,0.4)' : '1px solid transparent',
+            transition: 'background 0.12s',
+          }}
+          onMouseEnter={(e) => {
+            if (!active) e.currentTarget.style.background = 'rgba(150,130,110,0.1)'
+          }}
+          onMouseLeave={(e) => {
+            if (!active) e.currentTarget.style.background = 'transparent'
+          }}
+        >
+          <span style={{ color: st.color, fontSize: 15, display: 'inline-flex' }}>{st.icon}</span>
+          {agent ? (
+            <Tag color="geekblue" style={{ margin: 0, fontWeight: 500 }}>
+              {agent}
+            </Tag>
+          ) : (
+            <Tag style={{ margin: 0, color: '#8a7a6d' }}>follow-up</Tag>
+          )}
+          <span
+            style={{
+              flex: 1,
+              overflow: 'hidden',
+              textOverflow: 'ellipsis',
+              whiteSpace: 'nowrap',
+              fontWeight: !isChild ? 600 : 400,
+            }}
+            title={titleBody(t)}
+          >
+            {titleBody(t)}
+          </span>
+          {fmtCost(t.total_cost_usd) && (
+            <Typography.Text type="secondary" style={{ fontSize: 11, flexShrink: 0 }}>
+              {fmtCost(t.total_cost_usd)}
+            </Typography.Text>
+          )}
+        </div>
+        {/* children: vertical trunk + recursive nodes */}
+        {kids.length > 0 && (
+          <div style={{ marginLeft: isChild ? 20 : 0, borderLeft: `1px solid ${GUIDE}`, paddingLeft: 0 }}>
+            {kids.map((k) => (
+              <Node key={k.id} t={k} isChild />
+            ))}
           </div>
-        )
-      })
-  return <div>{render('__root__', 0)}</div>
+        )}
+      </div>
+    )
+  }
+
+  const roots = (byParent['__root__'] || []).sort((a, b) => sortKey(a).localeCompare(sortKey(b)))
+  return (
+    <div
+      style={{
+        border: '1px solid rgba(150,130,110,0.25)',
+        borderRadius: 8,
+        padding: 8,
+        background: 'rgba(150,130,110,0.04)',
+      }}
+    >
+      {roots.map((t) => (
+        <Node key={t.id} t={t} isChild={false} />
+      ))}
+    </div>
+  )
 }
 
 export default function TaskDetail({ taskId, onClose, onChanged, onOpenTask }) {
@@ -318,7 +391,7 @@ export default function TaskDetail({ taskId, onClose, onChanged, onOpenTask }) {
           <Descriptions.Item label="Project">{task.project || '—'}</Descriptions.Item>
           <Descriptions.Item label="Turns">{task.num_turns ?? '—'}</Descriptions.Item>
           <Descriptions.Item label="Cost">
-            {task.total_cost_usd != null ? `$${task.total_cost_usd}` : '—'}
+            {task.total_cost_usd != null ? fmtCost(task.total_cost_usd) : '—'}
           </Descriptions.Item>
           <Descriptions.Item label="Prompt" span={2}>
             <Typography.Text style={{ whiteSpace: 'pre-wrap' }}>{task.prompt}</Typography.Text>
