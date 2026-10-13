@@ -69,6 +69,68 @@ function renderLine(ev) {
   return { color: s.color, prefix: s.prefix, text: text || '' }
 }
 
+// Agent name is the part of the title before the first ": ".
+function agentOf(t) {
+  const i = (t.title || '').indexOf(': ')
+  return i > 0 ? t.title.slice(0, i) : null
+}
+function titleBody(t) {
+  const i = (t.title || '').indexOf(': ')
+  return i > 0 ? t.title.slice(i + 2) : t.title
+}
+
+// A compact delegation/workflow tree built from parent_task_id links. Shows the
+// coordinator and its delegated children (and their follow-ups) as a nested,
+// status-coloured, clickable tree so a fan-out is trackable at a glance.
+function DelegationTree({ thread, currentId, onOpenTask }) {
+  const byParent = {}
+  const ids = new Set(thread.map((t) => t.id))
+  for (const t of thread) {
+    const pid = t.parent_task_id && ids.has(t.parent_task_id) ? t.parent_task_id : '__root__'
+    ;(byParent[pid] = byParent[pid] || []).push(t)
+  }
+  const sortKey = (t) => t.created_at || ''
+  const render = (parentId, depth) =>
+    (byParent[parentId] || [])
+      .sort((a, b) => sortKey(a).localeCompare(sortKey(b)))
+      .map((t) => {
+        const agent = agentOf(t)
+        return (
+          <div key={t.id}>
+            <div
+              onClick={() => t.id !== currentId && onOpenTask?.(t.id)}
+              style={{
+                display: 'flex',
+                alignItems: 'center',
+                gap: 8,
+                padding: '4px 6px',
+                marginLeft: depth * 18,
+                borderRadius: 4,
+                cursor: t.id === currentId ? 'default' : 'pointer',
+                background: t.id === currentId ? 'rgba(255,170,100,0.12)' : 'transparent',
+                borderLeft: depth > 0 ? '2px solid rgba(140,120,100,0.3)' : 'none',
+              }}
+            >
+              <Tag color={STATUS_COLORS[t.status]} style={{ margin: 0, minWidth: 74, textAlign: 'center' }}>
+                {t.status}
+              </Tag>
+              {agent && <Tag style={{ margin: 0 }}>{agent}</Tag>}
+              <span style={{ flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                {titleBody(t)}
+              </span>
+              {t.total_cost_usd != null && (
+                <Typography.Text type="secondary" style={{ fontSize: 11 }}>
+                  ${t.total_cost_usd}
+                </Typography.Text>
+              )}
+            </div>
+            {render(t.id, depth + 1)}
+          </div>
+        )
+      })
+  return <div>{render('__root__', 0)}</div>
+}
+
 export default function TaskDetail({ taskId, onClose, onChanged, onOpenTask }) {
   const [task, setTask] = useState(null)
   const [events, setEvents] = useState([])
@@ -194,28 +256,50 @@ export default function TaskDetail({ taskId, onClose, onChanged, onOpenTask }) {
         </Space>
       }
     >
-      {thread.length > 1 && (
-        <div style={{ marginBottom: 12 }}>
-          <Typography.Text type="secondary" style={{ fontSize: 12 }}>
-            <ApartmentOutlined /> Thread · {thread.length} steps
-          </Typography.Text>
-          <div style={{ marginTop: 6, display: 'flex', flexWrap: 'wrap', gap: 6 }}>
-            {thread.map((step, i) => (
-              <Button
-                key={step.id}
-                size="small"
-                type={step.id === taskId ? 'primary' : 'default'}
-                onClick={() => onOpenTask?.(step.id)}
-                title={step.title}
-              >
-                {i + 1}. <Tag color={STATUS_COLORS[step.status]} style={{ marginInlineStart: 4 }}>
-                  {step.status}
-                </Tag>
-              </Button>
-            ))}
-          </div>
-        </div>
-      )}
+      {thread.length > 1 &&
+        (() => {
+          const ids = new Set(thread.map((t) => t.id))
+          const delegated = thread.some(
+            (t) => t.parent_task_id && ids.has(t.parent_task_id) && t.id !== taskId
+          )
+          const done = thread.filter((t) => t.status === 'completed').length
+          const failed = thread.filter((t) => t.status === 'failed').length
+          const active = thread.filter((t) =>
+            ['queued', 'running', 'awaiting_approval'].includes(t.status)
+          ).length
+          return (
+            <div style={{ marginBottom: 12 }}>
+              <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+                <ApartmentOutlined /> {delegated ? 'Delegated work' : 'Thread'} · {thread.length} tasks
+                {' · '}
+                {done} done{failed ? `, ${failed} failed` : ''}
+                {active ? `, ${active} active` : ''}
+              </Typography.Text>
+              <div style={{ marginTop: 6 }}>
+                {delegated ? (
+                  <DelegationTree thread={thread} currentId={taskId} onOpenTask={onOpenTask} />
+                ) : (
+                  <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
+                    {thread.map((step, i) => (
+                      <Button
+                        key={step.id}
+                        size="small"
+                        type={step.id === taskId ? 'primary' : 'default'}
+                        onClick={() => onOpenTask?.(step.id)}
+                        title={step.title}
+                      >
+                        {i + 1}.{' '}
+                        <Tag color={STATUS_COLORS[step.status]} style={{ marginInlineStart: 4 }}>
+                          {step.status}
+                        </Tag>
+                      </Button>
+                    ))}
+                  </div>
+                )}
+              </div>
+            </div>
+          )
+        })()}
 
       {task && (
         <Descriptions size="small" column={2} bordered style={{ marginBottom: 16 }}>
