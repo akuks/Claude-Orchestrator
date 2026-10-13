@@ -275,6 +275,48 @@ def test_project_env_roundtrips(client):
     assert u["env"] == {"APP_ENV": "staging"}
 
 
+def test_workflow_runs_stages_in_order(client):
+    import time
+    fe = client.post("/agents", json={"name": "WF-FE", "system_prompt": "ui", "default_prompt": "x"}).json()
+    be = client.post("/agents", json={"name": "WF-BE", "system_prompt": "api", "default_prompt": "x"}).json()
+    qa = client.post("/agents", json={"name": "WF-QA", "system_prompt": "qa", "default_prompt": "x"}).json()
+    wf = client.post("/workflows", json={
+        "name": "mini pipeline",
+        "stages": [
+            {"name": "Develop", "items": [
+                {"agent": "WF-FE", "prompt": "frontend for {{input}}"},
+                {"agent": "WF-BE", "prompt": "backend for {{input}}"},
+            ]},
+            {"name": "Test", "items": [{"agent": "WF-QA", "prompt": "test {{input}}"}]},
+        ],
+    }).json()
+    assert len(wf["stages"]) == 2
+    # Unknown agent rejected.
+    assert client.post("/workflows", json={
+        "name": "bad", "stages": [{"name": "s", "items": [{"agent": "nope", "prompt": "x"}]}]
+    }).status_code == 400
+
+    run = client.post(f"/workflows/{wf['id']}/run", json={"input": "issue #1"}).json()
+    assert run["status"] in ("running", "pending")
+
+    # Stage 0 creates 2 parallel tasks with {{input}} substituted.
+    board = client.get(f"/workflows/runs/{run['id']}").json()
+    s0 = [t for t in board["tasks"] if t["stage_index"] == 0]
+    assert len(s0) == 2 and all("issue #1" in t["prompt"] for t in s0)
+
+    # Runner advances through both stages to completion (mock tasks complete fast).
+    deadline = time.time() + 40
+    final = None
+    while time.time() < deadline:
+        final = client.get(f"/workflows/runs/{run['id']}").json()
+        if final["run"]["status"] in ("completed", "failed"):
+            break
+        time.sleep(1)
+    assert final["run"]["status"] == "completed"
+    # Stage 1 (Test) ran after stage 0.
+    assert any(t["stage_index"] == 1 for t in final["tasks"])
+
+
 def test_github_webhook_triggers_review(client):
     client.post(
         "/projects",
