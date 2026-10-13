@@ -329,6 +329,7 @@ class AgentCreate(BaseModel):
     requires_approval: bool = False  # gate every run at the task level
     allow_remote: bool = False  # permit outbound SSH/SCP/SFTP
     folder: str = ""  # UI grouping path, e.g. "Canonizer/Dev"
+    coordinator: bool = False  # can analyse + delegate to other agents
 
 
 class AgentUpdate(BaseModel):
@@ -345,6 +346,7 @@ class AgentUpdate(BaseModel):
     requires_approval: Optional[bool] = None
     allow_remote: Optional[bool] = None
     folder: Optional[str] = None
+    coordinator: Optional[bool] = None
 
 
 class AgentOut(BaseModel):
@@ -362,6 +364,7 @@ class AgentOut(BaseModel):
     requires_approval: bool = False
     allow_remote: bool = False
     folder: str = ""
+    coordinator: bool = False
     created_at: datetime
 
     model_config = {"from_attributes": True}
@@ -371,12 +374,25 @@ class AgentRun(BaseModel):
     prompt: Optional[str] = None  # overrides the agent's default_prompt
     project_id: Optional[str] = None  # overrides the agent's default project
     input_files: list[InputFile] = Field(default_factory=list)  # attached task files
+    parent_task_id: Optional[str] = None  # a coordinator dispatching a child
 
 
 class AgentBulkRun(BaseModel):
     # One task per prompt — upload a task list and the agent works through each.
     prompts: list[str] = Field(min_length=1)
     project_id: Optional[str] = None
+
+
+class DispatchItem(BaseModel):
+    agent: str  # agent id OR exact name
+    prompt: str = Field(min_length=1)
+
+
+class DispatchRequest(BaseModel):
+    # A coordinator fans out: create one child task per item, linked to parent.
+    items: list[DispatchItem] = Field(min_length=1, max_length=8)
+    parent_task_id: Optional[str] = None
+    project_id: Optional[str] = None  # default project for children
 
 
 class ScheduleCreate(BaseModel):

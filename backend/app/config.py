@@ -62,6 +62,8 @@ class Settings(BaseSettings):
     memory_call_timeout_seconds: int = 120
 
     # API
+    # Base URL a coordinator agent uses to dispatch to other agents (self-call).
+    api_base: str = "http://localhost:8200"
     cors_origins: list[str] = [
         "http://localhost:5173",
         "http://localhost:3000",

@@ -199,6 +199,10 @@ class Agent(Base):
     # Organisational folder path for the UI (slash-separated, e.g. "Canonizer/Dev").
     # Empty = ungrouped. Purely for display grouping.
     folder: Mapped[str] = mapped_column(String(200), default="")
+    # When true, this agent's tasks get a live registry of the other agents + the
+    # local API injected, so it can analyse work and delegate by dispatching
+    # child tasks to specialists (a coordinator / tech-lead).
+    coordinator: Mapped[bool] = mapped_column(default=False)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=_now)
 
 

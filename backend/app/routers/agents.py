@@ -10,6 +10,7 @@ from ..schemas import (
     AgentOut,
     AgentRun,
     AgentUpdate,
+    DispatchRequest,
     TaskOut,
 )
 from ..task_service import build_task
@@ -70,6 +71,26 @@ PRESETS = [
         "tags": ["security", "vapt"],
     },
     # ---- Dev team: role templates you instantiate onto a project ----
+    {
+        "name": "Tech Lead",
+        "category": _DEV_TEAM,
+        "description": "Analyses work and delegates to specialist agents (coordinator). Does not code itself.",
+        "system_prompt": (
+            "You are a pragmatic engineering tech lead / coordinator. You analyse "
+            "incoming work (a PR, spec, or bug report), break it into sub-tasks by "
+            "role, and delegate each to the right specialist agent — you do NOT "
+            "implement it yourself. Dispatch independent sub-tasks together so they "
+            "run in parallel; sequence dependent stages (test after code, deploy "
+            "after test). Keep each delegated prompt specific and self-contained. "
+            "Finish by reporting who you delegated what, and the child task ids."
+        ),
+        "default_prompt": "Analyse the work (PR number, spec, or description) and delegate it to the right agents.",
+        "max_turns": 30,
+        "max_budget_usd": 2.0,
+        "coordinator": True,
+        "requires_approval": True,  # review the delegation plan before it fans out
+        "tags": ["dev", "coordinator", "lead"],
+    },
     {
         "name": "Frontend Developer",
         "category": _DEV_TEAM,
@@ -206,6 +227,7 @@ async def create_agent(payload: AgentCreate):
             requires_approval=payload.requires_approval,
             allow_remote=payload.allow_remote,
             folder=payload.folder,
+            coordinator=payload.coordinator,
         )
         s.add(agent)
         await s.commit()
@@ -276,6 +298,7 @@ async def run_agent(agent_id: str, payload: AgentRun, request: Request):
             requires_approval=agent.requires_approval,
             allow_remote=agent.allow_remote,
             input_files=[f.model_dump() for f in payload.input_files],
+            parent_task_id=payload.parent_task_id,
         )
         await s.commit()
         await s.refresh(task)
@@ -285,6 +308,51 @@ async def run_agent(agent_id: str, payload: AgentRun, request: Request):
     if out.status != Status.AWAITING_APPROVAL:
         await request.app.state.worker.submit(out.id, out.priority, out.created_at)
     return out
+
+
+@router.post("/dispatch", response_model=list[TaskOut], status_code=201)
+async def dispatch(payload: DispatchRequest, request: Request):
+    """Coordinator fan-out: create one child task per item, each delegated to the
+    named agent and linked to the parent task, then submit them (worker runs them
+    in parallel). Reuses the normal agent-run path — no separate orchestration."""
+    from ..constants import Status
+
+    async with SessionLocal() as s:
+        # Resolve each target agent by id or exact name.
+        all_agents = (await s.execute(select(Agent))).scalars().all()
+        by_id = {a.id: a for a in all_agents}
+        by_name = {a.name: a for a in all_agents}
+        outs = []
+        for item in payload.items:
+            agent = by_id.get(item.agent) or by_name.get(item.agent)
+            if agent is None:
+                raise HTTPException(404, f"Agent not found: {item.agent}")
+            task = await build_task(
+                s,
+                prompt=item.prompt,
+                title=f"{agent.name}: {item.prompt.splitlines()[0][:60]}",
+                project_id=agent.project_id or payload.project_id,
+                model=agent.model or None,
+                max_turns=agent.max_turns,
+                max_budget_usd=agent.max_budget_usd,
+                priority=agent.priority,
+                tags=(agent.tags or []) + ["agent", "delegated"],
+                agent_id=agent.id,
+                system_prompt=agent.system_prompt or None,
+                requires_approval=agent.requires_approval,
+                allow_remote=agent.allow_remote,
+                parent_task_id=payload.parent_task_id,
+            )
+            outs.append(task)
+        await s.commit()
+        for t in outs:
+            await s.refresh(t)
+        results = [TaskOut.model_validate(t) for t in outs]
+
+    for o in results:
+        if o.status != Status.AWAITING_APPROVAL:
+            await request.app.state.worker.submit(o.id, o.priority, o.created_at)
+    return results
 
 
 @router.post("/{agent_id}/bulk", response_model=list[TaskOut], status_code=201)

@@ -20,7 +20,7 @@ from .config import settings
 from .constants import Priority, Status
 from .database import SessionLocal
 from .events import broker
-from .models import Artifact, McpCall, Project, Task, TaskEvent
+from .models import Agent, Artifact, McpCall, Project, Task, TaskEvent
 
 _MAX_TOOL_RESULT_CHARS = 2000
 
@@ -100,6 +100,50 @@ def _short(value) -> str:
         value = " ".join(str(p) for p in parts)
     text = str(value)
     return text[:_MAX_TOOL_RESULT_CHARS]
+
+
+async def _coordinator_context(s, task_id: str, me_id: str) -> str:
+    """Build the registry + delegation instructions injected into a coordinator's
+    prompt: the other agents it can delegate to, and how to dispatch to them."""
+    rows = (await s.execute(select(Agent).order_by(Agent.folder, Agent.name))).scalars().all()
+    lines = []
+    for a in rows:
+        if a.id == me_id or a.coordinator:
+            continue  # don't list self or other coordinators
+        flags = []
+        if a.requires_approval:
+            flags.append("approval-gated")
+        if a.allow_remote:
+            flags.append("ssh")
+        suffix = f" [{', '.join(flags)}]" if flags else ""
+        where = f" (project: {a.folder})" if a.folder else ""
+        lines.append(f'- "{a.name}"{where}{suffix}: {a.description or "—"}')
+    registry = "\n".join(lines) or "(no specialist agents available)"
+    base = settings.api_base.rstrip("/")
+    return (
+        "# You are a COORDINATOR (tech lead)\n"
+        "Analyse the task below, break it into sub-tasks, and DELEGATE each to the "
+        "right specialist agent — do not write the code yourself.\n\n"
+        "## Agents you can delegate to\n"
+        f"{registry}\n\n"
+        "## How to delegate\n"
+        "Dispatch all independent sub-tasks in ONE call so they run in parallel. "
+        "Use curl against the local orchestrator API:\n"
+        f"```\ncurl -s -X POST {base}/agents/dispatch -H 'Content-Type: application/json' -d '{{\n"
+        '  "parent_task_id": "' + task_id + '",\n'
+        '  "items": [\n'
+        '    {"agent": "<exact agent name>", "prompt": "<what that agent should do>"},\n'
+        '    {"agent": "<exact agent name>", "prompt": "<...>"}\n'
+        "  ]\n}'\n```\n"
+        "Each item becomes a real child task (shown under you). For a dependent stage "
+        "(e.g. test AFTER code, deploy AFTER test), dispatch the first stage, then "
+        f"poll each child with `curl -s {base}/tasks/<child_id>` until its status is "
+        "`completed` (abort the chain if one is `failed`), then dispatch the next "
+        "stage. Approval-gated agents (e.g. deploy) will sit in `awaiting_approval` "
+        "until a human approves — report that and move on; do not try to approve them.\n"
+        "Finish with a short summary: which agents you delegated what, and the child "
+        "task ids."
+    )
 
 
 class WorkerManager:
@@ -227,6 +271,7 @@ class WorkerManager:
             task_created_at = task.created_at
             system_prompt = task.system_prompt
             allow_remote = task.allow_remote
+            task_agent_id = task.agent_id
             workspace = Path(task.workspace_dir or (settings.workspaces_dir / task_id))
             # Per-project environment (toolchain scoping) for this task's subprocess.
             project_env = {}
@@ -234,6 +279,12 @@ class WorkerManager:
                 proj = await s.get(Project, task.project_id)
                 if proj and proj.env:
                     project_env = dict(proj.env)
+            # Coordinator: inject the live agent registry + how to delegate.
+            coordinator_block = None
+            if task_agent_id:
+                me = await s.get(Agent, task_agent_id)
+                if me is not None and me.coordinator:
+                    coordinator_block = await _coordinator_context(s, task_id, me.id)
             await s.commit()
 
         workspace.mkdir(parents=True, exist_ok=True)
@@ -246,6 +297,11 @@ class WorkerManager:
             if preamble:
                 prompt = f"{preamble}\n\n---\n\n# Task\n\n{prompt}"
                 await emit("context", ctx_log)
+
+        # Coordinator: prepend the agent registry + delegation instructions.
+        if coordinator_block and not resume_session_id:
+            prompt = f"{coordinator_block}\n\n---\n\n# Task\n\n{prompt}"
+            await emit("coordinator", {"agents_injected": True})
 
         # Resolve MCP servers for this task and write a per-task config BEFORE the
         # baseline snapshot so the generated config file isn't logged as an artifact.

@@ -68,13 +68,19 @@ async def build_task(
     system_prompt: str | None = None,
     requires_approval: bool = False,
     allow_remote: bool = True,
+    parent_task_id: str | None = None,
 ) -> Task:
     """Create a Task row (flushed, not committed) in the given session.
 
     When requires_approval is set, the task starts in `awaiting_approval` and is
     NOT submitted to the worker until a human approves it.
+
+    When parent_task_id is set (a coordinator dispatching a child), the new task
+    links to the parent and inherits its root_id, so it shows under the parent in
+    the existing thread view.
     """
     project_obj = await s.get(Project, project_id) if project_id else None
+    parent = await s.get(Task, parent_task_id) if parent_task_id else None
     resolved_model = model or (project_obj.default_model if project_obj else "")
 
     risk = classify_risk(prompt, project_id, tags)
@@ -100,10 +106,13 @@ async def build_task(
         allow_remote=allow_remote,
         requires_approval=gated,
         risk=risk,
+        parent_task_id=parent.id if parent else None,
     )
     s.add(task)
     await s.flush()  # assign id
-    task.root_id = task.id
+    # A dispatched child shares its coordinator's root so it shows in the same
+    # thread/board; otherwise a task is its own root.
+    task.root_id = parent.root_id if parent else task.id
 
     if project_obj:
         task.workspace_dir = project_obj.directory  # run in the repo
