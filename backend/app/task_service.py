@@ -69,6 +69,8 @@ async def build_task(
     requires_approval: bool = False,
     allow_remote: bool = True,
     parent_task_id: str | None = None,
+    workflow_run_id: str | None = None,
+    stage_index: int | None = None,
 ) -> Task:
     """Create a Task row (flushed, not committed) in the given session.
 
@@ -107,6 +109,8 @@ async def build_task(
         requires_approval=gated,
         risk=risk,
         parent_task_id=parent.id if parent else None,
+        workflow_run_id=workflow_run_id,
+        stage_index=stage_index,
     )
     s.add(task)
     await s.flush()  # assign id

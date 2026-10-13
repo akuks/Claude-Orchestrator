@@ -61,6 +61,9 @@ class Task(Base):
     # The agent that ran this task, and its role prompt (--append-system-prompt).
     agent_id: Mapped[str | None] = mapped_column(String(32), nullable=True, index=True)
     system_prompt: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Workflow linkage: set when this task belongs to a workflow run's stage.
+    workflow_run_id: Mapped[str | None] = mapped_column(String(32), nullable=True, index=True)
+    stage_index: Mapped[int | None] = mapped_column(Integer, nullable=True)
     # Whether this task may open outbound SSH/SCP/SFTP. False → ssh/scp/sftp are
     # added to --disallowedTools (deny wins even under bypassPermissions). Ad-hoc
     # tasks default True; agent tasks inherit the agent's allow_remote flag.
@@ -335,3 +338,39 @@ class McpCall(Base):
     tool: Mapped[str] = mapped_column(String(200))
     is_error: Mapped[bool] = mapped_column(default=False)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=_now, index=True)
+
+
+class Workflow(Base):
+    """A saved, reusable pipeline: ordered stages, each with one or more agent
+    steps that run in parallel. Run it on an input (PR/issue/description) and the
+    runner advances stage by stage.
+
+    stages shape (JSON):
+      [{"name": "Develop", "items": [{"agent": "<id|name>", "prompt": "..."}]}, ...]
+    Each item prompt may contain {{input}}, replaced with the run's input.
+    """
+
+    __tablename__ = "workflows"
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=_uuid)
+    name: Mapped[str] = mapped_column(String(200))
+    description: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    stages: Mapped[list] = mapped_column(JSON, default=list)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=_now)
+
+
+class WorkflowRun(Base):
+    """One execution of a workflow on a given input."""
+
+    __tablename__ = "workflow_runs"
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=_uuid)
+    workflow_id: Mapped[str] = mapped_column(String(32), index=True)
+    name: Mapped[str] = mapped_column(String(200))  # snapshot of workflow name
+    input: Mapped[str] = mapped_column(Text, default="")
+    # pending | running | paused | completed | failed
+    status: Mapped[str] = mapped_column(String(16), default="pending")
+    current_stage: Mapped[int] = mapped_column(Integer, default=0)
+    stages: Mapped[list] = mapped_column(JSON, default=list)  # snapshot at run time
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=_now, index=True)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=_now)

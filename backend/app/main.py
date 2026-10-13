@@ -26,9 +26,11 @@ from .routers import (
     templates,
     usage,
     webhooks,
+    workflows,
 )
 from .scheduler import Scheduler
 from .worker import WorkerManager
+from .workflow_runner import WorkflowRunner
 
 
 async def _mcp_health_loop():
@@ -78,6 +80,9 @@ async def lifespan(app: FastAPI):
     scheduler = Scheduler(worker)
     app.state.scheduler = scheduler
     await scheduler.start()
+    workflow_runner = WorkflowRunner(worker)
+    app.state.workflow_runner = workflow_runner
+    await workflow_runner.start()
     health_task = asyncio.create_task(_mcp_health_loop())
     approval_task = asyncio.create_task(_approval_timeout_loop())
     try:
@@ -85,6 +90,7 @@ async def lifespan(app: FastAPI):
     finally:
         health_task.cancel()
         approval_task.cancel()
+        await workflow_runner.stop()
         await scheduler.stop()
         await worker.stop()
 
@@ -110,6 +116,7 @@ app.include_router(usage.router)
 app.include_router(findings.router)
 app.include_router(webhooks.router)
 app.include_router(agents.router)
+app.include_router(workflows.router)
 
 
 @app.get("/health", tags=["meta"])

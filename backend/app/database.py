@@ -38,6 +38,8 @@ def _add_missing_columns(sync_conn) -> None:
             ("agent_id", "VARCHAR(32)"),
             ("system_prompt", "TEXT"),
             ("allow_remote", "BOOLEAN DEFAULT 1"),
+            ("workflow_run_id", "VARCHAR(32)"),
+            ("stage_index", "INTEGER"),
         ],
         "schedules": [
             ("requires_approval", "BOOLEAN DEFAULT 0"),

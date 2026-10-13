@@ -44,6 +44,8 @@ class Settings(BaseSettings):
 
     # Scheduling (Phase 4)
     scheduler_interval_seconds: int = 30
+    # How often the workflow runner advances active runs.
+    workflow_runner_interval_seconds: int = 5
 
     # Approvals (Phase 5): auto-reject pending approvals older than this.
     approval_timeout_seconds: int = 86400  # 24h; 0 disables auto-reject
