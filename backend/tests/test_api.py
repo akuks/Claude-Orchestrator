@@ -317,6 +317,32 @@ def test_workflow_runs_stages_in_order(client):
     assert any(t["stage_index"] == 1 for t in final["tasks"])
 
 
+def test_workflow_stage_chaining_feeds_prev_output(client):
+    # A later stage can build on an earlier stage's output via {{prev}}.
+    planner = client.post("/agents", json={"name": "WF-Plan", "system_prompt": "plan", "default_prompt": "x"}).json()
+    dev = client.post("/agents", json={"name": "WF-Dev2", "system_prompt": "build", "default_prompt": "x"}).json()
+    wf = client.post("/workflows", json={
+        "name": "chain pipeline",
+        "stages": [
+            {"name": "Plan", "items": [{"agent": "WF-Plan", "prompt": "plan {{input}}"}]},
+            {"name": "Build", "items": [{"agent": "WF-Dev2", "prompt": "build from plan:\n{{prev}}"}]},
+        ],
+    }).json()
+    run = client.post(f"/workflows/{wf['id']}/run", json={"input": "feature X"}).json()
+    import time
+    deadline = time.time() + 40
+    final = None
+    while time.time() < deadline:
+        final = client.get(f"/workflows/runs/{run['id']}").json()
+        if final["run"]["status"] in ("completed", "failed"):
+            break
+        time.sleep(1)
+    assert final["run"]["status"] == "completed"
+    # The mock claude echoes "done" as result_text; stage 1's prompt should contain it.
+    s1 = [t for t in final["tasks"] if t["stage_index"] == 1][0]
+    assert "build from plan:" in s1["prompt"] and "done" in s1["prompt"]
+
+
 def test_github_webhook_triggers_review(client):
     client.post(
         "/projects",
