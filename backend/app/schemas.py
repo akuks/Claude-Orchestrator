@@ -52,6 +52,8 @@ class TaskOut(BaseModel):
     schedule_id: Optional[str]
     agent_id: Optional[str] = None
     allow_remote: bool = True
+    workflow_run_id: Optional[str] = None
+    stage_index: Optional[int] = None
     requires_approval: bool = False
     risk: str = "info"
     decision_reason: Optional[str] = None
@@ -457,3 +459,56 @@ class ServerEntry(BaseModel):
     user: str = Field(min_length=1, max_length=64)
     pem: str = Field(min_length=1, max_length=500)  # path to the key on the host
     notes: Optional[str] = None
+
+
+# ---- Workflows (saved stage pipelines) ------------------------------------
+
+
+class WorkflowStageItem(BaseModel):
+    agent: str  # agent id or exact name
+    prompt: str = Field(min_length=1)
+
+
+class WorkflowStage(BaseModel):
+    name: str = Field(min_length=1, max_length=120)
+    items: list[WorkflowStageItem] = Field(min_length=1)
+
+
+class WorkflowCreate(BaseModel):
+    name: str = Field(min_length=1, max_length=200)
+    description: Optional[str] = None
+    stages: list[WorkflowStage] = Field(min_length=1)
+
+
+class WorkflowUpdate(BaseModel):
+    name: Optional[str] = None
+    description: Optional[str] = None
+    stages: Optional[list[WorkflowStage]] = None
+
+
+class WorkflowOut(BaseModel):
+    id: str
+    name: str
+    description: Optional[str]
+    stages: list
+    created_at: datetime
+
+    model_config = {"from_attributes": True}
+
+
+class WorkflowRunCreate(BaseModel):
+    input: str = ""  # the PR/issue/description this run acts on
+
+
+class WorkflowRunOut(BaseModel):
+    id: str
+    workflow_id: str
+    name: str
+    input: str
+    status: str
+    current_stage: int
+    stages: list
+    created_at: datetime
+    updated_at: datetime
+
+    model_config = {"from_attributes": True}
