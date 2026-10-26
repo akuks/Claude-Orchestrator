@@ -343,6 +343,37 @@ def test_workflow_stage_chaining_feeds_prev_output(client):
     assert "build from plan:" in s1["prompt"] and "done" in s1["prompt"]
 
 
+def test_schedule_does_not_stack_pending_runs(client):
+    # A gated schedule must not pile up duplicate approvals every tick.
+    import asyncio
+    import datetime
+
+    import app.scheduler as sched_mod
+    from app.database import SessionLocal
+    from app.models import Schedule
+
+    # A schedule whose task auto-gates (merging a PR = critical risk).
+    sch = client.post("/schedules", json={
+        "name": "GatedSched", "cron": "*/15 * * * *",
+        "prompt": "merge PR #9 into main", "enabled": True,
+    }).json()
+
+    async def drive():
+        sc = sched_mod.Scheduler(None)
+        for _ in range(2):  # two cadence firings, both forced due
+            async with SessionLocal() as s:
+                row = await s.get(Schedule, sch["id"])
+                row.next_run_at = datetime.datetime(2000, 1, 1)
+                await s.commit()
+            await sc._tick()
+
+    asyncio.run(drive())
+
+    runs = client.get(f"/schedules/{sch['id']}/runs").json()
+    pending = [r for r in runs if r["status"] == "awaiting_approval"]
+    assert len(pending) == 1, f"expected 1 pending run, got {len(pending)}"
+
+
 def test_github_webhook_triggers_review(client):
     client.post(
         "/projects",
