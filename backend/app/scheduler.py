@@ -14,7 +14,7 @@ from sqlalchemy import select
 from .config import settings
 from .constants import Status
 from .database import SessionLocal
-from .models import Agent, Schedule
+from .models import Agent, Schedule, Task
 from .task_service import build_task
 
 
@@ -105,6 +105,23 @@ class Scheduler:
             fired = []
             for sch in due:
                 if not is_valid_cron(sch.cron):
+                    continue
+                # Don't stack runs: if this schedule's previous run is still
+                # unresolved (waiting on approval, queued, or running), skip this
+                # firing and just advance the clock. Otherwise gated schedules pile
+                # up duplicate approvals every cadence.
+                active = (
+                    await s.execute(
+                        select(Task.id)
+                        .where(
+                            Task.schedule_id == sch.id,
+                            Task.status.in_(list(Status.ACTIVE)),
+                        )
+                        .limit(1)
+                    )
+                ).first()
+                if active is not None:
+                    sch.next_run_at = next_run(sch.cron, now)
                     continue
                 task = await build_from_schedule(s, sch, "scheduled")
                 sch.last_run_at = now
