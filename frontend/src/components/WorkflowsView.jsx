@@ -195,12 +195,38 @@ function RunBoard({ runId, onClose }) {
     return () => clearInterval(id)
   }, [refresh])
 
+  const act = async (fn, msg) => {
+    try {
+      await fn()
+      message.success(msg)
+      refresh()
+    } catch (e) {
+      message.error(e.message)
+    }
+  }
+
   if (!data) return null
   const { run, tasks } = data
   const stages = run.stages || []
+  const active = ['pending', 'running', 'paused'].includes(run.status)
 
   return (
-    <Modal open onCancel={onClose} onOk={onClose} width={720} footer={<Button onClick={onClose}>Close</Button>}
+    <Modal open onCancel={onClose} onOk={onClose} width={720}
+      footer={
+        <Space>
+          {run.status === 'failed' && (
+            <Button type="primary" onClick={() => act(() => api.retryWorkflowRun(run.id), 'Retrying failed stage')}>
+              Retry failed stage
+            </Button>
+          )}
+          {active && (
+            <Popconfirm title="Cancel this run and stop its tasks?" onConfirm={() => act(() => api.cancelWorkflowRun(run.id), 'Run cancelled')}>
+              <Button danger>Cancel run</Button>
+            </Popconfirm>
+          )}
+          <Button onClick={onClose}>Close</Button>
+        </Space>
+      }
       title={
         <Space>
           {run.name}

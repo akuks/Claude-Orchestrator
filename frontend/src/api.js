@@ -108,6 +108,7 @@ export const api = {
   listWorkflowRuns: () => req('GET', '/workflows/runs'),
   getWorkflowRun: (id) => req('GET', `/workflows/runs/${id}`),
   cancelWorkflowRun: (id) => req('POST', `/workflows/runs/${id}/cancel`),
+  retryWorkflowRun: (id) => req('POST', `/workflows/runs/${id}/retry`),
   listSchedules: () => req('GET', '/schedules'),
   createSchedule: (payload) => req('POST', '/schedules', payload),
   updateSchedule: (id, payload) => req('PATCH', `/schedules/${id}`, payload),
