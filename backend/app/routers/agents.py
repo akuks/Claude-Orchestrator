@@ -41,6 +41,7 @@ PRESETS = [
             "open pull requests awaiting my review, and anything urgent. End with a short "
             "'Top 3 for today' list."
         ),
+        "model": "haiku",
         "tags": ["personal", "brief"],
     },
     {
@@ -56,6 +57,7 @@ PRESETS = [
             "Produce my weekly review: what got done this week, key decisions, blockers, "
             "and open loops to carry into next week. Group by theme and keep it tight."
         ),
+        "model": "haiku",
         "tags": ["personal", "review"],
     },
     {
@@ -89,6 +91,7 @@ PRESETS = [
         "max_budget_usd": 2.0,
         "coordinator": True,
         "requires_approval": True,  # review the delegation plan before it fans out
+        "model": "sonnet",
         "tags": ["dev", "coordinator", "lead"],
     },
     {
@@ -106,6 +109,7 @@ PRESETS = [
         "default_prompt": "Implement the requested frontend change on this branch.",
         "max_turns": 30,
         "max_budget_usd": 2.0,
+        "model": "sonnet",
         "tags": ["dev", "frontend"],
     },
     {
@@ -122,6 +126,7 @@ PRESETS = [
         "default_prompt": "Implement the requested backend change on this branch.",
         "max_turns": 30,
         "max_budget_usd": 2.0,
+        "model": "sonnet",
         "tags": ["dev", "backend"],
     },
     {
@@ -138,6 +143,7 @@ PRESETS = [
         "default_prompt": "Implement the requested feature end-to-end on this branch.",
         "max_turns": 40,
         "max_budget_usd": 3.0,
+        "model": "sonnet",
         "tags": ["dev", "fullstack"],
     },
     {
@@ -155,6 +161,7 @@ PRESETS = [
         "default_prompt": "Review the changed files on the current branch and report findings.",
         "max_turns": 25,
         "max_budget_usd": 1.0,
+        "model": "haiku",
         "tags": ["dev", "review"],
     },
     {
@@ -171,6 +178,7 @@ PRESETS = [
         "default_prompt": "Add tests for the recent changes and run the suite; report results.",
         "max_turns": 30,
         "max_budget_usd": 2.0,
+        "model": "haiku",
         "tags": ["dev", "qa", "testing"],
     },
     {
@@ -196,6 +204,7 @@ PRESETS = [
         "max_budget_usd": 3.0,
         "requires_approval": True,  # deploys/infra changes are irreversible — always gated
         "allow_remote": True,  # may SSH in to deploy
+        "model": "sonnet",
         "tags": ["devops", "ops", "ssh"],
     },
 ]
