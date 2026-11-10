@@ -14,11 +14,12 @@ class Settings(BaseSettings):
     claude_bin: str = "claude"
     default_model: str = "sonnet"
     default_max_turns: int = 25
-    worker_concurrency: int = 3
+    worker_concurrency: int = 5
     task_timeout_seconds: int = 1800
     claude_permission_mode: str = "bypassPermissions"
     # Default per-task spend cap in USD (--max-budget-usd). None = uncapped.
-    default_task_budget_usd: float | None = None
+    # A sane global ceiling so no single task can run away; agents can override.
+    default_task_budget_usd: float | None = 2.0
     # Fallback model(s) if the primary is unavailable (--fallback-model). "" = off.
     fallback_model: str = ""
     # Auto-retry transient failures (rate limits / overload / network) with
@@ -60,7 +61,7 @@ class Settings(BaseSettings):
 
     # Projects & memory (Phase 3)
     projects_dir: Path = Path("./projects")
-    context_budget_tokens: int = 6000
+    context_budget_tokens: int = 3000  # injected project memory + summaries per task
     memory_enabled_default: bool = True
     memory_model: str = "haiku"
     memory_max_chars: int = 6000  # ~1500 tokens
