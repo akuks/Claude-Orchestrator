@@ -46,6 +46,9 @@ class Settings(BaseSettings):
     scheduler_interval_seconds: int = 30
     # How often the workflow runner advances active runs.
     workflow_runner_interval_seconds: int = 5
+    # Cap on how much of a stage's output is passed to later stages via {{prev}}
+    # / {{stageN}} — keeps chained input (and token cost) bounded.
+    workflow_stage_output_max_chars: int = 8000
 
     # Approvals (Phase 5): auto-reject pending approvals older than this.
     approval_timeout_seconds: int = 86400  # 24h; 0 disables auto-reject

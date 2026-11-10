@@ -65,11 +65,18 @@ async def _stage_outputs(s, run_id: str, up_to_stage: int) -> dict[int, str]:
             select(Task).where(Task.workflow_run_id == run_id, Task.stage_index < up_to_stage)
         )
     ).scalars().all()
+    from .config import settings
+
+    cap = settings.workflow_stage_output_max_chars
     out: dict[int, str] = {}
     for t in sorted(rows, key=lambda x: (x.stage_index or 0, x.created_at)):
         if t.result_text:
             out.setdefault(t.stage_index, "")
             out[t.stage_index] += (("\n\n" if out[t.stage_index] else "") + t.result_text)
+    # Cap each stage's chained output so later-stage input stays bounded.
+    for idx, text in out.items():
+        if len(text) > cap:
+            out[idx] = text[:cap] + f"\n\n…[truncated, {len(text) - cap} chars omitted]"
     return out
 
 
@@ -145,6 +152,55 @@ class WorkflowRunner:
     async def start_run(self, run_id: str):
         """Kick off a freshly created run (start stage 0) immediately."""
         await self._advance(run_id, first=True)
+
+    async def cancel_run(self, run_id: str) -> bool:
+        """Halt a run AND cancel its in-flight stage tasks (not just mark failed)."""
+        async with SessionLocal() as s:
+            run = await s.get(WorkflowRun, run_id)
+            if run is None or run.status not in ACTIVE_RUN:
+                return False
+            active_tasks = (
+                await s.execute(
+                    select(Task.id).where(
+                        Task.workflow_run_id == run.id,
+                        Task.status.in_(list(Status.ACTIVE)),
+                    )
+                )
+            ).scalars().all()
+            run.status = RUN_FAILED
+            await s.commit()
+        # Actually stop the subprocesses (terminates running, dequeues queued).
+        for tid in active_tasks:
+            try:
+                await self.worker.cancel(tid)
+            except Exception:
+                pass
+        return True
+
+    async def retry_run(self, run_id: str) -> bool:
+        """Re-run the current (failed) stage and continue the pipeline. Clears the
+        failed stage's prior tasks so the runner sees a clean attempt."""
+        from sqlalchemy import delete
+
+        async with SessionLocal() as s:
+            run = await s.get(WorkflowRun, run_id)
+            if run is None or run.status != RUN_FAILED:
+                return False
+            # Drop the current stage's previous (failed) tasks.
+            await s.execute(
+                delete(Task).where(
+                    Task.workflow_run_id == run.id,
+                    Task.stage_index == run.current_stage,
+                )
+            )
+            run.status = RUN_RUNNING
+            submits = await _start_stage(s, run, run.current_stage, self.worker)
+            await s.commit()
+            for t in submits:
+                await s.refresh(t)
+            results = [(t.id, t.priority, t.created_at, t.status) for t in submits]
+        await self._submit(results)
+        return True
 
     async def _tick(self):
         async with SessionLocal() as s:

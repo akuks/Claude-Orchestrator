@@ -197,13 +197,25 @@ async def get_run(run_id: str):
 
 
 @router.post("/runs/{run_id}/cancel", response_model=WorkflowRunOut)
-async def cancel_run(run_id: str):
+async def cancel_run(run_id: str, request: Request):
+    async with SessionLocal() as s:
+        if await s.get(WorkflowRun, run_id) is None:
+            raise HTTPException(404, "Run not found")
+    # Halt the run AND stop its in-flight stage tasks.
+    await request.app.state.workflow_runner.cancel_run(run_id)
+    async with SessionLocal() as s:
+        return WorkflowRunOut.model_validate(await s.get(WorkflowRun, run_id))
+
+
+@router.post("/runs/{run_id}/retry", response_model=WorkflowRunOut)
+async def retry_run(run_id: str, request: Request):
+    """Re-run the failed stage and continue the pipeline."""
     async with SessionLocal() as s:
         run = await s.get(WorkflowRun, run_id)
         if run is None:
             raise HTTPException(404, "Run not found")
-        if run.status in ("pending", "running", "paused"):
-            run.status = "failed"  # halt
-            await s.commit()
-            await s.refresh(run)
-        return WorkflowRunOut.model_validate(run)
+        if run.status != "failed":
+            raise HTTPException(400, "Only a failed run can be retried")
+    await request.app.state.workflow_runner.retry_run(run_id)
+    async with SessionLocal() as s:
+        return WorkflowRunOut.model_validate(await s.get(WorkflowRun, run_id))
