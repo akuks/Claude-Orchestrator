@@ -317,6 +317,36 @@ def test_workflow_runs_stages_in_order(client):
     assert any(t["stage_index"] == 1 for t in final["tasks"])
 
 
+def test_workflow_cancel_and_retry(client):
+    import time
+    be = client.post("/agents", json={"name": "WF-R", "system_prompt": "x", "default_prompt": "x"}).json()
+    wf = client.post("/workflows", json={
+        "name": "retry pipeline",
+        "stages": [{"name": "Build", "items": [{"agent": "WF-R", "prompt": "build {{input}}"}]}],
+    }).json()
+    run = client.post(f"/workflows/{wf['id']}/run", json={"input": "thing"}).json()
+
+    # Cancel mid-flight -> run fails and stage tasks are not left active.
+    client.post(f"/workflows/runs/{run['id']}/cancel")
+    time.sleep(1)
+    board = client.get(f"/workflows/runs/{run['id']}").json()
+    assert board["run"]["status"] == "failed"
+    assert all(t["status"] not in ("queued", "running") for t in board["tasks"])
+
+    # Retry a failed run -> re-runs the stage; with the mock it completes.
+    client.post(f"/workflows/runs/{run['id']}/retry")
+    deadline = time.time() + 40
+    final = None
+    while time.time() < deadline:
+        final = client.get(f"/workflows/runs/{run['id']}").json()
+        if final["run"]["status"] in ("completed", "failed"):
+            break
+        time.sleep(1)
+    assert final["run"]["status"] == "completed"
+    # Retrying a non-failed run is rejected.
+    assert client.post(f"/workflows/runs/{run['id']}/retry").status_code == 400
+
+
 def test_workflow_stage_chaining_feeds_prev_output(client):
     # A later stage can build on an earlier stage's output via {{prev}}.
     planner = client.post("/agents", json={"name": "WF-Plan", "system_prompt": "plan", "default_prompt": "x"}).json()
