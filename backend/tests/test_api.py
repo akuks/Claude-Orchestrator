@@ -408,6 +408,25 @@ def test_schedule_does_not_stack_pending_runs(client):
     assert len(pending) == 1, f"expected 1 pending run, got {len(pending)}"
 
 
+def test_read_only_agent_flag(client):
+    # Read-only is tool-enforced: it flows agent -> task.
+    presets = {p["name"]: p for p in client.get("/agents/presets").json()}
+    assert presets["Security Auditor"]["read_only"] is True
+    assert presets["Code Reviewer"]["read_only"] is True
+
+    a = client.post("/agents", json={
+        "name": "RO", "system_prompt": "review", "default_prompt": "review it",
+        "read_only": True,
+    }).json()
+    assert a["read_only"] is True
+    t = client.post(f"/agents/{a['id']}/run", json={}).json()
+    assert t["read_only"] is True
+    assert wait_task(client, t["id"])["status"] == "completed"
+    # Ad-hoc tasks are not read-only by default.
+    adhoc = client.post("/tasks", json={"prompt": "x"}).json()
+    assert adhoc["read_only"] is False
+
+
 def test_mcp_both_scope_applies_globally(client):
     # A "both"-scoped server has global reach (supersedes project scoping).
     import asyncio
