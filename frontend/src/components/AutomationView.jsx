@@ -21,6 +21,7 @@ import {
 } from 'antd'
 import {
   ApartmentOutlined,
+  BulbOutlined,
   ClockCircleOutlined,
   CloudServerOutlined,
   DeleteOutlined,
@@ -35,6 +36,7 @@ import dayjs from 'dayjs'
 import { api, STATUS_COLORS } from '../api'
 import AgentsView from './AgentsView'
 import ServersView from './ServersView'
+import SkillsView from './SkillsView'
 import WorkflowsView from './WorkflowsView'
 
 const MODEL_OPTS = [
@@ -588,6 +590,15 @@ export default function AutomationView({ projects = [] }) {
             </span>
           ),
           children: <ServersView projects={projects} />,
+        },
+        {
+          key: 'skills',
+          label: (
+            <span>
+              <BulbOutlined /> Skills
+            </span>
+          ),
+          children: <SkillsView projects={projects} />,
         },
         {
           key: 'templates',

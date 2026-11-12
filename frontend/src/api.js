@@ -109,6 +109,13 @@ export const api = {
   getWorkflowRun: (id) => req('GET', `/workflows/runs/${id}`),
   cancelWorkflowRun: (id) => req('POST', `/workflows/runs/${id}/cancel`),
   retryWorkflowRun: (id) => req('POST', `/workflows/runs/${id}/retry`),
+
+  // ---- Skill packs (Claude Code plugins) ----
+  listSkills: () => req('GET', '/skills'),
+  skillPresets: () => req('GET', '/skills/presets'),
+  installSkill: (payload) => req('POST', '/skills', payload),
+  updateSkill: (id, payload) => req('PATCH', `/skills/${id}`, payload),
+  deleteSkill: (id) => req('DELETE', `/skills/${id}`),
   listSchedules: () => req('GET', '/schedules'),
   createSchedule: (payload) => req('POST', '/schedules', payload),
   updateSchedule: (id, payload) => req('PATCH', `/schedules/${id}`, payload),
