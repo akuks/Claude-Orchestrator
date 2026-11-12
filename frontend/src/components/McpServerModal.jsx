@@ -71,7 +71,7 @@ export default function McpServerModal({ open, server, onClose, onSaved }) {
       if (isEdit) {
         const patch = {
           scope: v.scope,
-          project: v.scope === 'project' ? v.project : null,
+          project: ['project', 'both'].includes(v.scope) ? (v.project || null) : null,
           command: v.command,
           args,
           url: v.url,
@@ -85,7 +85,7 @@ export default function McpServerModal({ open, server, onClose, onSaved }) {
           name: v.name,
           transport: v.transport,
           scope: v.scope,
-          project: v.scope === 'project' ? v.project : null,
+          project: ['project', 'both'].includes(v.scope) ? (v.project || null) : null,
           command: v.command,
           args,
           url: v.url,
@@ -142,12 +142,13 @@ export default function McpServerModal({ open, server, onClose, onSaved }) {
         </div>
 
         <div style={{ display: 'flex', gap: 12 }}>
-          <Form.Item name="scope" label="Scope" style={{ width: 160 }}>
+          <Form.Item name="scope" label="Scope" style={{ width: 180 }}>
             <Select
               options={[
-                { value: 'team', label: 'Team-shared' },
-                { value: 'user', label: 'Per-user' },
-                { value: 'project', label: 'Per-project' },
+                { value: 'team', label: 'Team-shared (global)' },
+                { value: 'user', label: 'Per-user (global)' },
+                { value: 'project', label: 'Per-project only' },
+                { value: 'both', label: 'Both (global, overrides project)' },
               ]}
             />
           </Form.Item>
@@ -156,14 +157,14 @@ export default function McpServerModal({ open, server, onClose, onSaved }) {
             shouldUpdate={(p, c) => p.scope !== c.scope}
           >
             {({ getFieldValue }) =>
-              getFieldValue('scope') === 'project' ? (
+              ['project', 'both'].includes(getFieldValue('scope')) ? (
                 <Form.Item
                   name="project"
                   label="Project"
                   style={{ flex: 1 }}
-                  rules={[{ required: true }]}
+                  rules={[{ required: getFieldValue('scope') === 'project' }]}
                 >
-                  <Input placeholder="project name" />
+                  <Input placeholder={getFieldValue('scope') === 'both' ? 'project (optional)' : 'project name'} />
                 </Form.Item>
               ) : null
             }
