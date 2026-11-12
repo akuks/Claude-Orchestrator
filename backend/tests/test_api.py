@@ -408,6 +408,30 @@ def test_schedule_does_not_stack_pending_runs(client):
     assert len(pending) == 1, f"expected 1 pending run, got {len(pending)}"
 
 
+def test_skillpack_install_and_scope(client, tmp_path):
+    # Register a skill pack from a local plugin dir (no network).
+    plugin = tmp_path / "myskill"
+    (plugin / ".claude-plugin").mkdir(parents=True)
+    (plugin / ".claude-plugin" / "plugin.json").write_text(
+        '{"name": "myskill", "version": "1.0"}'
+    )
+    presets = client.get("/skills/presets").json()
+    assert any(p["name"] == "cybersecurity-skills" for p in presets)
+
+    pack = client.post("/skills", json={"local_path": str(plugin), "scope": "global"}).json()
+    assert pack["name"] == "myskill" and pack["version"] == "1.0" and pack["enabled"] is True
+    assert pack["local_path"] == str(plugin.resolve())
+    # Listed, and can be disabled.
+    assert any(p["id"] == pack["id"] for p in client.get("/skills").json())
+    off = client.patch(f"/skills/{pack['id']}", json={"enabled": False}).json()
+    assert off["enabled"] is False
+    # Needs a source or path.
+    assert client.post("/skills", json={"scope": "global"}).status_code == 400
+    # Delete keeps the user's local dir (only cloned dirs are removed).
+    assert client.delete(f"/skills/{pack['id']}").status_code == 204
+    assert plugin.exists()
+
+
 def test_github_webhook_triggers_review(client):
     client.post(
         "/projects",
