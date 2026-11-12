@@ -20,7 +20,7 @@ from .config import settings
 from .constants import Priority, Status
 from .database import SessionLocal
 from .events import broker
-from .models import Agent, Artifact, McpCall, Project, Task, TaskEvent
+from .models import Agent, Artifact, McpCall, Project, SkillPack, Task, TaskEvent
 
 _MAX_TOOL_RESULT_CHARS = 2000
 
@@ -287,6 +287,16 @@ class WorkerManager:
                 me = await s.get(Agent, task_agent_id)
                 if me is not None and me.coordinator:
                     coordinator_block = await _coordinator_context(s, task_id, me.id)
+            # Enabled skill packs (Claude Code plugins) for this task: global ones
+            # plus any scoped to this task's project.
+            plugin_dirs = []
+            packs = (
+                await s.execute(select(SkillPack).where(SkillPack.enabled.is_(True)))
+            ).scalars().all()
+            for p in packs:
+                if p.scope == "global" or (p.scope == "project" and p.project_id == task.project_id):
+                    if Path(p.local_path).exists():
+                        plugin_dirs.append(p.local_path)
             await s.commit()
 
         workspace.mkdir(parents=True, exist_ok=True)
@@ -336,6 +346,11 @@ class WorkerManager:
             cmd += ["--append-system-prompt", system_prompt]
         if resume_session_id:
             cmd += ["--resume", resume_session_id]
+        # Load enabled skill packs (Claude Code plugins) for this task.
+        for pd in plugin_dirs:
+            cmd += ["--plugin-dir", pd]
+        if plugin_dirs:
+            await emit("skills", {"plugin_dirs": plugin_dirs})
         allowed_tools = list(mcp["allowed"]) if mcp else []
         disallowed_tools = list(mcp["disallowed"]) if mcp else []
         # SSH is opt-in per agent: unless the task is remote-enabled, deny outbound

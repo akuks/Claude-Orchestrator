@@ -374,3 +374,23 @@ class WorkflowRun(Base):
     stages: Mapped[list] = mapped_column(JSON, default=list)  # snapshot at run time
     created_at: Mapped[datetime] = mapped_column(DateTime, default=_now, index=True)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=_now)
+
+
+class SkillPack(Base):
+    """An installed Claude Code plugin (skill pack), loaded into agent tasks via
+    --plugin-dir. Enable globally or scope to a project; tasks for that project
+    (or all tasks, if global) get the plugin's skills available."""
+
+    __tablename__ = "skill_packs"
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=_uuid)
+    name: Mapped[str] = mapped_column(String(120), unique=True, index=True)
+    description: Mapped[str | None] = mapped_column(String(1000), nullable=True)
+    source_url: Mapped[str | None] = mapped_column(String(500), nullable=True)  # git repo
+    local_path: Mapped[str] = mapped_column(String(500))  # dir passed to --plugin-dir
+    version: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    enabled: Mapped[bool] = mapped_column(default=True)
+    # "global" applies to every task; "project" applies only to its project_id.
+    scope: Mapped[str] = mapped_column(String(16), default="global")
+    project_id: Mapped[str | None] = mapped_column(String(32), nullable=True, index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=_now)

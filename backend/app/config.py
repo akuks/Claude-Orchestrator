@@ -59,6 +59,9 @@ class Settings(BaseSettings):
     # can never run unattended.
     gate_critical_approval: bool = True
 
+    # Skill packs (Claude Code plugins, loaded via --plugin-dir)
+    skillpacks_dir: Path = Path("./skillpacks")
+
     # Projects & memory (Phase 3)
     projects_dir: Path = Path("./projects")
     context_budget_tokens: int = 3000  # injected project memory + summaries per task
@@ -81,5 +84,7 @@ settings = Settings()
 # Absolute paths so workspace/MCP-config paths are unambiguous regardless of cwd.
 settings.workspaces_dir = settings.workspaces_dir.resolve()
 settings.projects_dir = settings.projects_dir.resolve()
+settings.skillpacks_dir = settings.skillpacks_dir.resolve()
 settings.workspaces_dir.mkdir(parents=True, exist_ok=True)
 settings.projects_dir.mkdir(parents=True, exist_ok=True)
+settings.skillpacks_dir.mkdir(parents=True, exist_ok=True)

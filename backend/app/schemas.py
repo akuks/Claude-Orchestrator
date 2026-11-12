@@ -512,3 +512,36 @@ class WorkflowRunOut(BaseModel):
     updated_at: datetime
 
     model_config = {"from_attributes": True}
+
+
+# ---- Skill packs (Claude Code plugins) ------------------------------------
+
+
+class SkillPackCreate(BaseModel):
+    name: Optional[str] = None  # derived from repo if omitted
+    source_url: Optional[str] = None  # git repo to clone
+    local_path: Optional[str] = None  # or an existing local plugin dir
+    description: Optional[str] = None
+    scope: str = "global"  # global | project
+    project_id: Optional[str] = None
+
+
+class SkillPackUpdate(BaseModel):
+    enabled: Optional[bool] = None
+    scope: Optional[str] = None
+    project_id: Optional[str] = None
+
+
+class SkillPackOut(BaseModel):
+    id: str
+    name: str
+    description: Optional[str]
+    source_url: Optional[str]
+    local_path: str
+    version: Optional[str]
+    enabled: bool
+    scope: str
+    project_id: Optional[str]
+    created_at: datetime
+
+    model_config = {"from_attributes": True}

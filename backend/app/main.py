@@ -21,6 +21,7 @@ from .routers import (
     mcp,
     projects,
     schedules,
+    skills,
     stream,
     tasks,
     templates,
@@ -117,6 +118,7 @@ app.include_router(findings.router)
 app.include_router(webhooks.router)
 app.include_router(agents.router)
 app.include_router(workflows.router)
+app.include_router(skills.router)
 
 
 @app.get("/health", tags=["meta"])
