@@ -47,7 +47,11 @@ async def servers_for_task(project: str | None) -> list[McpServer]:
         ).scalars().all()
     out = []
     for srv in rows:
-        if srv.scope in ("team", "user"):
+        # "team"/"user"/"both" are global — they apply to every task (global
+        # takes precedence). "both" additionally carries a project association,
+        # but its global reach supersedes project scoping. "project" applies only
+        # to its own project's tasks.
+        if srv.scope in ("team", "user", "both"):
             out.append(srv)
         elif srv.scope == "project" and project and srv.project == project:
             out.append(srv)

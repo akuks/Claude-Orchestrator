@@ -21,7 +21,7 @@ from ..schemas import (
 router = APIRouter(prefix="/mcp", tags=["mcp"])
 
 _VALID_TRANSPORTS = {"stdio", "http"}
-_VALID_SCOPES = {"team", "user", "project"}
+_VALID_SCOPES = {"team", "user", "project", "both"}
 _VALID_ACTIONS = {"auto_approve", "require_approval", "block"}
 
 
