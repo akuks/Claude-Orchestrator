@@ -158,6 +158,14 @@ function AgentModal({ open, agent, seed, projects, onClose, onSaved }) {
           <Switch />
         </Form.Item>
         <Form.Item
+          name="read_only"
+          label="Read-only (block code edits)"
+          valuePropName="checked"
+          extra="Tool-enforced: blocks Edit/Write/commit/push/merge so the agent cannot modify code. For reviewers and auditors."
+        >
+          <Switch />
+        </Form.Item>
+        <Form.Item
           name="coordinator"
           label="Coordinator (delegates to other agents)"
           valuePropName="checked"
@@ -473,6 +481,7 @@ export default function AgentsView({ projects = [] }) {
       priority: p.priority || 'normal',
       requires_approval: p.requires_approval ?? false,
       allow_remote: p.allow_remote ?? false,
+      read_only: p.read_only ?? false,
       coordinator: p.coordinator ?? false,
       folder: p.category || '',
       tags: p.tags || [],
@@ -505,6 +514,11 @@ export default function AgentsView({ projects = [] }) {
           {row.allow_remote && (
             <Tag color="geekblue" style={{ marginLeft: 6 }}>
               SSH
+            </Tag>
+          )}
+          {row.read_only && (
+            <Tag color="green" style={{ marginLeft: 6 }}>
+              read-only
             </Tag>
           )}
           {row.coordinator && (
