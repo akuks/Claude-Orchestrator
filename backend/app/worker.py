@@ -271,6 +271,7 @@ class WorkerManager:
             task_created_at = task.created_at
             system_prompt = task.system_prompt
             allow_remote = task.allow_remote
+            read_only = task.read_only
             task_agent_id = task.agent_id
             workspace = Path(task.workspace_dir or (settings.workspaces_dir / task_id))
             # Per-project environment (toolchain scoping) for this task's subprocess.
@@ -357,6 +358,14 @@ class WorkerManager:
         # ssh/scp/sftp. Deny rules win even under --permission-mode bypassPermissions.
         if not allow_remote:
             disallowed_tools += ["Bash(ssh:*)", "Bash(scp:*)", "Bash(sftp:*)"]
+        # Read-only agents cannot modify code: block file-edit tools and git writes.
+        # Deny rules win even under --permission-mode bypassPermissions.
+        if read_only:
+            disallowed_tools += [
+                "Edit", "Write", "MultiEdit", "NotebookEdit",
+                "Bash(git commit:*)", "Bash(git push:*)", "Bash(git merge:*)",
+                "Bash(git add:*)", "Bash(gh pr merge:*)",
+            ]
         if mcp:
             cmd += ["--mcp-config", mcp["config_path"], "--strict-mcp-config"]
             await emit(

@@ -70,6 +70,7 @@ PRESETS = [
             "with file:line, impact, and concrete remediation."
         ),
         "default_prompt": "Audit the changed files on the current branch for security issues.",
+        "read_only": True,
         "tags": ["security", "vapt"],
     },
     # ---- Dev team: role templates you instantiate onto a project ----
@@ -162,6 +163,7 @@ PRESETS = [
         "max_turns": 25,
         "max_budget_usd": 1.0,
         "model": "haiku",
+        "read_only": True,
         "tags": ["dev", "review"],
     },
     {
@@ -235,6 +237,7 @@ async def create_agent(payload: AgentCreate):
             tags=payload.tags,
             requires_approval=payload.requires_approval,
             allow_remote=payload.allow_remote,
+            read_only=payload.read_only,
             folder=payload.folder,
             coordinator=payload.coordinator,
         )
@@ -306,6 +309,7 @@ async def run_agent(agent_id: str, payload: AgentRun, request: Request):
             system_prompt=agent.system_prompt or None,
             requires_approval=agent.requires_approval,
             allow_remote=agent.allow_remote,
+            read_only=agent.read_only,
             input_files=[f.model_dump() for f in payload.input_files],
             parent_task_id=payload.parent_task_id,
         )
@@ -350,6 +354,7 @@ async def dispatch(payload: DispatchRequest, request: Request):
                 system_prompt=agent.system_prompt or None,
                 requires_approval=agent.requires_approval,
                 allow_remote=agent.allow_remote,
+                read_only=agent.read_only,
                 parent_task_id=payload.parent_task_id,
             )
             outs.append(task)
@@ -392,6 +397,7 @@ async def bulk_run_agent(agent_id: str, payload: AgentBulkRun, request: Request)
                     system_prompt=agent.system_prompt or None,
                     requires_approval=agent.requires_approval,
                     allow_remote=agent.allow_remote,
+                    read_only=agent.read_only,
                 )
             )
         await s.commit()

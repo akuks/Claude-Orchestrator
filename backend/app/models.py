@@ -68,6 +68,9 @@ class Task(Base):
     # added to --disallowedTools (deny wins even under bypassPermissions). Ad-hoc
     # tasks default True; agent tasks inherit the agent's allow_remote flag.
     allow_remote: Mapped[bool] = mapped_column(default=True)
+    # When true, file-mutating and git-write tools are blocked via
+    # --disallowedTools (tool-enforced read-only, e.g. a reviewer/auditor).
+    read_only: Mapped[bool] = mapped_column(default=False)
 
     # Approvals (Phase 5): a task requiring approval waits in `awaiting_approval`
     # until a human approves (→ queued) or rejects (→ cancelled).
@@ -199,6 +202,9 @@ class Agent(Base):
     # When true, this agent may open outbound SSH/SCP/SFTP (remote login).
     # Off by default: SSH is opt-in per agent.
     allow_remote: Mapped[bool] = mapped_column(default=False)
+    # When true, the agent cannot modify code — Edit/Write/commit/push are blocked
+    # via --disallowedTools (tool-enforced read-only for reviewers/auditors).
+    read_only: Mapped[bool] = mapped_column(default=False)
     # Organisational folder path for the UI (slash-separated, e.g. "Canonizer/Dev").
     # Empty = ungrouped. Purely for display grouping.
     folder: Mapped[str] = mapped_column(String(200), default="")

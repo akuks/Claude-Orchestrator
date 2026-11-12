@@ -52,6 +52,7 @@ class TaskOut(BaseModel):
     schedule_id: Optional[str]
     agent_id: Optional[str] = None
     allow_remote: bool = True
+    read_only: bool = False
     workflow_run_id: Optional[str] = None
     stage_index: Optional[int] = None
     requires_approval: bool = False
@@ -330,6 +331,7 @@ class AgentCreate(BaseModel):
     tags: list[str] = Field(default_factory=list)
     requires_approval: bool = False  # gate every run at the task level
     allow_remote: bool = False  # permit outbound SSH/SCP/SFTP
+    read_only: bool = False  # tool-enforced read-only (block Edit/Write/commit/push)
     folder: str = ""  # UI grouping path, e.g. "Canonizer/Dev"
     coordinator: bool = False  # can analyse + delegate to other agents
 
@@ -347,6 +349,7 @@ class AgentUpdate(BaseModel):
     tags: Optional[list[str]] = None
     requires_approval: Optional[bool] = None
     allow_remote: Optional[bool] = None
+    read_only: Optional[bool] = None
     folder: Optional[str] = None
     coordinator: Optional[bool] = None
 
@@ -365,6 +368,7 @@ class AgentOut(BaseModel):
     tags: list
     requires_approval: bool = False
     allow_remote: bool = False
+    read_only: bool = False
     folder: str = ""
     coordinator: bool = False
     created_at: datetime

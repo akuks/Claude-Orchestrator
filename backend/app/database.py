@@ -38,6 +38,7 @@ def _add_missing_columns(sync_conn) -> None:
             ("agent_id", "VARCHAR(32)"),
             ("system_prompt", "TEXT"),
             ("allow_remote", "BOOLEAN DEFAULT 1"),
+            ("read_only", "BOOLEAN DEFAULT 0"),
             ("workflow_run_id", "VARCHAR(32)"),
             ("stage_index", "INTEGER"),
         ],
@@ -48,6 +49,7 @@ def _add_missing_columns(sync_conn) -> None:
         "agents": [
             ("requires_approval", "BOOLEAN DEFAULT 0"),
             ("allow_remote", "BOOLEAN DEFAULT 0"),
+            ("read_only", "BOOLEAN DEFAULT 0"),
             ("folder", "VARCHAR(200) DEFAULT ''"),
             ("coordinator", "BOOLEAN DEFAULT 0"),
         ],
