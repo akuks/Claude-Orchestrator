@@ -408,6 +408,30 @@ def test_schedule_does_not_stack_pending_runs(client):
     assert len(pending) == 1, f"expected 1 pending run, got {len(pending)}"
 
 
+def test_mcp_both_scope_applies_globally(client):
+    # A "both"-scoped server has global reach (supersedes project scoping).
+    import asyncio
+    from app import mcp_manager
+    from app.database import SessionLocal
+    from app.models import McpServer
+
+    async def check():
+        async with SessionLocal() as s:
+            s.add(McpServer(name="both-srv", transport="stdio", scope="both",
+                            project="ProjA", command="echo", enabled=True))
+            s.add(McpServer(name="proj-srv", transport="stdio", scope="project",
+                            project="ProjA", command="echo", enabled=True))
+            await s.commit()
+        # For a DIFFERENT project, the "both" server still applies; the
+        # project-only one does not.
+        names = {x.name for x in await mcp_manager.servers_for_task("ProjB")}
+        return names
+
+    names = asyncio.run(check())
+    assert "both-srv" in names  # global reach
+    assert "proj-srv" not in names  # project-only, different project
+
+
 def test_skillpack_install_and_scope(client, tmp_path):
     # Register a skill pack from a local plugin dir (no network).
     plugin = tmp_path / "myskill"
