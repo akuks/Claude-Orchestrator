@@ -408,6 +408,31 @@ def test_schedule_does_not_stack_pending_runs(client):
     assert len(pending) == 1, f"expected 1 pending run, got {len(pending)}"
 
 
+def test_mcp_config_written_outside_workspace(client, tmp_path):
+    # The MCP config (vault secrets) must NOT land in the agent's working dir.
+    import asyncio
+    from app import mcp_manager
+    from app.database import SessionLocal
+    from app.models import McpServer
+
+    async def run():
+        async with SessionLocal() as s:
+            s.add(McpServer(name="cfg-srv", transport="stdio", scope="team",
+                            command="echo", enabled=True))
+            await s.commit()
+        workspace = tmp_path / "repo"  # pretend agent cwd / project repo
+        workspace.mkdir()
+        config_dir = tmp_path / "_mcp_configs" / "task1"  # dedicated, outside cwd
+        mcp = await mcp_manager.prepare_for_task(None, config_dir)
+        return workspace, config_dir, mcp
+
+    workspace, config_dir, mcp = asyncio.run(run())
+    # Config exists in the dedicated dir, NOT in the workspace (repo).
+    assert (config_dir / ".mcp-config.json").exists()
+    assert not (workspace / ".mcp-config.json").exists()
+    assert mcp and str(config_dir) in mcp["config_path"]
+
+
 def test_read_only_agent_flag(client):
     # Read-only is tool-enforced: it flows agent -> task.
     presets = {p["name"]: p for p in client.get("/agents/presets").json()}
