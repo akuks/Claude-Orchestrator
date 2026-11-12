@@ -316,9 +316,12 @@ class WorkerManager:
             prompt = f"{coordinator_block}\n\n---\n\n# Task\n\n{prompt}"
             await emit("coordinator", {"agents_injected": True})
 
-        # Resolve MCP servers for this task and write a per-task config BEFORE the
-        # baseline snapshot so the generated config file isn't logged as an artifact.
-        mcp = await mcp_manager.prepare_for_task(project, workspace)
+        # Resolve MCP servers for this task and write the per-task config to a
+        # dedicated area that is NEVER any task's working directory (not the repo,
+        # not the sandbox cwd), so the config's vault secrets can't be read in — or
+        # committed from — the agent's cwd. --mcp-config uses the absolute path.
+        mcp_config_dir = settings.workspaces_dir / "_mcp_configs" / task_id
+        mcp = await mcp_manager.prepare_for_task(project, mcp_config_dir)
 
         # Repo-backed project tasks: skip artifact diffing (git tracks changes and
         # scanning a whole repo is slow/noisy). Sandbox tasks still collect outputs.

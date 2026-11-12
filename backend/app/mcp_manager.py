@@ -74,17 +74,26 @@ def build_config(servers: list[McpServer]) -> dict:
     return {"mcpServers": cfg}
 
 
-async def prepare_for_task(project: str | None, workspace: Path) -> dict | None:
-    """Write a per-task MCP config and resolve allow/deny tool lists from policy."""
+async def prepare_for_task(project: str | None, config_dir: Path) -> dict | None:
+    """Write a per-task MCP config and resolve allow/deny tool lists from policy.
+
+    The config holds vault secrets, so it is written to config_dir — a per-task
+    location OUTSIDE the agent's working directory (never the project repo) — so
+    an agent can't read or accidentally commit it. --mcp-config takes the absolute
+    path, so the file does not need to live in the cwd.
+    """
     servers = await servers_for_task(project)
     if not servers:
         return None
 
     cfg = build_config(servers)
-    # Absolute path — Claude resolves --mcp-config against its cwd (the workspace),
-    # so a relative path would be doubled and "not found".
-    path = (workspace / ".mcp-config.json").resolve()
+    config_dir.mkdir(parents=True, exist_ok=True)
+    path = (config_dir / ".mcp-config.json").resolve()
     path.write_text(json.dumps(cfg, indent=2))
+    try:
+        path.chmod(0o600)  # owner-only
+    except OSError:
+        pass
 
     name_by_id = {s.id: s.name for s in servers}
     async with SessionLocal() as s:
