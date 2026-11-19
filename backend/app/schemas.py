@@ -614,3 +614,20 @@ class UserOut(BaseModel):
     last_login_at: Optional[datetime] = None
 
     model_config = {"from_attributes": True}
+
+
+class UserCreate(BaseModel):
+    email: str = Field(min_length=3, max_length=320)
+    name: str = Field(default="", max_length=200)
+    role: str = "member"
+    password: str
+
+
+class UserPatch(BaseModel):
+    name: Optional[str] = Field(default=None, max_length=200)
+    role: Optional[str] = None
+    active: Optional[bool] = None
+
+
+class PasswordResetIn(BaseModel):
+    password: str

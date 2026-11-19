@@ -29,6 +29,7 @@ from .routers import (
     tasks,
     templates,
     usage,
+    users,
     webhooks,
     workflows,
 )
@@ -132,6 +133,7 @@ for _r in (
     workflows.router,
     skills.router,
     context_docs.router,
+    users.router,
 ):
     app.include_router(_r, dependencies=_authed)
 
