@@ -8,6 +8,8 @@ class Settings(BaseSettings):
 
     # Storage
     database_url: str = "sqlite+aiosqlite:///./claude_orchestrator.db"
+    # Disable connection pooling (tests: asyncpg connections can't cross event loops).
+    db_null_pool: bool = False
     workspaces_dir: Path = Path("./workspaces")
 
     # Claude Code worker

@@ -1,9 +1,12 @@
+import asyncio
+
 from sqlalchemy.ext.asyncio import (
     AsyncSession,
     async_sessionmaker,
     create_async_engine,
 )
 from sqlalchemy.orm import DeclarativeBase
+from sqlalchemy.pool import NullPool
 
 from .config import settings
 
@@ -12,7 +15,12 @@ class Base(DeclarativeBase):
     pass
 
 
-engine = create_async_engine(settings.database_url, echo=False, future=True)
+engine = create_async_engine(
+    settings.database_url,
+    echo=False,
+    future=True,
+    **({"poolclass": NullPool} if settings.db_null_pool else {}),
+)
 SessionLocal = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
 
 
@@ -103,13 +111,48 @@ def _add_missing_columns(sync_conn) -> None:
         pass
 
 
-async def init_db() -> None:
-    # Import models so they register with Base.metadata before create_all.
-    from . import models  # noqa: F401
+def run_migrations(url: str) -> None:
+    """Bring the database at `url` to the latest schema (blocking).
 
-    async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
-        await conn.run_sync(_add_missing_columns)
+    A legacy SQLite DB created by the old create_all path has tables but no
+    alembic_version: patch its missing columns, then stamp it at the baseline
+    so `upgrade head` does not try to recreate anything."""
+    from pathlib import Path
+
+    from alembic import command
+    from alembic.config import Config
+    from sqlalchemy import inspect
+
+    backend_dir = Path(__file__).resolve().parent.parent
+    cfg = Config(str(backend_dir / "alembic.ini"))
+    cfg.set_main_option("script_location", str(backend_dir / "migrations"))
+    cfg.attributes["url"] = url
+
+    async def _detect_legacy() -> bool:
+        eng = create_async_engine(url)
+        try:
+            async with eng.begin() as conn:
+
+                def _check(sync_conn) -> bool:
+                    tables = set(inspect(sync_conn).get_table_names())
+                    if "alembic_version" in tables or "tasks" not in tables:
+                        return False
+                    if sync_conn.dialect.name == "sqlite":
+                        _add_missing_columns(sync_conn)
+                    return True
+
+                return await conn.run_sync(_check)
+        finally:
+            await eng.dispose()
+
+    legacy = asyncio.run(_detect_legacy())
+    if legacy:
+        command.stamp(cfg, "0001")
+    command.upgrade(cfg, "head")
+
+
+async def init_db() -> None:
+    await asyncio.to_thread(run_migrations, settings.database_url)
 
 
 async def get_session() -> AsyncSession:

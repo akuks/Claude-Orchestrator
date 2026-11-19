@@ -28,9 +28,11 @@ fi
 )
 _MOCK.chmod(0o755)
 
+# A pre-set CO_DATABASE_URL (e.g. the Postgres CI job) wins over the temp SQLite DB.
+os.environ.setdefault("CO_DATABASE_URL", f"sqlite+aiosqlite:///{_TMP}/test.db")
 os.environ.update(
     {
-        "CO_DATABASE_URL": f"sqlite+aiosqlite:///{_TMP}/test.db",
+        "CO_DB_NULL_POOL": "1",
         "CO_WORKSPACES_DIR": f"{_TMP}/workspaces",
         "CO_PROJECTS_DIR": f"{_TMP}/projects",
         "CO_SECRET_KEY_FILE": f"{_TMP}/.secret.key",
