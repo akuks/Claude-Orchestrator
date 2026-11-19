@@ -1,3 +1,4 @@
+import asyncio
 import time
 from collections import defaultdict, deque
 
@@ -54,6 +55,17 @@ def _set_cookie(request: Request, response: Response, raw: str) -> None:
     )
 
 
+# Serializes the "no users yet" check + insert in setup and bootstrap_admin so
+# concurrent first-admin creation can't yield two admins. Single-process server
+# assumed (like the lockout). One lock per event loop (tests use several loops).
+_setup_locks: dict = {}
+
+
+def _setup_lock() -> asyncio.Lock:
+    loop = asyncio.get_running_loop()
+    return _setup_locks.setdefault(loop, asyncio.Lock())
+
+
 async def _current(s, request: Request) -> tuple[User, str]:
     # Local helper; Task 4 replaces it with the shared dependency.
     raw = request.cookies.get(COOKIE)
@@ -67,7 +79,7 @@ async def bootstrap_admin() -> None:
     """Create the env-configured admin when there are no users."""
     if not (settings.admin_email and settings.admin_password):
         return
-    async with SessionLocal() as s:
+    async with _setup_lock(), SessionLocal() as s:
         if (await s.execute(select(func.count()).select_from(User))).scalar_one() > 0:
             return
         s.add(
@@ -97,7 +109,7 @@ async def setup(body: SetupIn, request: Request, response: Response):
         auth.validate_password(body.password)
     except ValueError as e:
         raise HTTPException(422, str(e))
-    async with SessionLocal() as s:
+    async with _setup_lock(), SessionLocal() as s:
         if await _user_count(s) > 0:
             raise HTTPException(409, "Setup already completed")
         user = User(

@@ -69,7 +69,7 @@ def test_setup_only_when_no_users(tmp_path, monkeypatch):
         r = c.post("/auth/setup", json={"email": "b@x.com", "name": "B", "password": "longenough123"})
         assert r.status_code == 409
         short = c.post("/auth/setup", json={"email": "b@x.com", "name": "B", "password": "short"})
-        assert short.status_code in (409, 422)
+        assert short.status_code == 422
     asyncio.run(eng.dispose())
 
 
@@ -142,3 +142,35 @@ def test_password_change_revokes_other_sessions(client):
     assert c1.get("/auth/me").status_code == 200
     assert c2.get("/auth/me").status_code == 401
     assert _fresh().post("/auth/login", json={"email": "pw@test.local", "password": "new-password-123"}).status_code == 200
+
+
+def test_concurrent_setup_creates_exactly_one_admin(tmp_path, monkeypatch):
+    import httpx
+    from sqlalchemy import func, select
+
+    from app.database import Base
+    from app.models import User
+    from app.routers import auth as auth_router
+
+    async def go():
+        eng = create_async_engine(f"sqlite+aiosqlite:///{tmp_path}/race.db")
+        async with eng.begin() as c:
+            await c.run_sync(Base.metadata.create_all)
+        sm = async_sessionmaker(eng, expire_on_commit=False)
+        monkeypatch.setattr(auth_router, "SessionLocal", sm)
+        app = FastAPI()
+        app.include_router(auth_router.router)
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://t") as c:
+            rs = await asyncio.gather(
+                *[
+                    c.post("/auth/setup", json={"email": f"a{i}@x.com", "name": "A", "password": "longenough123"})
+                    for i in range(2)
+                ]
+            )
+        async with sm() as s:
+            n = (await s.execute(select(func.count()).select_from(User))).scalar_one()
+        await eng.dispose()
+        return sorted(r.status_code for r in rs), n
+
+    codes, n = asyncio.run(go())
+    assert codes == [201, 409] and n == 1
