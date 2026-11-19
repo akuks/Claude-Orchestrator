@@ -189,4 +189,4 @@ def test_scheduler_skips_disabled_owner(client, member_client):
     finally:
         _set_active(MEMBER_EMAIL, True)
     assert n == 0
-    assert nxt > datetime.datetime(2001, 1, 1)  # clock advanced, no tight loop
+    assert nxt.replace(tzinfo=None) > datetime.datetime(2001, 1, 1)  # clock advanced, no tight loop
