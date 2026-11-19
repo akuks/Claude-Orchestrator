@@ -1,19 +1,29 @@
 // Thin fetch wrapper around the orchestrator REST API. Relative URLs are
 // proxied to the backend by Vite in dev (see vite.config.js).
 
+let unauthorizedHandler = null
+export function setUnauthorizedHandler(fn) {
+  unauthorizedHandler = fn
+}
+// 401s from these are expected (bad creds / no session yet) and handled by callers.
+const NO_401_HOOK = ['/auth/login', '/auth/logout', '/auth/me', '/auth/setup']
+
 async function req(method, path, body) {
-  const opts = { method, headers: {} }
+  const opts = { method, headers: { 'X-Requested-With': 'co' }, credentials: 'same-origin' }
   if (body !== undefined) {
     opts.headers['Content-Type'] = 'application/json'
     opts.body = JSON.stringify(body)
   }
   const res = await fetch(path, opts)
+  if (res.status === 401 && !NO_401_HOOK.includes(path)) unauthorizedHandler?.()
   if (!res.ok) {
     let detail = res.statusText
     try {
       detail = (await res.json()).detail || detail
     } catch (_) {}
-    throw new Error(detail)
+    const err = new Error(typeof detail === 'string' ? detail : JSON.stringify(detail))
+    err.status = res.status
+    throw err
   }
   if (res.status === 204) return null
   return res.json()
@@ -27,6 +37,19 @@ function qs(params = {}) {
 }
 
 export const api = {
+  // ---- Auth & users ----
+  setupStatus: () => req('GET', '/auth/setup-status'),
+  setup: (payload) => req('POST', '/auth/setup', payload),
+  login: (email, password) => req('POST', '/auth/login', { email, password }),
+  logout: () => req('POST', '/auth/logout'),
+  me: () => req('GET', '/auth/me'),
+  changePassword: (current_password, new_password) =>
+    req('POST', '/auth/password', { current_password, new_password }),
+  listUsers: () => req('GET', '/users'),
+  createUser: (payload) => req('POST', '/users', payload),
+  updateUser: (id, payload) => req('PATCH', `/users/${id}`, payload),
+  resetUserPassword: (id, password) => req('POST', `/users/${id}/reset-password`, { password }),
+
   listTasks: (params = {}) => {
     const qs = new URLSearchParams(
       Object.entries(params).filter(([, v]) => v != null && v !== '')
