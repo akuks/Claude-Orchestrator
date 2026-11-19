@@ -105,3 +105,41 @@ def test_bad_role_and_unknown_user(client):
     assert client.patch(f"/users/{u['id']}", json={"role": "root"}).status_code == 400
     assert client.patch("/users/nope", json={"name": "x"}).status_code == 404
     assert client.post("/users/nope/reset-password", json={"password": PW}).status_code == 404
+
+
+def test_inactive_admin_does_not_count_for_last_admin_guard(client):
+    me = client.get("/auth/me").json()
+    ghost = _mk(client, "ghost-admin@test.local", role="admin")
+    try:
+        assert client.patch(f"/users/{ghost['id']}", json={"active": False}).status_code == 200
+        # Only an inactive admin besides me: I am still the last ACTIVE admin.
+        assert client.patch(f"/users/{me['id']}", json={"role": "member"}).status_code == 400
+        assert client.patch(f"/users/{me['id']}", json={"active": False}).status_code == 400
+    finally:
+        client.patch(f"/users/{ghost['id']}", json={"role": "member"})
+    assert client.get("/auth/me").json()["role"] == "admin"
+
+
+def test_sole_admin_combined_demote_and_disable_400(client):
+    me = client.get("/auth/me").json()
+    r = client.patch(f"/users/{me['id']}", json={"role": "member", "active": False})
+    assert r.status_code == 400
+    assert client.get("/auth/me").json()["role"] == "admin"
+
+
+def test_admin_self_demote_ok_when_another_active_admin(client):
+    u = _mk(client, "demote-self@test.local", role="admin")
+    c, r = _login("demote-self@test.local", PW)
+    assert r.status_code == 200
+    r = c.patch(f"/users/{u['id']}", json={"role": "member"})
+    assert r.status_code == 200 and r.json()["role"] == "member"
+    assert c.get("/users").status_code == 403
+
+
+def test_admin_self_disable_ok_then_session_dead(client):
+    u = _mk(client, "disable-self@test.local", role="admin")
+    c, r = _login("disable-self@test.local", PW)
+    assert r.status_code == 200
+    r = c.patch(f"/users/{u['id']}", json={"active": False})
+    assert r.status_code == 200 and r.json()["active"] is False
+    assert c.get("/auth/me").status_code == 401
