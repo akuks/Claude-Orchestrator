@@ -46,3 +46,24 @@ def test_legacy_db_is_stamped_not_recreated(tmp_path):
     run_migrations(f"sqlite+aiosqlite:///{db}")
     assert _alembic_version(db) is not None
     assert _count(db, "projects") == 1
+
+
+def test_legacy_db_missing_table_and_column_is_repaired(tmp_path):
+    db = tmp_path / "old.db"
+    _make_legacy_db(db)
+    engine = create_engine(f"sqlite:///{db}")
+    with Session(engine) as s:
+        s.add(models.Task(id="t1", title="old", prompt="hi"))
+        s.commit()
+    engine.dispose()
+    with sqlite3.connect(db) as c:
+        c.execute("DROP TABLE context_docs")
+        c.execute("ALTER TABLE tasks DROP COLUMN read_only")
+    run_migrations(f"sqlite+aiosqlite:///{db}")
+    assert "context_docs" in _tables(db)
+    with sqlite3.connect(db) as c:
+        cols = {r[1] for r in c.execute("PRAGMA table_info(tasks)")}
+        row = c.execute("SELECT id, prompt, read_only FROM tasks").fetchall()
+    assert "read_only" in cols
+    assert row == [("t1", "hi", 0)]
+    assert _alembic_version(db) == "0001"

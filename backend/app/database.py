@@ -139,6 +139,11 @@ def run_migrations(url: str) -> None:
                         return False
                     if sync_conn.dialect.name == "sqlite":
                         _add_missing_columns(sync_conn)
+                    # Tables added after this DB was first created (create_all
+                    # only creates the missing ones).
+                    from . import models  # noqa: F401
+
+                    Base.metadata.create_all(sync_conn)
                     return True
 
                 return await conn.run_sync(_check)
