@@ -18,6 +18,7 @@ from .models import ApiToken, AuthSession, User, _now
 
 _ph = PasswordHasher()
 MIN_PASSWORD_LEN = 10
+AGENT_TOKEN_MAX_TTL_SECONDS = 24 * 3600  # hard cap for agent-task tokens
 
 
 def normalize_email(email: str) -> str:
@@ -93,6 +94,8 @@ async def revoke_user_sessions(s, user_id: str, except_raw: str | None = None) -
 async def mint_token(
     s, user_id: str, purpose: str, task_id: str | None, ttl_seconds: int
 ) -> str:
+    if purpose == "agent-task":
+        ttl_seconds = min(ttl_seconds, AGENT_TOKEN_MAX_TTL_SECONDS)
     raw = "co_" + secrets.token_urlsafe(32)
     s.add(
         ApiToken(

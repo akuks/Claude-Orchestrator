@@ -10,7 +10,7 @@ from sqlalchemy import (
     String,
     Text,
 )
-from sqlalchemy.orm import Mapped, mapped_column, relationship
+from sqlalchemy.orm import Mapped, mapped_column, relationship, validates
 
 from .constants import Priority, Status
 from .database import Base
@@ -438,6 +438,11 @@ class User(Base):
     active: Mapped[bool] = mapped_column(default=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
     last_login_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    @validates("email")
+    def _normalize_email(self, _key, value: str) -> str:
+        # Enforced at the model so no code path can bypass case-insensitive uniqueness.
+        return value.strip().lower()
 
 
 class AuthSession(Base):

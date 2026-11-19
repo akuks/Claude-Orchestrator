@@ -111,29 +111,54 @@ def _add_missing_columns(sync_conn) -> None:
         pass
 
 
-# Tables created by migrations after the 0001 baseline. Legacy-DB repair must not
-# create_all these, or the later `upgrade head` would collide. Append per migration.
-_POST_BASELINE_TABLES = {"users", "auth_sessions", "api_tokens"}
+def _alembic_cfg(url: str):
+    from pathlib import Path
+
+    from alembic.config import Config
+
+    backend_dir = Path(__file__).resolve().parent.parent
+    cfg = Config(str(backend_dir / "alembic.ini"))
+    cfg.set_main_option("script_location", str(backend_dir / "migrations"))
+    cfg.attributes["url"] = url
+    return cfg
+
+
+def _baseline_metadata(cfg):
+    """Frozen 0001 schema: run Alembic to the baseline on a scratch SQLite file and
+    reflect it. Immune to later model changes (new columns/tables)."""
+    import tempfile
+    from pathlib import Path
+
+    from alembic import command
+    from sqlalchemy import MetaData, create_engine
+
+    with tempfile.TemporaryDirectory(prefix="co-baseline-") as d:
+        scratch = Path(d) / "baseline.db"
+        cfg.attributes["url"] = f"sqlite+aiosqlite:///{scratch}"
+        command.upgrade(cfg, "0001")
+        eng = create_engine(f"sqlite:///{scratch}")
+        try:
+            md = MetaData()
+            md.reflect(eng)
+        finally:
+            eng.dispose()
+    md.remove(md.tables["alembic_version"])
+    return md
 
 
 def run_migrations(url: str) -> None:
     """Bring the database at `url` to the latest schema (blocking).
 
     A legacy SQLite DB created by the old create_all path has tables but no
-    alembic_version: patch its missing columns, then stamp it at the baseline
-    so `upgrade head` does not try to recreate anything."""
-    from pathlib import Path
-
+    alembic_version: patch its missing columns, create any missing baseline
+    tables from the frozen 0001 schema, then stamp it at the baseline so
+    `upgrade head` applies only later migrations."""
     from alembic import command
-    from alembic.config import Config
     from sqlalchemy import inspect
 
-    backend_dir = Path(__file__).resolve().parent.parent
-    cfg = Config(str(backend_dir / "alembic.ini"))
-    cfg.set_main_option("script_location", str(backend_dir / "migrations"))
-    cfg.attributes["url"] = url
+    cfg = _alembic_cfg(url)
 
-    async def _detect_legacy() -> bool:
+    async def _is_legacy() -> bool:
         eng = create_async_engine(url)
         try:
             async with eng.begin() as conn:
@@ -144,27 +169,26 @@ def run_migrations(url: str) -> None:
                         return False
                     if sync_conn.dialect.name == "sqlite":
                         _add_missing_columns(sync_conn)
-                    # Tables added after this DB was first created (create_all
-                    # only creates the missing ones).
-                    from . import models  # noqa: F401
-
-                    # Only baseline tables: later ones come from `upgrade head`.
-                    Base.metadata.create_all(
-                        sync_conn,
-                        tables=[
-                            t
-                            for t in Base.metadata.sorted_tables
-                            if t.name not in _POST_BASELINE_TABLES
-                        ],
-                    )
                     return True
 
                 return await conn.run_sync(_check)
         finally:
             await eng.dispose()
 
-    legacy = asyncio.run(_detect_legacy())
+    async def _create_missing(baseline) -> None:
+        eng = create_async_engine(url)
+        try:
+            async with eng.begin() as conn:
+                # checkfirst (default) skips tables the legacy DB already has.
+                await conn.run_sync(lambda c: baseline.create_all(c))
+        finally:
+            await eng.dispose()
+
+    legacy = asyncio.run(_is_legacy())
     if legacy:
+        baseline = _baseline_metadata(cfg)
+        cfg.attributes["url"] = url
+        asyncio.run(_create_missing(baseline))
         command.stamp(cfg, "0001")
     command.upgrade(cfg, "head")
 

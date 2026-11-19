@@ -4,7 +4,7 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import Session
 
 from app import models
-from app.database import _POST_BASELINE_TABLES, Base, run_migrations
+from app.database import _alembic_cfg, _baseline_metadata, run_migrations
 
 
 def _tables(db) -> set[str]:
@@ -25,11 +25,8 @@ def _count(db, table) -> int:
 
 def _make_legacy_db(db) -> None:
     engine = create_engine(f"sqlite:///{db}")
-    # A legacy DB predates the auth tables (they arrive via migration 0002).
-    Base.metadata.create_all(
-        engine,
-        tables=[t for t in Base.metadata.sorted_tables if t.name not in _POST_BASELINE_TABLES],
-    )
+    # A legacy DB has exactly the frozen baseline (0001) schema, no alembic_version.
+    _baseline_metadata(_alembic_cfg("sqlite+aiosqlite://")).create_all(engine)
     with Session(engine) as s:
         s.add(models.Project(id="p1", name="legacy", slug="legacy", directory="/x"))
         s.commit()
