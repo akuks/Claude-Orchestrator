@@ -4,7 +4,7 @@ import re
 from datetime import datetime, timezone
 from pathlib import Path
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel
 from sqlalchemy import func, select
 
@@ -59,7 +59,7 @@ def _to_out(project: Project, count: int = 0, cost: float = 0.0) -> ProjectOut:
 
 
 @router.post("", response_model=ProjectOut, status_code=201)
-async def create_project(payload: ProjectCreate):
+async def create_project(payload: ProjectCreate, request: Request):
     if payload.default_model not in VALID_MODELS:
         raise HTTPException(400, f"Invalid model. Use one of {sorted(VALID_MODELS)}")
     slug = _slugify(payload.name)
@@ -89,6 +89,7 @@ async def create_project(payload: ProjectCreate):
             github_repo=payload.github_repo,
             auto_review_prs=payload.auto_review_prs,
             env=payload.env,
+            created_by=request.state.principal.user.id,
         )
         s.add(project)
         await s.commit()
@@ -205,7 +206,7 @@ class ImportRequest(BaseModel):
 
 
 @router.post("/import", response_model=list[ProjectOut])
-async def import_projects(payload: ImportRequest):
+async def import_projects(payload: ImportRequest, request: Request):
     """Bulk-create projects from a list of directories (skips already-added)."""
     created: list[Project] = []
     async with SessionLocal() as s:
@@ -228,6 +229,7 @@ async def import_projects(payload: ImportRequest):
                 directory=d,
                 default_model=settings.default_model,
                 memory_enabled=settings.memory_enabled_default,
+                created_by=request.state.principal.user.id,
             )
             s.add(project)
             existing_dirs.add(d)

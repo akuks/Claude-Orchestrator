@@ -58,7 +58,7 @@ async def list_presets():
 
 
 @router.post("", response_model=TemplateOut, status_code=201)
-async def create_template(payload: TemplateCreate):
+async def create_template(payload: TemplateCreate, request: Request):
     if payload.model and payload.model not in VALID_MODELS:
         raise HTTPException(400, f"Invalid model. Use one of {sorted(VALID_MODELS)}")
     async with SessionLocal() as s:
@@ -71,6 +71,7 @@ async def create_template(payload: TemplateCreate):
             max_turns=payload.max_turns,
             priority=payload.priority,
             tags=payload.tags,
+            created_by=request.state.principal.user.id,
         )
         s.add(tpl)
         await s.commit()
@@ -112,6 +113,7 @@ async def run_template(template_id: str, request: Request):
             max_turns=tpl.max_turns,
             priority=tpl.priority,
             tags=tpl.tags,
+            created_by=request.state.principal.user.id,
         )
         await s.commit()
         await s.refresh(task)

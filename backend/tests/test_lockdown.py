@@ -225,7 +225,7 @@ def thread(client):
     """root A (coordinator run) → child C (dispatched) → grandchild G; unrelated B."""
     lead = client.post("/agents", json={
         "name": "TokLead", "system_prompt": "delegate", "default_prompt": "coordinate",
-        "coordinator": True,
+        "coordinator": True, "requires_approval": True,
     }).json()
     client.post("/agents", json={"name": "TokWorker", "system_prompt": "w", "default_prompt": "x"})
     a = client.post(f"/agents/{lead['id']}/run", json={}).json()

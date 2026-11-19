@@ -114,6 +114,7 @@ async def _start_stage(s, run: WorkflowRun, stage_index: int, worker) -> list[st
             allow_remote=agent.allow_remote,
             workflow_run_id=run.id,
             stage_index=stage_index,
+            created_by=run.created_by,
         )
         submits.append(task)
     return submits

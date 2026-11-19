@@ -58,6 +58,8 @@ class TaskOut(BaseModel):
     requires_approval: bool = False
     risk: str = "info"
     decision_reason: Optional[str] = None
+    created_by: Optional[str] = None
+    decided_by: Optional[str] = None
     thread_count: int = 1  # number of steps in this task's thread
     created_at: datetime
     started_at: Optional[datetime]

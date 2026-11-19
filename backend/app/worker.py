@@ -15,7 +15,7 @@ from pathlib import Path
 
 from sqlalchemy import func, select
 
-from . import context_store, mcp_manager, memory, notifications, security
+from . import auth, context_store, mcp_manager, memory, notifications, security
 from .config import settings
 from .constants import Priority, Status
 from .database import SessionLocal
@@ -129,7 +129,7 @@ async def _coordinator_context(s, task_id: str, me_id: str) -> str:
         "## How to delegate\n"
         "Dispatch all independent sub-tasks in ONE call so they run in parallel. "
         "Use curl against the local orchestrator API:\n"
-        f"```\ncurl -s -X POST {base}/agents/dispatch -H 'Content-Type: application/json' -d '{{\n"
+        f"```\ncurl -s -X POST {base}/agents/dispatch -H \"Authorization: Bearer $CO_API_TOKEN\" -H 'Content-Type: application/json' -d '{{\n"
         '  "parent_task_id": "' + task_id + '",\n'
         '  "items": [\n'
         '    {"agent": "<exact agent name>", "prompt": "<what that agent should do>"},\n'
@@ -137,7 +137,7 @@ async def _coordinator_context(s, task_id: str, me_id: str) -> str:
         "  ]\n}'\n```\n"
         "Each item becomes a real child task (shown under you). For a dependent stage "
         "(e.g. test AFTER code, deploy AFTER test), dispatch the first stage, then "
-        f"poll each child with `curl -s {base}/tasks/<child_id>` until its status is "
+        f"poll each child with `curl -s -H \"Authorization: Bearer $CO_API_TOKEN\" {base}/tasks/<child_id>` until its status is "
         "`completed` (abort the chain if one is `failed`), then dispatch the next "
         "stage. Approval-gated agents (e.g. deploy) will sit in `awaiting_approval` "
         "until a human approves — report that and move on; do not try to approve them.\n"
@@ -273,6 +273,7 @@ class WorkerManager:
             allow_remote = task.allow_remote
             read_only = task.read_only
             task_agent_id = task.agent_id
+            task_owner = task.created_by
             workspace = Path(task.workspace_dir or (settings.workspaces_dir / task_id))
             # Per-project environment (toolchain scoping) for this task's subprocess.
             project_env = {}
@@ -417,6 +418,20 @@ class WorkerManager:
             if prepend:
                 sub_env["PATH"] = f"{prepend}{os.pathsep}{sub_env.get('PATH', '')}"
             await emit("env", {"applied": sorted(project_env.keys()) + (["PATH_PREPEND"] if prepend else [])})
+
+        # Scoped agent token: lets a coordinator call back into the API as the
+        # task's owner (dispatch + read own tree). Env only - never in the prompt,
+        # workspace files, events or logs. Ownerless (legacy) tasks run without one.
+        if task_owner:
+            async with SessionLocal() as s:
+                sub_env["CO_API_TOKEN"] = await auth.mint_token(
+                    s,
+                    task_owner,
+                    "agent-task",
+                    task_id,
+                    ttl_seconds=min(settings.task_timeout_seconds, 86400),
+                )
+                await s.commit()
 
         try:
             proc = await asyncio.create_subprocess_exec(
@@ -672,6 +687,9 @@ class WorkerManager:
         artifacts: list[dict] | None = None,
     ) -> None:
         context_store.cleanup(task_id)  # drop this task's knowledge snapshot
+        async with SessionLocal() as s:
+            await auth.revoke_task_tokens(s, task_id)
+            await s.commit()
         async with SessionLocal() as s:
             task = await s.get(Task, task_id)
             if task is None:

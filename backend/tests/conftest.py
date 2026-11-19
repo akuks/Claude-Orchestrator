@@ -15,6 +15,11 @@ _MOCK.write_text(
     """#!/usr/bin/env bash
 args="$*"
 cat >/dev/null
+# Test seam: report whether the scoped agent token reached the subprocess env
+# (presence only, never the value).
+if [[ -n "$CO_TEST_ENV_PROBE" ]]; then
+  if [[ -n "$CO_API_TOKEN" ]]; then echo present >"$CO_TEST_ENV_PROBE"; else echo absent >"$CO_TEST_ENV_PROBE"; fi
+fi
 if [[ "$args" == *"stream-json"* ]]; then
   printf '{"type":"system","subtype":"init","session_id":"test-session"}\\n'
   printf '{"type":"assistant","message":{"model":"claude-test","content":[{"type":"text","text":"working"}]}}\\n'

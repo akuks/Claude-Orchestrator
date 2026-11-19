@@ -79,6 +79,7 @@ async def _approval_timeout_loop():
 async def lifespan(app: FastAPI):
     await init_db()
     await auth.bootstrap_admin()
+    await auth.assign_orphans_to_first_admin()
     worker = WorkerManager()
     app.state.worker = worker
     await worker.start()

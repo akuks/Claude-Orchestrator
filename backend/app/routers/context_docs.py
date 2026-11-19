@@ -90,6 +90,7 @@ async def create_doc(payload: ContextDocCreate, p: Principal = Depends(current_p
             scope=payload.scope,
             project_id=project_id,
             enabled=payload.enabled,
+            created_by=p.user.id,
         )
         s.add(doc)
         await s.commit()

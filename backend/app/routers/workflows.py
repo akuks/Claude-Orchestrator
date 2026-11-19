@@ -98,11 +98,11 @@ async def _validate_agents(s, stages: list) -> None:
 
 
 @router.post("", response_model=WorkflowOut, status_code=201)
-async def create_workflow(payload: WorkflowCreate):
+async def create_workflow(payload: WorkflowCreate, request: Request):
     stages = [st.model_dump() for st in payload.stages]
     async with SessionLocal() as s:
         await _validate_agents(s, stages)
-        wf = Workflow(name=payload.name, description=payload.description, stages=stages)
+        wf = Workflow(name=payload.name, description=payload.description, stages=stages, created_by=request.state.principal.user.id)
         s.add(wf)
         await s.commit()
         await s.refresh(wf)
@@ -157,6 +157,7 @@ async def run_workflow(workflow_id: str, payload: WorkflowRunCreate, request: Re
             stages=wf.stages,
             status="pending",
             current_stage=0,
+            created_by=request.state.principal.user.id,
         )
         s.add(run)
         await s.commit()

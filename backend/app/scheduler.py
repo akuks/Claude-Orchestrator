@@ -39,6 +39,7 @@ async def build_from_schedule(s, sch: Schedule, title_suffix: str):
             requires_approval=sch.requires_approval or agent.requires_approval,
             allow_remote=agent.allow_remote,
             read_only=agent.read_only,
+            created_by=sch.created_by,
         )
     return await build_task(
         s,
@@ -51,6 +52,7 @@ async def build_from_schedule(s, sch: Schedule, title_suffix: str):
         tags=sch.tags,
         schedule_id=sch.id,
         requires_approval=sch.requires_approval,
+        created_by=sch.created_by,
     )
 
 

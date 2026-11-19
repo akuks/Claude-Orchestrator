@@ -84,6 +84,37 @@ async def bootstrap_admin() -> None:
         await s.commit()
 
 
+async def assign_orphans_to(user_id: str) -> None:
+    """Give every pre-ownership row (created_by NULL) to this user."""
+    from sqlalchemy import update
+
+    from ..models import (
+        Agent, ContextDoc, Project, Schedule, Task, Template, Workflow, WorkflowRun,
+    )
+
+    async with SessionLocal() as s:
+        for model in (Task, Schedule, Agent, Workflow, WorkflowRun, Project, Template, ContextDoc):
+            await s.execute(
+                update(model).where(model.created_by.is_(None)).values(created_by=user_id)
+            )
+        await s.commit()
+
+
+async def assign_orphans_to_first_admin() -> None:
+    """Startup: hand legacy rows to the earliest-created active admin, if any."""
+    async with SessionLocal() as s:
+        admin_id = (
+            await s.execute(
+                select(User.id)
+                .where(User.role == "admin", User.active.is_(True))
+                .order_by(User.created_at, User.id)
+                .limit(1)
+            )
+        ).scalar_one_or_none()
+    if admin_id:
+        await assign_orphans_to(admin_id)
+
+
 async def _user_count(s) -> int:
     return (await s.execute(select(func.count()).select_from(User))).scalar_one()
 
@@ -114,8 +145,10 @@ async def setup(body: SetupIn, request: Request, response: Response):
         await s.flush()
         raw = await auth.create_session(s, user, request.headers.get("user-agent"))
         await s.commit()
+        admin_id = user.id
         _set_cookie(request, response, raw)
-        return user
+    await assign_orphans_to(admin_id)
+    return user
 
 
 @router.post("/login", response_model=UserOut)

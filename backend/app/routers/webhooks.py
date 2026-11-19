@@ -81,6 +81,7 @@ async def github_webhook(
             model="opus",
             max_turns=60,
             tags=["security", "vapt", "code-review", "auto"],
+            created_by=project.created_by,
         )
         info = (task.id, task.priority, task.created_at, task.status)
         await s.commit()

@@ -27,9 +27,13 @@ def _make_legacy_db(db) -> None:
     engine = create_engine(f"sqlite:///{db}")
     # A legacy DB has exactly the frozen baseline (0001) schema, no alembic_version.
     _baseline_metadata(_alembic_cfg("sqlite+aiosqlite://")).create_all(engine)
-    with Session(engine) as s:
-        s.add(models.Project(id="p1", name="legacy", slug="legacy", directory="/x"))
-        s.commit()
+    # Raw SQL: the ORM model now has columns the frozen baseline lacks.
+    with engine.begin() as c:
+        c.exec_driver_sql(
+            "INSERT INTO projects (id, name, slug, directory, default_model, env, memory,"
+            " memory_enabled, archived, auto_review_prs, created_at)"
+            " VALUES ('p1', 'legacy', 'legacy', '/x', 'sonnet', '{}', '', 1, 0, 0, CURRENT_TIMESTAMP)"
+        )
     engine.dispose()
 
 
@@ -38,7 +42,7 @@ def test_fresh_db_migrates_to_head(tmp_path):
     run_migrations(url)
     tables = _tables(tmp_path / "fresh.db")
     assert {"tasks", "projects", "context_docs", "alembic_version"} <= tables
-    assert _alembic_version(tmp_path / "fresh.db") == "0002"
+    assert _alembic_version(tmp_path / "fresh.db") == "0003"
 
 
 def test_legacy_db_is_stamped_not_recreated(tmp_path):
@@ -53,9 +57,13 @@ def test_legacy_db_missing_table_and_column_is_repaired(tmp_path):
     db = tmp_path / "old.db"
     _make_legacy_db(db)
     engine = create_engine(f"sqlite:///{db}")
-    with Session(engine) as s:
-        s.add(models.Task(id="t1", title="old", prompt="hi"))
-        s.commit()
+    with engine.begin() as c:
+        c.exec_driver_sql(
+            "INSERT INTO tasks (id, title, prompt, status, priority, tags, model, max_turns,"
+            " attempt, allow_remote, read_only, requires_approval, risk, created_at)"
+            " VALUES ('t1', 'old', 'hi', 'queued', 'normal', '[]', '', 25, 0, 1, 0, 0, 'info',"
+            " CURRENT_TIMESTAMP)"
+        )
     engine.dispose()
     with sqlite3.connect(db) as c:
         c.execute("DROP TABLE context_docs")
@@ -67,5 +75,5 @@ def test_legacy_db_missing_table_and_column_is_repaired(tmp_path):
         row = c.execute("SELECT id, prompt, read_only FROM tasks").fetchall()
     assert "read_only" in cols
     assert row == [("t1", "hi", 0)]
-    assert _alembic_version(db) == "0002"
+    assert _alembic_version(db) == "0003"
     assert "users" in _tables(db)
