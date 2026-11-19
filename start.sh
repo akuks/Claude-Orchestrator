@@ -3,6 +3,7 @@
 # First run creates the backend venv and installs deps. Ctrl+C stops both.
 #
 # Ports are configurable:  CO_BACKEND_PORT (default 8200)  CO_FRONTEND_PORT (default 5200)
+# Bind address: CO_BIND_HOST (default 127.0.0.1); proxy IPs: CO_FORWARDED_ALLOW_IPS
 
 set -e
 ROOT="$(cd "$(dirname "$0")" && pwd)"
@@ -31,7 +32,10 @@ lsof -ti "tcp:$FRONTEND_PORT" 2>/dev/null | xargs kill 2>/dev/null || true
 
 # --- launch ---
 cd "$ROOT/backend"
-./.venv/bin/uvicorn app.main:app --host 0.0.0.0 --port "$BACKEND_PORT" &
+# Binds localhost by default. Behind a reverse proxy, set CO_FORWARDED_ALLOW_IPS to the
+# proxy's IP so the login lockout sees real client IPs. Single process: no --workers.
+./.venv/bin/uvicorn app.main:app --host "${CO_BIND_HOST:-127.0.0.1}" --port "$BACKEND_PORT" \
+  --proxy-headers --forwarded-allow-ips "${CO_FORWARDED_ALLOW_IPS:-127.0.0.1}" &
 BACKEND_PID=$!
 
 cd "$ROOT/frontend"
