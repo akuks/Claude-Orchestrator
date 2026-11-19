@@ -20,7 +20,7 @@ from .config import settings
 from .constants import Priority, Status
 from .database import SessionLocal
 from .events import broker
-from .models import Agent, Artifact, McpCall, Project, SkillPack, Task, TaskEvent
+from .models import Agent, Artifact, McpCall, Project, SkillPack, Task, TaskEvent, User
 
 _MAX_TOOL_RESULT_CHARS = 2000
 
@@ -243,6 +243,16 @@ class WorkerManager:
                 await s.commit()
             await broker.publish(task_id, {"seq": seq, "type": etype, "payload": payload})
 
+        # A disabled user's queued/automated tasks must not run.
+        async with SessionLocal() as s:
+            t0 = await s.get(Task, task_id)
+            owner = await s.get(User, t0.created_by) if t0 and t0.created_by else None
+            owner_disabled = owner is not None and not owner.active
+        if owner_disabled:
+            await emit("error", {"message": "Task owner is disabled"})
+            await self._finish(task_id, Status.FAILED, error="Task owner is disabled")
+            return
+
         # Load + mark running (or short-circuit if cancelled while queued).
         async with SessionLocal() as s:
             task = await s.get(Task, task_id)
@@ -411,7 +421,10 @@ class WorkerManager:
         # Build the subprocess environment: inherited env + the project's env.
         # PATH_PREPEND is prepended to PATH (toolchain scoping, e.g. a project-
         # specific PHP/Node) rather than replacing it.
-        sub_env = os.environ.copy()
+        # Server config (CO_*: admin password, DB URL, secret key...) must not reach
+        # the agent, which a member can make print its env. CO_API_TOKEN is re-added
+        # below for tasks that have an owner.
+        sub_env = {k: v for k, v in os.environ.items() if not k.startswith("CO_")}
         if project_env:
             prepend = project_env.pop("PATH_PREPEND", None)
             sub_env.update({k: str(v) for k, v in project_env.items()})

@@ -11,7 +11,7 @@ from datetime import datetime, timedelta, timezone
 
 from argon2 import PasswordHasher
 from argon2.exceptions import InvalidHashError, VerificationError
-from fastapi import Depends, HTTPException, Request, WebSocket
+from fastapi import Depends, HTTPException, Request, Response, WebSocket
 from sqlalchemy import delete, select, update
 
 from .config import settings
@@ -69,7 +69,17 @@ async def create_session(s, user: User, user_agent: str | None) -> str:
     return raw
 
 
+SLIDE_AFTER_SECONDS = 60  # refresh a session at most once a minute
+
+
 async def resolve_session(s, raw: str) -> User | None:
+    found = await resolve_session_slide(s, raw)
+    return found[0] if found else None
+
+
+async def resolve_session_slide(s, raw: str) -> tuple[User, bool] | None:
+    """Return (user, slid). `slid` means expiry was extended (and last_seen_at
+    written), so the caller should re-send the cookie with a fresh max_age."""
     sess = await s.get(AuthSession, _sha(raw))
     if sess is None:
         return None
@@ -79,10 +89,13 @@ async def resolve_session(s, raw: str) -> User | None:
     user = await s.get(User, sess.user_id)
     if user is None or not user.active:
         return None
-    sess.expires_at = now + timedelta(days=settings.session_ttl_days)
-    sess.last_seen_at = now
-    await s.flush()
-    return user
+    slid = False
+    if (now - _aware(sess.last_seen_at)).total_seconds() >= SLIDE_AFTER_SECONDS:
+        sess.expires_at = now + timedelta(days=settings.session_ttl_days)
+        sess.last_seen_at = now
+        slid = True
+        await s.flush()
+    return user, slid
 
 
 async def revoke_user_sessions(s, user_id: str, except_raw: str | None = None) -> None:
@@ -152,6 +165,19 @@ class Principal:
 # --------------------------------------------------------------------------
 
 SESSION_COOKIE = "co_session"
+
+
+def set_session_cookie(request: Request, response: Response, raw: str) -> None:
+    response.set_cookie(
+        SESSION_COOKIE,
+        raw,
+        httponly=True,
+        samesite="lax",
+        secure=(request.url.scheme == "https"),
+        max_age=settings.session_ttl_days * 86400,
+        path="/",
+    )
+
 CSRF_HEADER = "X-Requested-With"
 _SAFE_METHODS = {"GET", "HEAD", "OPTIONS"}
 
@@ -239,9 +265,12 @@ async def current_principal(request: Request) -> Principal:
                     raise HTTPException(403, "Token not allowed for this route")
         else:
             raw = request.cookies.get(SESSION_COOKIE)
-            user = await resolve_session(s, raw) if raw else None
-            if user is None:
+            found = await resolve_session_slide(s, raw) if raw else None
+            if found is None:
                 raise HTTPException(401, "Not authenticated")
+            user, slid = found
+            if slid:
+                request.state.refresh_session_cookie = raw
             if request.method not in _SAFE_METHODS and not request.headers.get(CSRF_HEADER):
                 raise HTTPException(403, f"missing {CSRF_HEADER}")
             principal = Principal(user)

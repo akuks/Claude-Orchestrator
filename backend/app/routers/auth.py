@@ -1,4 +1,5 @@
 import asyncio
+import logging
 import time
 from collections import defaultdict, deque
 
@@ -13,6 +14,7 @@ from ..models import AuthSession, User, _now
 from ..schemas import LoginIn, PasswordChangeIn, SetupIn, UserOut
 
 router = APIRouter(prefix="/auth", tags=["auth"])
+log = logging.getLogger(__name__)
 
 COOKIE = auth.SESSION_COOKIE
 _ph = PasswordHasher()
@@ -43,16 +45,7 @@ def _locked(key) -> bool:
     return len(_recent(key)) >= settings.login_max_failures
 
 
-def _set_cookie(request: Request, response: Response, raw: str) -> None:
-    response.set_cookie(
-        COOKIE,
-        raw,
-        httponly=True,
-        samesite="lax",
-        secure=(request.url.scheme == "https"),
-        max_age=settings.session_ttl_days * 86400,
-        path="/",
-    )
+_set_cookie = auth.set_session_cookie
 
 
 # Serializes the "no users yet" check + insert in setup and bootstrap_admin so
@@ -69,6 +62,11 @@ def _setup_lock() -> asyncio.Lock:
 async def bootstrap_admin() -> None:
     """Create the env-configured admin when there are no users."""
     if not (settings.admin_email and settings.admin_password):
+        return
+    try:
+        auth.validate_password(settings.admin_password)
+    except ValueError as e:
+        log.error("CO_ADMIN_PASSWORD rejected (%s); admin not created. Use the setup screen.", e)
         return
     async with _setup_lock(), SessionLocal() as s:
         if (await s.execute(select(func.count()).select_from(User))).scalar_one() > 0:

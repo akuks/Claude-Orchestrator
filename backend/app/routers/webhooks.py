@@ -25,7 +25,7 @@ _PR_ACTIONS = {"opened", "reopened", "synchronize", "ready_for_review"}
 
 def _verify(body: bytes, signature: str | None) -> bool:
     if not settings.github_webhook_secret:
-        return True  # verification disabled
+        return False  # never accept unsigned payloads (handler 503s first)
     if not signature or not signature.startswith("sha256="):
         return False
     digest = hmac.new(
@@ -40,6 +40,8 @@ async def github_webhook(
     x_github_event: str = Header(default=""),
     x_hub_signature_256: str | None = Header(default=None),
 ):
+    if not settings.github_webhook_secret:
+        raise HTTPException(503, "GitHub webhook secret not configured")
     body = await request.body()
     if not _verify(body, x_hub_signature_256):
         raise HTTPException(401, "Invalid signature")

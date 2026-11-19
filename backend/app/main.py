@@ -10,6 +10,7 @@ from datetime import datetime, timedelta, timezone
 from sqlalchemy import select
 
 from . import mcp_manager
+from . import auth as auth_mod
 from .auth import current_principal
 from .config import settings
 from .constants import Status
@@ -103,6 +104,17 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="Claude Orchestrator", version="0.1.0", lifespan=lifespan)
+
+@app.middleware("http")
+async def refresh_session_cookie(request, call_next):
+    """current_principal flags request.state when it slid the session; re-send the
+    cookie then so the browser's max_age slides with the server-side expiry."""
+    response = await call_next(request)
+    raw = getattr(request.state, "refresh_session_cookie", None)
+    if raw:
+        auth_mod.set_session_cookie(request, response, raw)
+    return response
+
 
 app.add_middleware(
     CORSMiddleware,

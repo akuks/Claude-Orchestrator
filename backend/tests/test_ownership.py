@@ -122,7 +122,7 @@ def test_agent_token_scope(client):
 
 def test_agent_token_revoked_after_task(client, monkeypatch, tmp_path):
     probe = tmp_path / "probe"
-    monkeypatch.setenv("CO_TEST_ENV_PROBE", str(probe))
+    monkeypatch.setenv("TEST_ENV_PROBE", str(probe))
     t = client.post("/tasks", json={"prompt": "say hi"}).json()
     done = wait_task(client, t["id"])
     assert done["status"] == "completed"
