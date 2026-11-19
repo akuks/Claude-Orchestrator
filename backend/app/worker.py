@@ -424,6 +424,8 @@ class WorkerManager:
         # workspace files, events or logs. Ownerless (legacy) tasks run without one.
         if task_owner:
             async with SessionLocal() as s:
+                # An interrupted earlier attempt (crash/restart) may have left one live.
+                await auth.revoke_task_tokens(s, task_id)
                 sub_env["CO_API_TOKEN"] = await auth.mint_token(
                     s,
                     task_owner,
@@ -517,7 +519,9 @@ class WorkerManager:
                 if t is not None:
                     t.attempt = attempt + 1
                     t.status = Status.QUEUED
-                    await s.commit()
+                # This attempt is over: don't leave its token live through backoff.
+                await auth.revoke_task_tokens(s, task_id)
+                await s.commit()
             asyncio.create_task(
                 self._retry_after(task_id, backoff, task_priority, task_created_at)
             )

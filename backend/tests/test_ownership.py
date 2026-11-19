@@ -164,3 +164,87 @@ def test_approval_records_decider(client):
     assert client.post(f"/approvals/{b['id']}/reject", json={}).json()["decided_by"] == aid
     out = client.post("/approvals/approve", json={"task_ids": [c["id"]]}).json()
     assert out[0]["decided_by"] == aid
+
+
+def _make_member_task_parent(client):
+    return client.post("/tasks", json={"prompt": "admin parent", "requires_approval": True}).json()
+
+
+def test_member_children_owned_by_member_not_parent_owner(client, member_client):
+    me = member_client.get("/auth/me").json()["id"]
+    admin = _admin_id()
+    assert me != admin
+    _agent(client, "r8-agent")
+    parent = _make_member_task_parent(client)
+    assert parent["created_by"] == admin
+    d = member_client.post(
+        "/agents/dispatch",
+        json={"parent_task_id": parent["id"], "items": [{"agent": "r8-agent", "prompt": "x"}]},
+    )
+    # Non-agent callers pass the parent id only as linkage; owner is the caller.
+    if d.status_code == 201:
+        assert d.json()[0]["created_by"] == me
+    ag = client.get("/agents").json()
+    aid = next(a["id"] for a in ag if a["name"] == "r8-agent")
+    r = member_client.post(f"/agents/{aid}/run", json={"parent_task_id": parent["id"]})
+    if r.status_code == 201:
+        assert r.json()["created_by"] == me
+
+
+def test_member_followup_owned_by_member(client, member_client):
+    me = member_client.get("/auth/me").json()["id"]
+    parent = _make_member_task_parent(client)
+
+    async def setsess():
+        async with SessionLocal() as s:
+            (await s.get(Task, parent["id"])).session_id = "sess-x"
+            await s.commit()
+
+    asyncio.run(setsess())
+    r = member_client.post(f"/tasks/{parent['id']}/followup", json={"prompt": "more"})
+    if r.status_code == 201:
+        assert r.json()["created_by"] == me
+
+
+def _live_tokens(task_id):
+    async def go():
+        async with SessionLocal() as s:
+            rows = (
+                await s.execute(select(ApiToken).where(ApiToken.task_id == task_id))
+            ).scalars().all()
+            return [t for t in rows if t.revoked_at is None]
+
+    return asyncio.run(go())
+
+
+def test_stale_token_revoked_when_a_new_attempt_starts(client, monkeypatch, tmp_path):
+    aid = _admin_id()
+    t = client.post("/tasks", json={"prompt": "restart me", "requires_approval": True}).json()
+    stale = _mint(t["id"], aid)  # as left behind by an interrupted run
+    assert len(_live_tokens(t["id"])) == 1
+    client.post(f"/approvals/{t['id']}/approve")  # now it actually runs
+    wait_task(client, t["id"])
+    assert _live_tokens(t["id"]) == []
+    # the stale token is dead too
+    assert _agent_client(stale).get(f"/tasks/{t['id']}").status_code == 401
+
+
+def test_token_revoked_during_retry_backoff(client, monkeypatch, tmp_path):
+    from app.config import settings
+
+    failing = tmp_path / "fail_claude.sh"
+    failing.write_text("#!/usr/bin/env bash\ncat >/dev/null\necho 'rate limit exceeded' >&2\nexit 1\n")
+    failing.chmod(0o755)
+    monkeypatch.setattr(settings, "claude_bin", str(failing))
+    monkeypatch.setattr(settings, "retry_max_attempts", 1)
+    monkeypatch.setattr(settings, "retry_backoff_seconds", 3600)  # stays in backoff
+    t = client.post("/tasks", json={"prompt": "flaky"}).json()
+    import time
+
+    deadline = time.time() + 20
+    while time.time() < deadline:
+        if client.get(f"/tasks/{t['id']}").json()["attempt"] == 1:
+            break
+        time.sleep(0.2)
+    assert _live_tokens(t["id"]) == []
+    client.post(f"/tasks/{t['id']}/cancel")

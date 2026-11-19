@@ -20,9 +20,10 @@ router = APIRouter(prefix="/agents", tags=["agents"])
 
 
 async def _creator(s, request: Request, parent_task_id: str | None) -> str:
-    """Owner for a task created under a parent: the parent's creator (so a
-    dispatched child belongs to whoever owns the coordinator), else the caller."""
-    if parent_task_id:
+    """Owner for a task created under a parent. Only an agent-task token inherits
+    the parent's creator (its coordinator's owner); a human caller always owns
+    what they create, so nobody's tasks run as someone else."""
+    if parent_task_id and request.state.principal.is_agent:
         parent = await s.get(Task, parent_task_id)
         if parent is not None and parent.created_by:
             return parent.created_by

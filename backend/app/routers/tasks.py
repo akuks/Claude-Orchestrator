@@ -323,7 +323,7 @@ async def followup_task(task_id: str, payload: FollowupCreate, request: Request)
             resume_session_id=parent.session_id,
             workspace_dir=parent.workspace_dir,  # same workspace = continues context
             status=Status.QUEUED,
-            created_by=parent.created_by or request.state.principal.user.id,
+            created_by=request.state.principal.user.id,
         )
         s.add(child)
         await s.commit()
