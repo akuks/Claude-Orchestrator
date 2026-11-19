@@ -5,8 +5,11 @@ let unauthorizedHandler = null
 export function setUnauthorizedHandler(fn) {
   unauthorizedHandler = fn
 }
+export function notifyUnauthorized() {
+  unauthorizedHandler?.()
+}
 // 401s from these are expected (bad creds / no session yet) and handled by callers.
-const NO_401_HOOK = ['/auth/login', '/auth/logout', '/auth/me', '/auth/setup']
+const NO_401_HOOK = ['/auth/login', '/auth/logout', '/auth/me', '/auth/setup', '/auth/password']
 
 async function req(method, path, body) {
   const opts = { method, headers: { 'X-Requested-With': 'co' }, credentials: 'same-origin' }

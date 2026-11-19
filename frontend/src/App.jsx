@@ -101,12 +101,24 @@ export default function App() {
 
   if (phase === 'loading')
     return (
-      <div style={{ display: 'flex', justifyContent: 'center', paddingTop: 160 }}>
-        <Spin size="large" />
-      </div>
+      <Layout style={{ minHeight: '100vh' }}>
+        <div style={{ display: 'flex', justifyContent: 'center', paddingTop: 160 }}>
+          <Spin size="large" />
+        </div>
+      </Layout>
     )
-  if (phase === 'setup') return <SetupPage onDone={signedIn} />
-  if (phase === 'login') return <LoginPage notice={notice} onLoggedIn={signedIn} />
+  if (phase === 'setup')
+    return (
+      <Layout style={{ minHeight: '100vh' }}>
+        <SetupPage onDone={signedIn} />
+      </Layout>
+    )
+  if (phase === 'login')
+    return (
+      <Layout style={{ minHeight: '100vh' }}>
+        <LoginPage notice={notice} onLoggedIn={signedIn} />
+      </Layout>
+    )
   return <AppInner user={user} onLogout={logout} />
 }
 
