@@ -135,9 +135,9 @@ any other origin must be added, or live task streams are rejected.
 |---|---|---|
 | `CO_DATABASE_URL` | `sqlite+aiosqlite:///./claude_orchestrator.db` | Task/event store (SQLite, or `postgresql+asyncpg://…`) |
 | `CO_ADMIN_EMAIL` / `CO_ADMIN_PASSWORD` | *(unset)* | Bootstrap first admin (else use the setup screen) |
-| `CO_BIND_HOST` | `127.0.0.1` | Interface `start.sh` binds the backend to |
-| `CO_FORWARDED_ALLOW_IPS` | `127.0.0.1` | Reverse-proxy IP(s) trusted for `X-Forwarded-For` |
-| `CO_CORS_ORIGINS` | localhost dev origins | JSON list; CORS **and** WebSocket Origin allowlist |
+| `CO_BIND_HOST` | `127.0.0.1` | Interface `start.sh` binds the backend to (read by `start.sh` from the shell or `backend/.env`; not by the app) |
+| `CO_FORWARDED_ALLOW_IPS` | `127.0.0.1` | Reverse-proxy IP(s) trusted for `X-Forwarded-For` (read by `start.sh` from the shell or `backend/.env`; not by the app) |
+| `CO_CORS_ORIGINS` | localhost dev origins (`start.sh` sets it from `CO_FRONTEND_PORT` if unset) | JSON list; CORS **and** WebSocket Origin allowlist |
 | `CO_SESSION_TTL_DAYS` | `7` | Login session lifetime |
 | `CO_LOGIN_MAX_FAILURES` / `CO_LOGIN_WINDOW_SECONDS` | `5` / `900` | Login lockout |
 | `CO_WORKSPACES_DIR` | `./workspaces` | Isolated per-task working dirs (resolved absolute) |
@@ -150,7 +150,7 @@ any other origin must be added, or live task streams are rejected.
 | `CO_FALLBACK_MODEL` | *(unset)* | Fallback model if the primary is unavailable |
 | `CO_RETRY_MAX_ATTEMPTS` / `CO_RETRY_BACKOFF_SECONDS` | `2` / `30` | Auto-retry transient failures |
 | `CO_GATE_CRITICAL_APPROVAL` | `true` | Force approval for critical-risk tasks (merge/deploy/delete) |
-| `CO_GITHUB_WEBHOOK_SECRET` | *(unset)* | HMAC secret for the GitHub PR webhook |
+| `CO_GITHUB_WEBHOOK_SECRET` | *(unset)* | HMAC secret for the GitHub PR webhook (required: the endpoint returns 503 while unset) |
 | `CO_SECRET_KEY` | *(auto)* | AES-256 vault key (else generated to `.secret.key`) |
 | `ANTHROPIC_API_KEY` | *(unset)* | Headless auth for the spawned `claude` |
 

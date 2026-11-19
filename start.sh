@@ -7,6 +7,16 @@
 
 set -e
 ROOT="$(cd "$(dirname "$0")" && pwd)"
+
+# Read ONLY these two keys from backend/.env (when not already set in the shell);
+# the file is parsed, never sourced.
+_env_key() {
+  [ -f "$ROOT/backend/.env" ] || return 0
+  grep -E "^[[:space:]]*$1=" "$ROOT/backend/.env" | tail -n1 \
+    | sed -E "s/^[[:space:]]*$1=//; s/^[\"']//; s/[\"'][[:space:]]*$//; s/[[:space:]]+$//"
+}
+[ -z "${CO_BIND_HOST:-}" ] && CO_BIND_HOST="$(_env_key CO_BIND_HOST)"
+[ -z "${CO_FORWARDED_ALLOW_IPS:-}" ] && CO_FORWARDED_ALLOW_IPS="$(_env_key CO_FORWARDED_ALLOW_IPS)"
 BACKEND_PORT="${CO_BACKEND_PORT:-8200}"
 FRONTEND_PORT="${CO_FRONTEND_PORT:-5200}"
 
@@ -32,6 +42,10 @@ lsof -ti "tcp:$FRONTEND_PORT" 2>/dev/null | xargs kill 2>/dev/null || true
 
 # --- launch ---
 cd "$ROOT/backend"
+# The WebSocket Origin allowlist is CO_CORS_ORIGINS; follow a custom frontend port.
+if [ -z "${CO_CORS_ORIGINS:-}" ]; then
+  export CO_CORS_ORIGINS="[\"http://localhost:$FRONTEND_PORT\",\"http://127.0.0.1:$FRONTEND_PORT\"]"
+fi
 # Binds localhost by default. Behind a reverse proxy, set CO_FORWARDED_ALLOW_IPS to the
 # proxy's IP so the login lockout sees real client IPs. Single process: no --workers.
 ./.venv/bin/uvicorn app.main:app --host "${CO_BIND_HOST:-127.0.0.1}" --port "$BACKEND_PORT" \
