@@ -12,7 +12,9 @@ venv/
 backend/.venv/
 backend/*.db
 backend/workspaces/
-backend/projects/       # per-project working dirs (may hold real hosts/keys, e.g. Infra servers.yaml)
+# Per-project working dirs (may hold real hosts/keys, e.g. Infra servers.yaml).
+# NB: gitignore has no inline comments — keep comments on their own line.
+backend/projects/
 backend/.env
 
 # Credential vault key — NEVER commit
