@@ -528,3 +528,58 @@ def test_github_webhook_triggers_review(client):
         headers={"X-GitHub-Event": "pull_request", "X-Hub-Signature-256": "sha256=bad"},
     )
     assert r2.status_code == 401
+
+
+def test_context_store_crud_scoping_and_preview(client):
+    proj = client.post("/projects", json={"name": "CtxProj"}).json()
+    g = client.post("/context-docs", json={
+        "path": "runbooks/deploy", "body": "# Deploy steps\nRun make deploy.",
+    }).json()
+    # Path normalized to .md; title + abstract derived when omitted.
+    assert g["path"] == "runbooks/deploy.md" and g["scope"] == "global"
+    assert g["title"] == "Deploy" and g["abstract"] == "Deploy steps"
+    # Unsafe paths rejected; duplicates in the same scope conflict.
+    for bad in ("../etc/passwd", "a/../../b", "sp ace", ".hidden/x"):
+        assert client.post("/context-docs", json={"path": bad}).status_code == 400
+    assert client.post("/context-docs", json={"path": "runbooks/deploy.md"}).status_code == 409
+    # Project scope needs a real project.
+    assert client.post("/context-docs", json={"path": "x", "scope": "project"}).status_code == 400
+    # A project doc at the same path overrides the global one for that project only.
+    p = client.post("/context-docs", json={
+        "path": "runbooks/deploy.md", "scope": "project", "project_id": proj["id"],
+        "abstract": "Project-specific deploy", "body": "use the blue/green script",
+    }).json()
+    pv = client.get("/context-docs/preview", params={"project_id": proj["id"]}).json()
+    assert [d["id"] for d in pv["docs"] if d["path"] == "runbooks/deploy.md"] == [p["id"]]
+    assert "Project-specific deploy" in pv["index"]
+    glob = client.get("/context-docs/preview").json()
+    assert any(d["id"] == g["id"] for d in glob["docs"])
+    assert not any(d["id"] == p["id"] for d in glob["docs"])
+    # Disabled docs drop out; edits apply.
+    client.patch(f"/context-docs/{p['id']}", json={"enabled": False})
+    pv = client.get("/context-docs/preview", params={"project_id": proj["id"]}).json()
+    assert any(d["id"] == g["id"] for d in pv["docs"])
+    up = client.patch(f"/context-docs/{g['id']}", json={"title": "Deploy runbook"}).json()
+    assert up["title"] == "Deploy runbook"
+    assert client.patch(f"/context-docs/{g['id']}", json={"path": "../x"}).status_code == 400
+    for d in (g, p):
+        assert client.delete(f"/context-docs/{d['id']}").status_code == 204
+    assert client.get(f"/context-docs/{g['id']}").status_code == 404
+
+
+def test_context_store_injected_into_task_and_cleaned_up(client):
+    from pathlib import Path
+
+    doc = client.post("/context-docs", json={
+        "path": "conventions/style.md", "abstract": "Code style rules", "body": "Use black.",
+    }).json()
+    tid = client.post("/tasks", json={"prompt": "do a thing"}).json()["id"]
+    assert wait_task(client, tid)["status"] == "completed"
+    evs = [e for e in client.get(f"/tasks/{tid}/events").json() if e["type"] == "context_store"]
+    assert evs, "context_store event expected"
+    log = evs[0]["payload"]
+    assert "conventions/style.md" in log["paths"]
+    assert "_context" in log["dir"] and tid in log["dir"]
+    # Snapshot (outside the task cwd) is removed when the task finishes.
+    assert not Path(log["dir"]).exists()
+    client.delete(f"/context-docs/{doc['id']}")

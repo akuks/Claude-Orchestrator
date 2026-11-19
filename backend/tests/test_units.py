@@ -78,3 +78,40 @@ def test_mcp_tool_classification():
 def test_cron_validation():
     assert scheduler.is_valid_cron("0 9 * * 1-5")
     assert not scheduler.is_valid_cron("nonsense")
+
+
+def test_context_store_paths_and_snapshot(tmp_path, monkeypatch):
+    import asyncio
+
+    import pytest
+
+    from app import context_store
+    from app.config import settings
+    from app.models import ContextDoc
+
+    assert context_store.normalize_path("a/b") == "a/b.md"
+    assert context_store.normalize_path("/a/b.md/") == "a/b.md"
+    for bad in ("..", "a/../b", "", "a//.hidden/../x", "a/b c"):
+        with pytest.raises(ValueError):
+            context_store.normalize_path(bad)
+    assert context_store.derive_abstract("\n\n## Heading\nbody") == "Heading"
+
+    # Index is capped and points at the dir for the overflow.
+    monkeypatch.setattr(settings, "context_index_max_chars", 400)
+    docs = [ContextDoc(path=f"d{i}.md", title=f"D{i}", abstract="x" * 40, body="b") for i in range(20)]
+    idx = context_store.build_index(docs, tmp_path)
+    assert len(idx) < 600 and "more doc(s)" in idx
+
+    # Snapshot writes bodies under the per-task dir only.
+    monkeypatch.setattr(settings, "workspaces_dir", tmp_path)
+
+    async def fake_docs_for(_pid):
+        return [ContextDoc(path="runbooks/deploy.md", title="Deploy", abstract="How", body="steps")]
+
+    monkeypatch.setattr(context_store, "docs_for", fake_docs_for)
+    index, log = asyncio.run(context_store.prepare_for_task(None, "t1"))
+    f = tmp_path / "_context" / "t1" / "runbooks" / "deploy.md"
+    assert f.exists() and "steps" in f.read_text()
+    assert "runbooks/deploy.md" in index and log["docs"] == 1
+    context_store.cleanup("t1")
+    assert not f.parent.parent.exists()
