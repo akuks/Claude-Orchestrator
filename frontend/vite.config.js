@@ -19,6 +19,7 @@ export default defineConfig({
       '/agents': { target, changeOrigin: true },
       '/workflows': { target, changeOrigin: true },
       '/skills': { target, changeOrigin: true },
+      '/context-docs': { target, changeOrigin: true },
       '/approvals': { target, changeOrigin: true },
       '/usage': { target, changeOrigin: true },
       '/findings': { target, changeOrigin: true },

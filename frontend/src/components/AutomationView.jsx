@@ -21,6 +21,7 @@ import {
 } from 'antd'
 import {
   ApartmentOutlined,
+  BookOutlined,
   BulbOutlined,
   ClockCircleOutlined,
   CloudServerOutlined,
@@ -36,6 +37,7 @@ import dayjs from 'dayjs'
 import { api, STATUS_COLORS } from '../api'
 import AgentsView from './AgentsView'
 import ServersView from './ServersView'
+import ContextStoreView from './ContextStoreView'
 import SkillsView from './SkillsView'
 import WorkflowsView from './WorkflowsView'
 
@@ -599,6 +601,15 @@ export default function AutomationView({ projects = [] }) {
             </span>
           ),
           children: <SkillsView projects={projects} />,
+        },
+        {
+          key: 'knowledge',
+          label: (
+            <span>
+              <BookOutlined /> Knowledge
+            </span>
+          ),
+          children: <ContextStoreView projects={projects} />,
         },
         {
           key: 'templates',

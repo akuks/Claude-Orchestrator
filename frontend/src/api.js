@@ -19,6 +19,13 @@ async function req(method, path, body) {
   return res.json()
 }
 
+function qs(params = {}) {
+  const s = new URLSearchParams(
+    Object.entries(params).filter(([, v]) => v != null && v !== '')
+  ).toString()
+  return s ? `?${s}` : ''
+}
+
 export const api = {
   listTasks: (params = {}) => {
     const qs = new URLSearchParams(
@@ -116,6 +123,12 @@ export const api = {
   installSkill: (payload) => req('POST', '/skills', payload),
   updateSkill: (id, payload) => req('PATCH', `/skills/${id}`, payload),
   deleteSkill: (id) => req('DELETE', `/skills/${id}`),
+  // ---- Context Store (curated knowledge docs, tiered) ----
+  listContextDocs: (params = {}) => req('GET', `/context-docs${qs(params)}`),
+  previewContext: (projectId) => req('GET', `/context-docs/preview${qs({ project_id: projectId })}`),
+  createContextDoc: (payload) => req('POST', '/context-docs', payload),
+  updateContextDoc: (id, payload) => req('PATCH', `/context-docs/${id}`, payload),
+  deleteContextDoc: (id) => req('DELETE', `/context-docs/${id}`),
   listSchedules: () => req('GET', '/schedules'),
   createSchedule: (payload) => req('POST', '/schedules', payload),
   updateSchedule: (id, payload) => req('PATCH', `/schedules/${id}`, payload),

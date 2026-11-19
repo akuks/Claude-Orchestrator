@@ -69,6 +69,9 @@ function renderLine(ev) {
     case 'system':
       text = p.subtype || ''
       break
+    case 'context_store':
+      text = `knowledge base — ${p.docs} doc(s) indexed (~${p.index_approx_tokens} tokens): ${(p.paths || []).join(', ')}`
+      break
     default:
       text = JSON.stringify(p)
   }
