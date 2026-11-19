@@ -17,6 +17,7 @@ from .models import Task
 from .routers import (
     agents,
     approvals,
+    auth,
     context_docs,
     findings,
     mcp,
@@ -76,6 +77,7 @@ async def _approval_timeout_loop():
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     await init_db()
+    await auth.bootstrap_admin()
     worker = WorkerManager()
     app.state.worker = worker
     await worker.start()
@@ -107,6 +109,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+app.include_router(auth.router)
 app.include_router(tasks.router)
 app.include_router(stream.router)
 app.include_router(mcp.router)
