@@ -111,6 +111,11 @@ def _add_missing_columns(sync_conn) -> None:
         pass
 
 
+# Tables created by migrations after the 0001 baseline. Legacy-DB repair must not
+# create_all these, or the later `upgrade head` would collide. Append per migration.
+_POST_BASELINE_TABLES = {"users", "auth_sessions", "api_tokens"}
+
+
 def run_migrations(url: str) -> None:
     """Bring the database at `url` to the latest schema (blocking).
 
@@ -143,7 +148,15 @@ def run_migrations(url: str) -> None:
                     # only creates the missing ones).
                     from . import models  # noqa: F401
 
-                    Base.metadata.create_all(sync_conn)
+                    # Only baseline tables: later ones come from `upgrade head`.
+                    Base.metadata.create_all(
+                        sync_conn,
+                        tables=[
+                            t
+                            for t in Base.metadata.sorted_tables
+                            if t.name not in _POST_BASELINE_TABLES
+                        ],
+                    )
                     return True
 
                 return await conn.run_sync(_check)

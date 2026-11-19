@@ -14,3 +14,4 @@ fpdf2>=2.7
 PyYAML>=6.0
 alembic>=1.13
 asyncpg>=0.29
+argon2-cffi>=23.1

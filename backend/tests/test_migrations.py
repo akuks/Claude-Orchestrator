@@ -4,7 +4,7 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import Session
 
 from app import models
-from app.database import Base, run_migrations
+from app.database import _POST_BASELINE_TABLES, Base, run_migrations
 
 
 def _tables(db) -> set[str]:
@@ -25,7 +25,11 @@ def _count(db, table) -> int:
 
 def _make_legacy_db(db) -> None:
     engine = create_engine(f"sqlite:///{db}")
-    Base.metadata.create_all(engine)
+    # A legacy DB predates the auth tables (they arrive via migration 0002).
+    Base.metadata.create_all(
+        engine,
+        tables=[t for t in Base.metadata.sorted_tables if t.name not in _POST_BASELINE_TABLES],
+    )
     with Session(engine) as s:
         s.add(models.Project(id="p1", name="legacy", slug="legacy", directory="/x"))
         s.commit()
@@ -37,7 +41,7 @@ def test_fresh_db_migrates_to_head(tmp_path):
     run_migrations(url)
     tables = _tables(tmp_path / "fresh.db")
     assert {"tasks", "projects", "context_docs", "alembic_version"} <= tables
-    assert _alembic_version(tmp_path / "fresh.db") == "0001"
+    assert _alembic_version(tmp_path / "fresh.db") == "0002"
 
 
 def test_legacy_db_is_stamped_not_recreated(tmp_path):
@@ -66,4 +70,5 @@ def test_legacy_db_missing_table_and_column_is_repaired(tmp_path):
         row = c.execute("SELECT id, prompt, read_only FROM tasks").fetchall()
     assert "read_only" in cols
     assert row == [("t1", "hi", 0)]
-    assert _alembic_version(db) == "0001"
+    assert _alembic_version(db) == "0002"
+    assert "users" in _tables(db)
