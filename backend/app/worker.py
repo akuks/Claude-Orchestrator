@@ -15,7 +15,7 @@ from pathlib import Path
 
 from sqlalchemy import func, select
 
-from . import mcp_manager, memory, notifications, security
+from . import context_store, mcp_manager, memory, notifications, security
 from .config import settings
 from .constants import Priority, Status
 from .database import SessionLocal
@@ -311,6 +311,15 @@ class WorkerManager:
                 prompt = f"{preamble}\n\n---\n\n# Task\n\n{prompt}"
                 await emit("context", ctx_log)
 
+        # Context Store (tiered): write applicable curated docs (L2) to a per-task
+        # snapshot dir outside the cwd, and prepend their one-line abstracts (L0)
+        # so the agent opens only what's relevant. Also on resumed threads — each
+        # task gets its own snapshot, and the previous one is cleaned up.
+        kb_index, kb_log = await context_store.prepare_for_task(project_id, task_id)
+        if kb_index:
+            prompt = f"{kb_index}\n\n---\n\n# Task\n\n{prompt}"
+            await emit("context_store", kb_log)
+
         # Coordinator: prepend the agent registry + delegation instructions.
         if coordinator_block and not resume_session_id:
             prompt = f"{coordinator_block}\n\n---\n\n# Task\n\n{prompt}"
@@ -369,6 +378,9 @@ class WorkerManager:
                 "Bash(git commit:*)", "Bash(git push:*)", "Bash(git merge:*)",
                 "Bash(git add:*)", "Bash(gh pr merge:*)",
             ]
+        if kb_index:
+            # Let the agent Read the snapshot even outside bypassPermissions mode.
+            cmd += ["--add-dir", kb_log["dir"]]
         if mcp:
             cmd += ["--mcp-config", mcp["config_path"], "--strict-mcp-config"]
             await emit(
@@ -659,6 +671,7 @@ class WorkerManager:
         error: str | None = None,
         artifacts: list[dict] | None = None,
     ) -> None:
+        context_store.cleanup(task_id)  # drop this task's knowledge snapshot
         async with SessionLocal() as s:
             task = await s.get(Task, task_id)
             if task is None:

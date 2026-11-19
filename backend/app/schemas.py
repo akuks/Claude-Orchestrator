@@ -549,3 +549,38 @@ class SkillPackOut(BaseModel):
     created_at: datetime
 
     model_config = {"from_attributes": True}
+
+
+class ContextDocCreate(BaseModel):
+    path: str  # e.g. "runbooks/deploy.md"
+    title: Optional[str] = None  # derived from the path if omitted
+    abstract: Optional[str] = None  # derived from the body if omitted
+    body: str = ""
+    scope: str = "global"  # global | project
+    project_id: Optional[str] = None
+    enabled: bool = True
+
+
+class ContextDocUpdate(BaseModel):
+    path: Optional[str] = None
+    title: Optional[str] = None
+    abstract: Optional[str] = None
+    body: Optional[str] = None
+    scope: Optional[str] = None
+    project_id: Optional[str] = None
+    enabled: Optional[bool] = None
+
+
+class ContextDocOut(BaseModel):
+    id: str
+    path: str
+    title: str
+    abstract: str
+    body: str
+    enabled: bool
+    scope: str
+    project_id: Optional[str]
+    created_at: datetime
+    updated_at: datetime
+
+    model_config = {"from_attributes": True}

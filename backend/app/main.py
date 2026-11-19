@@ -17,6 +17,7 @@ from .models import Task
 from .routers import (
     agents,
     approvals,
+    context_docs,
     findings,
     mcp,
     projects,
@@ -119,6 +120,7 @@ app.include_router(webhooks.router)
 app.include_router(agents.router)
 app.include_router(workflows.router)
 app.include_router(skills.router)
+app.include_router(context_docs.router)
 
 
 @app.get("/health", tags=["meta"])

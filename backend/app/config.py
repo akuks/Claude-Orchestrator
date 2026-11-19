@@ -62,6 +62,9 @@ class Settings(BaseSettings):
     # Skill packs (Claude Code plugins, loaded via --plugin-dir)
     skillpacks_dir: Path = Path("./skillpacks")
 
+    # Context Store (curated knowledge docs, tiered: abstracts injected, bodies on disk)
+    context_index_max_chars: int = 4000  # cap on the injected L0 index (~1000 tokens)
+
     # Projects & memory (Phase 3)
     projects_dir: Path = Path("./projects")
     context_budget_tokens: int = 3000  # injected project memory + summaries per task

@@ -400,3 +400,27 @@ class SkillPack(Base):
     scope: Mapped[str] = mapped_column(String(16), default="global")
     project_id: Mapped[str | None] = mapped_column(String(32), nullable=True, index=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=_now)
+
+
+class ContextDoc(Base):
+    """A curated knowledge document in the Context Store (runbooks, conventions,
+    architecture, decisions). Loaded into agent tasks in tiers: the one-line
+    abstract (L0) is always injected in an index; the full body (L2) is written
+    to a read-only snapshot dir the agent opens with Read only when relevant.
+    Complements project memory (auto-captured) — this is human-curated."""
+
+    __tablename__ = "context_docs"
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=_uuid)
+    # Hierarchical path, e.g. "runbooks/deploy.md". Unique per scope+project.
+    path: Mapped[str] = mapped_column(String(300), index=True)
+    title: Mapped[str] = mapped_column(String(200))
+    abstract: Mapped[str] = mapped_column(String(400), default="")  # L0
+    body: Mapped[str] = mapped_column(Text, default="")  # L2
+    enabled: Mapped[bool] = mapped_column(default=True)
+    # "global" applies to every task; "project" only to its project_id's tasks
+    # (and overrides a global doc with the same path).
+    scope: Mapped[str] = mapped_column(String(16), default="global")
+    project_id: Mapped[str | None] = mapped_column(String(32), nullable=True, index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=_now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=_now, onupdate=_now)
