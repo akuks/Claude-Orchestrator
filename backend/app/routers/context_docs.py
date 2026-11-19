@@ -1,7 +1,8 @@
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import select
 
 from .. import context_store
+from ..auth import Principal, current_principal, ensure_admin
 from ..database import SessionLocal
 from ..models import ContextDoc, Project
 from ..schemas import ContextDocCreate, ContextDocOut, ContextDocUpdate
@@ -72,7 +73,9 @@ async def get_doc(doc_id: str):
 
 
 @router.post("", response_model=ContextDocOut, status_code=201)
-async def create_doc(payload: ContextDocCreate):
+async def create_doc(payload: ContextDocCreate, p: Principal = Depends(current_principal)):
+    if payload.scope == "global":
+        ensure_admin(p)  # global docs reach every task
     path = _norm(payload.path)
     async with SessionLocal() as s:
         project_id = await _validate(s, payload.scope, payload.project_id)
@@ -95,12 +98,16 @@ async def create_doc(payload: ContextDocCreate):
 
 
 @router.patch("/{doc_id}", response_model=ContextDocOut)
-async def update_doc(doc_id: str, payload: ContextDocUpdate):
+async def update_doc(
+    doc_id: str, payload: ContextDocUpdate, p: Principal = Depends(current_principal)
+):
     data = payload.model_dump(exclude_unset=True)
     async with SessionLocal() as s:
         doc = await s.get(ContextDoc, doc_id)
         if doc is None:
             raise HTTPException(404, "Doc not found")
+        if doc.scope == "global" or data.get("scope") == "global":
+            ensure_admin(p)
         if "path" in data:
             data["path"] = _norm(data["path"])
         if "abstract" in data:
@@ -123,10 +130,12 @@ async def update_doc(doc_id: str, payload: ContextDocUpdate):
 
 
 @router.delete("/{doc_id}", status_code=204)
-async def delete_doc(doc_id: str):
+async def delete_doc(doc_id: str, p: Principal = Depends(current_principal)):
     async with SessionLocal() as s:
         doc = await s.get(ContextDoc, doc_id)
         if doc is None:
             raise HTTPException(404, "Doc not found")
+        if doc.scope == "global":
+            ensure_admin(p)
         await s.delete(doc)
         await s.commit()

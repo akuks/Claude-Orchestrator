@@ -50,6 +50,11 @@ os.environ.update(
 )
 
 
+ADMIN_EMAIL = os.environ["CO_ADMIN_EMAIL"]
+ADMIN_PASSWORD = os.environ["CO_ADMIN_PASSWORD"]
+MEMBER_EMAIL = "member@test.local"
+
+
 @pytest.fixture(scope="session")
 def client():
     from fastapi.testclient import TestClient
@@ -57,7 +62,55 @@ def client():
     from app.main import app
 
     with TestClient(app) as c:  # runs lifespan → init_db, worker, scheduler
+        r = c.post("/auth/login", json={"email": ADMIN_EMAIL, "password": ADMIN_PASSWORD})
+        assert r.status_code == 200, r.text
+        c.headers["X-Requested-With"] = "co"
         yield c
+
+
+@pytest.fixture(scope="session")
+def anon_client(client):
+    """No session cookie (but the CSRF header, so 401 vs 403 is unambiguous)."""
+    from fastapi.testclient import TestClient
+
+    from app.main import app
+
+    c = TestClient(app)
+    c.headers["X-Requested-With"] = "co"
+    return c
+
+
+@pytest.fixture(scope="session")
+def member_client(client):
+    """A logged-in non-admin. Created directly in the DB until the /users API
+    exists (Task 6)."""
+    import asyncio
+
+    from fastapi.testclient import TestClient
+
+    from app import auth
+    from app.database import SessionLocal
+    from app.main import app
+    from app.models import User
+
+    async def mk():
+        async with SessionLocal() as s:
+            s.add(
+                User(
+                    email=MEMBER_EMAIL,
+                    name="Member",
+                    password_hash=auth.hash_password(ADMIN_PASSWORD),
+                    role="member",
+                )
+            )
+            await s.commit()
+
+    asyncio.run(mk())
+    c = TestClient(app)
+    r = c.post("/auth/login", json={"email": MEMBER_EMAIL, "password": ADMIN_PASSWORD})
+    assert r.status_code == 200, r.text
+    c.headers["X-Requested-With"] = "co"
+    return c
 
 
 def wait_task(client, task_id: str, timeout: float = 20.0) -> dict:

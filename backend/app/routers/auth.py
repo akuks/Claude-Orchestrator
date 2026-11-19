@@ -3,7 +3,7 @@ import time
 from collections import defaultdict, deque
 
 from argon2 import PasswordHasher
-from fastapi import APIRouter, HTTPException, Request, Response
+from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from sqlalchemy import func, select
 
 from .. import auth
@@ -14,7 +14,7 @@ from ..schemas import LoginIn, PasswordChangeIn, SetupIn, UserOut
 
 router = APIRouter(prefix="/auth", tags=["auth"])
 
-COOKIE = "co_session"
+COOKIE = auth.SESSION_COOKIE
 _ph = PasswordHasher()
 # Computed once; verified against on unknown emails so timing doesn't leak existence.
 _DUMMY_HASH = _ph.hash("dummy-password-for-timing")
@@ -64,15 +64,6 @@ _setup_locks: dict = {}
 def _setup_lock() -> asyncio.Lock:
     loop = asyncio.get_running_loop()
     return _setup_locks.setdefault(loop, asyncio.Lock())
-
-
-async def _current(s, request: Request) -> tuple[User, str]:
-    # Local helper; Task 4 replaces it with the shared dependency.
-    raw = request.cookies.get(COOKIE)
-    user = await auth.resolve_session(s, raw) if raw else None
-    if user is None:
-        raise HTTPException(401, "Not authenticated")
-    return user, raw
 
 
 async def bootstrap_admin() -> None:
@@ -149,7 +140,7 @@ async def login(body: LoginIn, request: Request, response: Response):
         return user
 
 
-@router.post("/logout", status_code=204)
+@router.post("/logout", status_code=204, dependencies=[Depends(auth.current_principal)])
 async def logout(request: Request, response: Response):
     raw = request.cookies.get(COOKIE)
     if raw:
@@ -164,17 +155,22 @@ async def logout(request: Request, response: Response):
 
 
 @router.get("/me", response_model=UserOut)
-async def me(request: Request):
-    async with SessionLocal() as s:
-        user, _ = await _current(s, request)
-        await s.commit()  # persist sliding-expiry refresh
-        return user
+async def me(p: auth.Principal = Depends(auth.current_principal)):
+    return p.user
 
 
 @router.post("/password", status_code=204)
-async def change_password(body: PasswordChangeIn, request: Request):
+async def change_password(
+    body: PasswordChangeIn,
+    request: Request,
+    p: auth.Principal = Depends(auth.current_principal),
+):
+    # Cookie-only: the current browser session (raw id) is the one kept alive.
+    raw = request.cookies.get(COOKIE)
+    if p.token is not None or not raw:
+        raise HTTPException(403, "Password change requires a browser session")
     async with SessionLocal() as s:
-        user, raw = await _current(s, request)
+        user = await s.get(User, p.user.id)
         if not auth.verify_password(user.password_hash, body.current_password):
             raise HTTPException(401, "Current password is incorrect")
         try:

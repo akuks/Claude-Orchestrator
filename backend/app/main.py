@@ -2,7 +2,7 @@ import asyncio
 import os
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI
+from fastapi import Depends, FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from datetime import datetime, timedelta, timezone
@@ -10,6 +10,7 @@ from datetime import datetime, timedelta, timezone
 from sqlalchemy import select
 
 from . import mcp_manager
+from .auth import current_principal
 from .config import settings
 from .constants import Status
 from .database import SessionLocal, init_db
@@ -109,21 +110,29 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# Open: /auth/* guards its own routes per-endpoint; webhooks verify an HMAC;
+# the WebSocket stream authenticates the cookie itself (ws_principal).
 app.include_router(auth.router)
-app.include_router(tasks.router)
-app.include_router(stream.router)
-app.include_router(mcp.router)
-app.include_router(projects.router)
-app.include_router(templates.router)
-app.include_router(schedules.router)
-app.include_router(approvals.router)
-app.include_router(usage.router)
-app.include_router(findings.router)
 app.include_router(webhooks.router)
-app.include_router(agents.router)
-app.include_router(workflows.router)
-app.include_router(skills.router)
-app.include_router(context_docs.router)
+app.include_router(stream.router)
+
+# Everything else requires a logged-in user or an API token.
+_authed = [Depends(current_principal)]
+for _r in (
+    tasks.router,
+    mcp.router,
+    projects.router,
+    templates.router,
+    schedules.router,
+    approvals.router,
+    usage.router,
+    findings.router,
+    agents.router,
+    workflows.router,
+    skills.router,
+    context_docs.router,
+):
+    app.include_router(_r, dependencies=_authed)
 
 
 @app.get("/health", tags=["meta"])
@@ -131,7 +140,7 @@ async def health():
     return {"status": "ok", "version": app.version}
 
 
-@app.get("/system/claude", tags=["meta"])
+@app.get("/system/claude", tags=["meta"], dependencies=_authed)
 async def claude_status():
     """Report whether the Claude CLI is present and can authenticate — so a
     headless deployment can be verified before running tasks."""

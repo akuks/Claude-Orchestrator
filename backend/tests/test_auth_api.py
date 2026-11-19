@@ -15,7 +15,9 @@ PW = "test-password-123"
 def _fresh():
     from app.main import app
 
-    return TestClient(app)
+    c = TestClient(app)
+    c.headers["X-Requested-With"] = "co"  # CSRF header for cookie-auth writes
+    return c
 
 
 def _mk_user(client, email, pw=PW, **kw):
@@ -56,7 +58,9 @@ def test_setup_only_when_no_users(tmp_path, monkeypatch):
             await c.run_sync(Base.metadata.create_all)
 
     asyncio.run(init())
-    monkeypatch.setattr(auth_router, "SessionLocal", async_sessionmaker(eng, expire_on_commit=False))
+    sm = async_sessionmaker(eng, expire_on_commit=False)
+    monkeypatch.setattr(auth_router, "SessionLocal", sm)
+    monkeypatch.setattr(auth, "SessionLocal", sm)  # current_principal (/auth/me)
     app = FastAPI()
     app.include_router(auth_router.router)
     with TestClient(app) as c:

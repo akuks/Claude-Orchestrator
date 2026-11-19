@@ -1,9 +1,10 @@
 from datetime import datetime, timedelta, timezone
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import Integer, cast, delete, func, select
 
 from .. import mcp_manager
+from ..auth import require_admin
 from ..constants import VALID_MODELS  # noqa: F401 (kept for symmetry)
 from ..crypto import decrypt_json, encrypt_json
 from ..database import SessionLocal
@@ -19,6 +20,7 @@ from ..schemas import (
 )
 
 router = APIRouter(prefix="/mcp", tags=["mcp"])
+_admin = [Depends(require_admin)]  # writes are admin-only; reads are open
 
 _VALID_TRANSPORTS = {"stdio", "http"}
 _VALID_SCOPES = {"team", "user", "project", "both"}
@@ -42,7 +44,7 @@ def _pack_secrets(env: dict | None, headers: dict | None) -> str | None:
     return encrypt_json(payload) if payload else None
 
 
-@router.post("/servers", response_model=McpServerOut, status_code=201)
+@router.post("/servers", response_model=McpServerOut, status_code=201, dependencies=_admin)
 async def create_server(payload: McpServerCreate):
     if payload.transport not in _VALID_TRANSPORTS:
         raise HTTPException(400, f"transport must be one of {sorted(_VALID_TRANSPORTS)}")
@@ -103,7 +105,7 @@ async def get_server(server_id: str):
         return _to_out(await _get_or_404(s, server_id))
 
 
-@router.patch("/servers/{server_id}", response_model=McpServerOut)
+@router.patch("/servers/{server_id}", response_model=McpServerOut, dependencies=_admin)
 async def update_server(server_id: str, payload: McpServerUpdate):
     async with SessionLocal() as s:
         srv = await _get_or_404(s, server_id)
@@ -125,7 +127,7 @@ async def update_server(server_id: str, payload: McpServerUpdate):
         return _to_out(srv)
 
 
-@router.delete("/servers/{server_id}", status_code=204)
+@router.delete("/servers/{server_id}", status_code=204, dependencies=_admin)
 async def delete_server(server_id: str):
     async with SessionLocal() as s:
         srv = await _get_or_404(s, server_id)
@@ -133,7 +135,7 @@ async def delete_server(server_id: str):
         await s.commit()
 
 
-@router.post("/servers/{server_id}/test", response_model=McpProbeOut)
+@router.post("/servers/{server_id}/test", response_model=McpProbeOut, dependencies=_admin)
 async def test_server(server_id: str):
     async with SessionLocal() as s:
         await _get_or_404(s, server_id)
@@ -157,7 +159,7 @@ async def get_policies(server_id: str):
     return [PolicyOut.model_validate(p) for p in rows]
 
 
-@router.put("/servers/{server_id}/policies", response_model=list[PolicyOut])
+@router.put("/servers/{server_id}/policies", response_model=list[PolicyOut], dependencies=_admin)
 async def set_policies(server_id: str, policies: list[PolicyIn]):
     for p in policies:
         if p.action not in _VALID_ACTIONS:

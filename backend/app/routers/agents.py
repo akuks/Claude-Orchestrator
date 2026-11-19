@@ -330,6 +330,11 @@ async def dispatch(payload: DispatchRequest, request: Request):
     in parallel). Reuses the normal agent-run path — no separate orchestration."""
     from ..constants import Status
 
+    # An agent-task token may only fan out under its own task.
+    p = request.state.principal
+    if p.is_agent and payload.parent_task_id != p.token.task_id:
+        raise HTTPException(403, "Token may only dispatch under its own task")
+
     async with SessionLocal() as s:
         # Resolve each target agent by id or exact name.
         all_agents = (await s.execute(select(Agent))).scalars().all()
