@@ -104,7 +104,7 @@ async def _reset_sequences(conn, tables) -> list[str]:
     return done
 
 
-async def _copy(src_url: str, dst_url: str, force: bool) -> int:
+async def _copy(src_url: str, dst_url: str, force: bool, dst_display: str = "") -> int:
     tables = _tables()
     src = create_async_engine(src_url)
     dst = create_async_engine(dst_url)
@@ -120,6 +120,11 @@ async def _copy(src_url: str, dst_url: str, force: bool) -> int:
                 )
                 return 2
             if existing:
+                print(
+                    f"--force: deleting {sum(existing.values())} existing rows from "
+                    f"{dst_display or dst_url}",
+                    file=sys.stderr,
+                )
                 for t in reversed(tables):
                     await dconn.execute(t.delete())
             copied = {}
@@ -164,9 +169,14 @@ def main(argv=None) -> int:
     if src_file is not None and not src_file.exists():
         print(f"ERROR: source database not found: {src_file}", file=sys.stderr)
         return 1
-    if src_url == dst_url:
-        print("ERROR: source and target are the same", file=sys.stderr)
+    dst_file = _sqlite_path(dst_url)
+    if src_url == dst_url or (
+        src_file is not None and dst_file is not None and src_file == dst_file
+    ):
+        print("ERROR: source and target are the same database; refusing.", file=sys.stderr)
         return 1
+
+    redacted = make_url(dst_url).render_as_string(hide_password=True)
 
     with tempfile.TemporaryDirectory(prefix="co-migrate-") as tmp:
         if src_file is not None:
@@ -182,7 +192,7 @@ def main(argv=None) -> int:
         print("Upgrading the target schema to head…")
         run_migrations(dst_url)
         print("Copying…")
-        return asyncio.run(_copy(src_url, dst_url, args.force))
+        return asyncio.run(_copy(src_url, dst_url, args.force, redacted))
 
 
 if __name__ == "__main__":

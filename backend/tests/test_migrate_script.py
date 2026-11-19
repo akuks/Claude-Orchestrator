@@ -78,3 +78,27 @@ def test_legacy_source_is_upgraded_on_a_copy(tmp_path):
     assert "users" in {
         r[0] for r in sqlite3.connect(dst).execute("SELECT name FROM sqlite_master")
     }
+
+
+def test_same_file_different_spelling_refused(tmp_path, monkeypatch, capsys):
+    mod = _load()
+    src = tmp_path / "src.db"
+    _seed(src)
+    before = src.read_bytes()
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "link.db").symlink_to(src)
+    for dst in ("sqlite:///src.db", "sqlite:///./src.db", f"sqlite:///{tmp_path}/../{tmp_path.name}/src.db",
+                f"sqlite:///{tmp_path}/link.db"):
+        for extra in ([], ["--force"]):
+            assert mod.main(["--from", f"sqlite:///{src}", "--to", dst, *extra]) != 0
+    assert src.read_bytes() == before
+
+
+def test_force_warns_with_redacted_target(tmp_path, capsys):
+    mod = _load()
+    src, dst = tmp_path / "src.db", tmp_path / "dst.db"
+    _seed(src)
+    assert mod.main(["--from", f"sqlite:///{src}", "--to", f"sqlite:///{dst}"]) == 0
+    capsys.readouterr()
+    assert mod.main(["--from", f"sqlite:///{src}", "--to", f"sqlite:///{dst}", "--force"]) == 0
+    assert "--force: deleting 3 existing rows from" in capsys.readouterr().err

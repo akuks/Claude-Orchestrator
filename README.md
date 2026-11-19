@@ -114,7 +114,7 @@ python scripts/migrate_sqlite_to_postgres.py \
 ```
 
 The source file is never modified (a temporary copy is upgraded and read). The
-target must be empty unless you pass `--force`, which empties it first.
+target must be empty unless you pass `--force`, which **destroys all existing data in the target** (it deletes every row before copying). Source and target must not be the same database; that is always refused.
 
 **HTTPS via a reverse proxy.** For anything beyond localhost, put nginx/Caddy/etc.
 in front with TLS. The session cookie is marked `Secure` automatically when the
