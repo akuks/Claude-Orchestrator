@@ -182,13 +182,13 @@ def test_member_children_owned_by_member_not_parent_owner(client, member_client)
         json={"parent_task_id": parent["id"], "items": [{"agent": "r8-agent", "prompt": "x"}]},
     )
     # Non-agent callers pass the parent id only as linkage; owner is the caller.
-    if d.status_code == 201:
-        assert d.json()[0]["created_by"] == me
+    assert d.status_code == 201, d.text
+    assert d.json()[0]["created_by"] == me
     ag = client.get("/agents").json()
     aid = next(a["id"] for a in ag if a["name"] == "r8-agent")
-    r = member_client.post(f"/agents/{aid}/run", json={"parent_task_id": parent["id"]})
-    if r.status_code == 201:
-        assert r.json()["created_by"] == me
+    r = member_client.post(f"/agents/{aid}/run", json={"parent_task_id": parent["id"], "prompt": "p"})
+    assert r.status_code == 201, r.text
+    assert r.json()["created_by"] == me
 
 
 def test_member_followup_owned_by_member(client, member_client):
@@ -202,8 +202,18 @@ def test_member_followup_owned_by_member(client, member_client):
 
     asyncio.run(setsess())
     r = member_client.post(f"/tasks/{parent['id']}/followup", json={"prompt": "more"})
-    if r.status_code == 201:
-        assert r.json()["created_by"] == me
+    assert r.status_code == 201, r.text
+    assert r.json()["created_by"] == me
+
+
+def _token_count(task_id):
+    async def go():
+        async with SessionLocal() as s:
+            return len(
+                (await s.execute(select(ApiToken).where(ApiToken.task_id == task_id))).scalars().all()
+            )
+
+    return asyncio.run(go())
 
 
 def _live_tokens(task_id):
@@ -218,15 +228,31 @@ def _live_tokens(task_id):
 
 
 def test_stale_token_revoked_when_a_new_attempt_starts(client, monkeypatch, tmp_path):
+    import time
+
+    from app.config import settings
+
+    slow = tmp_path / "slow_claude.sh"
+    slow.write_text("#!/usr/bin/env bash\ncat >/dev/null\nsleep 4\n")
+    slow.chmod(0o755)
+    monkeypatch.setattr(settings, "claude_bin", str(slow))
     aid = _admin_id()
     t = client.post("/tasks", json={"prompt": "restart me", "requires_approval": True}).json()
     stale = _mint(t["id"], aid)  # as left behind by an interrupted run
     assert len(_live_tokens(t["id"])) == 1
-    client.post(f"/approvals/{t['id']}/approve")  # now it actually runs
-    wait_task(client, t["id"])
-    assert _live_tokens(t["id"]) == []
-    # the stale token is dead too
+    client.post(f"/approvals/{t['id']}/approve")
+    # While the new attempt is RUNNING (fresh token minted), the stale one is dead.
+    deadline = time.time() + 15
+    while time.time() < deadline:
+        if _token_count(t["id"]) == 2:  # stale + the new attempt's token
+            break
+        time.sleep(0.1)
+    assert _token_count(t["id"]) == 2
+    live = _live_tokens(t["id"])
+    assert len(live) == 1  # only the new attempt's token
     assert _agent_client(stale).get(f"/tasks/{t['id']}").status_code == 401
+    client.post(f"/tasks/{t['id']}/cancel")
+    wait_task(client, t["id"])
 
 
 def test_token_revoked_during_retry_backoff(client, monkeypatch, tmp_path):
