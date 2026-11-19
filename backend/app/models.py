@@ -28,6 +28,8 @@ class Task(Base):
     __tablename__ = "tasks"
 
     id: Mapped[str] = mapped_column(String(32), primary_key=True, default=_uuid)
+    created_by: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    decided_by: Mapped[str | None] = mapped_column(String(32), nullable=True)
     title: Mapped[str] = mapped_column(String(200))
     prompt: Mapped[str] = mapped_column(Text)
     project: Mapped[str | None] = mapped_column(String(200), nullable=True, index=True)
@@ -137,6 +139,7 @@ class Project(Base):
     __tablename__ = "projects"
 
     id: Mapped[str] = mapped_column(String(32), primary_key=True, default=_uuid)
+    created_by: Mapped[str | None] = mapped_column(String(32), nullable=True)
     name: Mapped[str] = mapped_column(String(200))
     slug: Mapped[str] = mapped_column(String(120), unique=True, index=True)
     directory: Mapped[str] = mapped_column(String(500))
@@ -185,6 +188,7 @@ class Agent(Base):
     __tablename__ = "agents"
 
     id: Mapped[str] = mapped_column(String(32), primary_key=True, default=_uuid)
+    created_by: Mapped[str | None] = mapped_column(String(32), nullable=True)
     name: Mapped[str] = mapped_column(String(200))
     description: Mapped[str | None] = mapped_column(String(500), nullable=True)
     system_prompt: Mapped[str] = mapped_column(Text, default="")  # the role
@@ -219,6 +223,7 @@ class Template(Base):
     __tablename__ = "templates"
 
     id: Mapped[str] = mapped_column(String(32), primary_key=True, default=_uuid)
+    created_by: Mapped[str | None] = mapped_column(String(32), nullable=True)
     name: Mapped[str] = mapped_column(String(200))
     description: Mapped[str | None] = mapped_column(String(500), nullable=True)
     prompt: Mapped[str] = mapped_column(Text)
@@ -234,6 +239,7 @@ class Schedule(Base):
     __tablename__ = "schedules"
 
     id: Mapped[str] = mapped_column(String(32), primary_key=True, default=_uuid)
+    created_by: Mapped[str | None] = mapped_column(String(32), nullable=True)
     name: Mapped[str] = mapped_column(String(200))
     cron: Mapped[str] = mapped_column(String(120))
     enabled: Mapped[bool] = mapped_column(default=True)
@@ -359,6 +365,7 @@ class Workflow(Base):
     __tablename__ = "workflows"
 
     id: Mapped[str] = mapped_column(String(32), primary_key=True, default=_uuid)
+    created_by: Mapped[str | None] = mapped_column(String(32), nullable=True)
     name: Mapped[str] = mapped_column(String(200))
     description: Mapped[str | None] = mapped_column(String(500), nullable=True)
     stages: Mapped[list] = mapped_column(JSON, default=list)
@@ -371,6 +378,7 @@ class WorkflowRun(Base):
     __tablename__ = "workflow_runs"
 
     id: Mapped[str] = mapped_column(String(32), primary_key=True, default=_uuid)
+    created_by: Mapped[str | None] = mapped_column(String(32), nullable=True)
     workflow_id: Mapped[str] = mapped_column(String(32), index=True)
     name: Mapped[str] = mapped_column(String(200))  # snapshot of workflow name
     input: Mapped[str] = mapped_column(Text, default="")
@@ -412,6 +420,7 @@ class ContextDoc(Base):
     __tablename__ = "context_docs"
 
     id: Mapped[str] = mapped_column(String(32), primary_key=True, default=_uuid)
+    created_by: Mapped[str | None] = mapped_column(String(32), nullable=True)
     # Hierarchical path, e.g. "runbooks/deploy.md". Unique per scope+project.
     path: Mapped[str] = mapped_column(String(300), index=True)
     title: Mapped[str] = mapped_column(String(200))
