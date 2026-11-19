@@ -294,10 +294,15 @@ function AppInner({ user, onLogout }) {
           display: 'flex',
           alignItems: 'center',
           justifyContent: 'space-between',
+          flexWrap: 'wrap',
+          height: 'auto',
+          minHeight: 64,
+          rowGap: 8,
           paddingInline: 24,
+          paddingBlock: 8,
         }}
       >
-        <Space size="large">
+        <Space size="large" wrap>
           <Typography.Title
             level={4}
             style={{ color: '#fff', margin: 0, whiteSpace: 'nowrap' }}
@@ -340,7 +345,7 @@ function AppInner({ user, onLogout }) {
             ]}
           />
         </Space>
-        <Space>
+        <Space wrap>
           {view === 'tasks' && (
             <Select
               allowClear
@@ -368,14 +373,25 @@ function AppInner({ user, onLogout }) {
             trigger={['click']}
             menu={{
               items: [
+                {
+                  key: 'me',
+                  disabled: true,
+                  label: (
+                    <span>
+                      {user.name}{' '}
+                      <Tag style={{ marginInlineEnd: 0 }} color={user.role === 'admin' ? 'gold' : 'default'}>
+                        {user.role}
+                      </Tag>
+                    </span>
+                  ),
+                },
+                { type: 'divider' },
                 { key: 'pw', icon: <LockOutlined />, label: 'Change password', onClick: () => setPwOpen(true) },
                 { key: 'out', icon: <LogoutOutlined />, label: 'Log out', onClick: onLogout },
               ],
             }}
           >
-            <Button icon={<UserOutlined />} data-testid="user-menu">
-              {user.name} <Tag style={{ marginInlineEnd: 0 }} color={user.role === 'admin' ? 'gold' : 'default'}>{user.role}</Tag>
-            </Button>
+            <Button icon={<UserOutlined />} data-testid="user-menu" title={user.name} aria-label="User menu" />
           </Dropdown>
         </Space>
       </Header>
