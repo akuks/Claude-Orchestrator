@@ -245,7 +245,9 @@ export default function TaskDetail({ taskId, onClose, onChanged, onOpenTask }) {
     ws.onclose = (e) => {
       if (closed) return
       if (e.code === 4401) notifyUnauthorized()
-      else if (e.code === 4403) console.warn('Task stream rejected (forbidden / origin not allowed)')
+      else if (e.code === 4403) {
+        message.error("Live output blocked: this page's origin isn't in CO_CORS_ORIGINS")
+      }
     }
     // Load any already-persisted artifacts (for finished tasks reopened later).
     api.getArtifacts(taskId).then((a) => !closed && setArtifacts(a))
