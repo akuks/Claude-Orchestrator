@@ -90,6 +90,8 @@ class Settings(BaseSettings):
         "http://localhost:5173",
         "http://localhost:3000",
         "http://127.0.0.1:5173",
+        "http://localhost:5200",  # start.sh UI (Vite proxy keeps the browser Origin)
+        "http://127.0.0.1:5200",
     ]
 
 

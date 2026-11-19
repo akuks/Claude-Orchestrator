@@ -294,3 +294,21 @@ def test_personal_token_acts_as_user_without_csrf(thread):
     # A token is not a browser session: it can't change the password.
     r = t.post("/auth/password", json={"current_password": ADMIN_PASSWORD, "new_password": "whatever-123456"})
     assert r.status_code == 403
+
+
+def test_ws_stream_rejects_foreign_origin(client):
+    from conftest import wait_task
+
+    t = client.post("/tasks", json={"prompt": "origin check"}).json()
+    wait_task(client, t["id"])
+    url = f"/tasks/{t['id']}/stream"
+    # Same-site but a different origin (another port/subdomain): the browser
+    # still sends the Lax cookie, so the server must check Origin itself.
+    with pytest.raises(WebSocketDisconnect) as e:
+        with client.websocket_connect(url, headers={"Origin": "http://evil.localhost:9999"}) as ws:
+            ws.receive_json()
+    assert e.value.code == 4403
+    with client.websocket_connect(url, headers={"Origin": "http://localhost:5200"}) as ws:
+        assert ws.receive_json()["seq"] >= 1
+    with client.websocket_connect(url) as ws:  # non-browser client: no Origin
+        assert ws.receive_json()["seq"] >= 1
