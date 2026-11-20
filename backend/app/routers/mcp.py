@@ -1,14 +1,15 @@
 from datetime import datetime, timedelta, timezone
 
-from fastapi import APIRouter, Depends, HTTPException
-from sqlalchemy import Integer, cast, delete, func, select
+from fastapi import APIRouter, Depends, HTTPException, Request
+from sqlalchemy import Integer, and_, cast, delete, func, or_, select, true
 
 from .. import mcp_manager
+from ..access import ALL, task_visibility_clause, visible_project_ids
 from ..auth import require_admin
 from ..constants import VALID_MODELS  # noqa: F401 (kept for symmetry)
 from ..crypto import decrypt_json, encrypt_json
 from ..database import SessionLocal
-from ..models import McpCall, McpServer, McpToolPolicy
+from ..models import McpCall, McpServer, McpToolPolicy, Project, Task
 from ..schemas import (
     McpObservabilityOut,
     McpProbeOut,
@@ -25,6 +26,17 @@ _admin = [Depends(require_admin)]  # writes are admin-only; reads are open
 _VALID_TRANSPORTS = {"stdio", "http"}
 _VALID_SCOPES = {"team", "user", "project", "both"}
 _VALID_ACTIONS = {"auto_approve", "require_approval", "block"}
+
+
+async def _server_visibility(s, p):
+    """Project-scoped servers are visible only when their project — resolved by
+    its *current* name — is visible; an unresolvable name is admin-only. Other
+    scopes are visible to everyone."""
+    visible = await visible_project_ids(s, p)
+    if visible is ALL:
+        return true()
+    names = select(Project.name).where(Project.id.in_(visible))
+    return or_(McpServer.scope != "project", McpServer.project.in_(names))
 
 
 def _to_out(srv: McpServer) -> McpServerOut:
@@ -81,13 +93,16 @@ async def create_server(payload: McpServerCreate):
 
 
 @router.get("/servers", response_model=list[McpServerOut])
-async def list_servers(scope: str | None = None, project: str | None = None):
+async def list_servers(
+    request: Request, scope: str | None = None, project: str | None = None
+):
     stmt = select(McpServer).order_by(McpServer.created_at.desc())
     if scope:
         stmt = stmt.where(McpServer.scope == scope)
     if project:
         stmt = stmt.where(McpServer.project == project)
     async with SessionLocal() as s:
+        stmt = stmt.where(await _server_visibility(s, request.state.principal))
         rows = (await s.execute(stmt)).scalars().all()
     return [_to_out(r) for r in rows]
 
@@ -99,10 +114,23 @@ async def _get_or_404(s, server_id: str) -> McpServer:
     return srv
 
 
+async def _visible_or_404(s, p, server_id: str) -> McpServer:
+    srv = (
+        await s.execute(
+            select(McpServer).where(
+                McpServer.id == server_id, await _server_visibility(s, p)
+            )
+        )
+    ).scalar_one_or_none()
+    if srv is None:
+        raise HTTPException(404, "MCP server not found")
+    return srv
+
+
 @router.get("/servers/{server_id}", response_model=McpServerOut)
-async def get_server(server_id: str):
+async def get_server(server_id: str, request: Request):
     async with SessionLocal() as s:
-        return _to_out(await _get_or_404(s, server_id))
+        return _to_out(await _visible_or_404(s, request.state.principal, server_id))
 
 
 @router.patch("/servers/{server_id}", response_model=McpServerOut, dependencies=_admin)
@@ -146,9 +174,9 @@ async def test_server(server_id: str):
 
 
 @router.get("/servers/{server_id}/policies", response_model=list[PolicyOut])
-async def get_policies(server_id: str):
+async def get_policies(server_id: str, request: Request):
     async with SessionLocal() as s:
-        await _get_or_404(s, server_id)
+        await _visible_or_404(s, request.state.principal, server_id)
         rows = (
             await s.execute(
                 select(McpToolPolicy)
@@ -190,19 +218,23 @@ async def set_policies(server_id: str, policies: list[PolicyIn]):
 
 
 @router.get("/observability", response_model=McpObservabilityOut)
-async def observability(days: int = 7):
+async def observability(request: Request, days: int = 7):
     since = datetime.now(timezone.utc) - timedelta(days=days)
+    p = request.state.principal
     async with SessionLocal() as s:
+        # Admins count every call (including ones with no task); everyone else
+        # only calls made by tasks they can see.
+        if p.is_admin and p.user.active:
+            window = McpCall.created_at >= since
+        else:
+            seen = select(Task.id).where(await task_visibility_clause(s, p))
+            window = and_(McpCall.created_at >= since, McpCall.task_id.in_(seen))
         total_calls = (
-            await s.execute(
-                select(func.count()).where(McpCall.created_at >= since)
-            )
+            await s.execute(select(func.count()).where(window))
         ).scalar_one()
         total_errors = (
             await s.execute(
-                select(func.count()).where(
-                    McpCall.created_at >= since, McpCall.is_error.is_(True)
-                )
+                select(func.count()).where(window, McpCall.is_error.is_(True))
             )
         ).scalar_one()
         by_server_rows = (
@@ -212,14 +244,14 @@ async def observability(days: int = 7):
                     func.count(),
                     func.sum(cast(McpCall.is_error, Integer)),
                 )
-                .where(McpCall.created_at >= since)
+                .where(window)
                 .group_by(McpCall.server)
             )
         ).all()
         top_tool_rows = (
             await s.execute(
                 select(McpCall.server, McpCall.tool, func.count())
-                .where(McpCall.created_at >= since)
+                .where(window)
                 .group_by(McpCall.server, McpCall.tool)
                 .order_by(func.count().desc())
                 .limit(10)

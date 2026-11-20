@@ -1,13 +1,44 @@
-from fastapi import APIRouter, Depends, HTTPException
-from sqlalchemy import select
+from fastapi import APIRouter, Depends, HTTPException, Request
+from sqlalchemy import or_, select, true
 
 from .. import context_store
+from ..access import ALL, require_project_role, visible_project_ids
 from ..auth import Principal, current_principal, ensure_admin
 from ..database import SessionLocal
 from ..models import ContextDoc, Project
 from ..schemas import ContextDocCreate, ContextDocOut, ContextDocUpdate
 
 router = APIRouter(prefix="/context-docs", tags=["context-docs"])
+
+_SCOPES = ("global", "project")
+
+
+async def _visibility(s, p):
+    """Global docs: everyone. Project docs: any role on that project."""
+    visible = await visible_project_ids(s, p)
+    if visible is ALL:
+        return true()
+    return or_(ContextDoc.scope != "project", ContextDoc.project_id.in_(visible))
+
+
+async def _visible_doc_or_404(s, p, doc_id: str) -> ContextDoc:
+    doc = (
+        await s.execute(
+            select(ContextDoc).where(ContextDoc.id == doc_id, await _visibility(s, p))
+        )
+    ).scalar_one_or_none()
+    if doc is None:
+        raise HTTPException(404, "Doc not found")
+    return doc
+
+
+async def _require_write(s, p, scope: str, project_id: str | None) -> None:
+    """Global docs reach every task → admin. Project docs → that project's
+    maintainer (404 when the project isn't visible, 403 when the role is lower)."""
+    if scope == "project":
+        await require_project_role(s, p, project_id, "maintainer")
+    else:
+        ensure_admin(p)
 
 
 async def _validate(s, scope: str, project_id: str | None) -> str | None:
@@ -40,9 +71,15 @@ def _norm(path: str) -> str:
 
 
 @router.get("", response_model=list[ContextDocOut])
-async def list_docs(project_id: str | None = None, scope: str | None = None):
+async def list_docs(
+    request: Request, project_id: str | None = None, scope: str | None = None
+):
     async with SessionLocal() as s:
-        q = select(ContextDoc).order_by(ContextDoc.path)
+        q = (
+            select(ContextDoc)
+            .where(await _visibility(s, request.state.principal))
+            .order_by(ContextDoc.path)
+        )
         if scope:
             q = q.where(ContextDoc.scope == scope)
         if project_id:
@@ -52,9 +89,12 @@ async def list_docs(project_id: str | None = None, scope: str | None = None):
 
 
 @router.get("/preview")
-async def preview_index(project_id: str | None = None):
+async def preview_index(request: Request, project_id: str | None = None):
     """What a task (optionally in a project) would receive: the L0 index and the
     docs that apply after project-overrides-global resolution."""
+    if project_id:
+        async with SessionLocal() as s:
+            await require_project_role(s, request.state.principal, project_id)
     docs = await context_store.docs_for(project_id)
     root = context_store.context_dir("<task-id>")
     return {
@@ -64,20 +104,19 @@ async def preview_index(project_id: str | None = None):
 
 
 @router.get("/{doc_id}", response_model=ContextDocOut)
-async def get_doc(doc_id: str):
+async def get_doc(doc_id: str, request: Request):
     async with SessionLocal() as s:
-        doc = await s.get(ContextDoc, doc_id)
-        if doc is None:
-            raise HTTPException(404, "Doc not found")
+        doc = await _visible_doc_or_404(s, request.state.principal, doc_id)
         return ContextDocOut.model_validate(doc)
 
 
 @router.post("", response_model=ContextDocOut, status_code=201)
 async def create_doc(payload: ContextDocCreate, p: Principal = Depends(current_principal)):
-    if payload.scope == "global":
-        ensure_admin(p)  # global docs reach every task
+    if payload.scope not in _SCOPES:
+        raise HTTPException(400, "scope must be 'global' or 'project'")
     path = _norm(payload.path)
     async with SessionLocal() as s:
+        await _require_write(s, p, payload.scope, payload.project_id)
         project_id = await _validate(s, payload.scope, payload.project_id)
         await _check_unique(s, path, payload.scope, project_id)
         doc = ContextDoc(
@@ -104,11 +143,12 @@ async def update_doc(
 ):
     data = payload.model_dump(exclude_unset=True)
     async with SessionLocal() as s:
-        doc = await s.get(ContextDoc, doc_id)
-        if doc is None:
-            raise HTTPException(404, "Doc not found")
-        if doc.scope == "global" or data.get("scope") == "global":
-            ensure_admin(p)
+        doc = await _visible_doc_or_404(s, p, doc_id)
+        await _require_write(s, p, doc.scope, doc.project_id)
+        new_scope = data.get("scope", doc.scope)
+        new_pid = data.get("project_id", doc.project_id) if new_scope == "project" else None
+        if new_scope in _SCOPES and (new_scope, new_pid) != (doc.scope, doc.project_id):
+            await _require_write(s, p, new_scope, new_pid)  # moving needs both places
         if "path" in data:
             data["path"] = _norm(data["path"])
         if "abstract" in data:
@@ -133,10 +173,7 @@ async def update_doc(
 @router.delete("/{doc_id}", status_code=204)
 async def delete_doc(doc_id: str, p: Principal = Depends(current_principal)):
     async with SessionLocal() as s:
-        doc = await s.get(ContextDoc, doc_id)
-        if doc is None:
-            raise HTTPException(404, "Doc not found")
-        if doc.scope == "global":
-            ensure_admin(p)
+        doc = await _visible_doc_or_404(s, p, doc_id)
+        await _require_write(s, p, doc.scope, doc.project_id)
         await s.delete(doc)
         await s.commit()
