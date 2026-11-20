@@ -18,15 +18,22 @@ export default function CommandPalette({ open, commands, loading, onClose }) {
     setActive(0)
   }, [open])
 
-  // The dialog only takes focus a frame or two after ⌘K. Keys pressed in
-  // that gap would be lost, so handle them here until the input has focus.
+  // The dialog only takes focus a frame or two after ⌘K. Keys pressed before
+  // the input has had focus once would be lost, so buffer them until then.
+  // After that, a printable key typed elsewhere just refocuses the input.
   const keyRef = useRef(null)
+  const focusedOnce = useRef(false)
   useEffect(() => {
     if (!open) return
+    focusedOnce.current = false
     const onKey = (e) => {
       const input = inputRef.current?.input
-      if (!input || document.activeElement === input) return
+      if (input && document.activeElement === input) return
       if (e.metaKey || e.ctrlKey || e.altKey) return
+      if (input && focusedOnce.current) {
+        if (e.key.length === 1) input.focus({ preventScroll: true })
+        return
+      }
       if (e.key === 'Escape') {
         e.preventDefault()
         onClose()
@@ -37,7 +44,7 @@ export default function CommandPalette({ open, commands, loading, onClose }) {
       else if (['ArrowDown', 'ArrowUp', 'Enter'].includes(e.key)) keyRef.current?.(e)
       else return
       e.preventDefault()
-      input.focus({ preventScroll: true })
+      input?.focus({ preventScroll: true })
     }
     window.addEventListener('keydown', onKey, true)
     return () => window.removeEventListener('keydown', onKey, true)
@@ -96,6 +103,7 @@ export default function CommandPalette({ open, commands, loading, onClose }) {
         onChange={(e) => setQuery(e.target.value)}
         onKeyDown={onKeyDown}
         onFocus={(e) => {
+          focusedOnce.current = true
           const end = e.target.value.length
           e.target.setSelectionRange(end, end)
         }}

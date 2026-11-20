@@ -39,7 +39,7 @@ import SetupPage from './auth/SetupPage'
 import ChangePasswordModal from './auth/ChangePasswordModal'
 import MyCredentials from './components/MyCredentials'
 import { useThemeMode } from './theme/ThemeModeContext.jsx'
-import { useRoute } from './shell/router'
+import { redirectIfForbidden, returnTo, useRoute } from './shell/router'
 import { buildCommands, isPaletteShortcut } from './shell/commands'
 import Rail from './shell/Rail'
 import TopBar from './shell/TopBar'
@@ -137,15 +137,16 @@ function AppInner({ user, onLogout }) {
   const [paletteOpen, setPaletteOpen] = useState(false)
   const [paletteData, setPaletteData] = useState({ workflows: [], recent: [], loading: false })
   const [runWorkflowId, setRunWorkflowId] = useState(null)
-  const paletteClosedAt = useRef(0)
 
   // #/tasks/<id> opens that task's detail drawer.
   const selected = page === 'tasks' && route.id ? route.id : null
-  const openTask = useCallback((id) => navigate({ page: 'tasks', id }), [navigate])
+  // Switching steps inside the open drawer replaces the entry, so closing it
+  // still steps back to wherever the drawer was opened from.
+  const openTask = useCallback((id) => navigate({ page: 'tasks', id }, { replace: true }), [navigate])
 
   // Admin-only pages: a member following a stale link lands on Home.
   useEffect(() => {
-    if (!isAdmin && (page === 'users' || page === 'teams')) navigate({ page: 'home' })
+    redirectIfForbidden({ page }, isAdmin, navigate)
   }, [isAdmin, page, navigate])
 
   const loadClaudeInfo = useCallback(() => {
@@ -209,24 +210,14 @@ function AppInner({ user, onLogout }) {
   }, [refresh, page])
 
   // ---- ⌘K ----
-  const openPalette = useCallback((viaFocus) => {
-    // Focus returns to the trigger when the palette closes; don't reopen.
-    if (viaFocus === true && Date.now() - paletteClosedAt.current < 500) return
-    setPaletteOpen(true)
-  }, [])
-  const closePalette = useCallback(() => {
-    paletteClosedAt.current = Date.now()
-    setPaletteOpen(false)
-  }, [])
+  const openPalette = useCallback(() => setPaletteOpen(true), [])
+  const closePalette = useCallback(() => setPaletteOpen(false), [])
 
   useEffect(() => {
     const onKey = (e) => {
       if (!isPaletteShortcut(e)) return
       e.preventDefault()
-      setPaletteOpen((o) => {
-        if (o) paletteClosedAt.current = Date.now()
-        return !o
-      })
+      setPaletteOpen((o) => !o)
     }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
@@ -515,7 +506,7 @@ function AppInner({ user, onLogout }) {
       <MyCredentials open={credsOpen} onClose={() => setCredsOpen(false)} onChanged={onCredsChanged} />
       <TaskDetail
         taskId={selected}
-        onClose={() => navigate({ page: 'tasks' })}
+        onClose={() => returnTo({ page: 'tasks' }, navigate)}
         onChanged={refresh}
         onOpenTask={openTask}
         onOpenCredentials={() => setCredsOpen(true)}

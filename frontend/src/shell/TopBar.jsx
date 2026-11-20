@@ -32,17 +32,7 @@ export default function TopBar({ user, claudeInfo, isAdmin, onOpenPalette, onOpe
         data-testid="palette-trigger"
         aria-label={`Ask or jump (${SHORTCUT_LABEL})`}
         aria-haspopup="dialog"
-        onClick={() => onOpenPalette()}
-        onFocus={(e) => {
-          // Keyboard focus (Tab) opens it too; a mouse click is handled above.
-          let keyboard = false
-          try {
-            keyboard = e.target.matches(':focus-visible')
-          } catch {
-            keyboard = false
-          }
-          if (keyboard) onOpenPalette(true)
-        }}
+        onClick={() => onOpenPalette()} // a <button>: Enter and Space click it too
       >
         <SearchOutlined className="co-cmd-icon" />
         <span className="co-cmd-text">Ask or jump…</span>
