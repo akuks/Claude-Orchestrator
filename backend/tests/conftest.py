@@ -62,6 +62,7 @@ os.environ.update(
 ADMIN_EMAIL = os.environ["CO_ADMIN_EMAIL"]
 ADMIN_PASSWORD = os.environ["CO_ADMIN_PASSWORD"]
 MEMBER_EMAIL = "member@test.local"
+_ADMIN_CLIENT = None  # set by the session-scoped `client` fixture
 
 
 @pytest.fixture(scope="session")
@@ -74,6 +75,8 @@ def client():
         r = c.post("/auth/login", json={"email": ADMIN_EMAIL, "password": ADMIN_PASSWORD})
         assert r.status_code == 200, r.text
         c.headers["X-Requested-With"] = "co"
+        global _ADMIN_CLIENT
+        _ADMIN_CLIENT = c
         yield c
 
 
@@ -130,3 +133,27 @@ def wait_task(client, task_id: str, timeout: float = 20.0) -> dict:
             return t
         time.sleep(0.3)
     return client.get(f"/tasks/{task_id}").json()
+
+
+def login_as(email: str, role: str = "member"):
+    """Create a user via the admin /users API and return a logged-in client
+    (CSRF header set). Pass a unique email per call site to stay order-independent."""
+    from fastapi.testclient import TestClient
+
+    from app.main import app
+
+    # Reuse the session-scoped admin client (tests using login_as request `client`).
+    admin = _ADMIN_CLIENT
+    assert admin is not None, "login_as requires the `client` fixture"
+    r = admin.post(
+        "/users",
+        json={"email": email, "name": email.split("@")[0], "role": role, "password": ADMIN_PASSWORD},
+    )
+    assert r.status_code == 201, r.text
+    uid = r.json()["id"]
+    c = TestClient(app)
+    r = c.post("/auth/login", json={"email": email, "password": ADMIN_PASSWORD})
+    assert r.status_code == 200, r.text
+    c.headers["X-Requested-With"] = "co"
+    c.user_id = uid
+    return c
