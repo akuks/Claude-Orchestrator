@@ -30,8 +30,14 @@ API
                    ``env -S``, ``find -exec ... ;``, ``trap 'cmd'``,
                    ``watch cmd``, ``su|runuser|sg|script -c cmd``,
                    ``flock F -c cmd``, ``sudo -s|-i ARGS``, ``alias n='cmd'``
-                   values, ``git -c alias.n='!cmd'`` / ``git config alias.n``
-                   values, and a shell's script when it is visible: a
+                   values, git settings that run commands (``-c KEY=V`` /
+                   ``git config [set] KEY V`` for ``alias.*``, ``core.pager``,
+                   ``core.editor``, ``core.sshCommand``, ``core.fsmonitor``,
+                   ``sequence.editor``, ``diff.external``, ``credential.helper``
+                   ``!cmd`` ...), command-valued variables (``GIT_SSH_COMMAND``,
+                   ``GIT_PAGER``, ``EDITOR``, ``PAGER`` ... as prefix, ``env`` or
+                   ``export``), a ``parallel`` command word with spaces, and a
+                   shell's script when it is visible: a
                    heredoc or here-string (``bash <<EOF``, ``bash 0<<< ..``,
                    ``bash /dev/stdin <<< ..``), a heredoc or here-string piped
                    into a later shell stage (``cat <<EOF | bash``), literal
@@ -97,9 +103,15 @@ human-readable entry in ``Stage.reasons``:
   ``$1``, an unresolvable ``$( )``/backtick, an unquoted glob or brace
   expansion (``/bin/r?``, ``{rm,-rf,~}``);
 * a shell or ``source`` reads a script we cannot see: ``< file``, ``<&N``,
-  ``/dev/fd/N``, a non-literal ``<( )``, a pipe from something other than a
-  literal ``echo``/``printf``/heredoc/here-string (``curl x | bash``), or
-  stdin inherited inside a substitution (``tee >(bash)``);
+  any ``/dev`` or ``/proc`` path other than stdin (paths are normalised:
+  ``/dev/./stdin`` is stdin), a non-literal ``<( )``, a pipe from something
+  other than a literal ``echo``/``printf``/heredoc/here-string
+  (``curl x | bash``), or inherited stdin - a stdin-mode shell needs its
+  input visible at its own stage (``exec 0<<<..; bash``, ``{ bash; } <<<..``
+  and a bare ``bash`` are uncertain);
+* ``xargs``/``parallel`` builds a ``sh -c`` script from its input (no script
+  or a ``{}``/``-I`` placeholder in it), ``git --config-env``,
+  ``core.hooksPath``, or a command-valued variable that is not a literal;
 * a shell hook variable is set (``PS4``, ``PROMPT_COMMAND``, ``BASH_ENV``,
   ``ENV`` ...), ``${x@P}``, an array subscript holding ``$( )`` in a name
   argument (``read 'a[$(..)]'``) or reached through arithmetic, or the
@@ -117,6 +129,7 @@ around a dangerous verb as a hit rather than an allow.
 
 from __future__ import annotations
 
+import posixpath
 import re
 from dataclasses import dataclass, field
 
@@ -148,7 +161,7 @@ _PREFIX = frozenset({
     "sudo", "doas", "env", "command", "builtin", "nohup", "time", "exec", "xargs", "nice",
     "ionice", "timeout", "stdbuf", "busybox", "winpty", "setsid", "chronic", "chroot", "unshare",
     "nsenter", "flock", "strace", "pkexec", "unbuffer", "caffeinate", "arch", "parallel", "runuser",
-    "coproc", "if", "then", "else", "elif", "do", "while", "until", "!",
+    "coproc", "taskset", "numactl", "if", "then", "else", "elif", "do", "while", "until", "!",
 })
 _WITH_VALUE = {
     "sudo": {"-u", "-g", "-h", "-p", "-C", "-U", "-r", "-t", "-D", "-T", "--user", "--group",
@@ -174,12 +187,23 @@ _WITH_VALUE = {
                  "--delimiter", "-I", "--colsep", "--joblog", "--results", "-P", "--max-procs",
                  "--timeout", "--delay"},
     "runuser": {"-u", "-g", "-G", "--user", "--group", "--supp-group"},
+    "taskset": {"-c", "--cpu-list"},
+    "numactl": {"-N", "-m", "-C", "-i", "-p", "--cpunodebind", "--membind", "--physcpubind",
+                "--interleave", "--preferred"},
 }
 _NEEDS_ARG = frozenset({"timeout", "chroot", "flock"})  # a duration / root dir / lock file comes first
 _DECLARE = frozenset({"export", "declare", "typeset", "local", "readonly"})
 _MISSING = object()
-_STDIN_PATH = re.compile(r"/dev/stdin|/dev/fd/0|/proc/(self|\d+)/fd/0|-\Z")
-_FD_PATH = re.compile(r"/dev/fd/\d+|/proc/(self|\d+)/fd/\d+")
+_STDIN_PATH = re.compile(r"/dev/stdin|/dev/fd/0+|/proc/(self|thread-self|\d+)(/task/\d+)?/fd/0+")
+# Variables whose value some command runs as a shell command.
+_CMD_ENV_VARS = frozenset({"GIT_SSH_COMMAND", "GIT_SSH", "GIT_PAGER", "GIT_EDITOR", "GIT_SEQUENCE_EDITOR",
+                           "GIT_EXTERNAL_DIFF", "GIT_ASKPASS", "GIT_PROXY_COMMAND", "PAGER", "EDITOR",
+                           "VISUAL", "SSH_ASKPASS", "MANPAGER", "LESSOPEN"})
+# git config keys whose value is run as a command.
+_GIT_CMD_KEYS = re.compile(
+    r"(core\.(pager|editor|sshcommand|fsmonitor|askpass)|sequence\.editor|diff\.external|pager\..+"
+    r"|diff\..+\.(textconv|command)|merge\..+\.driver|filter\..+\.(clean|smudge|process)"
+    r"|gpg(\..+)?\.program|credential(\..+)?\.helper|alias\..+)")
 # Shell variables that make a shell run code from their value.
 _SHELL_HOOK_VARS = frozenset({"PS0", "PS1", "PS4", "PROMPT_COMMAND", "BASH_ENV", "ENV", "SHELLOPTS",
                               "BASHOPTS", "BASH_FUNC", "ZDOTDIR"})
@@ -307,6 +331,7 @@ def _strip(argv):
             break  # runuser [-l] USER -c CMD: like su, handled in _finish
         wrappers.append(base)
         i += 1
+        opt_start = i
         vals = _WITH_VALUE.get(base, ())
         sudo_shell = False
         while i < n and (argv[i].startswith("-") or (base == "env" and _ASSIGN.match(argv[i]))):
@@ -353,6 +378,10 @@ def _strip(argv):
             if base == "flock" and i < n and argv[i] in ("-c", "--command"):
                 scripts.append(argv[i + 1] if i + 1 < n else "")
                 i = n
+        if base == "taskset" and i < n and not any(
+                o in ("-c", "--cpu-list") or o.startswith("--cpu-list=")
+                or (o.startswith("-") and not o.startswith("--") and "c" in o) for o in argv[opt_start:i]):
+            i += 1  # taskset MASK cmd
         if base == "coproc" and i + 1 < n and argv[i + 1] == "{":
             i += 1  # coproc NAME { ...; }
         if sudo_shell and i < n:
@@ -723,6 +752,7 @@ class _Level:
         self.compound = 0  # open if/while/for/case/{ ... (assignments there are not straight-line)
         self.prev_sep = None  # the operator before the current pipeline
         self.pending_writes = []  # candidate safe writers of the current pipeline
+        self.redir_fd = None  # fd digits before the pending redirect
         self._reset_word()
 
     @staticmethod
@@ -731,6 +761,7 @@ class _Level:
         st._words = []
         st._procsub = {}  # word text -> ParseResult of a <( ) / >( ) word
         st._rdyn = set()  # redirect targets that are not literal
+        st._fdx = set()  # indexes of input redirects on an fd other than 0 (3<<< x is not stdin)
         return st
 
     def _reset_word(self):
@@ -788,6 +819,7 @@ class _Level:
             dyn = True
         if self.pending:
             self.stage.redirects.append((self.pending, text))
+            self._note_fd()
             if dyn:
                 self.stage._rdyn.add(text)
             self.pending = None
@@ -808,6 +840,21 @@ class _Level:
                     self.compound += 1
             words.append((text, dyn))
         self._reset_word()
+
+    def _note_fd(self):
+        if self.redir_fd is not None and self.redir_fd.strip("0"):
+            self.stage._fdx.add(len(self.stage.redirects) - 1)
+        self.redir_fd = None
+
+    def take_fd(self):
+        """Consume a pending fd number word (2>file, 0<<<x); True if there was one."""
+        text = "".join(self.buf)
+        if self.started and text.isdigit() and not self.dyn:
+            self.redir_fd = text
+            self._reset_word()
+            return True
+        self.redir_fd = None
+        return False
 
     def error(self, msg):
         self.stage.mark(msg)
@@ -852,11 +899,12 @@ class _Level:
                 self.vars.pop(name, None)
         self.pending_writes = []
         for k, sh in enumerate(self.pipeline):
-            if not _stdin_shell(sh) or any(op in ("<", "<<", "<<<", "<&", "<>") for op, _ in sh.redirects):
+            if not _stdin_shell(sh) or any(op in ("<<", "<<<", "<&", "<>") or (op == "<" and not _is_stdin_path(t))
+                                           for j, (op, t) in enumerate(sh.redirects)
+                                           if j not in sh.__dict__.get("_fdx", ())):
                 continue
-            if k == 0:
-                if self.ctx.depth > 0:  # inside >( ) / $( ): stdin comes from outside
-                    sh.mark("shell reads a script from stdin that is not visible")
+            if k == 0:  # inherited stdin (exec 0<..., { bash; } <<<..., >(bash)): not visible here
+                sh.mark("shell reads a script from stdin that is not visible")
                 continue
             prev = self.pipeline[k - 1]
             val = _echo_value(_single(prev, self.ctx))
@@ -1048,6 +1096,7 @@ class _Level:
         self.stage.stdin = True
         if delim:
             self.stage.redirects.append(("<<", delim))
+            self._note_fd()
             self.heredocs.append(_Heredoc(delim, quoted, strip, self.stage, self.pipeline))
         return i
 
@@ -1116,9 +1165,23 @@ def _shell_mode(args):
     rest = args[i:]
     if c_flag:
         return "c", (rest[0] if rest else None)
-    if s_flag or not rest or _STDIN_PATH.fullmatch(rest[0]):
+    if s_flag or not rest or _is_stdin_path(rest[0]):
         return "stdin", None
     return "file", rest[0]
+
+
+def _norm_path(path):
+    if not path.startswith("/"):
+        return path
+    return re.sub(r"^/+", "/", posixpath.normpath(path))
+
+
+def _is_stdin_path(path):
+    return path == "-" or bool(_STDIN_PATH.fullmatch(_norm_path(path)))
+
+
+def _is_dev_path(path):
+    return _norm_path(path).startswith(("/dev/", "/proc/"))
 
 
 def _source_args(args):
@@ -1134,7 +1197,7 @@ def _stdin_shell(st):
         return _shell_mode(args)[0] == "stdin"
     if name in ("source", "."):
         args = _source_args(args)
-        return bool(args) and bool(_STDIN_PATH.fullmatch(args[0]))
+        return bool(args) and _is_stdin_path(args[0])
     return False
 
 
@@ -1148,8 +1211,8 @@ def _script_from_path(st, path, scripts, what):
         else:
             st.mark(f"{what} reads a script from a process substitution that is not a literal")
         return True
-    if _FD_PATH.fullmatch(path) and not _STDIN_PATH.fullmatch(path):
-        st.mark(f"{what} reads a script from a file descriptor")
+    if _is_dev_path(path) and not _is_stdin_path(path):
+        st.mark(f"{what} reads a script from a device or /proc path: {path!r}")
         return True
     return False
 
@@ -1157,13 +1220,16 @@ def _script_from_path(st, path, scripts, what):
 def _stdin_inputs(st, scripts, what):
     """Scripts a stdin-reading shell gets from its own redirects."""
     rdyn = st.__dict__.get("_rdyn", set())
-    for op, t in st.redirects:
+    fdx = st.__dict__.get("_fdx", ())
+    for j, (op, t) in enumerate(st.redirects):
+        if j in fdx:
+            continue
         if op == "<<<":
             scripts.append(t)
             if t in rdyn:
                 st.mark(f"{what} runs a here-string that is not a literal")
         elif op == "<":
-            if _STDIN_PATH.fullmatch(t):
+            if _is_stdin_path(t):
                 continue
             if not _script_from_path(st, t, scripts, what):
                 st.mark(f"{what} reads its script from a file: {t!r}")
@@ -1200,6 +1266,7 @@ def _finish(st, ctx, vars_):
         if bi is None or words[bi][0] != "{" or words[bi][1]:
             break
         if bi >= 2 and command_name(words[bi - 2][0]) == "coproc":
+            writes.append((words[bi - 1][0], None, False))  # coproc NAME sets NAME (an array)
             del words[bi - 1:bi + 1]  # coproc NAME { ...; }: drop NAME too
         else:
             del words[bi]
@@ -1215,19 +1282,31 @@ def _finish(st, ctx, vars_):
     argv = st.argv
 
     # Variable writers (see parse()).
+    assigns = list(st.env.items())  # (name, value|None) of every assignment in this stage
     for name, val in st.env.items():
         writes.append((name, val, not argv))  # a prefix assignment on a command is not a shell write
-    if argv:
-        head, rest = command_name(argv[0]), argv[1:]
+    idx, wrappers, scripts = _strip(argv)
+    st.wrappers = wrappers
+    for w, d in zip(argv[:len(argv) if idx is None else idx], st.dynamic):  # then x=rm, env X=1 ...
+        m = _ASSIGN.match(w)
+        if m:
+            writes.append((m.group(1), None, False))
+            assigns.append((m.group(1), None if (d or m.group(2)) else m.group(3)))
+    if idx is not None:
+        # The writer is the command after wrappers (builtin printf -v x, command export x=..);
+        # a write behind any wrapper is never straight-line.
+        head, rest, rdyn = command_name(argv[idx]), argv[idx + 1:], st.dynamic[idx + 1:]
         flags = [w for w in rest if w.startswith(("-", "+"))]
         if head in _DECLARE:
             if any("n" in f for f in flags):
                 ctx.poison = True  # declare -n: a name reference writes another name
-            for w, d in zip(rest, st.dynamic[1:]):
+            for w, d in zip(rest, rdyn):
                 m = _ASSIGN.match(w)
                 if m:
-                    writes.append((m.group(1), None if (d or m.group(2)) else m.group(3),
-                                   head in ("export", "readonly") and not flags))
+                    val = None if (d or m.group(2)) else m.group(3)
+                    writes.append((m.group(1), val,
+                                   head in ("export", "readonly") and not flags and not wrappers))
+                    assigns.append((m.group(1), val))
                 elif _NAME.fullmatch(w) and head not in ("export", "readonly"):
                     writes.append((w, None, False))
         elif head in ("unset", "read", "mapfile", "readarray"):
@@ -1239,11 +1318,12 @@ def _finish(st, ctx, vars_):
             writes.extend((w, None, False) for w in names)
         elif head == "getopts":
             writes.extend((w, None, False) for w in rest[1:2] + ["OPTARG", "OPTIND"])
-        elif head == "printf":
-            for j, w in enumerate(rest):
-                if w == "-v" and j + 1 < len(rest):
+        elif head in ("printf", "wait"):
+            for j, w in enumerate(rest):  # printf -v NAME / wait -p NAME
+                opt = "-v" if head == "printf" else "-p"
+                if w == opt and j + 1 < len(rest):
                     writes.append((rest[j + 1].split("[")[0], None, False))
-                elif w.startswith("-v") and len(w) > 2:
+                elif w.startswith(opt) and len(w) > 2:
                     writes.append((w[2:].split("[")[0], None, False))
         elif head in ("for", "select") and rest:
             writes.append((rest[0], None, False))
@@ -1251,13 +1331,12 @@ def _finish(st, ctx, vars_):
             _arith_scan(" ".join(rest), ctx, vars_, st)
         if head in _NAME_ARG_CMDS and any("[" in w and ("$(" in w or "`" in w) for w in rest):
             st.mark("an array subscript in a variable name runs a command")
-
-    idx, wrappers, scripts = _strip(argv)
-    st.wrappers = wrappers
-    for w in argv[:len(argv) if idx is None else idx]:  # then x=rm, env X=1 ...: never straight-line
-        m = _ASSIGN.match(w)
-        if m:
-            writes.append((m.group(1), None, False))
+    for name, val in assigns:  # GIT_SSH_COMMAND=..., EDITOR=...: some program runs the value
+        if name in _CMD_ENV_VARS:
+            if val is None:
+                st.mark(f"{name} is set to a value that is not a literal")
+            elif val:
+                scripts.append(val)
     if idx is None:
         _nest(st, scripts, ctx, vars_)
         return writes
@@ -1272,6 +1351,10 @@ def _finish(st, ctx, vars_):
         if hooks & _SHELL_HOOK_VARS:
             st.mark("a shell hook variable (PS4, PROMPT_COMMAND, BASH_ENV, ENV ...) is set")
         mode, script = _shell_mode(args)
+        if mode == "c" and {"xargs", "parallel"} & set(wrappers):
+            holders = _placeholders(argv[:idx])
+            if script is None or any(h in script for h in holders):
+                st.mark("xargs/parallel builds the shell script from its input")
         if mode == "c" and script is not None:
             scripts.append(script)
         elif mode == "file":
@@ -1299,7 +1382,7 @@ def _finish(st, ctx, vars_):
             scripts.append(val)
     elif name in ("source", "."):
         sargs = _source_args(args)
-        if sargs and _STDIN_PATH.fullmatch(sargs[0]):
+        if sargs and _is_stdin_path(sargs[0]):
             _stdin_inputs(st, scripts, name)
         elif sargs and _script_from_path(st, sargs[0], scripts, name):
             pass
@@ -1312,7 +1395,10 @@ def _finish(st, ctx, vars_):
                 ctx.aliases.add(m.group(1))
                 scripts.append(m.group(2))
     elif name == "git":
-        scripts.extend(_git_alias_scripts(args))
+        scripts.extend(_git_scripts(args, st))
+    if "parallel" in wrappers and any(ch.isspace() for ch in argv[idx]):
+        end = next((j for j in range(idx, len(argv)) if argv[j] in (":::", "::::", ":::+", "::::+")), len(argv))
+        scripts.append(" ".join(argv[idx:end]))  # parallel 'rm -rf {}' ::: x: the word is a command line
     elif name == "find":
         for w in _find_exec(st, idx, ctx, vars_):
             ctx.write(w[0], False)
@@ -1327,19 +1413,54 @@ def _nest(st, scripts, ctx, vars_):
             st.nested.append(res)
 
 
-def _git_alias_scripts(args):
-    """git -c alias.X='!cmd' / git config alias.X '!cmd': the alias is a command."""
-    vals = []
+def _placeholders(prefix):
+    """Replacement strings xargs/parallel substitute into the command."""
+    out = {"{}", "{.}", "{/}", "{//}", "{/.}", "{#}", "{%}"}
+    for j, w in enumerate(prefix):
+        if w == "-I" and j + 1 < len(prefix):
+            out.add(prefix[j + 1])
+        elif w.startswith("-I") and len(w) > 2:
+            out.add(w[2:])
+        elif w.startswith("--replace="):
+            out.add(w.split("=", 1)[1])
+        elif w.startswith("-i") and len(w) > 2:
+            out.add(w[2:])
+    out.discard("")
+    return out
+
+
+def _git_config_pairs(rest):
+    """KEY VALUE of `git config [opts] [set] KEY VALUE`."""
+    pos, j = [], 0
+    while j < len(rest):
+        w = rest[j]
+        if w in ("-f", "--file", "--blob", "--type", "--default", "--comment", "--value"):
+            j += 2
+            continue
+        if not w.startswith("-"):
+            pos.append(w)
+        j += 1
+    if pos and pos[0] in ("set", "add"):
+        pos = pos[1:]
+    return [(pos[0], pos[1])] if len(pos) >= 2 else []
+
+
+def _git_scripts(args, st):
+    """Commands git runs from settings: -c KEY=VALUE, git config KEY VALUE."""
+    pairs = []
     i = 0
     while i < len(args):
         a = args[i]
         if a in ("-c", "--config") and i + 1 < len(args):
-            kv = args[i + 1]
-            i += 2
+            kv, i = args[i + 1], i + 2
         elif a.startswith("-c") and len(a) > 2:
             kv, i = a[2:], i + 1
         elif a.startswith("--config="):
             kv, i = a[len("--config="):], i + 1
+        elif a == "--config-env" or a.startswith("--config-env="):
+            st.mark("git --config-env takes a setting from the environment")
+            i += 2 if a == "--config-env" else 1
+            continue
         elif a in ("-C", "--git-dir", "--work-tree", "--namespace", "--exec-path"):
             i += 2
             continue
@@ -1348,16 +1469,31 @@ def _git_alias_scripts(args):
             continue
         else:
             if a == "config":
-                rest = [w for w in args[i + 1:] if not w.startswith("-")]
-                for j, w in enumerate(rest[:-1]):
-                    if w.lower().startswith("alias."):
-                        vals.append(rest[j + 1])
-                        break
+                pairs.extend(_git_config_pairs(args[i + 1:]))
             break
-        m = re.match(r"(?i)alias\.[^=]+=(.*)\Z", kv, re.S)
-        if m:
-            vals.append(m.group(1))
-    return [v[1:] if v.startswith("!") else "git " + v for v in vals]
+        if "=" in kv:
+            pairs.append(tuple(kv.split("=", 1)))
+    scripts = []
+    for key, val in pairs:
+        k = key.lower()
+        if k == "core.hookspath":
+            st.mark("git core.hooksPath runs hooks from another directory")
+            continue
+        if not _GIT_CMD_KEYS.fullmatch(k) or not val:
+            continue
+        if k.startswith("alias."):
+            scripts.append(val[1:] if val.startswith("!") else "git " + val)
+        elif k.startswith("credential"):
+            if val.startswith("!"):
+                scripts.append(val[1:])
+            elif "/" in val or " " in val:
+                scripts.append(val)
+        elif k == "core.fsmonitor":
+            if val.lower() not in ("true", "false", "yes", "no", "on", "off", "0", "1"):
+                scripts.append(val)
+        else:
+            scripts.append(val)
+    return scripts
 
 
 def _find_exec(st, idx, ctx, vars_):
@@ -1428,9 +1564,7 @@ def _lex(s, start, nested, ctx, vars_):
             lv.end_word()
             continue
         if c == "<" and nx == "<":
-            if lv.started and "".join(lv.buf).isdigit() and not lv.dyn:
-                lv._reset_word()  # 0<<< / 0<<: an fd number
-            else:
+            if not lv.take_fd():  # 0<<< / 3<<: an fd number
                 lv.end_word()
             if s[i + 2:i + 3] == "<":
                 lv.stage.stdin = True
@@ -1476,9 +1610,12 @@ def _lex(s, start, nested, ctx, vars_):
                 i += 2 if nx == "&" else 1
             continue
         if c in "<>":
-            if lv.started and "".join(lv.buf).isdigit() and not lv.dyn:
-                lv._reset_word()  # an fd number: 2>file
-            else:
+            fdvar = re.fullmatch(r"\{([A-Za-z_][A-Za-z0-9_]*)\}", "".join(lv.buf)) if lv.started else None
+            if fdvar and not lv.dyn:
+                ctx.write(fdvar.group(1), False)  # exec {x}>file assigns an fd number to x
+                lv.vars.pop(fdvar.group(1), None)
+                lv._reset_word()
+            elif not lv.take_fd():  # an fd number: 2>file
                 lv.end_word()
             if nx == "&":  # descriptor duplication (2>&1, <&0, >&-) or >&file
                 j = i + 2
