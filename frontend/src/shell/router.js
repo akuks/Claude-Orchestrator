@@ -31,18 +31,31 @@ function decode(s) {
   }
 }
 
+// A run page may carry the selected stage: #/runs/<id>?stage=N (N ≥ 0), so
+// Back/Forward restores the selection.
+const STAGE_RE = /(?:^|&)stage=(\d+)(?:&|$)/
+
 export function parseHash(hash) {
-  const path = String(hash ?? '').replace(/^#/, '').replace(/^\/+/, '')
+  const raw = String(hash ?? '').replace(/^#/, '').replace(/^\/+/, '')
+  const q = raw.indexOf('?')
+  const path = q === -1 ? raw : raw.slice(0, q)
+  const query = q === -1 ? '' : raw.slice(q + 1)
   const [page, rawId] = path.split('/')
   if (!PAGES.includes(page)) return { page: 'home' }
   const id = ID_PAGES.has(page) && rawId ? decode(rawId) : null
   if (ID_REQUIRED.has(page) && !id) return { page: 'home' }
-  return id ? { page, id } : { page }
+  if (!id) return { page }
+  const m = page === 'runs' ? query.match(STAGE_RE) : null
+  return m ? { page, id, stage: Number(m[1]) } : { page, id }
 }
 
-export function toHash({ page, id } = DEFAULT_ROUTE) {
+const isStage = (s) => Number.isInteger(s) && s >= 0
+
+export function toHash({ page, id, stage } = DEFAULT_ROUTE) {
   const p = PAGES.includes(page) ? page : 'home'
-  return id != null && id !== '' ? `#/${p}/${encodeURIComponent(id)}` : `#/${p}`
+  if (id == null || id === '') return `#/${p}`
+  const q = p === 'runs' && isStage(stage) ? `?stage=${stage}` : ''
+  return `#/${p}/${encodeURIComponent(id)}${q}`
 }
 
 const currentHash = () => (typeof window === 'undefined' ? '' : window.location.hash)
@@ -58,7 +71,7 @@ export function useRoute() {
   useEffect(() => {
     const sync = () => {
       const next = parseHash(currentHash())
-      setRoute((prev) => (prev.page === next.page && prev.id === next.id ? prev : next))
+      setRoute((prev) => (prev.page === next.page && prev.id === next.id && prev.stage === next.stage ? prev : next))
     }
     // Only navigate() tags entries (in-app links go through it, see
     // interceptHashLinks). hashchange/popstate also fire on Back/Forward, where

@@ -24,3 +24,18 @@ describe('stackLabels', () => {
     expect(stackLabels([], 100)).toEqual([])
   })
 })
+
+describe('placeLabel', () => {
+  it('marks the first placement (so a CSS fallback position stops applying) and skips sub-pixel moves', async () => {
+    const { placeLabel } = await import('./labels')
+    const el = document.createElement('div')
+    expect(el.hasAttribute('data-placed')).toBe(false)
+    placeLabel(el, { x: 10, y: 20 }, 'under')
+    expect(el.hasAttribute('data-placed')).toBe(true)
+    expect(el.style.visibility).toBe('visible')
+    const t = el.style.transform
+    expect(t).toContain('translate3d(10px, 20px, 0)')
+    placeLabel(el, { x: 10.1, y: 20.1 }, 'under')
+    expect(el.style.transform).toBe(t)
+  })
+})

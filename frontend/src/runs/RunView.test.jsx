@@ -16,6 +16,20 @@ vi.mock('../components/TaskDetail', () => ({
   default: ({ taskId }) => <div data-testid="task-detail-stub">{taskId}</div>,
 }))
 
+// Records the stages handed to the timeline, rendering the real component.
+const seen = vi.hoisted(() => ({ stages: [] }))
+vi.mock('../comets/Comets3D', async (importOriginal) => {
+  const m = await importOriginal()
+  const { createElement } = await import('react')
+  return {
+    ...m,
+    default: (p) => {
+      if (p.variant === 'timeline') seen.stages.push(p.stages)
+      return createElement(m.default, p)
+    },
+  }
+})
+
 import { api } from '../api'
 import RunView from './RunView'
 import { canManageRun, defaultTaskFor, runStages, stageState } from './runStages'
@@ -175,5 +189,65 @@ describe('RunView', () => {
     const c = await mount()
     expect(c.querySelector('[data-testid="run-cancel"]')).toBeNull()
     expect(c.querySelector('[data-testid="run-retry"]')).toBeNull()
+  })
+
+  it('takes the selected stage from props and reports clicks (URL-driven selection)', async () => {
+    api.getWorkflowRun.mockImplementation(async () => ({
+      run: run(),
+      tasks: [t('a', 0, 'completed'), t('c', 1, 'running')],
+    }))
+    const onSelectStage = vi.fn()
+    const c = await mount({ stage: 0, onSelectStage })
+    let stages = c.querySelectorAll('[data-testid="timeline-stage"]')
+    expect(stages[0].getAttribute('aria-pressed')).toBe('true')
+    expect(c.querySelector('[data-testid="task-detail-stub"]').textContent).toBe('a')
+    await act(async () => stages[2].click())
+    expect(onSelectStage).toHaveBeenCalledWith(2)
+    // the route (not local state) moves the selection: Back/Forward restore it
+    expect(c.querySelectorAll('[data-testid="timeline-stage"]')[0].getAttribute('aria-pressed')).toBe('true')
+    await view.rerender(
+      <RunView id="r1" user={{ id: 'u1', role: 'member' }} projects={[]} navigate={() => {}} stage={1} onSelectStage={onSelectStage} />,
+    )
+    stages = c.querySelectorAll('[data-testid="timeline-stage"]')
+    expect(stages[1].getAttribute('aria-pressed')).toBe('true')
+    expect(c.querySelector('[data-testid="task-detail-stub"]').textContent).toBe('c')
+    // an out-of-range stage falls back to the head stage
+    await view.rerender(
+      <RunView id="r1" user={{ id: 'u1', role: 'member' }} projects={[]} navigate={() => {}} stage={9} onSelectStage={onSelectStage} />,
+    )
+    expect(c.querySelectorAll('[data-testid="timeline-stage"]')[1].getAttribute('aria-pressed')).toBe('true')
+  })
+
+  it('keeps the same stages object across polls that change nothing', async () => {
+    vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval'] })
+    try {
+      api.getWorkflowRun.mockImplementation(async () => ({ run: run(), tasks: [t('c', 1, 'running')] }))
+      await mount()
+      const first = seen.stages.at(-1)
+      seen.stages.length = 0
+      await act(async () => vi.advanceTimersByTime(3100))
+      await flush()
+      expect(api.getWorkflowRun).toHaveBeenCalledTimes(2)
+      expect(seen.stages.length).toBeGreaterThan(0)
+      expect(seen.stages.every((s) => s === first)).toBe(true)
+      // a real change does produce new stages
+      api.getWorkflowRun.mockImplementation(async () => ({ run: run(), tasks: [t('c', 1, 'completed')] }))
+      await act(async () => vi.advanceTimersByTime(3100))
+      await flush()
+      expect(seen.stages.at(-1)).not.toBe(first)
+      expect(seen.stages.at(-1)[1].state).toBe('done')
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('marks a stage whose agents run in parallel', async () => {
+    api.getWorkflowRun.mockImplementation(async () => ({
+      run: run({ stages: [{ name: 'Plan', items: [{ agent: 'A' }] }, { name: 'Develop', items: [{ agent: 'B' }, { agent: 'C' }] }] }),
+      tasks: [t('c', 1, 'running')],
+    }))
+    const c = await mount()
+    const head = c.querySelector('[data-testid="run-stage-tasks"] header')
+    expect(head.querySelector('[data-testid="run-stage-parallel"]')?.textContent).toBe('parallel')
   })
 })

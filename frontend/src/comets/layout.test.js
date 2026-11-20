@@ -124,3 +124,18 @@ describe('laneY', () => {
     expect(laneY(0, 1)).toBeCloseTo(0.5)
   })
 })
+
+describe('lanes with many comets', () => {
+  it.each([7, 9, 12])('with %i comets every star stays inside its own lane', (n) => {
+    const items = Array.from({ length: n }, (_, i) => item(i, ['done', 'done', 'current', 'next', 'next', 'next']))
+    const { comets } = layoutComets(items)
+    const half = (0.88 - 0.12) / n / 2
+    comets.forEach((c, i) => {
+      const lane = laneY(i, n)
+      for (const s of c.stars) {
+        expect(s.y).toBeGreaterThanOrEqual(lane - half)
+        expect(s.y).toBeLessThanOrEqual(lane + half)
+      }
+    })
+  })
+})

@@ -108,6 +108,12 @@
   color: var(--co-text);
   min-width: 0;
 }
+.co-run-stage-parallel {
+  margin-left: auto;
+  font-size: 12px;
+  color: var(--co-text-secondary);
+  white-space: nowrap;
+}
 .co-run-stage-no {
   font-weight: 500;
   color: var(--co-text-secondary);

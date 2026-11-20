@@ -24,6 +24,8 @@ const terminal = {
   success: '#34d399',
 }
 
+const SUNSET = ['#f59e0b', '#f97316', '#e11d48'] // amber, orange, rose
+
 export const palette = {
   primary: '#f97316',
   amber: '#f59e0b',
@@ -62,6 +64,12 @@ export const palette = {
     cometLabelCurrent: '#c2410c',
     cometLabelFailed: '#be123c',
     cometLabelWait: '#b45309',
+    // 3D scene (shaders can't read CSS variables): upcoming-stage ring, trail
+    // flow highlight, head-spark core, and the particle-field colours.
+    starNext: '#c4a9b8',
+    sceneFlow: '#ffffff',
+    sparkCore: '#ffffff',
+    sceneDust: SUNSET,
   },
   night: {
     bg: 'linear-gradient(180deg,#0f0a14,#1a0f1f)',
@@ -87,6 +95,10 @@ export const palette = {
     cometLabelCurrent: '#fdba74',
     cometLabelFailed: '#fda4af',
     cometLabelWait: '#fcd34d',
+    starNext: '#a8929f',
+    sceneFlow: '#fff4e6',
+    sparkCore: '#fff7ed',
+    sceneDust: [...SUNSET, '#fbeff3'],
   },
 }
 

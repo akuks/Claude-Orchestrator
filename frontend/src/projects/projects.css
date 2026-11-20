@@ -19,8 +19,15 @@
 html[data-reduce-motion='false'] .co-pcard:hover {
   transform: translateY(-1px);
 }
-.co-pcard-archived {
-  opacity: 0.72;
+.co-pcard.co-pcard-archived {
+  /* recede without fading the text: dashed edge, no lift, quieter comet */
+  border-style: dashed;
+  box-shadow: none;
+  background: transparent;
+}
+.co-pcard-archived .co-pcard-work svg {
+  opacity: 0.5;
+  filter: grayscale(0.7);
 }
 .co-pcard-head {
   display: flex;
@@ -102,6 +109,16 @@ html[data-reduce-motion='false'] .co-pcard:hover {
 }
 .co-pcard-tag {
   margin: 0;
+}
+.co-pcard-tag-live {
+  color: var(--co-comet-label-current);
+  background: var(--co-active-bg);
+  border-color: var(--co-active-border);
+}
+.co-pcard-tag-paused {
+  color: var(--co-comet-label-wait);
+  background: var(--co-comet-wait-fill);
+  border-color: var(--co-warning);
 }
 .co-pcard-budget {
   display: inline-flex;

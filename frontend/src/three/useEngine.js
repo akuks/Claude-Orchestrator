@@ -66,10 +66,9 @@ export function useEngine({ wrapRef, mode, onFallback, onFrame, onResize, onDisp
     resize()
     update()
 
-    const lost = (e) => {
-      e.preventDefault()
-      cb.current.onFallback?.()
-    }
+    // No restore path: the scene falls back to its SVG twin for good. (Not
+    // calling preventDefault tells the browser we won't wait for a restore.)
+    const lost = () => cb.current.onFallback?.()
     canvas.addEventListener('webglcontextlost', lost)
 
     return () => {

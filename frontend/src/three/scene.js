@@ -51,13 +51,13 @@ export function sceneColors(mode) {
     done: rgb(t.status.success),
     failed: rgb(t.status.danger),
     wait: rgb(t.status.warning),
-    next: rgb(night ? '#a8929f' : '#c4a9b8'),
+    next: rgb(t.starNext),
     fill: rgb(t.surfaceSolid),
-    flow: rgb(night ? '#fff4e6' : '#ffffff'),
-    sparkCore: rgb(night ? '#fff7ed' : '#ffffff'),
+    flow: rgb(t.sceneFlow),
+    sparkCore: rgb(t.sparkCore),
     sparkHalo: rgb(night ? palette.orange : palette.amber),
     sparkFalloff: night ? 1.8 : 2.8,
-    dust: night ? ['#f59e0b', '#f97316', '#e11d48', '#fbeff3'] : ['#f59e0b', '#f97316', '#e11d48'],
+    dust: t.sceneDust,
     dustAlpha: night ? 0.75 : 0.42,
     auroraAlpha: night ? 0.16 : 0.12,
     trailGlow: night ? 0.34 : 0.17,
@@ -223,6 +223,39 @@ void main() {
   gl_FragColor = vec4(col, a * vA * uAlpha);
 }`
 
+// Particle field: `count` soft dots spread to fill the view at every depth.
+// The attributes are created once per geometry and refilled in place (resize,
+// mode switch), so no orphaned GPU buffers pile up. Seeded: same input, same field.
+export function fillDust(geo, count, size, colors) {
+  let pos = geo.getAttribute('position')
+  if (!pos || pos.count !== count) {
+    pos = new BufferAttribute(new Float32Array(count * 3), 3)
+    geo.setAttribute('position', pos)
+    geo.setAttribute('aColor', new BufferAttribute(new Float32Array(count * 3), 3))
+    geo.setAttribute('aSize', new BufferAttribute(new Float32Array(count), 1))
+    geo.setAttribute('aPhase', new BufferAttribute(new Float32Array(count), 1))
+  }
+  const col = geo.getAttribute('aColor')
+  const sz = geo.getAttribute('aSize')
+  const ph = geo.getAttribute('aPhase')
+  const dustColors = colors.dust.map(rgb)
+  let seed = 7
+  const rand = () => {
+    seed = (seed * 16807) % 2147483647
+    return seed / 2147483647
+  }
+  for (let i = 0; i < count; i++) {
+    const z = -10 + rand() * 12
+    const spread = 1 + (size.dist - z) / size.dist // farther = wider, so the view stays filled
+    pos.setXYZ(i, (rand() - 0.5) * size.W * spread * 1.1, (rand() - 0.5) * size.H * spread * 1.1, z)
+    const c = dustColors[Math.floor(rand() * dustColors.length)]
+    col.setXYZ(i, c.x, c.y, c.z)
+    sz.setX(i, 1.4 + rand() * rand() * 4.2)
+    ph.setX(i, rand() * Math.PI * 2)
+  }
+  for (const a of [pos, col, sz, ph]) a.needsUpdate = true
+}
+
 function shader(vertexShader, fragmentShader, uniforms, blending = NormalBlending) {
   return new ShaderMaterial({
     vertexShader,
@@ -275,32 +308,8 @@ export function createEngine(canvas, { mode = 'light', dust = 340, onFrame, para
   field.frustumCulled = false
   scene.add(field)
   glowMaterials.add(fieldMat)
-  let seed = 7
-  const rand = () => {
-    seed = (seed * 16807) % 2147483647
-    return seed / 2147483647
-  }
   function fillField() {
-    const pos = new Float32Array(dust * 3)
-    const col = new Float32Array(dust * 3)
-    const sz = new Float32Array(dust)
-    const ph = new Float32Array(dust)
-    seed = 7
-    for (let i = 0; i < dust; i++) {
-      const z = -10 + rand() * 12
-      const spread = 1 + (size.dist - z) / size.dist // farther = wider, so the view stays filled
-      pos[i * 3] = (rand() - 0.5) * size.W * spread * 1.1
-      pos[i * 3 + 1] = (rand() - 0.5) * size.H * spread * 1.1
-      pos[i * 3 + 2] = z
-      const c = rgb(colors.dust[Math.floor(rand() * colors.dust.length)])
-      col.set([c.x, c.y, c.z], i * 3)
-      sz[i] = 1.4 + rand() * rand() * 4.2
-      ph[i] = rand() * Math.PI * 2
-    }
-    fieldGeo.setAttribute('position', new BufferAttribute(pos, 3))
-    fieldGeo.setAttribute('aColor', new BufferAttribute(col, 3))
-    fieldGeo.setAttribute('aSize', new BufferAttribute(sz, 1))
-    fieldGeo.setAttribute('aPhase', new BufferAttribute(ph, 1))
+    fillDust(fieldGeo, dust, size, colors)
   }
 
   function setSize(w, h) {

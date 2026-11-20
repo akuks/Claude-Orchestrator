@@ -89,6 +89,14 @@
   pointer-events: auto;
   background: var(--co-surface);
 }
+/* Before the first frame (slow GPU, paused tab) the stage buttons stay usable
+   at their stars' flat layout positions instead of hidden. */
+.co-c3d-labels .co-tl-stage:not([data-placed]) {
+  visibility: visible;
+  left: var(--co-tl-x, 0);
+  top: var(--co-tl-y, 0);
+  transform: translate(-50%, 24px);
+}
 .co-c3d-labels .co-tl-stage:hover,
 .co-c3d-labels .co-tl-stage-hover {
   background: var(--co-hover);

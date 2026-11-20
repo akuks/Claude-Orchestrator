@@ -74,7 +74,7 @@ function Card({ project, model, onOpen, actions }) {
       <footer className="co-pcard-foot">
         <span className="co-pcard-chips">
           {model.liveCount ? (
-            <Tag color="orange" className="co-pcard-tag" data-testid="project-card-live">
+            <Tag className="co-pcard-tag co-pcard-tag-live" data-testid="project-card-live">
               {model.liveCount} live
             </Tag>
           ) : (
@@ -84,7 +84,7 @@ function Card({ project, model, onOpen, actions }) {
           )}
           {model.paused > 0 && (
             <Tooltip title={model.pausedReason}>
-              <Tag color="gold" className="co-pcard-tag" data-testid="project-card-paused">
+              <Tag className="co-pcard-tag co-pcard-tag-paused" data-testid="project-card-paused">
                 paused{model.paused > 1 ? ` ×${model.paused}` : ''}
               </Tag>
             </Tooltip>

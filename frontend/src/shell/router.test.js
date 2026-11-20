@@ -264,3 +264,37 @@ describe('interceptHashLinks', () => {
     seen.unmount()
   })
 })
+
+describe('run stage in the hash', () => {
+  it('parses ?stage=N on run routes and round-trips it', () => {
+    expect(parseHash('#/runs/r1?stage=2')).toEqual({ page: 'runs', id: 'r1', stage: 2 })
+    expect(toHash({ page: 'runs', id: 'r1', stage: 2 })).toBe('#/runs/r1?stage=2')
+    expect(toHash(parseHash('#/runs/r1?stage=0'))).toBe('#/runs/r1?stage=0')
+  })
+  it('ignores bad or foreign stage values', () => {
+    expect(parseHash('#/runs/r1?stage=-1')).toEqual({ page: 'runs', id: 'r1' })
+    expect(parseHash('#/runs/r1?stage=x')).toEqual({ page: 'runs', id: 'r1' })
+    expect(parseHash('#/runs/r1?stage=1.5')).toEqual({ page: 'runs', id: 'r1' })
+    expect(parseHash('#/runs/r1?')).toEqual({ page: 'runs', id: 'r1' })
+    expect(parseHash('#/tasks/7?stage=1')).toEqual({ page: 'tasks', id: '7' })
+    expect(toHash({ page: 'tasks', id: '7', stage: 1 })).toBe('#/tasks/7')
+    expect(toHash({ page: 'runs', id: 'r1', stage: null })).toBe('#/runs/r1')
+  })
+  it('useRoute re-renders when only the stage changes', () => {
+    window.history.replaceState(null, '', '#/runs/r1')
+    const seen = {}
+    function Probe() {
+      const [route, navigate] = useRoute()
+      seen.route = route
+      seen.navigate = navigate
+      return null
+    }
+    const container = document.createElement('div')
+    const root = createRoot(container)
+    act(() => root.render(createElement(Probe)))
+    act(() => seen.navigate({ page: 'runs', id: 'r1', stage: 1 }))
+    expect(window.location.hash).toBe('#/runs/r1?stage=1')
+    expect(seen.route).toEqual({ page: 'runs', id: 'r1', stage: 1 })
+    act(() => root.unmount())
+  })
+})

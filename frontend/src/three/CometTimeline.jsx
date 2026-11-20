@@ -136,8 +136,13 @@ export default function CometTimeline({ stages, onSelectStage, selectedIndex, mo
               buttonRef={(el) => {
                 labelRefs.current[j] = el
               }}
-              // as wide as the gap to the neighbouring stars allows
-              style={{ visibility: 'hidden', maxWidth: `calc((100% - ${PAD.l + PAD.r}px) / ${Math.max(1, comet.stars.length - 1)} - 8px)` }}
+              // as wide as the gap to the neighbouring stars allows; until the
+              // first frame places it, it sits at its star's flat layout spot
+              style={{
+                maxWidth: `calc((100% - ${PAD.l + PAD.r}px) / ${Math.max(1, comet.stars.length - 1)} - 8px)`,
+                '--co-tl-x': `calc(${PAD.l}px + ${s.x} * (100% - ${PAD.l + PAD.r}px))`,
+                '--co-tl-y': `${Math.round(PAD.t + s.y * (HEIGHT - PAD.t - PAD.b))}px`,
+              }}
             />
           ))}
         </div>

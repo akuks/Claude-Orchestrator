@@ -55,10 +55,15 @@ function NotFound() {
 // A workflow run's own page (#/runs/<id>): header, a comet timeline across
 // its stages, the selected stage's tasks, and the selected task's live detail
 // (the TaskDetail component, inline).
-export default function RunView({ id, user, projects = [], navigate, onOpenCredentials }) {
+//
+// With `onSelectStage` the selected stage is controlled by the `stage` prop
+// (the URL's ?stage=N, so Back/Forward restore it); without, it's local.
+export default function RunView({ id, user, projects = [], navigate, onOpenCredentials, stage: routeStage, onSelectStage }) {
   const [data, setData] = useState(null)
   const [error, setError] = useState(null) // { kind: 'notfound' | 'network', text }
-  const [stageIdx, setStageIdx] = useState(null) // null → follow the run's head stage
+  const [localStage, setLocalStage] = useState(null)
+  const controlled = typeof onSelectStage === 'function'
+  const stageIdx = controlled ? (routeStage ?? null) : localStage // null → follow the run's head stage
   const [taskId, setTaskId] = useState(null) // null → the stage's default task
   const [people, setPeople] = useState(null)
   const [busy, setBusy] = useState(false)
@@ -107,27 +112,42 @@ export default function RunView({ id, user, projects = [], navigate, onOpenCrede
 
   const run = data?.run
   const tasks = data?.tasks || []
-  const stages = useMemo(() => runStages(run, tasks), [run, tasks])
+  // Polls return fresh objects; keep the same stages array while nothing
+  // changed so the 3D timeline isn't rebuilt (and its labels re-placed) every poll.
+  const freshStages = useMemo(() => runStages(run, tasks), [run, tasks])
+  const stagesKey = JSON.stringify(freshStages)
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  const stages = useMemo(() => freshStages, [stagesKey])
   const head = useMemo(() => timelineComet(stages).headIndex, [stages])
   const selStage = stageIdx != null && stageIdx < stages.length ? stageIdx : head >= 0 ? head : null
   const stageTasks = selStage == null ? [] : tasksOfStage(tasks, selStage)
   const selTask = taskId && stageTasks.some((t) => t.id === taskId) ? taskId : defaultTaskFor(stageTasks)
 
-  const selectStage = useCallback((_stage, i) => {
-    setStageIdx(i)
-    setTaskId(null)
-  }, [])
+  const pickStage = useCallback(
+    (i) => {
+      if (controlled) onSelectStage(i)
+      else setLocalStage(i)
+    },
+    [controlled, onSelectStage],
+  )
+  const selectStage = useCallback(
+    (_stage, i) => {
+      pickStage(i)
+      setTaskId(null)
+    },
+    [pickStage],
+  )
   // Thread steps and follow-ups from the embedded detail: run tasks stay here,
   // anything else (a follow-up thread) opens on the Tasks page.
   const openTask = useCallback(
     (tid) => {
       const hit = tasks.find((t) => t.id === tid)
       if (hit) {
-        setStageIdx(hit.stage_index)
+        if (hit.stage_index !== selStage) pickStage(hit.stage_index)
         setTaskId(tid)
       } else navigate?.({ page: 'tasks', id: tid })
     },
-    [tasks, navigate],
+    [tasks, navigate, pickStage, selStage],
   )
 
   const act = async (fn, okText) => {
@@ -283,6 +303,11 @@ export default function RunView({ id, user, projects = [], navigate, onOpenCrede
               <h2>
                 <span className="co-run-stage-no">Stage {selStage + 1}</span> {stage.name}
               </h2>
+              {stageDef?.items?.length > 1 && (
+                <span className="co-run-stage-parallel" data-testid="run-stage-parallel" title={stageDef.items.map((it) => it.agent).join(', ')}>
+                  parallel
+                </span>
+              )}
               <Tag color={STAGE_TAG[stage.state]}>{stateLabel(stage.state)}</Tag>
             </header>
             {stageTasks.length ? (

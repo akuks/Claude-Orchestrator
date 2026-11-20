@@ -423,6 +423,8 @@ function AppInner({ user, onLogout }) {
             <RunView
               key={route.id}
               id={route.id}
+              stage={route.stage}
+              onSelectStage={(i) => navigate({ page: 'runs', id: route.id, stage: i })}
               user={user}
               projects={projects}
               navigate={navigate}

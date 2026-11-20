@@ -1,7 +1,8 @@
 // HTML labels over the canvas: written once per frame from projected 3D
 // positions. Only `transform` is touched (no layout reads, so no thrash), and
 // only when the anchor moved by at least a quarter pixel; the first write also
-// reveals the label (they start hidden so nothing flashes at 0,0).
+// reveals the label (they start hidden so nothing flashes at 0,0) and marks
+// it data-placed, which ends any static CSS fallback position.
 const OFFSET = {
   right: 'translate(10px, calc(-100% - 13px))',
   left: 'translate(calc(-100% - 10px), calc(-100% - 13px))',
@@ -17,7 +18,10 @@ export function placeLabel(el, p, side = 'right') {
   if (last && Math.abs(last.x - x) < 0.25 && Math.abs(last.y - y) < 0.25) return
   el._pos = { x, y }
   el.style.transform = `translate3d(${x}px, ${y}px, 0) ${OFFSET[side] || OFFSET.right}`
-  if (!last) el.style.visibility = 'visible'
+  if (!last) {
+    el.style.visibility = 'visible'
+    el.setAttribute('data-placed', '') // ends any CSS fallback position
+  }
 }
 
 // Label centres for a column of labels: each wants to sit at its anchor y,

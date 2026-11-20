@@ -86,6 +86,7 @@ export function layoutComets(items, { max = MAX_COMETS } = {}) {
   const n = shown.length
   // Fewer comets get a steeper climb; many keep to their lanes so they don't cross.
   const spread = n ? Math.min(1, 3 / n) : 1
+  const laneHalf = (Y_BOTTOM - Y_TOP) / Math.max(1, n) / 2
 
   const comets = shown.map((item, i) => {
     const rand = seeded(hashString(String(item.id)))
@@ -99,7 +100,9 @@ export function layoutComets(items, { max = MAX_COMETS } = {}) {
     const stars = base.map((s, j) => {
       const t = m > 1 ? j / (m - 1) : 0.5
       const x = X0 + (X1 - X0) * t
-      const y = lane + rise * (0.5 - t) + wobble * Math.sin(Math.PI * 2 * t + phase)
+      let y = lane + rise * (0.5 - t) + wobble * Math.sin(Math.PI * 2 * t + phase)
+      // Many comets: keep every star (and so the head) inside its own lane.
+      if (n > 6) y = clamp(y, lane - laneHalf * 0.9, lane + laneHalf * 0.9)
       const z = depth + 0.3 * Math.sin(Math.PI * t + phase)
       return { name: s.name, state: s.state, taskCount: s.task_count, x: round(clamp(x, 0, 1)), y: round(clamp(y, 0.04, 0.96)), z: round(clamp(z, -1, 1)) }
     })
