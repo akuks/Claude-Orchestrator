@@ -570,13 +570,21 @@ function TemplatesTab({ projects, isAdmin }) {
   )
 }
 
-export default function AutomationView({ projects = [], isAdmin = false }) {
+// runWorkflowId (from ⌘K "Run <workflow>…") switches to the Workflows tab and
+// opens that workflow's run dialog; onRunHandled clears the request.
+export default function AutomationView({ projects = [], isAdmin = false, runWorkflowId = null, onRunHandled }) {
   const [allAgents, setAllAgents] = useState([])
+  const [tab, setTab] = useState(runWorkflowId ? 'workflows' : 'agents')
   useEffect(() => {
     api.listAgents().then(setAllAgents).catch(() => {})
   }, [])
+  useEffect(() => {
+    if (runWorkflowId) setTab('workflows')
+  }, [runWorkflowId])
   return (
     <Tabs
+      activeKey={tab}
+      onChange={setTab}
       items={[
         {
           key: 'agents',
@@ -594,7 +602,14 @@ export default function AutomationView({ projects = [], isAdmin = false }) {
               <ApartmentOutlined /> Workflows
             </span>
           ),
-          children: <WorkflowsView agents={allAgents} isAdmin={isAdmin} />,
+          children: (
+            <WorkflowsView
+              agents={allAgents}
+              isAdmin={isAdmin}
+              runWorkflowId={runWorkflowId}
+              onRunHandled={onRunHandled}
+            />
+          ),
         },
         {
           key: 'schedules',

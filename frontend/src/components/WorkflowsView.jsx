@@ -327,7 +327,7 @@ function RunDialog({ workflow, onClose, onRan }) {
   )
 }
 
-export default function WorkflowsView({ agents = [], isAdmin = false }) {
+export default function WorkflowsView({ agents = [], isAdmin = false, runWorkflowId = null, onRunHandled }) {
   const [workflows, setWorkflows] = useState([])
   const [presets, setPresets] = useState([])
   const [runs, setRuns] = useState([])
@@ -336,6 +336,7 @@ export default function WorkflowsView({ agents = [], isAdmin = false }) {
   const [editing, setEditing] = useState(null)
   const [runWf, setRunWf] = useState(null)
   const [boardRun, setBoardRun] = useState(null)
+  const [loaded, setLoaded] = useState(false)
 
   const refresh = useCallback(async () => {
     setLoading(true)
@@ -348,12 +349,22 @@ export default function WorkflowsView({ agents = [], isAdmin = false }) {
       setWorkflows(w)
       setPresets(p)
       setRuns(r)
+      setLoaded(true)
     } catch (e) {
       message.error(e.message)
     } finally {
       setLoading(false)
     }
   }, [])
+
+  // Open the run dialog requested from ⌘K once the workflow list is in.
+  useEffect(() => {
+    if (!runWorkflowId || !loaded) return
+    const wf = workflows.find((w) => String(w.id) === String(runWorkflowId))
+    if (wf) setRunWf(wf)
+    else message.warning('That workflow is no longer available.')
+    onRunHandled?.()
+  }, [runWorkflowId, loaded, workflows, onRunHandled])
 
   useEffect(() => {
     refresh()
