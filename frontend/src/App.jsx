@@ -416,8 +416,8 @@ function AppInner({ user, onLogout }) {
             message="Claude isn't set up for you"
             description={
               isAdmin
-                ? 'Tasks you start will fail until you add your own Claude token or API key, or set an org fallback key for everyone on the Users page.'
-                : 'Tasks you start will fail until you add your own Claude token or API key (or an admin sets an org fallback key).'
+                ? 'Tasks you start will fail until you add your own Claude token or API key, or set an org fallback key for everyone on the Users page. Your schedules and PR auto-reviews are paused until then.'
+                : 'Tasks you start will fail until you add your own Claude token or API key (or an admin sets an org fallback key). Your schedules and PR auto-reviews are paused until then.'
             }
             action={
               <Space direction="vertical">

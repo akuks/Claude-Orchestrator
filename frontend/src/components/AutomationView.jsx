@@ -308,7 +308,20 @@ function SchedulesTab({ projects }) {
   }
 
   const columns = [
-    { title: 'Name', dataIndex: 'name', render: (n) => <b>{n}</b> },
+    {
+      title: 'Name',
+      dataIndex: 'name',
+      render: (n, row) => (
+        <Space size={4} wrap>
+          <b>{n}</b>
+          {row.blocked_reason && (
+            <Tag color="red" data-testid="schedule-paused">
+              Paused: {row.blocked_reason}
+            </Tag>
+          )}
+        </Space>
+      ),
+    },
     { title: 'Cron', dataIndex: 'cron', render: (c) => <code>{c}</code> },
     {
       title: 'Next run',
