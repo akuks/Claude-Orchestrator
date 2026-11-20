@@ -30,6 +30,7 @@ import {
   TeamOutlined,
 } from '@ant-design/icons'
 import dayjs from 'dayjs'
+import { when } from '../time'
 import relativeTime from 'dayjs/plugin/relativeTime'
 import { api } from '../api'
 import ProjectMembers from './ProjectMembers'
@@ -306,7 +307,7 @@ function MemoryPane({ project, canEdit, onSaved }) {
                 description={sm.summary}
               />
               <Typography.Text type="secondary" style={{ fontSize: 12 }}>
-                {dayjs(sm.created_at).format('MMM D, HH:mm')}
+                {when(sm.created_at).format('MMM D, HH:mm')}
               </Typography.Text>
             </List.Item>
           )}
@@ -322,7 +323,7 @@ function MemoryPane({ project, canEdit, onSaved }) {
 function ProjectDrawer({ project, tab, onTab, currentUser, onClose, onSaved }) {
   const canEdit = project?.my_role === 'maintainer'
   return (
-    <Drawer open={!!project} onClose={onClose} width={680} title={project?.name || ''} destroyOnClose>
+    <Drawer open={!!project} onClose={onClose} width={680} title={project?.name || ''} destroyOnHidden>
       {project && (
         <Tabs
           activeKey={tab}
@@ -445,7 +446,7 @@ function DiscoverModal({ open, onClose, onImported }) {
             title: 'Last used',
             dataIndex: 'last_active',
             width: 110,
-            render: (d) => dayjs(d).fromNow(),
+            render: (d) => when(d).fromNow(),
           },
         ]}
       />

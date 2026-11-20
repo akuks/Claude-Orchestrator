@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { api } from '../api'
+import { parseTime } from '../time'
 
 // Data behind Home: what needs the viewer, live workflows, their recent work
 // and today's cost. Every source is fetched independently (one failing never
@@ -11,12 +12,7 @@ const FINISHED = new Set(['completed', 'failed', 'cancelled'])
 
 // Backend timestamps are UTC; SQLite drops the offset, so a bare ISO string
 // is read as UTC rather than local time.
-export function parseTime(d) {
-  if (!d) return null
-  const s = typeof d === 'string' && /T\d{2}:\d{2}(:\d{2}(\.\d+)?)?$/.test(d) ? `${d}Z` : d
-  const t = new Date(s).getTime()
-  return Number.isFinite(t) ? t : null
-}
+export { parseTime } // re-exported: Home and the run page import it from here
 const ts = parseTime
 
 // ---- pure selectors -------------------------------------------------------

@@ -33,7 +33,7 @@ import {
   RobotOutlined,
   ThunderboltOutlined,
 } from '@ant-design/icons'
-import dayjs from 'dayjs'
+import { when } from '../time'
 import { api, STATUS_COLORS } from '../api'
 import AgentsView from './AgentsView'
 import ServersView from './ServersView'
@@ -155,7 +155,7 @@ function ScheduleModal({ open, schedule, projects, onClose, onSaved }) {
           </Space.Compact>
           <Typography.Text type="secondary" style={{ fontSize: 12 }}>
             {preview.length
-              ? `Next: ${preview.slice(0, 3).map((d) => dayjs(d).format('MMM D HH:mm')).join(' · ')}`
+              ? `Next: ${preview.slice(0, 3).map((d) => when(d).format('MMM D HH:mm')).join(' · ')}`
               : 'Enter a valid cron to preview run times'}
           </Typography.Text>
         </Form.Item>
@@ -255,7 +255,7 @@ function RunsDrawer({ schedule, onClose }) {
                 description={t.title}
               />
               <Typography.Text type="secondary" style={{ fontSize: 12 }}>
-                {dayjs(t.created_at).format('MMM D HH:mm')}
+                {when(t.created_at).format('MMM D HH:mm')}
               </Typography.Text>
             </List.Item>
           )}
@@ -326,12 +326,12 @@ function SchedulesTab({ projects }) {
     {
       title: 'Next run',
       dataIndex: 'next_run_at',
-      render: (d) => (d ? dayjs(d).format('MMM D HH:mm') : '—'),
+      render: (d) => (d ? when(d).format('MMM D HH:mm') : '—'),
     },
     {
       title: 'Last run',
       dataIndex: 'last_run_at',
-      render: (d) => (d ? dayjs(d).fromNow() : 'never'),
+      render: (d) => (d ? when(d).fromNow() : 'never'),
     },
     {
       title: 'Notify',

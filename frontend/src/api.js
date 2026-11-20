@@ -164,7 +164,7 @@ export const api = {
   updateWorkflow: (id, payload) => req('PATCH', `/workflows/${id}`, payload),
   deleteWorkflow: (id) => req('DELETE', `/workflows/${id}`),
   runWorkflow: (id, payload) => req('POST', `/workflows/${id}/run`, payload),
-  listWorkflowRuns: () => req('GET', '/workflows/runs'),
+  listWorkflowRuns: ({ limit } = {}) => req('GET', limit ? `/workflows/runs?limit=${limit}` : '/workflows/runs'),
   // Active runs + running coordinator threads (Home comets).
   liveRuns: () => req('GET', '/workflows/runs/live'),
   getWorkflowRun: (id) => req('GET', `/workflows/runs/${id}`),

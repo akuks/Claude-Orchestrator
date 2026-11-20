@@ -36,7 +36,7 @@ function NameModal({ open, team, onClose, onDone }) {
       onOk={submit}
       confirmLoading={busy}
       okText={team ? 'Save' : 'Create'}
-      destroyOnClose
+      destroyOnHidden
     >
       <Form form={form} layout="vertical">
         <Form.Item name="name" label="Name" rules={[{ required: true, whitespace: true }]}>

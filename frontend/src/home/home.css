@@ -42,6 +42,12 @@
 }
 .co-home-live {
   min-height: 330px;
+  display: flex;
+  flex-direction: column;
+}
+/* nothing live: centre the empty state in the tall panel */
+.co-home-live > .co-home-empty {
+  margin: auto 0;
 }
 .co-home-panel-head {
   display: flex;

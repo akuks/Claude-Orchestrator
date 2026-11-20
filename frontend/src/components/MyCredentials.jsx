@@ -141,7 +141,7 @@ export default function MyCredentials({ open, onClose, onChanged }) {
       onCancel={onClose}
       footer={<Button onClick={onClose}>Close</Button>}
       width={640}
-      destroyOnClose
+      destroyOnHidden
     >
       <Spin spinning={loading}>
         <Paragraph type="secondary">

@@ -16,7 +16,7 @@ import {
   ReloadOutlined,
   SafetyOutlined,
 } from '@ant-design/icons'
-import dayjs from 'dayjs'
+import { when } from '../time'
 import { api, RISK_COLORS } from '../api'
 
 export default function ApprovalsView({ onChanged }) {
@@ -139,7 +139,7 @@ export default function ApprovalsView({ onChanged }) {
                 <Typography.Text type="secondary">
                   {t.project ? `Project: ${t.project} · ` : ''}
                   {t.schedule_id ? 'From a schedule · ' : ''}
-                  {dayjs(t.created_at).fromNow()}
+                  {when(t.created_at).fromNow()}
                 </Typography.Text>
                 {t.context && (
                   <Space size={4} wrap>

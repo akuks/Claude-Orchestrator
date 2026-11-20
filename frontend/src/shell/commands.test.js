@@ -34,7 +34,7 @@ describe('buildCommands', () => {
   it('groups commands and gives each a unique id', () => {
     const cmds = buildCommands({ projects, tasks, workflows, isAdmin: true, actions: actions() })
     for (const c of cmds) {
-      expect(['Pages', 'Projects', 'Tasks', 'Workflows', 'Actions']).toContain(c.group)
+      expect(['Pages', 'Projects', 'Tasks', 'Runs', 'Workflows', 'Actions']).toContain(c.group)
       expect(typeof c.run).toBe('function')
     }
     expect(new Set(cmds.map((c) => c.id)).size).toBe(cmds.length)
@@ -95,5 +95,28 @@ describe('isPaletteShortcut', () => {
     expect(isPaletteShortcut(ev({ metaKey: true, key: 'K' }), true)).toBe(true)
     expect(isPaletteShortcut(ev({ metaKey: true, shiftKey: true }), true)).toBe(false)
     expect(isPaletteShortcut(ev({ metaKey: true, key: 'j' }), true)).toBe(false)
+  })
+})
+
+describe('runs and credentials in the palette', () => {
+  it('lists runs by name and opens the run page', () => {
+    const a = actions()
+    const runs = [{ id: 'r1', name: 'Feature flow', status: 'running' }, { id: 'r2', name: 'Release', status: 'completed' }]
+    const cmds = buildCommands({ runs, actions: a })
+    const r = cmds.filter((c) => c.group === 'Runs')
+    expect(r.map((c) => c.label)).toEqual(['Feature flow', 'Release'])
+    expect(r[0].keywords).toContain('running')
+    r[0].run()
+    expect(a.navigate).toHaveBeenCalledWith({ page: 'runs', id: 'r1' })
+    expect(searchCommands(cmds, 'feature flow')[0].id).toBe('run:r1')
+  })
+  it('offers "My credentials" when the action exists', () => {
+    const openCredentials = vi.fn()
+    const cmds = buildCommands({ actions: { ...actions(), openCredentials } })
+    const c = cmds.find((x) => x.id === 'action:credentials')
+    expect(c.label).toBe('My credentials')
+    c.run()
+    expect(openCredentials).toHaveBeenCalled()
+    expect(buildCommands({ actions: actions() }).some((x) => x.id === 'action:credentials')).toBe(false)
   })
 })

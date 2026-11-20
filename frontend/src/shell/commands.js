@@ -19,8 +19,8 @@ export function visiblePages(isAdmin) {
   return NAV_PAGES.filter((p) => isAdmin || !p.adminOnly)
 }
 
-export function buildCommands({ projects = [], tasks = [], workflows = [], isAdmin = false, actions = {} } = {}) {
-  const { navigate = () => {}, newTask, runWorkflow, toggleNight } = actions
+export function buildCommands({ projects = [], tasks = [], runs = [], workflows = [], isAdmin = false, actions = {} } = {}) {
+  const { navigate = () => {}, newTask, runWorkflow, toggleNight, openCredentials } = actions
   const cmds = []
 
   for (const p of visiblePages(isAdmin)) {
@@ -49,6 +49,15 @@ export function buildCommands({ projects = [], tasks = [], workflows = [], isAdm
       run: () => navigate({ page: 'tasks', id: t.id }),
     })
   }
+  for (const r of runs || []) {
+    cmds.push({
+      id: `run:${r.id}`,
+      label: r.name || `Run ${r.id}`,
+      group: 'Runs',
+      keywords: `run ${r.status || ''}`,
+      run: () => navigate({ page: 'runs', id: r.id }),
+    })
+  }
   for (const w of workflows || []) {
     cmds.push({
       id: `workflow:${w.id}`,
@@ -59,6 +68,8 @@ export function buildCommands({ projects = [], tasks = [], workflows = [], isAdm
     })
   }
   if (newTask) cmds.push({ id: 'action:new-task', label: 'New task…', group: 'Actions', run: newTask })
+  if (openCredentials)
+    cmds.push({ id: 'action:credentials', label: 'My credentials', group: 'Actions', keywords: 'claude key token', run: openCredentials })
   if (toggleNight)
     cmds.push({ id: 'action:night', label: 'Toggle night mode', group: 'Actions', keywords: 'dark theme', run: toggleNight })
   return cmds

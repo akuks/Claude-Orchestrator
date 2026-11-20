@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useState } from 'react'
 import { Button, Card, Input, Popconfirm, Space, Tag, Typography, message } from 'antd'
 import { DeleteOutlined, SaveOutlined } from '@ant-design/icons'
-import dayjs from 'dayjs'
+import { when } from '../time'
 import { api } from '../api'
 
 // Admin: the org fallback Anthropic API key, used by people who haven't added
@@ -62,7 +62,7 @@ export default function OrgFallbackCard({ onChanged }) {
         {info?.set && (
           <>
             {' '}
-            Last updated {info.updated_at ? dayjs(info.updated_at).fromNow() : ''}
+            Last updated {info.updated_at ? when(info.updated_at).fromNow() : ''}
             {info.updated_by ? ` by ${info.updated_by}` : ''}.
           </>
         )}

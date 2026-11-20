@@ -20,6 +20,7 @@ import {
   SafetyCertificateOutlined,
 } from '@ant-design/icons'
 import dayjs from 'dayjs'
+import { when } from './time'
 import relativeTime from 'dayjs/plugin/relativeTime'
 import { api, setUnauthorizedHandler, PRIORITY_COLORS, STATUS_COLORS, shortModel } from './api'
 import StatsBar from './components/StatsBar'
@@ -137,7 +138,7 @@ function AppInner({ user, onLogout }) {
   const [approvalCount, setApprovalCount] = useState(0)
   const [claudeInfo, setClaudeInfo] = useState(null)
   const [paletteOpen, setPaletteOpen] = useState(false)
-  const [paletteData, setPaletteData] = useState({ workflows: [], recent: [], loading: false })
+  const [paletteData, setPaletteData] = useState({ workflows: [], runs: [], recent: [], loading: false })
   const [runWorkflowId, setRunWorkflowId] = useState(null)
 
   // #/tasks/<id> opens that task's detail drawer.
@@ -238,8 +239,9 @@ function AppInner({ user, onLogout }) {
     Promise.all([
       api.listWorkflows().catch(() => []),
       tasks.length ? Promise.resolve(null) : api.listTasks({ limit: 20 }).catch(() => []),
-    ]).then(([workflows, recent]) => {
-      if (live) setPaletteData((d) => ({ workflows, recent: recent ?? d.recent, loading: false }))
+      api.listWorkflowRuns({ limit: 20 }).catch(() => []),
+    ]).then(([workflows, recent, runs]) => {
+      if (live) setPaletteData((d) => ({ workflows, runs, recent: recent ?? d.recent, loading: false }))
     })
     return () => {
       live = false
@@ -251,6 +253,7 @@ function AppInner({ user, onLogout }) {
       buildCommands({
         projects,
         tasks: (tasks.length ? tasks : paletteData.recent).slice(0, 20),
+        runs: paletteData.runs,
         workflows: paletteData.workflows,
         isAdmin,
         actions: {
@@ -266,6 +269,7 @@ function AppInner({ user, onLogout }) {
             navigate({ page: 'automation' })
           },
           toggleNight: () => setMode(mode === 'night' ? 'light' : 'night'),
+          openCredentials: () => setCredsOpen(true),
         },
       }),
     [projects, tasks, paletteData, isAdmin, navigate, mode, setMode],
@@ -337,7 +341,7 @@ function AppInner({ user, onLogout }) {
       title: 'Created',
       dataIndex: 'created_at',
       width: 130,
-      render: (d) => dayjs(d).fromNow(),
+      render: (d) => when(d).fromNow(),
     },
     {
       title: '',

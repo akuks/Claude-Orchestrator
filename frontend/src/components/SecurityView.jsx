@@ -14,7 +14,7 @@ import {
   message,
 } from 'antd'
 import { ReloadOutlined } from '@ant-design/icons'
-import dayjs from 'dayjs'
+import { when } from '../time'
 import { api, FINDING_STATUS_COLORS, SEVERITY_COLORS } from '../api'
 
 const STATUS_OPTS = [
@@ -114,7 +114,7 @@ export default function SecurityView({ projects = [] }) {
       width: 110,
       render: (n, row) => (
         <Tooltip
-          title={`First seen ${dayjs(row.first_seen).format('MMM D')} · last ${dayjs(
+          title={`First seen ${when(row.first_seen).format('MMM D')} · last ${when(
             row.last_seen
           ).format('MMM D')}`}
         >
