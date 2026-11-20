@@ -247,7 +247,8 @@ def test_test_connection_claude_failure_redacted(client, tmp_path, monkeypatch):
     # The probe env is the allowlisted base plus exactly the one Claude variable.
     got = {n for n in names.read_text().split() if n}
     allowed = {"PATH", "HOME", "USER", "LOGNAME", "SHELL", "LANG", "TERM", "TMPDIR", "TZ",
-               "CLAUDE_CODE_OAUTH_TOKEN", "CLAUDE_CONFIG_DIR", "GH_CONFIG_DIR", "GIT_CONFIG_GLOBAL"}
+               "CLAUDE_CODE_OAUTH_TOKEN", "CLAUDE_CONFIG_DIR", "GH_CONFIG_DIR", "GIT_CONFIG_GLOBAL",
+               "GIT_CONFIG_NOSYSTEM"}
     # bash itself sets a few (PWD, SHLVL, _, OLDPWD) when started.
     extra = {n for n in got - allowed if not n.startswith("LC_")} - {"PWD", "SHLVL", "_", "OLDPWD"}
     assert not extra, extra

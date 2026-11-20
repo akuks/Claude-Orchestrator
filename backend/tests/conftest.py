@@ -29,7 +29,8 @@ prompt="$(cat)"
 # os.environ can never reach this script. Instead a task prompt carrying the
 # marker [env-probe:KEY] makes the task run (stream-json only, so memory and
 # findings calls quoting the prompt don't overwrite it) record its env to
-# PROBES/KEY.vars (selected names=values) and PROBES/KEY.names (every name).
+# PROBES/KEY.vars (selected names=values), PROBES/KEY.names (every name) and
+# PROBES/KEY.args (argv, one per line).
 if [[ "$args" == *"stream-json"* && "$prompt" =~ \\[env-probe:([A-Za-z0-9_-]+)\\] ]]; then
   f="__PROBES__/${BASH_REMATCH[1]}"
   {
@@ -39,6 +40,7 @@ if [[ "$args" == *"stream-json"* && "$prompt" =~ \\[env-probe:([A-Za-z0-9_-]+)\\
     if [[ -n "$CO_API_TOKEN" ]]; then echo "CO_API_TOKEN=present"; fi
   } >"$f.vars.tmp"
   env | cut -d= -f1 >"$f.names"
+  printf '%s\\n' "$@" >"$f.args"
   mv "$f.vars.tmp" "$f.vars"
 fi
 # Server-side one-shot calls (memory: --print; findings: --print --json-schema)
@@ -191,8 +193,14 @@ def read_env_probe(key: str) -> tuple[dict[str, str], set[str]] | None:
     return pairs, names
 
 
+def read_probe_args(key: str) -> list[str] | None:
+    """argv (one per line) of the probed task run, or None if it never ran."""
+    f = _PROBES / f"{key}.args"
+    return f.read_text().splitlines() if f.exists() else None
+
+
 def clear_env_probe(key: str) -> None:
-    for suffix in ("vars", "names"):
+    for suffix in ("vars", "names", "args"):
         (_PROBES / f"{key}.{suffix}").unlink(missing_ok=True)
 
 
