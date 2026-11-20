@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import { createElement } from 'react'
 import { createRoot } from 'react-dom/client'
 import { act } from 'react'
-import { PAGES, parseHash, redirectIfForbidden, returnTo, toHash, useRoute } from './router'
+import { PAGES, interceptHashLinks, parseHash, redirectIfForbidden, returnTo, toHash, useRoute } from './router'
 
 globalThis.IS_REACT_ACT_ENVIRONMENT = true
 
@@ -193,24 +193,66 @@ describe('redirectIfForbidden', () => {
   })
 })
 
-describe('plain hash links', () => {
-  it('tag the new entry with where it came from so returnTo can step back', () => {
+function mountProbe() {
+  const seen = {}
+  function Probe() {
+    const [route, navigate] = useRoute()
+    seen.route = route
+    seen.navigate = navigate
+    return null
+  }
+  const container = document.createElement('div')
+  document.body.appendChild(container)
+  const root = createRoot(container)
+  act(() => root.render(createElement(Probe)))
+  seen.unmount = () => {
+    act(() => root.unmount())
+    container.remove()
+  }
+  return seen
+}
+
+describe('interceptHashLinks', () => {
+  function click(a, init = {}) {
+    document.body.appendChild(a)
+    const ev = new MouseEvent('click', { bubbles: true, cancelable: true, button: 0, ...init })
+    a.dispatchEvent(ev)
+    a.remove()
+    return ev
+  }
+  const link = (href) => Object.assign(document.createElement('a'), { href })
+
+  it('routes plain clicks on in-app hash links through navigate (push)', () => {
+    const nav = vi.fn()
+    const stop = interceptHashLinks(nav)
+    const ev = click(link('#/tasks/5'))
+    expect(ev.defaultPrevented).toBe(true)
+    expect(nav).toHaveBeenCalledWith('#/tasks/5')
+    stop()
+  })
+
+  it('leaves modified clicks, other links and handled clicks alone', () => {
+    const nav = vi.fn()
+    const stop = interceptHashLinks(nav)
+    click(link('#/tasks/5'), { metaKey: true })
+    click(link('#/tasks/5'), { button: 1 })
+    click(link('https://example.test/x'))
+    click(link('#section'))
+    const blank = link('#/tasks/5')
+    blank.target = '_blank'
+    click(blank)
+    expect(nav).not.toHaveBeenCalled()
+    stop()
+    click(link('#/tasks/5'))
+    expect(nav).not.toHaveBeenCalled()
+  })
+
+  it('a link-opened task closes by stepping back to the list', () => {
     window.history.replaceState(null, '', '#/tasks')
-    let root
-    const container = document.createElement('div')
-    const seen = {}
-    function Probe() {
-      const [route, navigate] = useRoute()
-      seen.route = route
-      seen.navigate = navigate
-      return null
-    }
-    root = createRoot(container)
-    act(() => root.render(createElement(Probe)))
-    // What the browser does for <a href="#/tasks/5">: new entry, no state, hashchange.
-    window.history.pushState(null, '', '#/tasks/5')
+    const seen = mountProbe()
+    const stop = interceptHashLinks(seen.navigate)
     act(() => {
-      window.dispatchEvent(new HashChangeEvent('hashchange', { oldURL: 'http://x/#/tasks', newURL: 'http://x/#/tasks/5' }))
+      click(link('#/tasks/5'))
     })
     expect(seen.route).toEqual({ page: 'tasks', id: '5' })
     expect(window.history.state).toEqual({ coFrom: '#/tasks' })
@@ -218,6 +260,7 @@ describe('plain hash links', () => {
     returnTo({ page: 'tasks' }, seen.navigate)
     expect(back).toHaveBeenCalledTimes(1)
     back.mockRestore()
-    act(() => root.unmount())
+    stop()
+    seen.unmount()
   })
 })

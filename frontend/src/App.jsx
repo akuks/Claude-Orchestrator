@@ -39,7 +39,7 @@ import SetupPage from './auth/SetupPage'
 import ChangePasswordModal from './auth/ChangePasswordModal'
 import MyCredentials from './components/MyCredentials'
 import { useThemeMode } from './theme/ThemeModeContext.jsx'
-import { redirectIfForbidden, returnTo, useRoute } from './shell/router'
+import { interceptHashLinks, redirectIfForbidden, returnTo, useRoute } from './shell/router'
 import { buildCommands, isPaletteShortcut } from './shell/commands'
 import Rail from './shell/Rail'
 import TopBar from './shell/TopBar'
@@ -140,9 +140,13 @@ function AppInner({ user, onLogout }) {
 
   // #/tasks/<id> opens that task's detail drawer.
   const selected = page === 'tasks' && route.id ? route.id : null
-  // Switching steps inside the open drawer replaces the entry, so closing it
-  // still steps back to wherever the drawer was opened from.
-  const openTask = useCallback((id) => navigate({ page: 'tasks', id }, { replace: true }), [navigate])
+  // Opening a task pushes (Back returns to the list); switching steps inside
+  // an already-open drawer replaces, so closing still steps back to the list.
+  const openTask = useCallback(
+    (id) => navigate({ page: 'tasks', id }, { replace: Boolean(selected) }),
+    [navigate, selected],
+  )
+  useEffect(() => interceptHashLinks(navigate), [navigate])
 
   // Admin-only pages: a member following a stale link lands on Home.
   useEffect(() => {

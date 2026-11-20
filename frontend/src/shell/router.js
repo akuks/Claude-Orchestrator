@@ -60,21 +60,15 @@ export function useRoute() {
       const next = parseHash(currentHash())
       setRoute((prev) => (prev.page === next.page && prev.id === next.id ? prev : next))
     }
-    // A plain <a href="#/…"> click creates an entry without state: tag it with
-    // where it came from, the same as navigate() does.
-    const onHashChange = (e) => {
-      if (window.history.state == null && e?.oldURL) {
-        const i = e.oldURL.indexOf('#')
-        window.history.replaceState({ coFrom: i >= 0 ? e.oldURL.slice(i) : '' }, '')
-      }
-      sync()
-    }
-    window.addEventListener('hashchange', onHashChange)
+    // Only navigate() tags entries (in-app links go through it, see
+    // interceptHashLinks). hashchange/popstate also fire on Back/Forward, where
+    // tagging would record the entry being left, so they only re-read the hash.
+    window.addEventListener('hashchange', sync)
     window.addEventListener('popstate', sync)
     window.addEventListener(SYNC_EVENT, sync)
     sync()
     return () => {
-      window.removeEventListener('hashchange', onHashChange)
+      window.removeEventListener('hashchange', sync)
       window.removeEventListener('popstate', sync)
       window.removeEventListener(SYNC_EVENT, sync)
     }
@@ -84,13 +78,30 @@ export function useRoute() {
     const hash = typeof to === 'string' ? toHash(parseHash(to)) : toHash(to)
     const from = currentHash()
     if (from === hash) return
-    // Keep the entry's origin; a non-null state also stops hashchange from re-tagging it.
-    if (replace) window.history.replaceState(window.history.state ?? { coFrom: null }, '', hash)
+    // Keep the entry's origin (if any).
+    if (replace) window.history.replaceState(window.history.state, '', hash)
     else window.history.pushState({ coFrom: from }, '', hash)
     window.dispatchEvent(new Event(SYNC_EVENT))
   }, [])
 
   return [route, navigate]
+}
+
+// Route plain left-clicks on in-app links (<a href="#/…">) through navigate,
+// so the new entry is pushed with its origin. Modified/middle clicks, targets
+// and anything a handler already prevented keep the browser default.
+export function interceptHashLinks(navigate, root = document) {
+  const onClick = (e) => {
+    if (e.defaultPrevented || e.button !== 0 || e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return
+    const a = e.target?.closest?.('a[href]')
+    if (!a || (a.target && a.target !== '_self') || a.hasAttribute('download')) return
+    const href = a.getAttribute('href')
+    if (!href?.startsWith('#/')) return
+    e.preventDefault()
+    navigate(href)
+  }
+  root.addEventListener('click', onClick)
+  return () => root.removeEventListener('click', onClick)
 }
 
 // Leave the current entry for `route`: if we got here straight from `route`,
