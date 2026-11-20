@@ -67,8 +67,10 @@ HARD (never approvable):
   ``$CLAUDE_CONFIG_DIR`` or ``$CLAUDE_PLUGIN_ROOT`` when its value is not
   known; inline interpreter code that names those variables or a protected
   path - the same checks run on every code text an interpreter gets
-  (``-c``/``-e``, a heredoc or here-string on stdin, literal text piped in, a
-  file written and run in the same line); a writer whose substituted
+  (``-c``/``-e``, a heredoc or here-string on stdin - also one attached to a
+  compound command around a bare interpreter, ``{ python3; } <<E``,
+  ``if ..; then node; fi <<E``, ``..; done <<E`` - and ``uv run -`` as
+  Python, literal text piped in, a file written and run in the same line); a writer whose substituted
   arguments or ``xargs`` input come from an environment dump (``env``,
   ``printenv``, ``export -p``, ``declare -p``, ``set``, ``/proc/*/environ``)
   or from ``ls``/``find`` of protected paths; running ``co_hook.py`` by
@@ -1305,6 +1307,7 @@ class _Bash:
         self.git_push_specs = []
         self.git_mirror = False
         self.subst_vars = {}
+        self.res_stack = []  # the ParseResult (nesting level) being checked
 
     def run(self, command, cwd):
         res = _sh.parse(command)
@@ -1324,6 +1327,13 @@ class _Bash:
         pipelines = {}
         for st in res:
             pipelines.setdefault(st.pipeline, []).append(st)
+        self.res_stack.append(res)
+        try:
+            self._result(res, cwd, outer, pipelines)
+        finally:
+            self.res_stack.pop()
+
+    def _result(self, res, cwd, outer, pipelines):
         for st in res:
             here = outer | _argv_tokens(pipelines.get(st.pipeline, [st]))
             for sub in st.nested:
@@ -1629,20 +1639,26 @@ class _Bash:
         if kind:
             for code, d in _inline_code(kind, args, dargs):
                 self.check_code(kind, code, d)
-            if kind not in ("awk", "vim") and _reads_stdin(name, args):
-                # R1: code given on stdin - a heredoc, a here-string, or literal text piped in
-                for _dl, _q, body in st.heredocs:
-                    self.check_code(kind, body)
-                for op, t in st.redirects:
-                    if op == "<<<":
-                        self.check_code(kind, t, "$" in t or "`" in t)
-                prev = [x for x in pipeline if x.index == st.index - 1]
-                if prev:
-                    pargv = _sh.expand_wrappers(prev[0]) or []
-                    pdyn = prev[0].dynamic[len(prev[0].argv) - len(pargv):]
-                    text = _literal_output(prev[0], pargv, pdyn)
-                    if isinstance(text, str):
-                        self.check_code(kind, text)
+        stdin_kind = "python" if name == "uv" else (kind if kind not in ("awk", "vim") else None)
+        if stdin_kind and _reads_stdin(name, args):
+            # R1: code given on stdin - a heredoc, a here-string, or literal text piped in
+            for _dl, _q, body in st.heredocs:
+                self.check_code(stdin_kind, body)
+            for op, t in st.redirects:
+                if op == "<<<":
+                    self.check_code(stdin_kind, t, "$" in t or "`" in t)
+            prev = [x for x in pipeline if x.index == st.index - 1]
+            if prev:
+                pargv = _sh.expand_wrappers(prev[0]) or []
+                pdyn = prev[0].dynamic[len(prev[0].argv) - len(pargv):]
+                text = _literal_output(prev[0], pargv, pdyn)
+                if isinstance(text, str):
+                    self.check_code(stdin_kind, text)
+            if not st.heredocs and not any(op in ("<", "<<<", "<>") for op, _t in st.redirects):
+                # Task 3 carry: stdin inherited from a compound command
+                # ({ python3; } <<E, if ..; then python3; fi <<E, ...; done <<E):
+                # the heredoc / here-string sits on the closing word's stage
+                self.compound_stdin(st, stdin_kind)
         if name == "sed":
             scripts = [c for c, _d in _short_opt_value(args, dargs, "e", ("--expression",))]
             if not scripts:
@@ -1695,6 +1711,24 @@ class _Bash:
             first_unknown = bool(st.dynamic[:1] and st.dynamic[0]) or bool(dyn[:1] and dyn[0])
             if _dangerous(toks) or (first_unknown and any(_DANGEROUS_ARGS.fullmatch(a) for a in argv[1:])):
                 ctx.hit("uncertain-command", False, raw)
+
+    def compound_stdin(self, st, kind):
+        res = self.res_stack[-1] if self.res_stack else []
+        after = False
+        for s2 in res:
+            if s2 is st:
+                after = True
+                continue
+            if not after:
+                continue
+            a2 = _sh.expand_wrappers(s2)
+            if a2 and _sh.command_name(a2[0]) not in _COMPOUND_CLOSERS:
+                continue
+            for _dl, _q, body in s2.heredocs:
+                self.check_code(kind, body)
+            for op, t in s2.redirects:
+                if op == "<<<":
+                    self.check_code(kind, t, "$" in t or "`" in t)
 
     def pipe_to_shell(self, st, argv, dyn, name, args, pipeline):
         ctx, raw = self.ctx, self.raw
@@ -1969,6 +2003,8 @@ def _reads_stdin(name, args):
         return args[:1] == ["run"] and any(a in _STDIN_PATHS for a in args[1:])
     return False
 
+
+_COMPOUND_CLOSERS = frozenset({"}", "fi", "done", "esac", ")"})
 
 _OTHER_INTERP = frozenset({"pwsh", "powershell", "rscript", "tclsh", "wish", "osascript"})
 
