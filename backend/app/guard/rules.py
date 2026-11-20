@@ -102,8 +102,9 @@ cannot resolve), ``git-force-push-main``, ``git-reset-hard``,
 ``git-clean-fdx``, ``git-stash-drop``, ``secret-files``, ``chmod-wide``,
 ``pipe-to-shell``, ``git-internals`` (writes to ``.git/config``,
 ``.git/hooks``, ``.git/info/attributes``, ``.gitmodules`` with an
-``update = !cmd`` key), ``agent-config`` (Rulings R6/R7: writes to a
-``.claude/settings*.json``, ``.claude/hooks/**`` or ``.mcp.json``),
+``update = !cmd`` key), ``agent-config`` (Rulings R6/R7/R20: writes to a
+``.claude/settings*.json``, ``.claude/hooks/**``, ``.claude/agents/**``,
+``.claude/skills/**``, ``.claude/commands/**`` or ``.mcp.json``),
 ``uncertain-command``, ``mcp-require-approval``, ``unknown-tool``.
 
 Paths: write targets, file-tool paths, ``cd`` targets, glob folders and
@@ -320,7 +321,11 @@ _VIM = frozenset({"vim", "vi", "nvim", "ex", "view", "gvim", "vimdiff", "rvim"})
 _WRITES_TEXT = re.compile(r"write|append|copy|rename|move|unlink|remove|\brm|symlink|truncate|chmod|mkdir|"
                           r"\bos\.replace\b|open\s{0,5}\([^)]{0,300}?['\"](?=[rbt]{0,3}[wax+])[rwaxbt+]{1,4}['\"]|"
                           r"system|exec|spawn|popen|subprocess", re.I)
-_AGENT_CODE = re.compile(r"\.claude[\\/]+(settings[^'\"\s]*\.json|hooks\b)|\.claude['\"]|\.mcp\.json", re.I)
+_AGENT_CODE = re.compile(r"\.claude[\\/]+(settings[^'\"\s]*\.json|hooks\b|agents\b|skills\b|commands\b)"
+                         r"|\.claude['\"]|\.mcp\.json", re.I)
+# Ruling R20: subagent, skill and slash-command definitions can start processes
+# (frontmatter mcpServers, hooks, inline !`cmd`) outside PreToolUse.
+_AGENT_DIRS = frozenset({"hooks", "agents", "skills", "commands"})
 _GITMODULES_EXEC = re.compile(r"(?im)^\s*update\s*=\s*!")
 _STDIN_PATHS = frozenset({"-", "/dev/stdin", "/dev/fd/0", "/proc/self/fd/0"})
 _MAKEFILES = frozenset({"makefile", "gnumakefile"})
@@ -489,14 +494,16 @@ def _git_internal_kind(path):
 
 
 def _agent_config(path):
-    """A .claude/settings*.json, .claude/hooks/** or .mcp.json path (R6/R7)."""
+    """A .claude/settings*.json, .claude/{hooks,agents,skills,commands}/** or
+    .mcp.json path (R6/R7/R20)."""
     parts = path.lower().split("/")
     if parts and parts[-1] == ".mcp.json":
         return True
     for i in range(len(parts) - 1, -1, -1):
         if parts[i] == ".claude":
             rest = parts[i + 1:]
-            return (len(rest) == 1 and fnmatch.fnmatchcase(rest[0], "settings*.json")) or rest[:1] == ["hooks"]
+            return (len(rest) == 1 and fnmatch.fnmatchcase(rest[0], "settings*.json")) or \
+                (bool(rest) and rest[0] in _AGENT_DIRS)
     return False
 
 
@@ -1569,7 +1576,7 @@ class _Bash:
         elif is_dir is False:
             is_dir = os.path.isdir(dpath) or dpath in ctx.glob_dirs or ctx.is_protected(dpath) and \
                 os.path.isdir(dpath) or _git_internal_kind(dpath) == "hooks" or dpath.endswith("/.claude") or \
-                dpath.endswith("/.claude/hooks")
+                dpath.lower().endswith(tuple("/.claude/" + d for d in _AGENT_DIRS))
         kind = "link" if link else "copy"
         if not is_dir:
             src = srcs[0][0] if srcs else None

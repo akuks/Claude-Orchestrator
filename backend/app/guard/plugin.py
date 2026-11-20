@@ -145,9 +145,11 @@ def _matches(version_dir: Path, files: dict[str, bytes]) -> bool:
         return False
 
 
-def ensure_plugin(root: Path) -> Path:
+def ensure_plugin(root: Path, prune: bool = True) -> Path:
     """Make ``root`` the current co-guard plugin; return ``root``. Idempotent and
-    cheap when nothing changed; safe to call per task (thread + file lock)."""
+    cheap when nothing changed; safe to call per task (thread + file lock).
+    ``prune`` removes other versions: only at server startup, when no task can
+    still be running one (the worker passes ``prune=False``)."""
     root = Path(root).absolute()
     parent = root.parent
     parent.mkdir(parents=True, exist_ok=True)
@@ -155,12 +157,12 @@ def ensure_plugin(root: Path) -> Path:
         fd = os.open(parent / f".{root.name}.lock", os.O_RDWR | os.O_CREAT, 0o600)
         try:
             fcntl.flock(fd, fcntl.LOCK_EX)
-            return _ensure(root, parent)
+            return _ensure(root, parent, prune)
         finally:
             os.close(fd)
 
 
-def _ensure(root: Path, parent: Path) -> Path:
+def _ensure(root: Path, parent: Path, prune: bool) -> Path:
     files = plugin_files()
     digest = content_hash(files)[:20]
     version = parent / f".{root.name}-{digest}"
@@ -181,7 +183,7 @@ def _ensure(root: Path, parent: Path) -> Path:
         os.replace(link, root)
 
     for old in parent.glob(f".{root.name}-*"):
-        if old != version:
+        if old != version and (prune or "-tmp-" in old.name or "-link-" in old.name):
             _rmtree(old)
     if not _matches(root.resolve(), files):
         raise RuntimeError("co-guard: the plugin could not be installed read-only")

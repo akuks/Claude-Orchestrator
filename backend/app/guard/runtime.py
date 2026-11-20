@@ -13,16 +13,20 @@
 
 from __future__ import annotations
 
+import hashlib
+import hmac
 import ipaddress
 import json
 import os
 import pwd
+import secrets
 import shutil
 import socket
 import sys
 import sysconfig
 from pathlib import Path
-from urllib.parse import urlsplit
+from urllib.parse import quote, urlsplit
+from urllib.request import ProxyHandler, build_opener
 
 from ..config import settings
 from .co_hook import APPROVAL_WAIT_MAX
@@ -49,6 +53,30 @@ class GuardConfigError(Exception):
 
 
 _API_BASE_CACHE: dict[tuple, str] = {}
+
+# Ruling R22: a per-boot secret held only in this process. GET /guard/whoami
+# answers HMAC(nonce, challenge), so the worker can tell this server from a
+# listener an agent started on the approval address.
+_BOOT_NONCE = secrets.token_bytes(32)
+
+
+def whoami_proof(challenge: str) -> str:
+    return hmac.new(_BOOT_NONCE, challenge.encode(), hashlib.sha256).hexdigest()
+
+
+def verify_api_base(base: str, timeout: float = 3.0) -> bool:
+    """True only if ``base`` is THIS server (blocking; run in a thread)."""
+    challenge = secrets.token_hex(16)
+    opener = build_opener(ProxyHandler({}))
+    try:
+        with opener.open(f"{base}/guard/whoami?challenge={challenge}", timeout=timeout) as resp:
+            if resp.status != 200:
+                return False
+            body = json.loads(resp.read(4096).decode() or "null")
+    except Exception:  # noqa: BLE001 - no answer / not JSON: not verified
+        return False
+    proof = body.get("proof") if isinstance(body, dict) else None
+    return isinstance(proof, str) and hmac.compare_digest(proof, whoami_proof(challenge))
 
 
 def guard_api_base() -> str:
@@ -81,7 +109,8 @@ def guard_api_base() -> str:
         ip = ipaddress.ip_address(addrs.pop().split("%", 1)[0])
     if ip.is_unspecified:
         ip = ipaddress.ip_address("::1" if ip.version == 6 else "127.0.0.1")
-    url = f"http://[{ip}]:{port}" if ip.version == 6 else f"http://{ip}:{port}"
+    # an IPv6 scope id is "%25"-escaped in a URL (fe80::1%en0 -> [fe80::1%25en0])
+    url = f"http://[{quote(str(ip), safe=':')}]:{port}" if ip.version == 6 else f"http://{ip}:{port}"
     _API_BASE_CACHE[key] = url
     return url
 
@@ -276,8 +305,13 @@ def _settings_value(path: Path, key: str):
     return data.get(key) if isinstance(data, dict) else None
 
 
+def _truthy(value) -> bool:
+    """Claude Code's check: anything but undefined / null / false / "false" counts as set."""
+    return value is not None and value is not False and value != "false"
+
+
 def _disables_us(path: Path) -> bool:
-    if _settings_value(path, "disableAllHooks") is True:
+    if _truthy(_settings_value(path, "disableAllHooks")) or _truthy(_settings_value(path, "allowManagedHooksOnly")):
         return True
     plugins = _settings_value(path, "enabledPlugins")
     return isinstance(plugins, dict) and any(

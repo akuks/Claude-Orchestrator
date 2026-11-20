@@ -24,6 +24,16 @@ PreToolUse
     safety", and a watchdog denies ``EXIT_MARGIN`` seconds before the hook's
     configured timeout.
 
+Ruling R21: the very first thing PreToolUse does (before any evaluation) is
+append ``{"event":"PreToolUse","tool_use_id":..,"seen":true}`` to the spool;
+the worker's watchdog requires that record for every tool result. If it
+cannot be written, the call is denied.
+
+A request that was never filed (connection refused, 4xx, or not accepted
+within FILE_BUDGET seconds) denies at once with "approval service
+unreachable - action blocked"; after filing, 3 refused connections in a row
+do the same.
+
 The approval API must be ``http://<literal IP>:<port>``, the POST must answer
 ``status: "pending"`` with an id, and every GET must carry that id; anything
 else (and any 4xx, or no ``CO_API_TOKEN``) denies at once. The decision is
@@ -59,6 +69,8 @@ HOOK_TIMEOUT = APPROVAL_WAIT_MAX + 30
 EXIT_MARGIN = 10  # always answer this long before HOOK_TIMEOUT (>= 5 s)
 POLL_SECONDS = 2.0
 POLL_MIN = 0.5
+FILE_BUDGET = 10.0  # seconds to get a request filed before giving up
+UNREACHABLE = "approval service unreachable \u2014 action blocked"
 REPORT_TIMEOUT = 0.5
 SUMMARY_MAX = 300
 ERROR_REASON = "co-guard error — action blocked for safety"
@@ -159,19 +171,25 @@ def load_rules():
 
 
 # -- spool / report ---------------------------------------------------------
-def _spool(record):
+def _spool_strict(record):
+    """Append one line to the spool; raises when it cannot."""
     tdir = os.environ.get("CO_TASK_DIR")
     if not tdir:
-        return
+        raise RuntimeError("CO_TASK_DIR is not set")
     record = dict(record, ts=round(time.time(), 3))
     line = json.dumps(record, default=str) + "\n"
+    fd = os.open(os.path.join(tdir, "spool.jsonl"), os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o600)
     try:
-        fd = os.open(os.path.join(tdir, "spool.jsonl"), os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o600)
-        try:
-            os.write(fd, line.encode())
-        finally:
-            os.close(fd)
-    except OSError:
+        if os.write(fd, line.encode()) != len(line.encode()):
+            raise OSError("short spool write")
+    finally:
+        os.close(fd)
+
+
+def _spool(record):
+    try:
+        _spool_strict(record)
+    except (OSError, RuntimeError):
         pass
 
 
@@ -181,7 +199,7 @@ def _api(policy):
     base = str(policy.get("api_base") or "").rstrip("/")
     u = urllib.parse.urlsplit(base)
     try:
-        ipaddress.ip_address(u.hostname or "")
+        ipaddress.ip_address(urllib.parse.unquote(u.hostname or ""))
         ok = u.scheme == "http" and u.port is not None and u.path in ("", "/") and not u.username
     except ValueError:
         ok = False
@@ -265,7 +283,11 @@ def request_approval(policy, payload, verdict, summary, deadline):
     idem = hashlib.sha256((command_hash + ":" + str(payload.get("tool_use_id") or "")).encode()).hexdigest()
     poll = poll_seconds(policy)
     req_id = None
+    refused = 0  # consecutive connection-refused errors
+    file_by = time.monotonic() + FILE_BUDGET  # no person can see an unfiled request: do not wait long
     while time.monotonic() < deadline:
+        if req_id is None and time.monotonic() > file_by:
+            return "refused", None, UNREACHABLE
         left = deadline - time.monotonic()
         try:
             if req_id is None:
@@ -287,10 +309,21 @@ def request_approval(policy, payload, verdict, summary, deadline):
                 if status != "pending":
                     return "refused", req_id, "the approval API gave an unknown status"
         except urllib.error.HTTPError as e:
+            refused = 0
             if 400 <= e.code < 500:
+                if req_id is None:
+                    return "refused", None, f"{UNREACHABLE} (HTTP {e.code})"
                 return "refused", req_id, f"the approval API refused the request (HTTP {e.code})"
-        except Exception:  # noqa: BLE001 - API down / 5xx / bad JSON: keep trying until the deadline
-            pass
+        except Exception as e:  # noqa: BLE001 - API down / 5xx / bad JSON: keep trying until the deadline
+            if isinstance(e, ConnectionRefusedError) or isinstance(getattr(e, "reason", None),
+                                                                    ConnectionRefusedError):
+                refused += 1
+                if refused >= 3:
+                    return "refused", req_id, UNREACHABLE
+            else:
+                refused = 0
+        else:
+            refused = 0
         time.sleep(max(0.0, min(poll, deadline - time.monotonic())))
     return "timeout", req_id, ""
 
@@ -326,10 +359,14 @@ def pre_tool_use(payload, policy, started):
     if status == "approved":
         context_only(f"co-guard: a person approved this action (request {req_id}).")
     else:
-        why = {"rejected": "a person rejected it", "expired": "the request expired",
-               "timeout": "no decision in time", "refused": f"co-guard could not ask a person ({detail})"}[status]
-        deny(f"CO-GUARD: blocked — needs approval and {why} (request {req_id or 'not filed'}): "
-             + redact(reason, 1000) + ". Do not retry the same action; explain what you needed instead.")
+        if status == "refused":
+            deny(f"CO-GUARD: {detail} (request {req_id or 'not filed'}). It needed a person's approval: "
+                 + redact(reason, 1000) + ". Do not retry the same action; explain what you needed instead.")
+        else:
+            why = {"rejected": "a person rejected it", "expired": "the request expired",
+                   "timeout": "no decision in time"}[status]
+            deny(f"CO-GUARD: blocked — needs approval and {why} (request {req_id}): "
+                 + redact(reason, 1000) + ". Do not retry the same action; explain what you needed instead.")
     return post_report(policy, rec)
 
 
@@ -363,10 +400,15 @@ def other_event(event, payload):
     _spool(rec)
 
 
+def _truthy(value):
+    """Claude Code's check: anything but undefined / null / false / "false" counts as set."""
+    return value is not None and value is not False and value != "false"
+
+
 def _disables_guard(data):
     if not isinstance(data, dict):
         return False
-    if data.get("disableAllHooks") is True or data.get("allowManagedHooksOnly") is True:
+    if _truthy(data.get("disableAllHooks")) or _truthy(data.get("allowManagedHooksOnly")):
         return True
     plugins = data.get("enabledPlugins")
     return isinstance(plugins, dict) and any(
@@ -378,17 +420,11 @@ def config_change(payload):
     settings change that would switch co-guard's hooks off."""
     path = payload.get("file_path")
     if not isinstance(path, str) or not path:
-        return None
-    try:
-        with open(path, encoding="utf-8") as f:
-            raw = f.read()
-    except OSError:
-        return None  # deleted / unreadable: nothing in it can switch us off
-    try:
-        data = json.loads(raw)
-    except ValueError:
-        keys = ("disableAllHooks", "co-guard", "allowManagedHooksOnly")
-        return "co-guard: unreadable settings change blocked" if any(k in raw for k in keys) else None
+        raise ValueError("no file_path")
+    with open(path, encoding="utf-8") as f:  # any error: blocked (main)
+        data = json.loads(f.read())
+    if not isinstance(data, dict):
+        raise ValueError("settings are not an object")
     if _disables_guard(data):
         return "co-guard: settings that switch off co-guard's hooks are not allowed during a task"
     return None
@@ -409,6 +445,9 @@ def main(argv):
         if is_pre:
             if payload.get("hook_event_name") not in (None, "PreToolUse"):
                 raise ValueError("event mismatch")
+            # Ruling R21: proof for the worker's watchdog that this call reached
+            # co-guard - written FIRST; if it cannot be written, deny.
+            _spool_strict({"event": "PreToolUse", "tool_use_id": payload.get("tool_use_id"), "seen": True})
             pre_tool_use(payload, load_policy(), started)
         elif event == "ConfigChange":
             why = config_change(payload)
@@ -425,6 +464,10 @@ def main(argv):
         if is_pre or event not in EVENTS:
             deny(ERROR_REASON)
             _spool({"event": event or "?", "decision": "deny", "rule_ids": [], "reason": "co-guard error"})
+        elif event == "ConfigChange":
+            _spool({"event": event, "decision": "blocked", "reason": "co-guard error"})
+            sys.stderr.write("co-guard: settings change blocked (it could not be checked)\n")
+            return 2
         else:
             _emit(None)
     finally:
