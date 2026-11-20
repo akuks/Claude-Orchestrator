@@ -2,6 +2,7 @@ import uuid
 from datetime import datetime, timezone
 
 from sqlalchemy import (
+    UniqueConstraint,
     JSON,
     DateTime,
     Float,
@@ -386,6 +387,8 @@ class WorkflowRun(Base):
     status: Mapped[str] = mapped_column(String(16), default="pending")
     current_stage: Mapped[int] = mapped_column(Integer, default=0)
     stages: Mapped[list] = mapped_column(JSON, default=list)  # snapshot at run time
+    # Projects the run's stages target (snapshot at run time), used for visibility.
+    project_ids: Mapped[list] = mapped_column(JSON, default=list)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now, index=True)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
 
@@ -481,3 +484,35 @@ class ApiToken(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
     expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class Team(Base):
+    __tablename__ = "teams"
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=_uuid)
+    name: Mapped[str] = mapped_column(String(120), unique=True, index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+
+
+class TeamMember(Base):
+    __tablename__ = "team_members"
+    __table_args__ = (UniqueConstraint("team_id", "user_id", name="uq_team_member"),)
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=_uuid)
+    team_id: Mapped[str] = mapped_column(String(32), index=True)
+    user_id: Mapped[str] = mapped_column(String(32), index=True)
+
+
+class ProjectMember(Base):
+    """A grant of a role on a project to a user or a team."""
+
+    __tablename__ = "project_members"
+    __table_args__ = (
+        UniqueConstraint("project_id", "subject_type", "subject_id", name="uq_project_member"),
+    )
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=_uuid)
+    project_id: Mapped[str] = mapped_column(String(32), index=True)
+    subject_type: Mapped[str] = mapped_column(String(8))  # "user" | "team"
+    subject_id: Mapped[str] = mapped_column(String(32), index=True)
+    role: Mapped[str] = mapped_column(String(16))  # "contributor" | "maintainer"
