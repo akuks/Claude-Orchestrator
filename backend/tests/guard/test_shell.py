@@ -992,7 +992,46 @@ def test_sudo_su_everyday_certain(cmd):
     assert not parse(cmd).uncertain
 
 
-# Extra fail-closed: a heredoc body after a dangling operator (bash syntax error).
+# Extra fail-closed: a heredoc body after a dangling operator feeds a later stage; uncertain.
 def test_heredoc_after_dangling_operator():
     assert parse("cat <<'E' |\nbash\nrm -rf ~\nE").uncertain
     assert not parse("cat <<EOF | tr a b\nx\nEOF").uncertain
+
+
+# ===========================================================================
+# Fix round 4: narrower git data-key allowlist; dangling-heredoc wording
+# ===========================================================================
+@pytest.mark.parametrize("cmd", [
+    "git -c submodule.x.update='!rm -rf ~' submodule update",
+    "git config submodule.x.update '!rm -rf ~'",
+])
+def test_git_submodule_update_command(cmd):
+    assert runs(cmd, "rm", "-rf", "~"), effective(cmd)
+
+
+@pytest.mark.parametrize("cmd", [
+    "git -c lfs.customtransfer.x.path=sh -c lfs.customtransfer.x.args='-c \"rm -rf ~\"' lfs fetch",
+    "git -c init.templateDir=/tmp/t clone x",
+    "git -c lfs.extension.x.clean='rm -rf ~' add .",
+    "git -c submodule.x.foo='a b' status",
+])
+def test_git_round4_uncertain(cmd):
+    assert parse(cmd).uncertain, [(s.argv, s.reasons) for s in walk(parse(cmd))]
+
+
+@pytest.mark.parametrize("cmd", [
+    "git -c submodule.recurse=true pull",
+    "git config init.defaultBranch main",
+    "git -c http.proxy=http://p:8080 fetch",
+    "git -c submodule.x.update=rebase submodule update",
+    "git config submodule.lib.url https://github.com/o/lib.git",
+])
+def test_git_round4_certain(cmd):
+    assert not parse(cmd).uncertain, [(s.argv, s.reasons) for s in walk(parse(cmd))]
+
+
+def test_dangling_heredoc_reason_wording():
+    reasons = [r for s in walk(parse("cat <<'E' |\nbash\nrm -rf ~\nE")) for r in s.reasons]
+    reasons += parse("cat <<'E' |\nbash\nrm -rf ~\nE").errors
+    assert "heredoc body feeds a later pipeline stage; treated as uncertain" in reasons
+    assert not any("syntax error" in r for r in reasons)
