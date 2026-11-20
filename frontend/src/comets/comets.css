@@ -1,0 +1,198 @@
+/* SVG comets (Home fallback scene + project-card mini comets). Colours come
+   from the theme's CSS variables so night mode follows automatically. */
+.co-comets {
+  position: relative;
+}
+.co-comets-svg {
+  display: block;
+  overflow: visible;
+}
+.co-comets-svg text {
+  font-family: var(--co-font);
+}
+.co-comet-hit {
+  fill: none;
+  stroke: transparent;
+  stroke-width: 22;
+  stroke-linecap: round;
+}
+.co-comet-trail {
+  fill: none;
+  stroke-linecap: round;
+  filter: drop-shadow(0 0 4px rgba(249, 115, 22, 0.35));
+}
+.co-comet-flow {
+  fill: none;
+  stroke: #fff;
+  stroke-opacity: 0.85;
+  stroke-width: 1.3;
+  stroke-dasharray: 4 7;
+  animation: co-comet-flow 1.4s linear infinite;
+}
+html[data-mode='night'] .co-comet-flow {
+  stroke-opacity: 0.5;
+}
+@keyframes co-comet-flow {
+  to {
+    stroke-dashoffset: -22;
+  }
+}
+.co-comet-link {
+  cursor: pointer;
+}
+.co-comet-link:hover .co-comet-trail {
+  filter: drop-shadow(0 0 7px rgba(249, 115, 22, 0.6));
+}
+
+.co-star-done {
+  fill: var(--co-success);
+}
+.co-star-failed {
+  fill: var(--co-danger);
+}
+.co-star-wait {
+  fill: #fef3c7;
+  stroke: var(--co-warning);
+  stroke-width: 2;
+}
+html[data-mode='night'] .co-star-wait {
+  fill: #3a2a10;
+}
+.co-star-next {
+  fill: var(--co-surface-solid);
+  stroke: var(--co-text-muted);
+  stroke-width: 2;
+}
+.co-star-current {
+  fill: var(--co-primary);
+  filter: drop-shadow(0 0 6px rgba(249, 115, 22, 0.75));
+}
+.co-star-halo {
+  fill: var(--co-primary);
+  opacity: 0.22;
+  transform-box: fill-box;
+  transform-origin: center;
+  animation: co-star-pulse 2.4s ease-in-out infinite;
+}
+@keyframes co-star-pulse {
+  50% {
+    opacity: 0.06;
+    transform: scale(1.35);
+  }
+}
+
+.co-comet-label {
+  font-size: 12px;
+  font-weight: 600;
+  fill: var(--co-text);
+  paint-order: stroke;
+  stroke: var(--co-surface-solid);
+  stroke-width: 3px;
+  stroke-linejoin: round;
+}
+.co-comet-label-current {
+  fill: #c2410c;
+}
+.co-comet-label-failed {
+  fill: #be123c;
+}
+.co-comet-label-waiting_approval {
+  fill: #b45309;
+}
+html[data-mode='night'] .co-comet-label-current {
+  fill: #fdba74;
+}
+html[data-mode='night'] .co-comet-label-failed {
+  fill: #fda4af;
+}
+html[data-mode='night'] .co-comet-label-waiting_approval {
+  fill: #fcd34d;
+}
+.co-comet-stage {
+  font-size: 10.5px;
+  fill: var(--co-text-secondary);
+}
+
+/* Keyboard-reachable list of the same comets (and the "+N more"). */
+.co-comet-list {
+  list-style: none;
+  margin: 6px 0 0;
+  padding: 0;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.co-comet-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  max-width: 100%;
+  padding: 4px 10px;
+  border-radius: 999px;
+  border: 1px solid var(--co-border);
+  background: var(--co-surface);
+  color: var(--co-text);
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+}
+.co-comet-item:hover {
+  background: var(--co-hover);
+  border-color: var(--co-active-border);
+}
+.co-comet-item:focus-visible {
+  outline: 2px solid var(--co-primary);
+  outline-offset: 2px;
+}
+.co-comet-item-title {
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 220px;
+}
+.co-comet-item-stage {
+  color: var(--co-text-secondary);
+  white-space: nowrap;
+}
+.co-comet-more {
+  font-weight: 600;
+  color: var(--co-text-secondary);
+  font-size: 12px;
+}
+span.co-comet-more {
+  display: inline-block;
+  padding: 4px 6px;
+}
+.co-comet-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  flex: none;
+  background: var(--co-text-muted);
+}
+.co-comet-dot-done {
+  background: var(--co-success);
+}
+.co-comet-dot-current {
+  background: var(--co-primary);
+  box-shadow: 0 0 6px var(--co-glow);
+}
+.co-comet-dot-failed {
+  background: var(--co-danger);
+}
+.co-comet-dot-waiting_approval {
+  background: var(--co-warning);
+}
+
+/* Static comets when motion is reduced (OS setting or in-app toggle). */
+html[data-reduce-motion='true'] .co-comet-flow,
+html[data-reduce-motion='true'] .co-star-halo {
+  animation: none;
+}
+@media (prefers-reduced-motion: reduce) {
+  .co-comet-flow,
+  .co-star-halo {
+    animation: none;
+  }
+}

@@ -34,6 +34,7 @@ import UsageView from './components/UsageView'
 import SecurityView from './components/SecurityView'
 import UsersView from './components/UsersView'
 import TeamsView from './components/TeamsView'
+import HomeView from './home/HomeView'
 import LoginPage from './auth/LoginPage'
 import SetupPage from './auth/SetupPage'
 import ChangePasswordModal from './auth/ChangePasswordModal'
@@ -409,11 +410,13 @@ function AppInner({ user, onLogout }) {
             />
           )}
           {page === 'home' && (
-            <Placeholder title="Home is coming" text="Your live workflows and what needs you will show up here.">
-              <Button type="primary" onClick={() => navigate({ page: 'tasks' })}>
-                Go to Tasks
-              </Button>
-            </Placeholder>
+            <HomeView
+              user={user}
+              navigate={navigate}
+              onOpenCredentials={() => setCredsOpen(true)}
+              onApprovalsChanged={loadApprovalCount}
+              refreshSignal={claudeInfo?.you?.claude}
+            />
           )}
           {page === 'runs' && (
             <Placeholder title="Run detail is coming" text={`Workflow run ${route.id} — open it from Automation → Workflows for now.`}>

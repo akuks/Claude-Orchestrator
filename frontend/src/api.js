@@ -165,6 +165,8 @@ export const api = {
   deleteWorkflow: (id) => req('DELETE', `/workflows/${id}`),
   runWorkflow: (id, payload) => req('POST', `/workflows/${id}/run`, payload),
   listWorkflowRuns: () => req('GET', '/workflows/runs'),
+  // Active runs + running coordinator threads (Home comets).
+  liveRuns: () => req('GET', '/workflows/runs/live'),
   getWorkflowRun: (id) => req('GET', `/workflows/runs/${id}`),
   cancelWorkflowRun: (id) => req('POST', `/workflows/runs/${id}/cancel`),
   retryWorkflowRun: (id) => req('POST', `/workflows/runs/${id}/retry`),
