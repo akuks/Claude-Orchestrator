@@ -163,10 +163,11 @@ def test_dispatch_refused_message(client):
         {"agent": worker_p["id"], "prompt": "ok"}, {"agent": worker_none["id"], "prompt": "ok"}]})
     assert r.status_code == 201, r.text
 
-    # Same rule for a logged-in user calling dispatch directly.
+    # A logged-in user calling dispatch directly is refused too, without
+    # learning the project's name (R14).
     r = u.post("/agents/dispatch", json={"items": [{"agent": worker_hidden["id"], "prompt": "x"}]})
-    assert r.status_code == 403
-    assert r.json()["detail"] == f"{email} is not a contributor on project {hidden['name']}"
+    assert r.status_code == 404
+    assert r.json()["detail"] == "Project not found" and hidden["name"] not in r.text
 
 
 def test_workflow_run_needs_all_projects(client):

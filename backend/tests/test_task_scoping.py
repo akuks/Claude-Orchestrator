@@ -155,7 +155,7 @@ def test_followup_duplicate_need_contributor_on_root_project(client):
     cid = _adhoc_child(root["id"], c.user_id, session_id="sess-ts")
     r = c.post(f"/tasks/{cid}/followup", json={"prompt": "x"})
     assert r.status_code == 201, r.text
-    assert r.json()["project_id"] == pid  # inherits the thread root's project
+    assert r.json()["project_id"] is None  # the step's own (ad-hoc) project
     # Drop the grant: the creator still sees their own ad-hoc step, but may no
     # longer follow up / duplicate into the project's repo and session.
     assert client.put(f"/projects/{pid}/members", json=[]).status_code == 200
@@ -177,6 +177,13 @@ def test_duplicate_and_followup_carry_project(client):
     for new in (d.json(), f.json()):
         assert new["project_id"] == pid
         assert c2.get(f"/tasks/{new['id']}").status_code == 200
+    # A follow-up of an ad-hoc step in the project's thread stays ad-hoc and
+    # joins the thread, so project members still see it via the root rule.
+    step = _adhoc_child(t["id"], c1.user_id, session_id="sess-step")
+    f2 = c1.post(f"/tasks/{step}/followup", json={"prompt": "more"})
+    assert f2.status_code == 201, f2.text
+    assert f2.json()["project_id"] is None and f2.json()["root_id"] == t["id"]
+    assert c2.get(f"/tasks/{f2.json()['id']}").status_code == 200
 
 
 def test_maintainer_manages_adhoc_steps_in_project_thread(client):

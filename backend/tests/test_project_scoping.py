@@ -113,9 +113,11 @@ def test_read_endpoints_any_role(client):
         assert u.get(f"/projects/{pid}/{path}").status_code == 200, path
 
 
-def test_regenerate_needs_contributor(client):
+def test_regenerate_needs_maintainer(client):
     pid = _mk_project(client)
     u = login_as(f"rg-{_uid()}@test.local")
     assert u.post(f"/projects/{pid}/memory/regenerate").status_code == 404
     _grant(client, pid, u.user_id, "contributor")
+    assert u.post(f"/projects/{pid}/memory/regenerate").status_code == 403
+    _grant(client, pid, u.user_id, "maintainer")
     assert u.post(f"/projects/{pid}/memory/regenerate").status_code == 200

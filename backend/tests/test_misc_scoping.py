@@ -6,7 +6,7 @@ import uuid
 from datetime import datetime, timezone
 
 from app.database import SessionLocal
-from app.models import Finding, McpCall, Task
+from app.models import Finding, McpCall, Project, Task
 from conftest import login_as
 
 
@@ -241,9 +241,11 @@ def test_mcp_project_match_after_rename(client):
 
 
 def test_usage_budget_from_visible_projects_only(client):
-    """An invisible project sharing a visible one's name can't supply its budget."""
-    p, twin = _mk_project(client), _mk_project(client)
-    assert client.patch(f"/projects/{twin['id']}", json={"name": p["name"], "budget_usd": 0.01}).status_code == 200
+    """An invisible project sharing a visible one's name (legacy data: the API
+    now refuses duplicate names) can't supply its budget."""
+    p = _mk_project(client)
+    assert client.patch(f"/projects/{_mk_project(client)['id']}", json={"name": p["name"]}).status_code == 409
+    _add(Project(name=p["name"], slug=f"twin-{_uid()}", directory="/nonexistent", budget_usd=0.01))
     u = _user(client, p["id"], "contributor")
     _add(_task(p, 2.0))
     row = next(r for r in u.get("/usage/by-project").json() if r["project"] == p["name"])
