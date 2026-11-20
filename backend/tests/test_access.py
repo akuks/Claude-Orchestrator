@@ -2,7 +2,7 @@ import asyncio
 
 import pytest
 from fastapi import HTTPException
-from sqlalchemy import select
+from sqlalchemy import delete, select
 
 from app import access, auth
 from app.database import SessionLocal, init_db
@@ -13,6 +13,16 @@ from datetime import timedelta
 @pytest.fixture(scope="module", autouse=True)
 def _db():
     asyncio.run(init_db())
+    yield
+
+    # Leave the shared test DB empty: the admin bootstrap only seeds when no users exist.
+    async def clean():
+        async with SessionLocal() as s:
+            for m in (ApiToken, ProjectMember, TeamMember, Team, Task, Project, User):
+                await s.execute(delete(m))
+            await s.commit()
+
+    asyncio.run(clean())
 
 
 def run(coro_fn):
