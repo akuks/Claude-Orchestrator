@@ -109,9 +109,19 @@ human-readable entry in ``Stage.reasons``:
   (``curl x | bash``), or inherited stdin - a stdin-mode shell needs its
   input visible at its own stage (``exec 0<<<..; bash``, ``{ bash; } <<<..``
   and a bare ``bash`` are uncertain);
-* ``xargs``/``parallel`` builds a ``sh -c`` script from its input (no script
-  or a ``{}``/``-I`` placeholder in it), ``git --config-env``,
-  ``core.hooksPath``, or a command-valued variable that is not a literal;
+* a script FILE runs while its stage has stdin input or a pipe into it
+  (``bash ../../dev/stdin <<< ..``: the file may be stdin);
+* ``xargs``/``parallel`` builds a ``sh -c`` script, the command word, or an
+  ``eval``/``source`` from its input (no script, a ``{}``/``-I``
+  placeholder, ``:::``), or ``parallel :::: file``;
+* git, fail closed: ``--config-env``, ``GIT_CONFIG_*``, ``GIT_EXEC_PATH``,
+  ``include*``, ``core.hooksPath``, ``core.gitProxy``, ``remote.*.uploadpack|
+  receivepack``, ``uploadpack.packObjectsHook``, ``core.alternateRefsCommand``,
+  ``mergetool|difftool.*.cmd``, any ``ext::`` argument, and an unrecognised
+  key (not a known command or data key) whose value has whitespace or ``/``;
+* a privileged shell with no visible input (``sudo -s``, ``su``, ``sudo su``),
+  a heredoc body after a dangling ``|``/``&&``/``||``, or a command-valued
+  variable that is not a literal;
 * a shell hook variable is set (``PS4``, ``PROMPT_COMMAND``, ``BASH_ENV``,
   ``ENV`` ...), ``${x@P}``, an array subscript holding ``$( )`` in a name
   argument (``read 'a[$(..)]'``) or reached through arithmetic, or the
@@ -204,6 +214,19 @@ _GIT_CMD_KEYS = re.compile(
     r"(core\.(pager|editor|sshcommand|fsmonitor|askpass)|sequence\.editor|diff\.external|pager\..+"
     r"|diff\..+\.(textconv|command)|merge\..+\.driver|filter\..+\.(clean|smudge|process)"
     r"|gpg(\..+)?\.program|credential(\..+)?\.helper|alias\..+)")
+# git keys that are always uncertain (fail closed); the value is also nested when it is a command.
+_GIT_RISKY_KEYS = re.compile(
+    r"(include\..+|includeif\..+|remote\..+\.(uploadpack|receivepack)|core\.gitproxy"
+    r"|uploadpack\.packobjectshook|core\.alternaterefscommand|(mergetool|difftool)\..+\.cmd|core\.hookspath)")
+_GIT_RISKY_NO_NEST = re.compile(r"(include\..+|includeif\..+|core\.hookspath)")
+# git keys known to hold plain data (names, colours, urls, paths): never uncertain.
+_GIT_DATA_KEYS = re.compile(
+    r"((user|author|committer|color|i18n|init|branch|push|pull|fetch|rebase|advice|log|format|status|help"
+    r"|safe|http|https|column|gc|pack|index|maintenance|feature|submodule|lfs)\..+"
+    r"|remote\.[^.]+\.(url|pushurl|fetch|push|tagopt|prune|mirror)"
+    r"|merge\.(ff|conflictstyle|log|renamelimit)|commit\.(template|gpgsign|verbose|cleanup)|tag\.(gpgsign|sort)"
+    r"|core\.(autocrlf|filemode|excludesfile|attributesfile|ignorecase|quotepath|whitespace|eol|longpaths"
+    r"|symlinks|bare|logallrefupdates|compression|precomposeunicode|safecrlf|abbrev|untrackedcache))")
 # Shell variables that make a shell run code from their value.
 _SHELL_HOOK_VARS = frozenset({"PS0", "PS1", "PS4", "PROMPT_COMMAND", "BASH_ENV", "ENV", "SHELLOPTS",
                               "BASHOPTS", "BASH_FUNC", "ZDOTDIR"})
@@ -753,6 +776,7 @@ class _Level:
         self.prev_sep = None  # the operator before the current pipeline
         self.pending_writes = []  # candidate safe writers of the current pipeline
         self.redir_fd = None  # fd digits before the pending redirect
+        self.dangling = False  # just after | && || (a heredoc body here is a syntax error)
         self._reset_word()
 
     @staticmethod
@@ -772,6 +796,7 @@ class _Level:
 
     # -- words ---------------------------------------------------------------
     def add(self, text, quoted=False, dyn=False):
+        self.dangling = False
         self.buf.append(text)
         if not quoted:
             self.unq.append(text)
@@ -899,6 +924,8 @@ class _Level:
                 self.vars.pop(name, None)
         self.pending_writes = []
         for k, sh in enumerate(self.pipeline):
+            if k and _script_file(sh):  # ... | bash x.sh: the file may itself be stdin (../dev/stdin)
+                sh.mark("a script file runs with a pipe into it")
             if not _stdin_shell(sh) or any(op in ("<<", "<<<", "<&", "<>") or (op == "<" and not _is_stdin_path(t))
                                            for j, (op, t) in enumerate(sh.redirects)
                                            if j not in sh.__dict__.get("_fdx", ())):
@@ -1188,17 +1215,50 @@ def _source_args(args):
     return args[1:] if args[:1] == ["--"] else args
 
 
+def _sudo_shell(argv):
+    """sudo -s / -i / --shell / --login with no command: an interactive shell."""
+    return any(t in ("--shell", "--login") or (t.startswith("-") and not t.startswith("--")
+                                                 and ("s" in t[1:] or "i" in t[1:])) for t in argv)
+
+
 def _stdin_shell(st):
-    idx, _, _ = _strip(st.argv)
+    idx, wrappers, _ = _strip(st.argv)
     if idx is None:
-        return False
+        return "sudo" in wrappers and _sudo_shell(st.argv)
     name, args = command_name(st.argv[idx]), st.argv[idx + 1:]
     if _shell_name(name):
         return _shell_mode(args)[0] == "stdin"
+    if name in ("su", "sg") or (name == "runuser" and "runuser" not in wrappers):
+        return _opt_value(args, "c") is None  # su [-] [user]: a shell on stdin
     if name in ("source", "."):
         args = _source_args(args)
         return bool(args) and _is_stdin_path(args[0])
     return False
+
+
+def _fd0_inputs(st):
+    fdx = st.__dict__.get("_fdx", ())
+    return [(op, t) for j, (op, t) in enumerate(st.redirects)
+            if j not in fdx and op in ("<", "<<", "<<<", "<&", "<>")]
+
+
+def _script_file(st):
+    """The stage runs a script FILE (bash x.sh, source f), not stdin, -c or <( )."""
+    idx, _, _ = _strip(st.argv)
+    if idx is None:
+        return False
+    name, args = command_name(st.argv[idx]), st.argv[idx + 1:]
+    procsub = st.__dict__.get("_procsub", {})
+    if _shell_name(name):
+        mode, path = _shell_mode(args)
+    elif name in ("source", "."):
+        sargs = _source_args(args)
+        if not sargs or _is_stdin_path(sargs[0]):
+            return False
+        mode, path = "file", sargs[0]
+    else:
+        return False
+    return mode == "file" and path not in procsub and not _is_dev_path(path)
 
 
 def _script_from_path(st, path, scripts, what):
@@ -1332,12 +1392,16 @@ def _finish(st, ctx, vars_):
         if head in _NAME_ARG_CMDS and any("[" in w and ("$(" in w or "`" in w) for w in rest):
             st.mark("an array subscript in a variable name runs a command")
     for name, val in assigns:  # GIT_SSH_COMMAND=..., EDITOR=...: some program runs the value
+        if name.startswith("GIT_CONFIG") or name == "GIT_EXEC_PATH":
+            st.mark(f"{name} changes the git configuration or programs")
         if name in _CMD_ENV_VARS:
             if val is None:
                 st.mark(f"{name} is set to a value that is not a literal")
             elif val:
                 scripts.append(val)
     if idx is None:
+        if "sudo" in wrappers and _sudo_shell(argv):
+            _stdin_inputs(st, scripts, "sudo")  # sudo -s <<< 'cmd'
         _nest(st, scripts, ctx, vars_)
         return writes
     if st.dynamic[idx]:
@@ -1351,9 +1415,10 @@ def _finish(st, ctx, vars_):
         if hooks & _SHELL_HOOK_VARS:
             st.mark("a shell hook variable (PS4, PROMPT_COMMAND, BASH_ENV, ENV ...) is set")
         mode, script = _shell_mode(args)
-        if mode == "c" and {"xargs", "parallel"} & set(wrappers):
+        if {"xargs", "parallel"} & set(wrappers):
             holders = _placeholders(argv[:idx])
-            if script is None or any(h in script for h in holders):
+            if (mode != "c" or script is None or script.startswith(":::")
+                    or any(h in script for h in holders)):
                 st.mark("xargs/parallel builds the shell script from its input")
         if mode == "c" and script is not None:
             scripts.append(script)
@@ -1380,6 +1445,8 @@ def _finish(st, ctx, vars_):
         val = _opt_value(args, "c")
         if val is not None:
             scripts.append(val)
+        elif name != "script":
+            _stdin_inputs(st, scripts, name)  # su <<< 'cmd'
     elif name in ("source", "."):
         sargs = _source_args(args)
         if sargs and _is_stdin_path(sargs[0]):
@@ -1396,12 +1463,32 @@ def _finish(st, ctx, vars_):
                 scripts.append(m.group(2))
     elif name == "git":
         scripts.extend(_git_scripts(args, st))
-    if "parallel" in wrappers and any(ch.isspace() for ch in argv[idx]):
-        end = next((j for j in range(idx, len(argv)) if argv[j] in (":::", "::::", ":::+", "::::+")), len(argv))
-        scripts.append(" ".join(argv[idx:end]))  # parallel 'rm -rf {}' ::: x: the word is a command line
     elif name == "find":
         for w in _find_exec(st, idx, ctx, vars_):
             ctx.write(w[0], False)
+    if {"xargs", "parallel"} & set(wrappers):
+        holders = _placeholders(argv[:idx])
+        if any(h in argv[idx] for h in holders):
+            st.mark("xargs/parallel puts its input in the command word")
+        if name in ("eval", "source", "."):
+            st.mark("xargs/parallel feeds its input to eval/source")
+    if "parallel" in wrappers:
+        seps = (":::", "::::", ":::+", "::::+")
+        if argv[idx] in seps:  # parallel ::: 'cmd' ...: each argument is a command line
+            op = argv[idx]
+            for w in argv[idx + 1:]:
+                if w in seps:
+                    op = w
+                    continue
+                if op.startswith("::::"):
+                    st.mark("parallel reads command lines from a file")
+                else:
+                    scripts.append(w)
+        elif any(ch.isspace() for ch in argv[idx]):
+            end = next((j for j in range(idx, len(argv)) if argv[j] in seps), len(argv))
+            scripts.append(" ".join(argv[idx:end]))  # parallel 'rm -rf {}' ::: x: the word is a command line
+    if _script_file(st) and _fd0_inputs(st):
+        st.mark("a script file runs while stdin is redirected (the file may be stdin)")
     _nest(st, scripts, ctx, vars_)
     return writes
 
@@ -1474,12 +1561,22 @@ def _git_scripts(args, st):
         if "=" in kv:
             pairs.append(tuple(kv.split("=", 1)))
     scripts = []
+    if any("ext::" in a for a in args):
+        st.mark("git ext:: transport runs a command")
     for key, val in pairs:
         k = key.lower()
-        if k == "core.hookspath":
-            st.mark("git core.hooksPath runs hooks from another directory")
+        if val and "ext::" in val:
+            st.mark("git ext:: transport runs a command")
+        if _GIT_RISKY_KEYS.fullmatch(k):
+            st.mark(f"git setting {key} runs or loads something else")
+            if val and not _GIT_RISKY_NO_NEST.fullmatch(k):
+                scripts.append(val[1:] if val.startswith("!") else val)
             continue
-        if not _GIT_CMD_KEYS.fullmatch(k) or not val:
+        if not _GIT_CMD_KEYS.fullmatch(k):
+            if val and not _GIT_DATA_KEYS.fullmatch(k) and any(ch.isspace() or ch == "/" for ch in val):
+                st.mark(f"unrecognised git setting {key} with a command-like value")
+            continue
+        if not val:
             continue
         if k.startswith("alias."):
             scripts.append(val[1:] if val.startswith("!") else "git " + val)
@@ -1492,7 +1589,7 @@ def _git_scripts(args, st):
             if val.lower() not in ("true", "false", "yes", "no", "on", "off", "0", "1"):
                 scripts.append(val)
         else:
-            scripts.append(val)
+            scripts.append(val[1:] if val.startswith("!") else val)
     return scripts
 
 
@@ -1578,6 +1675,8 @@ def _lex(s, start, nested, ctx, vars_):
             i = n if k < 0 else k
             continue
         if c == "\n" and lv.heredocs:
+            if lv.dangling:
+                lv.error("heredoc body after a dangling | && || (bash syntax error)")
             lv.end_pipeline(";")
             i = lv.read_bodies(i + 1, nested)
             continue
@@ -1588,6 +1687,7 @@ def _lex(s, start, nested, ctx, vars_):
         if c == "&":
             if nx == "&":
                 lv.end_pipeline("&&")
+                lv.dangling = True
                 i += 2
             elif nx == ">":
                 lv.end_word()
@@ -1608,6 +1708,7 @@ def _lex(s, start, nested, ctx, vars_):
             else:
                 lv.end_stage()
                 i += 2 if nx == "&" else 1
+            lv.dangling = True
             continue
         if c in "<>":
             fdvar = re.fullmatch(r"\{([A-Za-z_][A-Za-z0-9_]*)\}", "".join(lv.buf)) if lv.started else None
