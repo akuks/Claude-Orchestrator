@@ -51,8 +51,11 @@ def test_agent_env_has_no_co_server_secrets(client, monkeypatch):
     t = client.post("/tasks", json={"prompt": f"print env [env-probe:{key}]"}).json()
     assert wait_task(client, t["id"])["status"] == "completed"
     pairs, got = read_env_probe(key)
-    leaked = {n for n in got if n.startswith("CO_") and n != "CO_API_TOKEN"}
+    # co-guard's per-task vars (Task 3) are task data, not server config.
+    per_task = {"CO_API_TOKEN", "CO_TASK_ID", "CO_API_BASE", "CO_POLICY_FILE", "CO_TASK_DIR"}
+    leaked = {n for n in got if n.startswith("CO_") and n not in per_task}
     assert not leaked, leaked
+    assert per_task <= got
     assert "CO_ADMIN_PASSWORD" not in got and "CO_DATABASE_URL" not in got
     assert "CO_API_TOKEN" in got  # still minted for the task
     assert {"PATH", "ANTHROPIC_API_KEY"} <= got

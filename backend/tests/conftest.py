@@ -19,8 +19,19 @@ _PROBE_VARS = (
     "CLAUDE_CODE_OAUTH_TOKEN ANTHROPIC_API_KEY GH_TOKEN GITHUB_TOKEN "
     "GIT_AUTHOR_NAME GIT_AUTHOR_EMAIL GIT_COMMITTER_NAME GIT_COMMITTER_EMAIL "
     "CLAUDE_CONFIG_DIR GH_CONFIG_DIR GIT_CONFIG_GLOBAL RANDOM_SERVER_VAR "
-    "PATH PROBE_PROJECT_VAR"
+    "PATH PROBE_PROJECT_VAR CO_TASK_ID CO_API_BASE CO_POLICY_FILE CO_TASK_DIR "
+    "CLAUDE_CODE_SIMPLE CLAUDE_CODE_SAFE_MODE"
 )
+# Test seam (co-guard): a task prompt carrying [guard-spool] makes the mock act
+# like co-guard's hook: it appends spool lines to $CO_TASK_DIR/spool.jsonl, one
+# of them quoting the run's GH_TOKEN / CO_API_TOKEN (must come out redacted).
+_GUARD_SPOOL = r"""
+  if [[ -n "$CO_TASK_DIR" && -d "$CO_TASK_DIR" ]]; then
+    printf '{"event":"PreToolUse","decision":"deny","rule_ids":["rm-rf-outside"],"tool":"Bash","summary":"rm -rf ~","reason":"deletes home"}\n' >>"$CO_TASK_DIR/spool.jsonl"
+    printf '{"event":"PreToolUse","decision":"approved","rule_ids":["mcp-require-approval"],"tool":"mcp__db__query","summary":"token %s and %s","status":"approved","request_id":"r1"}\n' "$GH_TOKEN" "$CO_API_TOKEN" >>"$CO_TASK_DIR/spool.jsonl"
+    printf 'not json\n' >>"$CO_TASK_DIR/spool.jsonl"
+    printf '{"event":"SessionEnd","reason":"other","junk_key":"dropped"}\n' >>"$CO_TASK_DIR/spool.jsonl"
+  fi"""
 # Test seam: a task prompt carrying [env-echo] makes the mock behave like an
 # agent that prints its env: "NAME=value " for each of _ECHO_VARS that is set
 # goes into its assistant text, a tool_use input, a tool_result, a raw
@@ -68,6 +79,12 @@ if [[ "$args" == *"stream-json"* && "$prompt" =~ \\[env-probe:([A-Za-z0-9_-]+)\\
   } >"$f.vars.tmp"
   env | cut -d= -f1 >"$f.names"
   printf '%s\\n' "$@" >"$f.args"
+  # co-guard: the policy file (deleted at task end) and its mode, the task dir's mode
+  if [[ -n "$CO_POLICY_FILE" && -f "$CO_POLICY_FILE" ]]; then
+    cp "$CO_POLICY_FILE" "$f.policy"
+    (stat -c %a "$CO_POLICY_FILE" 2>/dev/null || stat -f %Lp "$CO_POLICY_FILE") >"$f.policymode"
+    (stat -c %a "$CO_TASK_DIR" 2>/dev/null || stat -f %Lp "$CO_TASK_DIR") >"$f.taskdirmode"
+  fi
   mv "$f.vars.tmp" "$f.vars"
 fi
 # Server-side one-shot calls (memory: --print; findings: --print --json-schema)
@@ -84,6 +101,9 @@ if [[ "$args" != *"stream-json"* && "$prompt" =~ \\[call-probe:([A-Za-z0-9_-]+)\
   env | cut -d= -f1 >"$f.names.tmp.$$"
   mv "$f.names.tmp.$$" "$f.names"
   mv "$f.vars.tmp.$$" "$f.vars"
+fi
+if [[ "$args" == *"stream-json"* && "$prompt" == *"[guard-spool]"* ]]; then
+  __GUARD_SPOOL__
 fi
 if [[ "$args" == *"stream-json"* && "$prompt" == *"[env-echo"* ]]; then
   __ENV_ECHO__
@@ -107,6 +127,7 @@ fi
 """.replace("__PROBES__", str(_PROBES))
     .replace("__PROBE_VARS__", _PROBE_VARS)
     .replace("__ENV_ECHO__", _ENV_ECHO)
+    .replace("__GUARD_SPOOL__", _GUARD_SPOOL)
     .replace("__ECHO_VARS__", _ECHO_VARS)
 )
 _MOCK.chmod(0o755)
@@ -239,8 +260,14 @@ def read_probe_args(key: str) -> list[str] | None:
     return f.read_text().splitlines() if f.exists() else None
 
 
+def read_probe_file(key: str, suffix: str) -> str | None:
+    """Another file the probed run recorded (policy, policymode, taskdirmode)."""
+    f = _PROBES / f"{key}.{suffix}"
+    return f.read_text() if f.exists() else None
+
+
 def clear_env_probe(key: str) -> None:
-    for suffix in ("vars", "names", "args"):
+    for suffix in ("vars", "names", "args", "policy", "policymode", "taskdirmode"):
         (_PROBES / f"{key}.{suffix}").unlink(missing_ok=True)
 
 
