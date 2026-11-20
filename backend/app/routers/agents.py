@@ -1,6 +1,8 @@
 from fastapi import APIRouter, HTTPException, Request
 from sqlalchemy import select
 
+from ..access import project_role, require_project_role
+from ..auth import ensure_admin
 from ..constants import VALID_MODELS
 from ..database import SessionLocal
 from ..models import Agent, Project
@@ -231,6 +233,7 @@ async def list_presets():
 
 @router.post("", response_model=AgentOut, status_code=201)
 async def create_agent(payload: AgentCreate, request: Request):
+    ensure_admin(request.state.principal)
     if payload.model and payload.model not in VALID_MODELS:
         raise HTTPException(400, f"Invalid model. Use one of {sorted(VALID_MODELS)}")
     async with SessionLocal() as s:
@@ -277,7 +280,8 @@ async def _get_or_404(s, agent_id: str) -> Agent:
 
 
 @router.patch("/{agent_id}", response_model=AgentOut)
-async def update_agent(agent_id: str, payload: AgentUpdate):
+async def update_agent(agent_id: str, payload: AgentUpdate, request: Request):
+    ensure_admin(request.state.principal)
     data = payload.model_dump(exclude_unset=True)
     if data.get("model") and data["model"] not in VALID_MODELS:
         raise HTTPException(400, "Invalid model")
@@ -291,7 +295,8 @@ async def update_agent(agent_id: str, payload: AgentUpdate):
 
 
 @router.delete("/{agent_id}", status_code=204)
-async def delete_agent(agent_id: str):
+async def delete_agent(agent_id: str, request: Request):
+    ensure_admin(request.state.principal)
     async with SessionLocal() as s:
         agent = await _get_or_404(s, agent_id)
         await s.delete(agent)
@@ -308,6 +313,7 @@ async def run_agent(agent_id: str, payload: AgentRun, request: Request):
         if not prompt:
             raise HTTPException(400, "This agent has no default prompt; provide one")
         project_id = payload.project_id or agent.project_id
+        await require_project_role(s, request.state.principal, project_id)
         task = await build_task(
             s,
             prompt=prompt,
@@ -337,6 +343,14 @@ async def run_agent(agent_id: str, payload: AgentRun, request: Request):
     return out
 
 
+async def _require_dispatch_target(s, p, project_id: str) -> None:
+    project = await s.get(Project, project_id)
+    if project is None:
+        raise HTTPException(404, "Project not found")
+    if await project_role(s, p, project_id) is None:
+        raise HTTPException(403, f"{p.user.email} is not a contributor on project {project.name}")
+
+
 @router.post("/dispatch", response_model=list[TaskOut], status_code=201)
 async def dispatch(payload: DispatchRequest, request: Request):
     """Coordinator fan-out: create one child task per item, each delegated to the
@@ -355,16 +369,23 @@ async def dispatch(payload: DispatchRequest, request: Request):
         by_id = {a.id: a for a in all_agents}
         by_name = {a.name: a for a in all_agents}
         creator = await _creator(s, request, payload.parent_task_id)
-        outs = []
+        targets = []
         for item in payload.items:
             agent = by_id.get(item.agent) or by_name.get(item.agent)
             if agent is None:
                 raise HTTPException(404, f"Agent not found: {item.agent}")
+            targets.append((item, agent, agent.project_id or payload.project_id))
+        # Every child must land where the caller (for a token: its owner) may
+        # contribute; check them all before creating any.
+        for pid in dict.fromkeys(t[2] for t in targets if t[2]):
+            await _require_dispatch_target(s, p, pid)
+        outs = []
+        for item, agent, project_id in targets:
             task = await build_task(
                 s,
                 prompt=item.prompt,
                 title=f"{agent.name}: {item.prompt.splitlines()[0][:60]}",
-                project_id=agent.project_id or payload.project_id,
+                project_id=project_id,
                 model=agent.model or None,
                 max_turns=agent.max_turns,
                 max_budget_usd=agent.max_budget_usd,
@@ -401,6 +422,7 @@ async def bulk_run_agent(agent_id: str, payload: AgentBulkRun, request: Request)
     async with SessionLocal() as s:
         agent = await _get_or_404(s, agent_id)
         project_id = payload.project_id or agent.project_id
+        await require_project_role(s, request.state.principal, project_id)
         tasks = []
         for p in prompts:
             tasks.append(

@@ -12,6 +12,8 @@ from datetime import datetime, timezone
 from croniter import croniter
 from sqlalchemy import select
 
+from .access import project_role
+from .auth import Principal
 from .config import settings
 from .constants import Status
 from .database import SessionLocal
@@ -72,6 +74,17 @@ def next_run(expr: str, after: datetime | None = None) -> datetime:
     return croniter(expr, base).get_next(datetime)
 
 
+async def _owner_may_fire(s, owner: User, sch: Schedule) -> bool:
+    """The owner still contributes to every project the run would land in
+    (the schedule's and its agent's). Admin owners always pass."""
+    agent = await s.get(Agent, sch.agent_id) if sch.agent_id else None
+    principal = Principal(owner)
+    for pid in {sch.project_id, agent and agent.project_id} - {None}:
+        if await project_role(s, principal, pid) is None:
+            return False
+    return True
+
+
 class Scheduler:
     def __init__(self, worker) -> None:
         self._worker = worker
@@ -117,6 +130,14 @@ class Scheduler:
                     if owner is not None and not owner.active:
                         log.warning(
                             "Skipping schedule %s (%s): owner is disabled", sch.id, sch.name
+                        )
+                        sch.next_run_at = next_run(sch.cron, now)
+                        continue
+                    if owner is not None and not await _owner_may_fire(s, owner, sch):
+                        log.warning(
+                            "Skipping schedule %s (%s): owner lost access to project",
+                            sch.id,
+                            sch.name,
                         )
                         sch.next_run_at = next_run(sch.cron, now)
                         continue

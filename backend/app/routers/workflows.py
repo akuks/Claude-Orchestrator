@@ -1,6 +1,14 @@
 from fastapi import APIRouter, HTTPException, Request
-from sqlalchemy import select
+from sqlalchemy import and_, select
 
+from ..access import (
+    ALL,
+    maintained_project_ids,
+    require_project_role,
+    task_visibility_clause,
+    visible_project_ids,
+)
+from ..auth import ensure_admin
 from ..database import SessionLocal
 from ..models import Agent, Task, Workflow, WorkflowRun
 from ..schemas import (
@@ -97,8 +105,41 @@ async def _validate_agents(s, stages: list) -> None:
                 raise HTTPException(400, f"Unknown agent in stage '{st.get('name')}': {item.get('agent')}")
 
 
+async def workflow_projects(s, wf: Workflow) -> list[str]:
+    """Distinct non-null project ids of the agents its stages reference
+    (each stage item's `agent` is an agent id or exact name)."""
+    refs = {item.get("agent") for st in (wf.stages or []) for item in st.get("items", [])}
+    refs.discard(None)
+    if not refs:
+        return []
+    rows = await s.execute(
+        select(Agent.id, Agent.name, Agent.project_id).where(Agent.project_id.is_not(None))
+    )
+    return sorted({r.project_id for r in rows if r.id in refs or r.name in refs})
+
+
+def _run_visible(p, run: WorkflowRun, visible) -> bool:
+    if visible is ALL or run.created_by == p.user.id:
+        return p.user.active
+    return bool(set(run.project_ids or []) & visible)
+
+
+async def _require_run(s, p, run_id: str, manage: bool = False) -> WorkflowRun:
+    """404 unless the run is visible; with `manage` (cancel/retry), 403 unless
+    the caller is its creator, an admin, or maintainer of any touched project."""
+    run = await s.get(WorkflowRun, run_id)
+    if run is None or not _run_visible(p, run, await visible_project_ids(s, p)):
+        raise HTTPException(404, "Run not found")
+    if manage and run.created_by != p.user.id:
+        maintained = await maintained_project_ids(s, p)
+        if maintained is not ALL and not set(run.project_ids or []) & maintained:
+            raise HTTPException(403, "Insufficient role")
+    return run
+
+
 @router.post("", response_model=WorkflowOut, status_code=201)
 async def create_workflow(payload: WorkflowCreate, request: Request):
+    ensure_admin(request.state.principal)
     stages = [st.model_dump() for st in payload.stages]
     async with SessionLocal() as s:
         await _validate_agents(s, stages)
@@ -117,7 +158,8 @@ async def list_workflows():
 
 
 @router.patch("/{workflow_id}", response_model=WorkflowOut)
-async def update_workflow(workflow_id: str, payload: WorkflowUpdate):
+async def update_workflow(workflow_id: str, payload: WorkflowUpdate, request: Request):
+    ensure_admin(request.state.principal)
     data = payload.model_dump(exclude_unset=True)
     if "stages" in data:
         data["stages"] = [st for st in data["stages"]]  # already dicts via model_dump
@@ -135,7 +177,8 @@ async def update_workflow(workflow_id: str, payload: WorkflowUpdate):
 
 
 @router.delete("/{workflow_id}", status_code=204)
-async def delete_workflow(workflow_id: str):
+async def delete_workflow(workflow_id: str, request: Request):
+    ensure_admin(request.state.principal)
     async with SessionLocal() as s:
         wf = await s.get(Workflow, workflow_id)
         if wf is None:
@@ -150,6 +193,10 @@ async def run_workflow(workflow_id: str, payload: WorkflowRunCreate, request: Re
         wf = await s.get(Workflow, workflow_id)
         if wf is None:
             raise HTTPException(404, "Workflow not found")
+        # Contributor on every project the stages touch (no project = anyone).
+        project_ids = await workflow_projects(s, wf)
+        for pid in project_ids:
+            await require_project_role(s, request.state.principal, pid)
         run = WorkflowRun(
             workflow_id=wf.id,
             name=wf.name,
@@ -158,6 +205,7 @@ async def run_workflow(workflow_id: str, payload: WorkflowRunCreate, request: Re
             status="pending",
             current_stage=0,
             created_by=request.state.principal.user.id,
+            project_ids=project_ids,
         )
         s.add(run)
         await s.commit()
@@ -172,24 +220,41 @@ async def run_workflow(workflow_id: str, payload: WorkflowRunCreate, request: Re
 
 
 @router.get("/runs", response_model=list[WorkflowRunOut])
-async def list_runs(limit: int = 50):
+async def list_runs(request: Request, limit: int = 50):
+    p = request.state.principal
+    query = select(WorkflowRun).order_by(WorkflowRun.created_at.desc(), WorkflowRun.id)
     async with SessionLocal() as s:
-        rows = (
-            await s.execute(select(WorkflowRun).order_by(WorkflowRun.created_at.desc()).limit(limit))
-        ).scalars().all()
-    return [WorkflowRunOut.model_validate(r) for r in rows]
+        visible = await visible_project_ids(s, p)
+        if visible is ALL:
+            rows = (await s.execute(query.limit(limit))).scalars().all()
+            return [WorkflowRunOut.model_validate(r) for r in rows]
+        # Visibility is an overlap test on the JSON `project_ids` column, which
+        # has no portable SQL form (SQLite vs Postgres JSON). So walk the runs
+        # newest-first in batches and keep visible ones until `limit` is
+        # reached — never filter after a LIMIT, which would drop rows.
+        out, offset, batch = [], 0, max(limit, 200)
+        while len(out) < limit:
+            rows = (await s.execute(query.offset(offset).limit(batch))).scalars().all()
+            out += [r for r in rows if _run_visible(p, r, visible)]
+            if len(rows) < batch:
+                break
+            offset += batch
+    return [WorkflowRunOut.model_validate(r) for r in out[:limit]]
 
 
 @router.get("/runs/{run_id}")
-async def get_run(run_id: str):
-    """Run detail + its tasks grouped by stage (the board)."""
+async def get_run(run_id: str, request: Request):
+    """Run detail + its tasks grouped by stage (the board). Only the stage tasks
+    the viewer can see are listed."""
+    p = request.state.principal
     async with SessionLocal() as s:
-        run = await s.get(WorkflowRun, run_id)
-        if run is None:
-            raise HTTPException(404, "Run not found")
+        run = await _require_run(s, p, run_id)
+        clause = await task_visibility_clause(s, p)
         tasks = (
             await s.execute(
-                select(Task).where(Task.workflow_run_id == run.id).order_by(Task.created_at)
+                select(Task)
+                .where(and_(Task.workflow_run_id == run.id, clause))
+                .order_by(Task.created_at)
             )
         ).scalars().all()
         run_out = WorkflowRunOut.model_validate(run)
@@ -200,8 +265,7 @@ async def get_run(run_id: str):
 @router.post("/runs/{run_id}/cancel", response_model=WorkflowRunOut)
 async def cancel_run(run_id: str, request: Request):
     async with SessionLocal() as s:
-        if await s.get(WorkflowRun, run_id) is None:
-            raise HTTPException(404, "Run not found")
+        await _require_run(s, request.state.principal, run_id, manage=True)
     # Halt the run AND stop its in-flight stage tasks.
     await request.app.state.workflow_runner.cancel_run(run_id)
     async with SessionLocal() as s:
@@ -212,9 +276,7 @@ async def cancel_run(run_id: str, request: Request):
 async def retry_run(run_id: str, request: Request):
     """Re-run the failed stage and continue the pipeline."""
     async with SessionLocal() as s:
-        run = await s.get(WorkflowRun, run_id)
-        if run is None:
-            raise HTTPException(404, "Run not found")
+        run = await _require_run(s, request.state.principal, run_id, manage=True)
         if run.status != "failed":
             raise HTTPException(400, "Only a failed run can be retried")
     await request.app.state.workflow_runner.retry_run(run_id)
