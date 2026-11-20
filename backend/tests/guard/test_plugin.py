@@ -212,3 +212,63 @@ def test_per_task_calls_keep_older_versions(tmp_path, monkeypatch):
     assert root.resolve() != old and old.exists()
     ensure_plugin(root)  # startup
     assert not old.exists()
+
+
+# ---- final fix wave 6: precompiled lib, no network imports off the approval path ----------
+
+
+def test_lib_is_precompiled_for_the_server_interpreter(tmp_path):
+    import importlib.util
+
+    root = ensure_plugin(tmp_path / "co-guard")
+    real = root.resolve()
+    for name in ("rules", "shell"):
+        pyc = real / "lib" / "__pycache__" / f"{name}.{sys.implementation.cache_tag}.pyc"
+        assert pyc.is_file() and _mode(pyc) == 0o444
+        assert importlib.util.cache_from_source(str(real / "lib" / f"{name}.py")) == str(pyc)
+        data = pyc.read_bytes()
+        assert data[:4] == importlib.util.MAGIC_NUMBER
+        assert int.from_bytes(data[4:8], "little") == 0b11  # hash-based, checked against the source
+        assert data[8:16] == importlib.util.source_hash((real / "lib" / f"{name}.py").read_bytes())
+    files = plugin_mod.plugin_files()
+    assert f"lib/__pycache__/rules.{sys.implementation.cache_tag}.pyc" in files  # part of the content hash
+    assert plugin_mod.plugin_files() == files  # deterministic
+
+
+def test_hook_uses_the_cache_and_skips_network_imports(tmp_path):
+    """The hook loads lib/*.py from the shipped .pyc (nothing compiled at run
+    time) and imports urllib only when it must talk to the approval API."""
+    import subprocess
+
+    root = ensure_plugin(tmp_path / "co-guard")
+    tdir = tmp_path / "_tasks" / "T1"
+    tdir.mkdir(parents=True)
+    proj = tmp_path / "proj"
+    proj.mkdir()
+    (tdir / "policy.json").write_text(json.dumps({
+        "task_id": "T1", "api_base": "http://127.0.0.1:9", "project_dir": str(proj), "cwd": str(proj),
+        "home": str(tmp_path / "home"), "protected_paths": [str(root), str(tdir)]}))
+    probe = (
+        "import runpy, sys, json\n"
+        "sys.argv = ['co_hook.py', sys.argv[1]]\n"
+        "try:\n"
+        "    runpy.run_path(%r, run_name='__main__')\n"
+        "except SystemExit:\n"
+        "    pass\n"
+        "sys.stderr.write(json.dumps({'urllib': 'urllib.request' in sys.modules}) + '\\n')\n"
+    ) % str(root / "hooks" / "co_hook.py")
+    env = {"PATH": os.environ.get("PATH", ""), "CO_POLICY_FILE": str(tdir / "policy.json"),
+           "CO_TASK_DIR": str(tdir), "CO_TASK_ID": "T1"}
+    for event, payload in (
+        ("PreToolUse", {"hook_event_name": "PreToolUse", "tool_name": "Bash", "tool_input": {"command": "ls"},
+                        "tool_use_id": "tu1"}),
+        ("PostToolUse", {"hook_event_name": "PostToolUse", "tool_name": "Bash", "tool_use_id": "tu1"}),
+    ):
+        p = subprocess.run([sys.executable, "-I", "-S", "-c", probe, event],
+                           input=json.dumps(payload), capture_output=True, text=True, timeout=30, env=env,
+                           cwd=str(proj))
+        info = json.loads(p.stderr.strip().splitlines()[-1])
+        assert info["urllib"] is False, (event, p.stderr[-2000:])
+    # no write of a fresh .pyc was even attempted: the shipped one was valid
+    assert sorted(os.listdir(root.resolve() / "lib" / "__pycache__")) == sorted(
+        f"{n}.{sys.implementation.cache_tag}.pyc" for n in ("rules", "shell"))

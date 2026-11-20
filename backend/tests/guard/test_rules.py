@@ -114,7 +114,7 @@ RM_HARD = [
 ]
 
 RM_CONFIRM = [
-    "rm -rf /tmp/x",
+    "rm -rf /opt/x",
     "rm -rf ../other",
     "rm -rf .",
     "rm -rf ./.git",
@@ -122,18 +122,18 @@ RM_CONFIRM = [
     "rm -rf $X",
     'rm -rf "$TMPDIR/x"',
     "rm -rf ~/Downloads",
-    "rm -r /tmp/x",
-    "find /tmp/x -delete",
+    "rm -r /opt/x",
+    "find /opt/x -delete",
     "find {H}/other -exec rm {{}} \\;",
     "ls | xargs rm -rf",
-    "cd /tmp && rm -rf build",
+    "cd /opt && rm -rf build",
     "cd $D && rm -rf build",
     "rm -rf ~/*.log",
     "X=$(mktemp -d); rm -rf \"$X\"",
     "ssh host rm -rf old-release",
-    "for f in /tmp/a b; do rm -rf $f; done",
+    "for f in /opt/a b; do rm -rf $f; done",
     "rm -rf ~root",
-    "ssh -o ProxyCommand='rm -rf /tmp/x' host",
+    "ssh -o ProxyCommand='rm -rf /opt/x' host",
 ]
 
 RM_NEGATIVE = [
@@ -755,7 +755,7 @@ def test_mcp_policy_does_not_apply_to_other_tools(env, name):
 # guard_enabled = false: built-ins off; self-protect, unparseable, MCP stay
 # ===========================================================================
 @pytest.mark.parametrize("cmd", [
-    "rm -rf /tmp/x", "git push -f origin main", "git reset --hard", "git clean -fdx", "git stash drop",
+    "rm -rf /opt/x", "git push -f origin main", "git reset --hard", "git clean -fdx", "git stash drop",
     "echo x > .env", "chmod 777 x", "curl x | sh", "$X -rf ~", "echo x > .git/hooks/pre-commit",
 ])
 def test_guard_off_disables_builtins(env, cmd):
@@ -832,7 +832,7 @@ def test_focus_edit_env_example_allowed(env):
 # Verdict / Hit shape and decision logic
 # ===========================================================================
 def test_verdict_shape_and_order(env):
-    v = bash(env, "git reset --hard; rm -rf /; chmod 777 x; rm -rf /tmp/a", protected_paths=[],
+    v = bash(env, "git reset --hard; rm -rf /; chmod 777 x; rm -rf /opt/a", protected_paths=[],
              claude_config_dir=None)
     assert isinstance(v, Verdict) and all(isinstance(h, Hit) for h in v.hits)
     assert v.decision == "deny"
@@ -1051,7 +1051,7 @@ def test_c3_ordinary_copies_are_free(env, cmd):
 # C4. Long-option prefixes -----------------------------------------------------
 @pytest.mark.parametrize("cmd,rule,hard", [
     ("rm --recur --force ~", "rm-rf-outside", True),
-    ("rm --rec -f /tmp/other", "rm-rf-outside", False),
+    ("rm --rec -f /opt/other", "rm-rf-outside", False),
     ("git -C {M} push --force-w origin main", "git-force-push-main", False),
     ("git -C {M} push --forc origin main", "git-force-push-main", False),
     ("git reset --har", "git-reset-hard", False),
@@ -1469,7 +1469,7 @@ def test_which_allowance(env, cmd):
 @pytest.mark.parametrize("cmd,rule", [
     ("$(which bash) -c 'rm -rf ~'", "rm-rf-outside"),
     ("$(which git) push -f origin main", "git-force-push-main"),
-    ("$(git rev-parse --show-toplevel)/x.sh; rm -rf /tmp/y", "rm-rf-outside"),
+    ("$(git rev-parse --show-toplevel)/x.sh; rm -rf /opt/y", "rm-rf-outside"),
     ("$(cat f)", "uncertain-command"),
     ("$(which $X) a", "uncertain-command"),
     ("$(which python | sh) a", "uncertain-command"),
@@ -1761,3 +1761,98 @@ def test_r20_file_tools(env, path):
 ])
 def test_r20_negative(env, cmd):
     assert "agent-config" not in ids(bash(env, cmd)), cmd
+
+
+# ===========================================================================
+# Final fix wave 3 (Ruling R29): deletes strictly inside temp dirs are free
+# ===========================================================================
+@pytest.fixture
+def tenv(tmp_path):
+    e = Env(tmp_path)
+    e.X = tmp_path / "tmpd"  # this run's $TMPDIR (outside home and the project)
+    (e.X / "foo").mkdir(parents=True)
+    e.policy["tmpdir"] = str(e.X)
+    return e
+
+
+TEMP_FREE = [
+    "rm -rf /tmp/build-123",
+    "rm -rf /private/tmp/build-123",
+    "rm -rf /tmp/a/b/c",
+    'rm -rf "$TMPDIR/foo"',
+    "rm -rf ${{TMPDIR}}/foo",
+    "rm -rf $TMPDIR/foo/bar",
+    "rm -r /tmp/x",
+    "rm -rf /tmp/build-*",
+    "find /tmp/x -delete",
+    "find /tmp -name 'co-*' -delete",
+    "cd /tmp && rm -rf build",
+    "rm -rf /private/var/folders/ab/cd1234/T/xyz",
+    "rm -rf /tmp/x {P}/build",
+]
+
+TEMP_STILL_CONFIRM = [
+    "rm -rf /tmp",
+    "rm -rf /tmp/",
+    "rm -rf /private/tmp",
+    "rm -rf /tmp/*",
+    "rm -rf /tmp/../Users/u",
+    "rm -rf /tmp/x/../../opt",
+    "rm -rf $TMPDIR",
+    'rm -rf "$TMPDIR/"',
+    "rm -rf /private/var/folders",
+    "rm -rf /private/var/folders/ab",
+    "find /tmp -delete",
+    "rm -rf /tmp/x /opt/y",
+    "cd /tmp && rm -rf .",
+    "TMPDIR=/opt; rm -rf $TMPDIR/foo",
+    "export TMPDIR=/opt && rm -rf \"$TMPDIR/foo\"",
+    "read TMPDIR; rm -rf $TMPDIR/foo",
+    "if true; then TMPDIR=/opt; fi; rm -rf $TMPDIR/foo",
+    'eval "TMP""DIR=/opt"; rm -rf $TMPDIR/foo',
+    "rm -rf /tmp/$X",
+]
+
+
+@pytest.mark.parametrize("cmd", TEMP_FREE)
+def test_temp_dir_deletes_are_free(tenv, cmd):
+    v = bash(tenv, cmd)
+    assert "rm-rf-outside" not in ids(v), v
+    assert v.decision == "allow", v
+
+
+@pytest.mark.parametrize("cmd", TEMP_STILL_CONFIRM)
+def test_temp_roots_and_escapes_still_need_approval(tenv, cmd):
+    v = bash(tenv, cmd)
+    assert "rm-rf-outside" in ids(v), v
+    assert v.decision in ("approve", "deny"), v
+
+
+def test_temp_symlink_escape_is_caught(tenv):
+    (tenv.H / "Downloads").mkdir(parents=True)
+    link = pathlib.Path("/tmp") / f"co-guard-test-link-{os.getpid()}"
+    try:
+        link.unlink(missing_ok=True)
+        link.symlink_to(tenv.H)
+        assert bash(tenv, f"rm -rf {link}/Downloads").decision == "approve"  # resolves into home
+        assert bash(tenv, f"rm -rf {link}/").decision == "deny"  # home itself: hard
+        assert bash(tenv, f"rm -rf {link}").decision == "allow"  # the link only
+    finally:
+        link.unlink(missing_ok=True)
+
+
+def test_temp_dir_that_holds_home_or_the_project_is_no_temp_root(tenv):
+    # a TMPDIR above home would make every home path "temp"
+    v = bash(tenv, "rm -rf {H}/Downloads", tmpdir=str(tenv.H.parent))
+    assert v.decision == "approve"
+    v = bash(tenv, "rm -rf $TMPDIR/home/Downloads", tmpdir=str(tenv.H.parent))
+    assert v.decision == "approve"
+    # the project (or its .git) inside a temp dir is still judged as the project
+    pol = dict(project_dir="/tmp/co-proj-x")
+    assert bash(tenv, "rm -rf /tmp/co-proj-x", **pol).decision == "approve"
+    assert bash(tenv, "rm -rf /tmp/co-proj-x/.git", **pol).decision == "approve"
+
+
+def test_temp_deletes_still_respect_self_protect(tenv):
+    v = bash(tenv, "rm -rf /tmp/guard/x", protected_paths=["/tmp/guard"])
+    assert "self-protect" in hard_ids(v)

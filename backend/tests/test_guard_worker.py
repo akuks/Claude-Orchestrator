@@ -85,7 +85,7 @@ def test_plugin_dir_first_hook_events_env_and_policy(client, tmp_path):
 
     args = read_probe_args(key)
     assert args is not None
-    assert "--include-hook-events" in args
+    assert "--include-hook-events" not in args  # final fix wave 2: the watchdog reads the spool
     dirs = [args[i + 1] for i, a in enumerate(args) if a == "--plugin-dir"]
     plugin = str(runtime.plugin_root().resolve())
     assert dirs[0] == plugin, dirs
@@ -712,3 +712,149 @@ def test_guard_settings_help_says_what_always_applies_and_the_ui_mirrors_it():
     parts = re.findall(r"\"((?:[^\"\\]|\\.)*)\"|'((?:[^'\\]|\\.)*)'", block)
     mirrored = "".join(re.sub(r"\\(.)", r"\1", a or b) for a, b in parts)
     assert mirrored == help_
+
+
+@pytest.mark.parametrize("subtype", ["hook_started", "hook_response", "hook_progress"])
+def test_hook_system_events_are_not_task_events(subtype):
+    """Final fix wave 2: stream hook events (should any arrive) never become
+    TaskEvents - co-guard's decisions come from the spool / live report."""
+    from app.worker import WorkerManager
+
+    got = []
+
+    async def emit(etype, payload):
+        got.append((etype, payload))
+
+    ctx = {"task_id": "t-" + _uid(), "mcp_ids": {}, "secrets": []}
+
+    async def go():
+        w = WorkerManager()
+        await w._handle_stream_event({"type": "system", "subtype": subtype, "hook_name": "PreToolUse:Bash"},
+                                     emit, {}, ctx)
+        await w._handle_stream_event({"type": "system", "subtype": "init"}, emit, {}, ctx)
+
+    asyncio.run(go())
+    assert got == [("system", {"subtype": "init", "session_id": None})]
+
+
+@pytest.mark.parametrize("how", ["cancel", "stop"])
+def test_cancel_and_stop_signal_the_whole_process_group(how, tmp_path):
+    """Final fix wave 5: like the watchdog, cancel()/stop() reach the tools
+    claude started (its process group), not only claude itself."""
+    import os
+    import signal as _signal
+    import time as _time
+
+    from app.worker import WorkerManager
+
+    pidfile = tmp_path / "child.pid"
+
+    async def go():
+        w = WorkerManager()
+        proc = await asyncio.create_subprocess_exec(
+            "/bin/sh", "-c", f"sleep 60 & echo $! > {pidfile}; wait", start_new_session=True)
+        for _ in range(100):
+            if pidfile.exists() and pidfile.read_text().strip():
+                break
+            await asyncio.sleep(0.05)
+        w._running["t"] = proc
+        if how == "cancel":
+            await w.cancel("t")
+        else:
+            await w.stop()
+        await asyncio.wait_for(proc.wait(), 10)
+        return int(pidfile.read_text())
+
+    child = asyncio.run(go())
+    for _ in range(100):
+        try:
+            os.kill(child, 0)
+        except ProcessLookupError:
+            break
+        _time.sleep(0.05)
+    else:
+        os.kill(child, _signal.SIGKILL)
+        raise AssertionError("the tool claude started survived")
+
+
+def test_startup_logs_the_approval_address(monkeypatch, caplog):
+    """Final fix wave 7: one line with the resolved approval address; a loud
+    warning when CO_BIND_HOST is a hostname (or cannot be used)."""
+    import logging
+    import socket
+
+    runtime._API_BASE_CACHE.clear()
+    try:
+        monkeypatch.setattr(settings, "bind_host", "127.0.0.1")
+        monkeypatch.setattr(settings, "backend_port", 9124)
+        with caplog.at_level(logging.INFO, logger="app.guard"):
+            runtime.log_approval_address()
+        lines = [r for r in caplog.records if "approval address" in r.getMessage()]
+        assert len(lines) == 1 and lines[0].levelno == logging.INFO
+        assert "http://127.0.0.1:9124" in lines[0].getMessage()
+
+        caplog.clear()
+        monkeypatch.setattr(socket, "getaddrinfo",
+                            lambda host, port, *a, **k: [(socket.AF_INET, socket.SOCK_STREAM, 6, "",
+                                                          ("10.0.0.7", port))])
+        monkeypatch.setattr(settings, "bind_host", "box.example")
+        with caplog.at_level(logging.INFO, logger="app.guard"):
+            runtime.log_approval_address()
+        warn = [r for r in caplog.records if r.levelno >= logging.WARNING]
+        assert warn and "box.example" in warn[0].getMessage() and "CO_BIND_HOST" in warn[0].getMessage()
+        assert any("http://10.0.0.7:9124" in r.getMessage() for r in caplog.records)
+
+        caplog.clear()
+        runtime._API_BASE_CACHE.clear()
+        monkeypatch.setattr(socket, "getaddrinfo", lambda *a, **k: (_ for _ in ()).throw(OSError("nope")))
+        with caplog.at_level(logging.INFO, logger="app.guard"):
+            runtime.log_approval_address()  # never raises: tasks fail later with the reason
+        assert any(r.levelno >= logging.ERROR and "box.example" in r.getMessage() for r in caplog.records)
+    finally:
+        runtime._API_BASE_CACHE.clear()
+
+
+def test_start_sh_reads_the_backend_port_from_env_file():
+    text = (Path(__file__).resolve().parents[2] / "start.sh").read_text()
+    assert '_env_key CO_BACKEND_PORT' in text
+    assert 'export CO_BACKEND_PORT="$BACKEND_PORT"' in text
+
+
+def test_adhoc_child_of_a_project_thread_uses_the_root_projects_guard_settings(client):
+    """Final fix wave 8: a dispatched child / follow-up with project_id=None in
+    a project thread gets the thread root's guard settings (effective project,
+    like access.effective_project_id); its own workspace stays its project dir."""
+    from app.main import app
+    from app.models import Project, Task
+
+    proj = _project(client)
+
+    async def setup():
+        async with SessionLocal() as s:
+            p = await s.get(Project, proj["id"])
+            p.guard_enabled = False
+            p.approval_wait_seconds = 120
+            await s.commit()
+
+    asyncio.run(setup())
+    root = _run(client, "root step", project_id=proj["id"])
+    assert root["status"] == "completed", root.get("error")
+    key = env_probe_key()
+    child_id = uuid.uuid4().hex
+
+    async def add_child():
+        async with SessionLocal() as s:
+            s.add(Task(id=child_id, title="child", prompt=f"child [env-probe:{key}]", project_id=None,
+                       root_id=root["id"], parent_task_id=root["id"], status="queued",
+                       created_by=root.get("created_by")))
+            await s.commit()
+            t = await s.get(Task, child_id)
+            return t.priority, t.created_at
+
+    prio, created = asyncio.run(add_child())
+    client.portal.call(app.state.worker.submit, child_id, prio, created)  # the app's own loop
+    done = wait_task(client, child_id)
+    assert done["status"] == "completed", done.get("error")
+    pol = json.loads(read_probe_file(key, "policy"))
+    assert pol["guard_enabled"] is False and pol["approval_wait_seconds"] == 120
+    assert pol["project_dir"] == str((settings.workspaces_dir / child_id).resolve())
