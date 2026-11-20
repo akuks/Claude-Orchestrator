@@ -1247,7 +1247,7 @@ AGENT_NEG = [
     "cat .claude/settings.json",
     "echo x > .claude/notes.md",
     "echo x > claude/settings.json",
-    "echo x > .claude/commands/x.md",
+    "echo x > .claude/commandsx/x.md",  # Ruling R20: .claude/commands/** is agent-config now
     "echo x > mcp.json",
 ]
 AGENT_TOOL_POS = [
@@ -1259,7 +1259,7 @@ AGENT_TOOL_POS = [
 ]
 AGENT_TOOL_NEG = [
     ("Write", {"file_path": "{P}/.claude/notes.md", "content": "x"}),
-    ("Write", {"file_path": "{P}/.claude/agents/a.md", "content": "x"}),
+    ("Write", {"file_path": "{P}/.claude/agent-notes.md", "content": "x"}),  # R20: .claude/agents/** is
     ("Write", {"file_path": "{P}/docs/mcp.json", "content": "{}"}),
     ("Write", {"file_path": "{P}/settings.json", "content": "{}"}),
     ("Edit", {"file_path": "{P}/CLAUDE.md", "old_string": "a", "new_string": "b"}),
@@ -1729,3 +1729,35 @@ def test_procsub_stdin_into_interpreter(env, cmd, rule):
 
 def test_procsub_stdin_literal_harmless_is_allowed(env):
     assert bash(env, "python3 < <(echo 'print(1)')").decision == "allow"
+
+
+# Ruling R20: subagent / skill / slash-command definitions are agent-config ------------------
+R20_POS = [
+    "echo x > .claude/agents/helper.md",
+    "cat > .claude/skills/s/SKILL.md <<'E'\n---\nname: s\n---\nE",
+    "cp evil.md .claude/commands/deploy.md",
+    "mkdir -p .claude/agents && cp a.md .claude/agents/",
+    "tee .CLAUDE/Agents/x.md < x",
+    "cp -r pack/. .claude/skills/",
+    "sed -i 's/a/b/' .claude/commands/x.md",
+    "python3 -c \"open('.claude/agents/a.md','w').write('x')\"",
+]
+
+
+@pytest.mark.parametrize("cmd", R20_POS)
+def test_r20_agent_definitions_are_agent_config(env, cmd):
+    assert "agent-config" in ids(bash(env, cmd)), cmd
+
+
+@pytest.mark.parametrize("path", [".claude/agents/a.md", ".claude/skills/x/SKILL.md", ".claude/commands/c.md",
+                                  "sub/.claude/Skills/y.md", ".claude/agents"])
+def test_r20_file_tools(env, path):
+    assert "agent-config" in ids(tool(env, "Write", {"file_path": str(env.P / path), "content": "x"}))
+
+
+@pytest.mark.parametrize("cmd", [
+    "cat .claude/agents/a.md", "ls .claude/skills", "echo x > docs/agents/a.md", "echo x > skills/s.md",
+    "echo x > .claude-agents.md", "echo x > commands/x.md", "grep -r foo .claude/commands",
+])
+def test_r20_negative(env, cmd):
+    assert "agent-config" not in ids(bash(env, cmd)), cmd

@@ -10,6 +10,8 @@ import types
 import uuid
 from pathlib import Path
 
+import pytest
+
 from sqlalchemy import select
 
 from app.config import settings
@@ -256,7 +258,7 @@ def test_spool_is_ingested_as_redacted_guard_events(client):
     assert "co_" not in blob.replace("co-guard", "")
 
 
-# ---- Ruling R19a: the stream watchdog stops a run whose tools escape co-guard ----
+# ---- Ruling R21: the watchdog matches tool_use ids through co-guard's spool ----
 
 
 def _guard_tool(client, mode, monkeypatch=None):
@@ -264,19 +266,37 @@ def _guard_tool(client, mode, monkeypatch=None):
     return done, [e.payload for e in _events(done["id"]) if e.type == "guard"]
 
 
-def test_tool_with_co_guard_hook_runs(client):
-    for mode in ("hooked", "early"):
-        done, guard = _guard_tool(client, mode)
-        assert done["status"] == "completed", (mode, done.get("error"))
-        assert not any(p.get("event") == "watchdog" for p in guard)
+def _killed(guard):
+    return any(p.get("event") == "watchdog" and p.get("decision") == "killed" for p in guard)
 
 
-def test_tool_without_hook_kills_the_task(client):
-    for mode in ("nohook", "other", "cancelled"):
-        done, guard = _guard_tool(client, mode)
-        assert done["status"] == "failed", mode
-        assert "co-guard was not running" in done["error"], mode
-        assert any(p.get("event") == "watchdog" and p.get("decision") == "killed" for p in guard), mode
+@pytest.mark.parametrize("mode", ["hooked", "parallel", "subagent"])
+def test_checked_calls_pass(client, mode):
+    done, guard = _guard_tool(client, mode)
+    assert done["status"] == "completed", (mode, done.get("error"))
+    assert not _killed(guard)
+    assert not any(p.get("seen") for p in guard)  # bookkeeping is not ingested
+
+
+def test_unchecked_successful_call_kills_the_task(client):
+    done, guard = _guard_tool(client, "nohook")
+    assert done["status"] == "failed"
+    assert "co-guard was not running" in done["error"] and "tuA" in done["error"]
+    assert _killed(guard)
+
+
+def test_unchecked_error_result_is_only_logged(client):
+    done, guard = _guard_tool(client, "errnohook")
+    assert done["status"] == "completed", done.get("error")
+    assert not _killed(guard)
+    assert any(p.get("event") == "unchecked_error" and p.get("tool_use_id") == "tuA" for p in guard)
+
+
+def test_call_waiting_for_a_person_is_not_killed(client, monkeypatch):
+    monkeypatch.setattr(settings, "guard_hook_grace_seconds", 1.0)
+    done, guard = _guard_tool(client, "waiting")
+    assert done["status"] == "completed", done.get("error")
+    assert not _killed(guard)
 
 
 def test_tool_left_unchecked_past_grace_kills_the_task(client, monkeypatch):
@@ -404,3 +424,177 @@ def test_mcp_names_normalised_like_claude_code(client):
         assert f"{pre}__drop" in args
         assert pol["mcp_tools"][f"{pre}__q"] == "require_approval"
         assert not any(srv.name in k for k in pol["mcp_tools"])
+
+
+
+# ---- fix round 2 -----------------------------------------------------------------------
+
+
+def test_always_strict_mcp_and_no_skill_shell(client):
+    key = env_probe_key()
+    done = _run(client, f"x [env-probe:{key}]")
+    assert done["status"] == "completed", done.get("error")
+    args = read_probe_args(key)
+    assert "--strict-mcp-config" in args
+    cfg = Path(args[args.index("--mcp-config") + 1])
+    assert cfg.is_absolute() and "_mcp_configs" in str(cfg)
+    i = args.index("--settings")
+    assert json.loads(args[i + 1]) == {"disableSkillShellExecution": True}
+    assert args.count("--settings") == 1
+
+
+def test_config_change_block_is_ingested(client):
+    done = _run(client, "act [guard-spool]")
+    guard = [e.payload for e in _events(done["id"]) if e.type == "guard"]
+    assert any(p.get("event") == "ConfigChange" and p.get("decision") == "blocked"
+               and p.get("source") == "project_settings" for p in guard), guard
+
+
+def test_followup_rechecks_project_settings(client):
+    """Ruling R16 check runs before EVERY spawn: a resumed / follow-up run in a
+    project whose settings now switch hooks off drops project sources too."""
+    proj = _project(client)
+    r = client.post("/tasks", json={"prompt": "first", "project_id": proj["id"]})
+    first = wait_task(client, r.json()["id"])
+    assert first["status"] == "completed", first.get("error")
+    d = Path(proj["directory"]) / ".claude"
+    d.mkdir(parents=True, exist_ok=True)
+    (d / "settings.local.json").write_text(json.dumps({"disableAllHooks": "yes"}))  # truthy like the CLI
+    key = env_probe_key()
+    r = client.post(f"/tasks/{first['id']}/followup", json={"prompt": f"more [env-probe:{key}]"})
+    assert r.status_code == 201, r.text
+    done = wait_task(client, r.json()["id"])
+    assert done["status"] == "completed", done.get("error")
+    args = read_probe_args(key)
+    assert args[args.index("--setting-sources") + 1] == "user"
+
+
+def test_hook_blockers_truthiness(tmp_path):
+    repo = tmp_path / "r"
+    (repo / ".git").mkdir(parents=True)
+    (repo / ".claude").mkdir()
+    f = repo / ".claude" / "settings.json"
+    for v, want in ((True, True), (1, True), ("true", True), ("no", True), ([], True), (0, True),
+                    (False, False), ("false", False), (None, False)):
+        f.write_text(json.dumps({"disableAllHooks": v}))
+        assert bool(runtime.hook_blockers(repo, None)["project"]) is want, v
+    f.write_text(json.dumps({"allowManagedHooksOnly": True}))
+    assert runtime.hook_blockers(repo, None)["project"]
+
+
+# ---- Ruling R22: the approval address must prove it is this server ----------------------
+
+
+def _serve_real_app():
+    import socket
+    import threading
+    import time as _t
+
+    import uvicorn
+
+    from app.main import app
+
+    s = socket.socket()
+    s.bind(("127.0.0.1", 0))
+    port = s.getsockname()[1]
+    s.close()
+    server = uvicorn.Server(uvicorn.Config(app, host="127.0.0.1", port=port, lifespan="off", log_level="error"))
+    th = threading.Thread(target=server.run, daemon=True)
+    th.start()
+    deadline = _t.time() + 10
+    while not server.started and _t.time() < deadline:
+        _t.sleep(0.05)
+    return server, th, port
+
+
+def _serve_fake(answer):
+    import threading
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+    class H(BaseHTTPRequestHandler):
+        def log_message(self, *a):
+            pass
+
+        def do_GET(self):
+            body = json.dumps(answer).encode()
+            self.send_response(200)
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+    srv = ThreadingHTTPServer(("127.0.0.1", 0), H)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    return srv
+
+
+def test_whoami_proves_identity(client):
+    r = client.get("/guard/whoami", params={"challenge": "ab" * 16})
+    assert r.status_code == 200 and r.json() == {"proof": runtime.whoami_proof("ab" * 16)}
+    assert client.get("/guard/whoami", params={"challenge": "not-hex"}).status_code == 422
+
+
+def test_verify_passes_against_the_real_app():
+    server, th, port = _serve_real_app()
+    try:
+        assert runtime.verify_api_base(f"http://127.0.0.1:{port}") is True
+    finally:
+        server.should_exit = True
+        th.join(5)
+
+
+@pytest.mark.parametrize("answer", [{"proof": "0" * 64}, {"proof": None}, {}, ["x"]])
+def test_verify_fails_against_a_stub(answer):
+    srv = _serve_fake(answer)
+    try:
+        assert runtime.verify_api_base(f"http://127.0.0.1:{srv.server_address[1]}") is False
+    finally:
+        srv.shutdown()
+        srv.server_close()
+
+
+def test_verify_fails_with_no_listener():
+    srv = _serve_fake({})
+    port = srv.server_address[1]
+    srv.shutdown()
+    srv.server_close()
+    assert runtime.verify_api_base(f"http://127.0.0.1:{port}", timeout=1) is False
+
+
+def test_unverified_approval_address_fails_the_task(client, monkeypatch):
+    srv = _serve_fake({"proof": "0" * 64})  # an agent's listener on the approval address
+    runtime._API_BASE_CACHE.clear()
+    monkeypatch.setattr(settings, "guard_verify_api", True)
+    monkeypatch.setattr(settings, "backend_port", srv.server_address[1])
+    try:
+        key = env_probe_key()
+        done = _run(client, f"x [env-probe:{key}]")
+        assert done["status"] == "failed"
+        assert "co-guard approval address not verified" in done["error"]
+        assert read_probe_args(key) is None
+    finally:
+        runtime._API_BASE_CACHE.clear()
+        srv.shutdown()
+        srv.server_close()
+
+
+def test_verified_approval_address_runs_the_task(client, monkeypatch):
+    server, th, port = _serve_real_app()
+    runtime._API_BASE_CACHE.clear()
+    monkeypatch.setattr(settings, "guard_verify_api", True)
+    monkeypatch.setattr(settings, "backend_port", port)
+    try:
+        done = _run(client, "verified run")
+        assert done["status"] == "completed", done.get("error")
+    finally:
+        runtime._API_BASE_CACHE.clear()
+        server.should_exit = True
+        th.join(5)
+
+
+def test_scope_id_is_escaped(monkeypatch):
+    runtime._API_BASE_CACHE.clear()
+    try:
+        monkeypatch.setattr(settings, "bind_host", "fe80::1%en0")
+        assert runtime.guard_api_base() == "http://[fe80::1%25en0]:8200"
+    finally:
+        runtime._API_BASE_CACHE.clear()

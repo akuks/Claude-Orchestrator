@@ -194,3 +194,21 @@ def test_concurrent_calls_are_safe(tmp_path):
     [t.start() for t in ts]
     [t.join() for t in ts]
     assert not errs and (tmp_path / "co-guard" / "hooks" / "co_hook.py").is_file()
+
+
+def test_per_task_calls_keep_older_versions(tmp_path, monkeypatch):
+    """Minor 1 (round 2): only the startup call prunes; a running task may use an older version."""
+    root = ensure_plugin(tmp_path / "co-guard")
+    old = root.resolve()
+    orig = plugin_mod.plugin_files
+
+    def changed():
+        files = orig()
+        files["hooks/co_hook.py"] += b"\n# v3\n"
+        return files
+
+    monkeypatch.setattr(plugin_mod, "plugin_files", changed)
+    ensure_plugin(root, prune=False)
+    assert root.resolve() != old and old.exists()
+    ensure_plugin(root)  # startup
+    assert not old.exists()

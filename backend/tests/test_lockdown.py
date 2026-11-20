@@ -23,6 +23,9 @@ OPEN_ROUTES = {
     ("GET", "/auth/setup-status"),
     ("POST", "/auth/setup"),
     ("POST", "/webhooks/github"),
+    # co-guard identity proof (Ruling R22): HMAC of a caller challenge with a
+    # per-boot secret; reveals nothing and carries no project data.
+    ("GET", "/guard/whoami"),
 }
 
 

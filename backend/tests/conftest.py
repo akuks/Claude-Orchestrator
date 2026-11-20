@@ -31,25 +31,32 @@ _GUARD_SPOOL = r"""
     printf '{"event":"PreToolUse","decision":"approved","rule_ids":["mcp-require-approval"],"tool":"mcp__db__query","summary":"token %s and %s","status":"approved","request_id":"r1"}\n' "$GH_TOKEN" "$CO_API_TOKEN" >>"$CO_TASK_DIR/spool.jsonl"
     printf 'not json\n' >>"$CO_TASK_DIR/spool.jsonl"
     printf '{"event":"SessionEnd","reason":"other","junk_key":"dropped"}\n' >>"$CO_TASK_DIR/spool.jsonl"
+    printf '{"event":"ConfigChange","source":"project_settings","decision":"blocked"}\n' >>"$CO_TASK_DIR/spool.jsonl"
   fi"""
-# Test seam (co-guard watchdog, Ruling R19a): [guard-tool:MODE] makes the mock
-# emit a Bash tool_use + tool_result with: hooked (a co-guard PreToolUse
-# hook_started first), nohook (none), other (another plugin's hook only),
-# early (the hook_started BEFORE the assistant message), cancelled (the hook
-# times out), slow (no hook, then 4 s of silence before the result).
+# Test seam (co-guard watchdog, Ruling R21): [guard-tool:MODE] makes the mock
+# emit Bash tool_use(s) + tool_result(s); "seen X" means it first appends
+# co-guard's spool record for id X (as the real hook does before evaluating):
+# hooked (seen A), nohook (none), errnohook (none, is_error result), parallel
+# (two calls, seen B then A, results B then A), subagent (a subagent's call,
+# parent_tool_use_id set, seen), waiting (seen A, result after 3 s: a call
+# waiting for a person), slow (no record, result after 4 s).
 _GUARD_TOOL = r"""
   mode="${BASH_REMATCH[1]}"
+  sp="$CO_TASK_DIR/spool.jsonl"
+  seen() { printf '{"event":"PreToolUse","tool_use_id":"%s","seen":true}\n' "$1" >>"$sp"; }
+  tu() { printf '{"type":"assistant","message":{"model":"claude-test","content":[{"type":"tool_use","id":"%s","name":"Bash","input":{"command":"ls"}}]}}\n' "$1"; }
+  tr() { printf '{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"%s","content":"ok","is_error":%s}]}}\n' "$1" "${2:-false}"; }
   printf '{"type":"system","subtype":"init","session_id":"test-session"}\n'
-  hs='{"type":"system","subtype":"hook_started","hook_id":"h1","hook_name":"PreToolUse:Bash","hook_event":"PreToolUse"}'
-  tu='{"type":"assistant","message":{"model":"claude-test","content":[{"type":"tool_use","id":"tuA","name":"Bash","input":{"command":"ls"}}]}}'
-  tr='{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"tuA","content":"ok"}]}}'
   case "$mode" in
-    hooked) printf '%s\n%s\n%s\n' "$tu" "$hs" "$tr" ;;
-    early) printf '%s\n%s\n%s\n' "$hs" "$tu" "$tr" ;;
-    nohook) printf '%s\n%s\n' "$tu" "$tr" ;;
-    other) printf '%s\n%s\n%s\n' "$tu" '{"type":"system","subtype":"hook_started","hook_id":"h9","hook_name":"PreToolUse:Bash","hook_event":"PreToolUse","plugin_name":"other-pack"}' "$tr" ;;
-    cancelled) printf '%s\n%s\n%s\n%s\n' "$tu" "$hs" '{"type":"system","subtype":"hook_response","hook_id":"h1","hook_name":"PreToolUse:Bash","hook_event":"PreToolUse","output":"","stdout":"","stderr":"","exit_code":1,"outcome":"cancelled"}' "$tr" ;;
-    slow) printf '%s\n' "$tu"; sleep 4; printf '%s\n' "$tr" ;;
+    hooked) tu tuA; seen tuA; tr tuA ;;
+    nohook) tu tuA; tr tuA ;;
+    errnohook) tu tuA; tr tuA true ;;
+    parallel) tu tuA; tu tuB; seen tuB; seen tuA; tr tuB; tr tuA ;;
+    subagent) seen tuS
+      printf '{"type":"assistant","parent_tool_use_id":"tuAgent","agent_id":"a1","message":{"content":[{"type":"tool_use","id":"tuS","name":"Bash","input":{"command":"echo sub"}}]}}\n'
+      printf '{"type":"user","parent_tool_use_id":"tuAgent","agent_id":"a1","message":{"content":[{"type":"tool_result","tool_use_id":"tuS","content":"sub"}]}}\n' ;;
+    waiting) tu tuA; seen tuA; sleep 3; tr tuA ;;
+    slow) tu tuA; sleep 4; tr tuA ;;
   esac
   printf '{"type":"result","subtype":"success","result":"done","num_turns":1,"total_cost_usd":0.01,"duration_ms":100,"is_error":false,"usage":{"input_tokens":1,"output_tokens":1}}\n'
   exit 0"""
@@ -71,7 +78,7 @@ _ENV_ECHO = r"""
   j=$(jesc "$dump")
   printf '{"type":"system","subtype":"init","session_id":"test-session"}\n'
   printf '{"type":"assistant","message":{"model":"claude-test","content":[{"type":"text","text":"env: %s"},{"type":"tool_use","id":"tu1","name":"Bash","input":{"command":"echo %s"}}]}}\n' "$j" "$j"
-  printf '{"type":"system","subtype":"hook_started","hook_id":"h1","hook_name":"PreToolUse:Bash","hook_event":"PreToolUse"}\n'
+  printf '{"event":"PreToolUse","tool_use_id":"tu1","seen":true}\n' >>"$CO_TASK_DIR/spool.jsonl"
   printf '{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"tu1","content":"%s"}]}}\n' "$j"
   printf 'raw stdout %s\n' "$dump"
   printf 'stderr %s\n' "$dump" >&2
@@ -176,6 +183,9 @@ os.environ.update(
         "CO_ADMIN_PASSWORD": "test-password-123",
         "CO_RETRY_MAX_ATTEMPTS": "0",
         "CO_GATE_CRITICAL_APPROVAL": "true",
+        # No server listens on the approval address in tests; test_guard_worker
+        # turns the check on against a real listener.
+        "CO_GUARD_VERIFY_API": "false",
     }
 )
 

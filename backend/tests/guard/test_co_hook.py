@@ -149,7 +149,8 @@ def run(plugin, tmp_path, stub):
 
 def test_allow_prints_nothing_and_does_not_touch_the_network(run, stub):
     assert run(bash("ls -la && git status")) is None
-    assert stub.requests == [] and run.spool() == []
+    assert stub.requests == []
+    assert run.spool() == [{"event": "PreToolUse", "tool_use_id": "tu1", "seen": True, "ts": run.spool()[0]["ts"]}]
     assert run({"hook_event_name": "PreToolUse", "tool_name": "mcp__db__list", "tool_input": {}}) is None
 
 
@@ -160,6 +161,8 @@ def test_hard_deny(run, stub):
     assert "rm-rf-outside" in reason(out)
     assert stub.paths("POST") == ["/guard/report"]  # no approval for hard rules
     sp = run.spool()
+    assert sp[0]["seen"] is True and sp[0]["tool_use_id"] == "tu1"  # Ruling R21: first, before evaluation
+    sp = sp[1:]
     assert sp[0]["decision"] == "deny" and sp[0]["rule_ids"] == ["rm-rf-outside"] and sp[0]["tool"] == "Bash"
 
 
@@ -536,7 +539,9 @@ def _config(run, tmp_path, content, source="project_settings"):
 
 
 @pytest.mark.parametrize("content", [{"disableAllHooks": True}, {"enabledPlugins": {"co-guard@inline": False}},
-                                     {"allowManagedHooksOnly": True}, '{"disableAllHooks": true,'])
+                                     {"allowManagedHooksOnly": True}, '{"disableAllHooks": true,', "{broken",
+                                     {"disableAllHooks": 1}, {"disableAllHooks": "true"}, {"disableAllHooks": "no"},
+                                     {"disableAllHooks": []}, {"disableAllHooks": 0}, "[1]"])
 def test_config_change_switching_hooks_off_is_blocked(run, tmp_path, content):
     code, err = _config(run, tmp_path, content)
     assert code == 2 and "co-guard" in err
@@ -544,7 +549,93 @@ def test_config_change_switching_hooks_off_is_blocked(run, tmp_path, content):
 
 
 @pytest.mark.parametrize("content", [{"disableAllHooks": False}, {"model": "sonnet"},
-                                     {"enabledPlugins": {"other@x": False}}, "{broken"])
+                                     {"enabledPlugins": {"other@x": False}}, {"disableAllHooks": None},
+                                     {"disableAllHooks": "false"}])
 def test_config_change_other_edits_are_allowed(run, tmp_path, content):
     code, _err = _config(run, tmp_path, content)
     assert code == 0
+
+
+
+# ---- fix round 2 ---------------------------------------------------------------------
+
+
+def test_seen_record_is_written_before_evaluation(run):
+    run(bash("rm -rf ~"))
+    sp = run.spool()
+    assert sp[0] == {"event": "PreToolUse", "tool_use_id": "tu1", "seen": True, "ts": sp[0]["ts"]}
+
+
+def test_seen_write_failure_denies(run):
+    out = run(bash("ls"), env={"CO_TASK_DIR": str(run.tdir / "missing-dir")})
+    assert decision(out) == "deny" and reason(out) == ERROR
+    env = dict(run.env)
+    env.pop("CO_TASK_DIR")
+    run.env = env
+    out = run(bash("ls"))
+    assert decision(out) == "deny" and reason(out) == ERROR
+
+
+def test_unfiled_request_denies_fast_with_clear_reason(plugin, tmp_path):
+    stub = Stub()
+    base = stub.base
+    stub.close()  # connection refused
+    run = Run(plugin, tmp_path, base, approval_wait_seconds=60)
+    out = run(_approve_cmd())
+    assert decision(out) == "deny"
+    assert "approval service unreachable \u2014 action blocked" in reason(out) and "not filed" in reason(out)
+    assert run.elapsed < 8
+
+
+def test_unfiled_request_gives_up_after_the_filing_budget(plugin, tmp_path, monkeypatch):
+    stub = Stub(post_status=503)  # reachable but never files
+    try:
+        run = Run(plugin, tmp_path, stub.base, approval_wait_seconds=60)
+        out = run(_approve_cmd(), timeout=40)
+        assert decision(out) == "deny" and "approval service unreachable" in reason(out)
+        assert co_hook.FILE_BUDGET - 1 < run.elapsed < co_hook.FILE_BUDGET + 6
+    finally:
+        stub.close()
+
+
+def test_api_gone_after_filing_denies(plugin, tmp_path):
+    stub = Stub(statuses=("pending",))
+    run = Run(plugin, tmp_path, stub.base, approval_wait_seconds=60, approval_poll_seconds=0.5)
+    t = threading.Timer(1.0, stub.close)
+    t.start()
+    out = run(_approve_cmd())
+    t.join()
+    assert decision(out) == "deny" and "approval service unreachable" in reason(out) and "req-1" in reason(out)
+    assert run.elapsed < 10
+
+
+def test_unfiled_4xx_reason(plugin, tmp_path):
+    stub = Stub(post_status=401)
+    try:
+        out = Run(plugin, tmp_path, stub.base)(_approve_cmd())
+        assert "approval service unreachable" in reason(out) and "HTTP 401" in reason(out)
+    finally:
+        stub.close()
+
+
+def test_scoped_ipv6_api_base_is_a_literal(run):
+    assert co_hook._api({"api_base": "http://[fe80::1%25en0]:8200"}) == "http://[fe80::1%25en0]:8200"
+    with pytest.raises(co_hook.Refused):
+        co_hook._api({"api_base": "http://[fe80::1%25en0]"})
+
+
+def test_truthiness_matches_the_cli():
+    for v in (True, 1, "true", "no", [], 0, {}, "x"):
+        assert co_hook._truthy(v), v
+    for v in (None, False, "false"):
+        assert not co_hook._truthy(v), v
+
+
+def test_config_change_without_file_or_payload_blocks(run, tmp_path):
+    p = subprocess.run([sys.executable, "-I", "-S", str(run.plugin / "hooks" / "co_hook.py"), "ConfigChange"],
+                       input="not json", capture_output=True, text=True, env=run.env, timeout=30)
+    assert p.returncode == 2
+    p = subprocess.run([sys.executable, "-I", "-S", str(run.plugin / "hooks" / "co_hook.py"), "ConfigChange"],
+                       input=json.dumps({"source": "project_settings", "file_path": str(tmp_path / "gone.json")}),
+                       capture_output=True, text=True, env=run.env, timeout=30)
+    assert p.returncode == 2
