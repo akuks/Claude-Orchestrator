@@ -437,7 +437,7 @@ function FolderGroups({ node, columns, path = '' }) {
   )
 }
 
-export default function AgentsView({ projects = [] }) {
+export default function AgentsView({ projects = [], isAdmin = false }) {
   const [agents, setAgents] = useState([])
   const [presets, setPresets] = useState([])
   const [loading, setLoading] = useState(false)
@@ -559,18 +559,22 @@ export default function AgentsView({ projects = [] }) {
           >
             Run
           </Button>
-          <Button
-            size="small"
-            icon={<EditOutlined />}
-            onClick={() => {
-              setSeed(null)
-              setEditing(row)
-              setModalOpen(true)
-            }}
-          />
-          <Popconfirm title="Delete this agent?" onConfirm={() => remove(row.id)}>
-            <Button size="small" danger icon={<DeleteOutlined />} />
-          </Popconfirm>
+          {isAdmin && (
+            <Button
+              size="small"
+              icon={<EditOutlined />}
+              onClick={() => {
+                setSeed(null)
+                setEditing(row)
+                setModalOpen(true)
+              }}
+            />
+          )}
+          {isAdmin && (
+            <Popconfirm title="Delete this agent?" onConfirm={() => remove(row.id)}>
+              <Button size="small" danger icon={<DeleteOutlined />} />
+            </Popconfirm>
+          )}
         </Space>
       ),
     },
@@ -579,17 +583,19 @@ export default function AgentsView({ projects = [] }) {
   return (
     <>
       <Space style={{ marginBottom: 12 }}>
-        <Button
-          type="primary"
-          icon={<PlusOutlined />}
-          onClick={() => {
-            setSeed(null)
-            setEditing(null)
-            setModalOpen(true)
-          }}
-        >
-          New Agent
-        </Button>
+        {isAdmin && (
+          <Button
+            type="primary"
+            icon={<PlusOutlined />}
+            onClick={() => {
+              setSeed(null)
+              setEditing(null)
+              setModalOpen(true)
+            }}
+          >
+            New Agent
+          </Button>
+        )}
         <Button icon={<ReloadOutlined />} onClick={refresh}>
           Refresh
         </Button>
@@ -597,7 +603,7 @@ export default function AgentsView({ projects = [] }) {
           Reusable, governed roles — a system prompt + model + budget + optional project.
         </Typography.Text>
       </Space>
-      {presets.length > 0 && (
+      {isAdmin && presets.length > 0 && (
         <div style={{ marginBottom: 12 }}>
           <Typography.Text strong style={{ display: 'block', marginBottom: 6 }}>
             Agent templates

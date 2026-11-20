@@ -400,7 +400,7 @@ function SchedulesTab({ projects }) {
   )
 }
 
-function TemplatesTab({ projects }) {
+function TemplatesTab({ projects, isAdmin }) {
   const [templates, setTemplates] = useState([])
   const [presets, setPresets] = useState([])
   const [modalOpen, setModalOpen] = useState(false)
@@ -463,27 +463,33 @@ function TemplatesTab({ projects }) {
 
   return (
     <>
-      <Typography.Title level={5}>Pre-built automations</Typography.Title>
-      <div style={{ display: 'flex', flexWrap: 'wrap', gap: 12, marginBottom: 20 }}>
-        {presets.map((p) => (
-          <Card key={p.name} size="small" style={{ width: 260 }} title={p.name}>
-            <Typography.Paragraph type="secondary" style={{ fontSize: 12, minHeight: 40 }}>
-              {p.description}
-            </Typography.Paragraph>
-            <Button size="small" icon={<PlusOutlined />} onClick={() => addPreset(p)}>
-              Add as template
-            </Button>
-          </Card>
-        ))}
-      </div>
+      {isAdmin && (
+        <>
+          <Typography.Title level={5}>Pre-built automations</Typography.Title>
+          <div style={{ display: 'flex', flexWrap: 'wrap', gap: 12, marginBottom: 20 }}>
+            {presets.map((p) => (
+              <Card key={p.name} size="small" style={{ width: 260 }} title={p.name}>
+                <Typography.Paragraph type="secondary" style={{ fontSize: 12, minHeight: 40 }}>
+                  {p.description}
+                </Typography.Paragraph>
+                <Button size="small" icon={<PlusOutlined />} onClick={() => addPreset(p)}>
+                  Add as template
+                </Button>
+              </Card>
+            ))}
+          </div>
+        </>
+      )}
 
       <Space style={{ marginBottom: 12 }}>
         <Typography.Title level={5} style={{ margin: 0 }}>
           Saved templates
         </Typography.Title>
-        <Button size="small" icon={<PlusOutlined />} onClick={() => setModalOpen(true)}>
-          New Template
-        </Button>
+        {isAdmin && (
+          <Button size="small" icon={<PlusOutlined />} onClick={() => setModalOpen(true)}>
+            New Template
+          </Button>
+        )}
       </Space>
       <Table
         rowKey="id"
@@ -508,9 +514,11 @@ function TemplatesTab({ projects }) {
                 >
                   Run
                 </Button>
-                <Popconfirm title="Delete template?" onConfirm={() => act(api.deleteTemplate, row.id, 'Deleted')}>
-                  <Button size="small" danger icon={<DeleteOutlined />} />
-                </Popconfirm>
+                {isAdmin && (
+                  <Popconfirm title="Delete template?" onConfirm={() => act(api.deleteTemplate, row.id, 'Deleted')}>
+                    <Button size="small" danger icon={<DeleteOutlined />} />
+                  </Popconfirm>
+                )}
               </Space>
             ),
           },
@@ -549,7 +557,7 @@ function TemplatesTab({ projects }) {
   )
 }
 
-export default function AutomationView({ projects = [] }) {
+export default function AutomationView({ projects = [], isAdmin = false }) {
   const [allAgents, setAllAgents] = useState([])
   useEffect(() => {
     api.listAgents().then(setAllAgents).catch(() => {})
@@ -564,7 +572,7 @@ export default function AutomationView({ projects = [] }) {
               <RobotOutlined /> Agents
             </span>
           ),
-          children: <AgentsView projects={projects} />,
+          children: <AgentsView projects={projects} isAdmin={isAdmin} />,
         },
         {
           key: 'workflows',
@@ -573,7 +581,7 @@ export default function AutomationView({ projects = [] }) {
               <ApartmentOutlined /> Workflows
             </span>
           ),
-          children: <WorkflowsView agents={allAgents} />,
+          children: <WorkflowsView agents={allAgents} isAdmin={isAdmin} />,
         },
         {
           key: 'schedules',
@@ -591,7 +599,7 @@ export default function AutomationView({ projects = [] }) {
               <CloudServerOutlined /> Servers
             </span>
           ),
-          children: <ServersView projects={projects} />,
+          children: <ServersView projects={projects} isAdmin={isAdmin} />,
         },
         {
           key: 'skills',
@@ -600,7 +608,7 @@ export default function AutomationView({ projects = [] }) {
               <BulbOutlined /> Skills
             </span>
           ),
-          children: <SkillsView projects={projects} />,
+          children: <SkillsView projects={projects} isAdmin={isAdmin} />,
         },
         {
           key: 'knowledge',
@@ -609,12 +617,12 @@ export default function AutomationView({ projects = [] }) {
               <BookOutlined /> Knowledge
             </span>
           ),
-          children: <ContextStoreView projects={projects} />,
+          children: <ContextStoreView projects={projects} isAdmin={isAdmin} />,
         },
         {
           key: 'templates',
           label: 'Task Templates',
-          children: <TemplatesTab projects={projects} />,
+          children: <TemplatesTab projects={projects} isAdmin={isAdmin} />,
         },
       ]}
     />

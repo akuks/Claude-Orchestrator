@@ -1,11 +1,12 @@
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 from sqlalchemy import select
 
+from ..access import can_see_task
 from ..auth import ws_principal
 from ..config import settings
 from ..database import SessionLocal
 from ..events import broker
-from ..models import TaskEvent
+from ..models import Task, TaskEvent
 
 router = APIRouter(tags=["stream"])
 
@@ -29,6 +30,12 @@ async def stream_task(websocket: WebSocket, task_id: str):
     if principal is None:
         await websocket.close(code=4401)
         return
+    # Missing or invisible task: 4404 (same code for both — never reveal existence).
+    async with SessionLocal() as s:
+        task = await s.get(Task, task_id)
+        if task is None or not await can_see_task(s, principal, task):
+            await websocket.close(code=4404)
+            return
     # Client may pass ?last_seq=N to resume without replaying what it has.
     try:
         last_seq = int(websocket.query_params.get("last_seq", 0))

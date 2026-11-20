@@ -26,6 +26,7 @@ export default defineConfig({
       '/system': { target, changeOrigin: true },
       '/auth': { target, changeOrigin: true },
       '/users': { target, changeOrigin: true },
+      '/teams': { target, changeOrigin: true },
       '/health': { target, changeOrigin: true },
     },
   },

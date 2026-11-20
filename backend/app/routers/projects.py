@@ -6,14 +6,17 @@ from pathlib import Path
 
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel
-from sqlalchemy import func, select
+from sqlalchemy import delete, func, select, update
 
 from .. import memory
 from ..config import settings
 from ..constants import VALID_MODELS, Status
 from ..database import SessionLocal
-from ..models import Project, Task, TaskSummary
+from ..access import ALL, project_role, require_project_role, visible_project_ids
+from ..models import McpServer, Project, ProjectMember, Task, TaskSummary, Team, User
 from ..schemas import (
+    MemberIn,
+    MemberOut,
     MemoryOut,
     ProjectCreate,
     ProjectOut,
@@ -27,6 +30,34 @@ import yaml
 router = APIRouter(prefix="/projects", tags=["projects"])
 
 CLAUDE_PROJECTS_DIR = Path.home() / ".claude" / "projects"
+
+MAINTAINER_FIELDS = {
+    "name",
+    "instructions",
+    "default_model",
+    "memory_enabled",
+    "memory",
+    "budget_usd",
+    "github_repo",
+    "auto_review_prs",
+}
+ADMIN_FIELDS = {"directory", "env", "archived"}
+MASK = "••••"
+
+
+def _require_admin(request: Request) -> None:
+    if not request.state.principal.is_admin:
+        raise HTTPException(403, "Admin only")
+
+
+async def _require_unique_name(s, name: str, exclude_id: str | None = None) -> None:
+    """Project names are unique (incl. archived): project-scoped MCP servers
+    and budgets are matched by name, so a shared name would share them."""
+    stmt = select(Project.id).where(Project.name == name)
+    if exclude_id is not None:
+        stmt = stmt.where(Project.id != exclude_id)
+    if (await s.execute(stmt.limit(1))).first() is not None:
+        raise HTTPException(409, f"A project named '{name}' already exists")
 
 
 def _slugify(name: str) -> str:
@@ -51,8 +82,18 @@ async def _counts(s, project_ids: list[str]) -> dict[str, tuple[int, float]]:
     return {pid: (n, float(cost or 0)) for pid, n, cost in rows}
 
 
-def _to_out(project: Project, count: int = 0, cost: float = 0.0) -> ProjectOut:
+def _to_out(
+    project: Project,
+    count: int = 0,
+    cost: float = 0.0,
+    *,
+    role: str | None = None,
+    admin: bool,
+) -> ProjectOut:
     out = ProjectOut.model_validate(project)
+    out.my_role = role
+    if not admin:
+        out.env = {k: MASK for k in out.env}
     out.task_count = count
     out.total_cost_usd = round(cost, 4)
     return out
@@ -60,6 +101,7 @@ def _to_out(project: Project, count: int = 0, cost: float = 0.0) -> ProjectOut:
 
 @router.post("", response_model=ProjectOut, status_code=201)
 async def create_project(payload: ProjectCreate, request: Request):
+    _require_admin(request)
     if payload.default_model not in VALID_MODELS:
         raise HTTPException(400, f"Invalid model. Use one of {sorted(VALID_MODELS)}")
     slug = _slugify(payload.name)
@@ -69,6 +111,7 @@ async def create_project(payload: ProjectCreate, request: Request):
         else settings.projects_dir / slug
     )
     async with SessionLocal() as s:
+        await _require_unique_name(s, payload.name)
         dup = (
             await s.execute(select(Project).where(Project.slug == slug))
         ).scalar_one_or_none()
@@ -94,18 +137,35 @@ async def create_project(payload: ProjectCreate, request: Request):
         s.add(project)
         await s.commit()
         await s.refresh(project)
-        return _to_out(project)
+        return _to_out(project, role="maintainer", admin=True)
 
 
 @router.get("", response_model=list[ProjectOut])
-async def list_projects(include_archived: bool = False):
+async def list_projects(request: Request, include_archived: bool = False):
+    principal = request.state.principal
     stmt = select(Project).order_by(Project.created_at.desc())
     if not include_archived:
         stmt = stmt.where(Project.archived.is_(False))
     async with SessionLocal() as s:
+        visible = await visible_project_ids(s, principal)
+        if visible is not ALL:
+            stmt = stmt.where(Project.id.in_(visible))
         rows = (await s.execute(stmt)).scalars().all()
         counts = await _counts(s, [p.id for p in rows])
-    return [_to_out(p, *counts.get(p.id, (0, 0.0))) for p in rows]
+        roles = {}
+        if not principal.is_admin:
+            for p in rows:
+                roles[p.id] = await project_role(s, principal, p.id)
+    admin = principal.is_admin
+    return [
+        _to_out(
+            p,
+            *counts.get(p.id, (0, 0.0)),
+            role="maintainer" if admin else roles.get(p.id),
+            admin=admin,
+        )
+        for p in rows
+    ]
 
 
 def _read_cwd(jsonl_path: Path) -> str | None:
@@ -149,12 +209,13 @@ def _is_noise(path: str, roots: list[str]) -> bool:
 
 
 @router.get("/discover")
-async def discover_projects():
+async def discover_projects(request: Request):
     """Find directories where Claude Code has been run (from ~/.claude/projects).
 
     Filters out non-existent paths, temp dirs, and the orchestrator's own
     sandbox/project working directories.
     """
+    _require_admin(request)
     roots = _noise_roots()
     found: dict[str, dict] = {}
     if CLAUDE_PROJECTS_DIR.exists():
@@ -208,16 +269,20 @@ class ImportRequest(BaseModel):
 @router.post("/import", response_model=list[ProjectOut])
 async def import_projects(payload: ImportRequest, request: Request):
     """Bulk-create projects from a list of directories (skips already-added)."""
+    _require_admin(request)
     created: list[Project] = []
     async with SessionLocal() as s:
         rows = (await s.execute(select(Project))).scalars().all()
         existing_dirs = {os.path.normpath(p.directory) for p in rows}
         existing_slugs = {p.slug for p in rows}
+        existing_names = {p.name for p in rows}
         for raw in payload.directories:
             d = os.path.normpath(str(Path(raw).expanduser()))
             if d in existing_dirs:
                 continue
             name = Path(d).name or d
+            if name in existing_names:
+                raise HTTPException(409, f"A project named '{name}' already exists")
             slug = base = _slugify(name)
             i = 2
             while slug in existing_slugs:
@@ -234,11 +299,12 @@ async def import_projects(payload: ImportRequest, request: Request):
             s.add(project)
             existing_dirs.add(d)
             existing_slugs.add(slug)
+            existing_names.add(name)
             created.append(project)
         await s.commit()
         for p in created:
             await s.refresh(p)
-    return [_to_out(p) for p in created]
+    return [_to_out(p, role="maintainer", admin=True) for p in created]
 
 
 async def _get_or_404(s, project_id: str) -> Project:
@@ -249,20 +315,30 @@ async def _get_or_404(s, project_id: str) -> Project:
 
 
 @router.get("/{project_id}", response_model=ProjectOut)
-async def get_project(project_id: str):
+async def get_project(project_id: str, request: Request):
+    principal = request.state.principal
     async with SessionLocal() as s:
+        role = await require_project_role(s, principal, project_id)
         project = await _get_or_404(s, project_id)
         counts = await _counts(s, [project_id])
-    return _to_out(project, *counts.get(project_id, (0, 0.0)))
+    return _to_out(project, *counts.get(project_id, (0, 0.0)), role=role, admin=principal.is_admin)
 
 
 @router.patch("/{project_id}", response_model=ProjectOut)
-async def update_project(project_id: str, payload: ProjectUpdate):
+async def update_project(project_id: str, payload: ProjectUpdate, request: Request):
+    principal = request.state.principal
     data = payload.model_dump(exclude_unset=True)
-    if "default_model" in data and data["default_model"] not in VALID_MODELS:
-        raise HTTPException(400, "Invalid model")
     async with SessionLocal() as s:
+        # Visibility (404) and role (403) are checked before any validation or write.
+        role = await require_project_role(s, principal, project_id, "maintainer")
+        # Allowlist: a non-admin may send maintainer fields only.
+        if not principal.is_admin and data.keys() - MAINTAINER_FIELDS:
+            raise HTTPException(403, "Admin only")
+        if "default_model" in data and data["default_model"] not in VALID_MODELS:
+            raise HTTPException(400, "Invalid model")
         project = await _get_or_404(s, project_id)
+        if data.get("name") and data["name"] != project.name:
+            await _require_unique_name(s, data["name"], exclude_id=project_id)
         if "directory" in data and data["directory"]:
             d = Path(data.pop("directory")).expanduser()
             try:
@@ -270,25 +346,37 @@ async def update_project(project_id: str, payload: ProjectUpdate):
             except OSError as exc:
                 raise HTTPException(400, f"Could not access directory: {exc}")
             project.directory = str(d.resolve())
+        if data.get("name") and data["name"] != project.name:
+            # Project-scoped MCP servers reference the project by name; carry
+            # them along so runtime matching and visibility follow the rename.
+            # Names are unique, so every server on the old name is this project's.
+            await s.execute(
+                update(McpServer)
+                .where(McpServer.scope == "project", McpServer.project == project.name)
+                .values(project=data["name"])
+            )
         for k, v in data.items():
             setattr(project, k, v)
         await s.commit()
         await s.refresh(project)
         counts = await _counts(s, [project_id])
-    return _to_out(project, *counts.get(project_id, (0, 0.0)))
+    return _to_out(project, *counts.get(project_id, (0, 0.0)), role=role, admin=principal.is_admin)
 
 
 @router.delete("/{project_id}", status_code=204)
-async def delete_project(project_id: str):
+async def delete_project(project_id: str, request: Request):
+    _require_admin(request)
     async with SessionLocal() as s:
         project = await _get_or_404(s, project_id)
+        await s.execute(delete(ProjectMember).where(ProjectMember.project_id == project_id))
         await s.delete(project)
         await s.commit()
 
 
 @router.get("/{project_id}/memory", response_model=MemoryOut)
-async def get_memory(project_id: str):
+async def get_memory(project_id: str, request: Request):
     async with SessionLocal() as s:
+        await require_project_role(s, request.state.principal, project_id)
         project = await _get_or_404(s, project_id)
         return MemoryOut(
             memory=project.memory,
@@ -298,8 +386,9 @@ async def get_memory(project_id: str):
 
 
 @router.post("/{project_id}/memory/regenerate", response_model=MemoryOut)
-async def regenerate_memory(project_id: str):
+async def regenerate_memory(project_id: str, request: Request):
     async with SessionLocal() as s:
+        await require_project_role(s, request.state.principal, project_id, "maintainer")
         await _get_or_404(s, project_id)
     await memory.rebuild_memory(project_id)
     async with SessionLocal() as s:
@@ -312,8 +401,9 @@ async def regenerate_memory(project_id: str):
 
 
 @router.get("/{project_id}/summaries", response_model=list[TaskSummaryOut])
-async def list_summaries(project_id: str, limit: int = 50):
+async def list_summaries(project_id: str, request: Request, limit: int = 50):
     async with SessionLocal() as s:
+        await require_project_role(s, request.state.principal, project_id)
         await _get_or_404(s, project_id)
         rows = (
             await s.execute(
@@ -327,8 +417,9 @@ async def list_summaries(project_id: str, limit: int = 50):
 
 
 @router.get("/{project_id}/stats")
-async def project_stats(project_id: str):
+async def project_stats(project_id: str, request: Request):
     async with SessionLocal() as s:
+        await require_project_role(s, request.state.principal, project_id)
         await _get_or_404(s, project_id)
         by_status_rows = (
             await s.execute(
@@ -389,15 +480,19 @@ def _read_servers(project: Project) -> list[dict]:
 
 
 @router.get("/{project_id}/servers", response_model=list[ServerEntry])
-async def list_servers(project_id: str):
+async def list_servers(project_id: str, request: Request):
     async with SessionLocal() as s:
+        await require_project_role(s, request.state.principal, project_id)
         project = await _get_or_404(s, project_id)
     return _read_servers(project)
 
 
 @router.put("/{project_id}/servers", response_model=list[ServerEntry])
-async def replace_servers(project_id: str, servers: list[ServerEntry]):
+async def replace_servers(project_id: str, servers: list[ServerEntry], request: Request):
     """Replace the whole inventory. Names must be unique."""
+    async with SessionLocal() as s:
+        await require_project_role(s, request.state.principal, project_id)
+    _require_admin(request)
     names = [x.name for x in servers]
     if len(names) != len(set(names)):
         raise HTTPException(400, "Server names must be unique")
@@ -421,3 +516,72 @@ async def replace_servers(project_id: str, servers: list[ServerEntry]):
     body = yaml.safe_dump(mapping, sort_keys=True, default_flow_style=False) if mapping else ""
     path.write_text(header + body)
     return _read_servers(project)
+
+
+MEMBER_ROLES = ("maintainer", "contributor")
+
+
+async def _members_out(s, project_id: str) -> list[MemberOut]:
+    rows = (
+        await s.execute(select(ProjectMember).where(ProjectMember.project_id == project_id))
+    ).scalars().all()
+    uids = [r.subject_id for r in rows if r.subject_type == "user"]
+    tids = [r.subject_id for r in rows if r.subject_type == "team"]
+    users = {}
+    teams = {}
+    if uids:
+        users = {u.id: u for u in (await s.execute(select(User).where(User.id.in_(uids)))).scalars()}
+    if tids:
+        teams = {t.id: t for t in (await s.execute(select(Team).where(Team.id.in_(tids)))).scalars()}
+    out = []
+    for r in rows:
+        if r.subject_type == "user":
+            u = users.get(r.subject_id)
+            label = (u.name or u.email) if u else r.subject_id
+        else:
+            t = teams.get(r.subject_id)
+            label = t.name if t else r.subject_id
+        out.append(
+            MemberOut(subject_type=r.subject_type, subject_id=r.subject_id, role=r.role, label=label)
+        )
+    return sorted(out, key=lambda m: (m.subject_type, m.label.lower()))
+
+
+@router.get("/{project_id}/members", response_model=list[MemberOut])
+async def list_members(project_id: str, request: Request):
+    async with SessionLocal() as s:
+        await require_project_role(s, request.state.principal, project_id)
+        return await _members_out(s, project_id)
+
+
+@router.put("/{project_id}/members", response_model=list[MemberOut])
+async def set_members(project_id: str, body: list[MemberIn], request: Request):
+    async with SessionLocal() as s:
+        await require_project_role(s, request.state.principal, project_id, "maintainer")
+        if not await s.get(Project, project_id):
+            raise HTTPException(404, "Not found")
+        seen = set()
+        for m in body:
+            if m.role not in MEMBER_ROLES:
+                raise HTTPException(400, f"role must be one of: {', '.join(MEMBER_ROLES)}")
+            if m.subject_type not in ("user", "team"):
+                raise HTTPException(400, "subject_type must be 'user' or 'team'")
+            key = (m.subject_type, m.subject_id)
+            if key in seen:
+                raise HTTPException(400, "Duplicate member")
+            seen.add(key)
+            model = User if m.subject_type == "user" else Team
+            if not await s.get(model, m.subject_id):
+                raise HTTPException(400, f"Unknown {m.subject_type}: {m.subject_id}")
+        await s.execute(delete(ProjectMember).where(ProjectMember.project_id == project_id))
+        for m in body:
+            s.add(
+                ProjectMember(
+                    project_id=project_id,
+                    subject_type=m.subject_type,
+                    subject_id=m.subject_id,
+                    role=m.role,
+                )
+            )
+        await s.commit()
+        return await _members_out(s, project_id)

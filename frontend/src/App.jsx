@@ -44,6 +44,7 @@ import ApprovalsView from './components/ApprovalsView'
 import UsageView from './components/UsageView'
 import SecurityView from './components/SecurityView'
 import UsersView from './components/UsersView'
+import TeamsView from './components/TeamsView'
 import LoginPage from './auth/LoginPage'
 import SetupPage from './auth/SetupPage'
 import ChangePasswordModal from './auth/ChangePasswordModal'
@@ -123,6 +124,7 @@ export default function App() {
 }
 
 function AppInner({ user, onLogout }) {
+  const isAdmin = user.role === 'admin'
   const [pwOpen, setPwOpen] = useState(false)
   const [tasks, setTasks] = useState([])
   const [stats, setStats] = useState(null)
@@ -339,8 +341,11 @@ function AppInner({ user, onLogout }) {
               { value: 'security', label: 'Security', icon: <SafetyCertificateOutlined /> },
               { value: 'usage', label: 'Usage', icon: <DollarOutlined /> },
               { value: 'mcp', label: 'MCP Servers', icon: <ApiOutlined /> },
-              ...(user.role === 'admin'
-                ? [{ value: 'users', label: 'Users', icon: <TeamOutlined /> }]
+              ...(isAdmin
+                ? [
+                    { value: 'users', label: 'Users', icon: <UserOutlined /> },
+                    { value: 'teams', label: 'Teams', icon: <TeamOutlined /> },
+                  ]
                 : []),
             ]}
           />
@@ -398,9 +403,10 @@ function AppInner({ user, onLogout }) {
 
       <Content style={{ padding: 24 }}>
         {view === 'mcp' && <McpRegistry />}
-        {view === 'users' && user.role === 'admin' && <UsersView currentUser={user} />}
-        {view === 'projects' && <ProjectsView onProjectsChanged={loadProjects} />}
-        {view === 'automation' && <AutomationView projects={projects} />}
+        {view === 'users' && isAdmin && <UsersView currentUser={user} />}
+        {view === 'teams' && isAdmin && <TeamsView />}
+        {view === 'projects' && <ProjectsView currentUser={user} onProjectsChanged={loadProjects} />}
+        {view === 'automation' && <AutomationView projects={projects} isAdmin={isAdmin} />}
         {view === 'approvals' && <ApprovalsView onChanged={loadApprovalCount} />}
         {view === 'usage' && <UsageView />}
         {view === 'security' && <SecurityView projects={projects} />}

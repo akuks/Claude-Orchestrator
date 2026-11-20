@@ -1,6 +1,8 @@
 from fastapi import APIRouter, HTTPException, Request
 from sqlalchemy import select
 
+from ..access import require_project_role
+from ..auth import ensure_admin
 from ..constants import VALID_MODELS
 from ..database import SessionLocal
 from ..models import Template
@@ -59,6 +61,7 @@ async def list_presets():
 
 @router.post("", response_model=TemplateOut, status_code=201)
 async def create_template(payload: TemplateCreate, request: Request):
+    ensure_admin(request.state.principal)
     if payload.model and payload.model not in VALID_MODELS:
         raise HTTPException(400, f"Invalid model. Use one of {sorted(VALID_MODELS)}")
     async with SessionLocal() as s:
@@ -89,7 +92,8 @@ async def list_templates():
 
 
 @router.delete("/{template_id}", status_code=204)
-async def delete_template(template_id: str):
+async def delete_template(template_id: str, request: Request):
+    ensure_admin(request.state.principal)
     async with SessionLocal() as s:
         tpl = await s.get(Template, template_id)
         if tpl is None:
@@ -104,6 +108,8 @@ async def run_template(template_id: str, request: Request):
         tpl = await s.get(Template, template_id)
         if tpl is None:
             raise HTTPException(404, "Template not found")
+        # A template runs on its own project (contributor needed); none = ad-hoc.
+        await require_project_role(s, request.state.principal, tpl.project_id)
         task = await build_task(
             s,
             prompt=tpl.prompt,

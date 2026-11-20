@@ -4,9 +4,10 @@ import re
 import shutil
 from pathlib import Path
 
-from fastapi import APIRouter, Depends, HTTPException
-from sqlalchemy import select
+from fastapi import APIRouter, Depends, HTTPException, Request
+from sqlalchemy import or_, select
 
+from ..access import ALL, visible_project_ids
 from ..auth import require_admin
 from ..config import settings
 from ..database import SessionLocal
@@ -69,9 +70,15 @@ async def _git_clone(url: str, dest: Path) -> None:
 
 
 @router.get("", response_model=list[SkillPackOut])
-async def list_skillpacks():
+async def list_skillpacks(request: Request):
+    stmt = select(SkillPack).order_by(SkillPack.created_at.desc())
     async with SessionLocal() as s:
-        rows = (await s.execute(select(SkillPack).order_by(SkillPack.created_at.desc()))).scalars().all()
+        visible = await visible_project_ids(s, request.state.principal)
+        if visible is not ALL:  # project packs only for that project's members
+            stmt = stmt.where(
+                or_(SkillPack.scope != "project", SkillPack.project_id.in_(visible))
+            )
+        rows = (await s.execute(stmt)).scalars().all()
     return [SkillPackOut.model_validate(r) for r in rows]
 
 

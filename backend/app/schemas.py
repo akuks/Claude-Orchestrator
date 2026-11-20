@@ -261,6 +261,7 @@ class ProjectOut(BaseModel):
     env: dict = {}
     task_count: int = 0
     total_cost_usd: float = 0.0
+    my_role: Optional[str] = None
 
     @field_validator("env", mode="before")
     @classmethod
@@ -514,6 +515,7 @@ class WorkflowRunOut(BaseModel):
     status: str
     current_stage: int
     stages: list
+    project_ids: list[str] = []
     created_at: datetime
     updated_at: datetime
 
@@ -631,3 +633,38 @@ class UserPatch(BaseModel):
 
 class PasswordResetIn(BaseModel):
     password: str
+
+
+class UserBrief(BaseModel):
+    id: str
+    name: str
+    email: str
+
+    model_config = {"from_attributes": True}
+
+
+class TeamIn(BaseModel):
+    name: str = Field(min_length=1, max_length=120)
+
+
+class TeamMembersIn(BaseModel):
+    user_ids: list[str]
+
+
+class TeamOut(BaseModel):
+    id: str
+    name: str
+    members: list[UserBrief] = Field(default_factory=list)
+
+
+class MemberIn(BaseModel):
+    subject_type: str
+    subject_id: str
+    role: str
+
+
+class MemberOut(BaseModel):
+    subject_type: str
+    subject_id: str
+    role: str
+    label: str

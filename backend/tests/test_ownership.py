@@ -175,7 +175,19 @@ def test_member_children_owned_by_member_not_parent_owner(client, member_client)
     admin = _admin_id()
     assert me != admin
     _agent(client, "r8-agent")
-    parent = _make_member_task_parent(client)
+    # The parent must be visible to the member (R9): an admin-owned task in a
+    # project where the member contributes.
+    import uuid
+
+    pid = client.post("/projects", json={"name": f"own-r8-{uuid.uuid4().hex[:8]}"}).json()["id"]
+    r = client.put(
+        f"/projects/{pid}/members",
+        json=[{"subject_type": "user", "subject_id": me, "role": "contributor"}],
+    )
+    assert r.status_code == 200, r.text
+    parent = client.post(
+        "/tasks", json={"prompt": "admin parent", "requires_approval": True, "project_id": pid}
+    ).json()
     assert parent["created_by"] == admin
     d = member_client.post(
         "/agents/dispatch",
@@ -193,7 +205,18 @@ def test_member_children_owned_by_member_not_parent_owner(client, member_client)
 
 def test_member_followup_owned_by_member(client, member_client):
     me = member_client.get("/auth/me").json()["id"]
-    parent = _make_member_task_parent(client)
+    # Phase 2: following up on someone else's task needs maintainer on its project.
+    import uuid
+
+    pid = client.post("/projects", json={"name": f"own-fu-{uuid.uuid4().hex[:8]}"}).json()["id"]
+    r = client.put(
+        f"/projects/{pid}/members",
+        json=[{"subject_type": "user", "subject_id": me, "role": "maintainer"}],
+    )
+    assert r.status_code == 200, r.text
+    parent = client.post(
+        "/tasks", json={"prompt": "admin parent", "project_id": pid, "requires_approval": True}
+    ).json()
 
     async def setsess():
         async with SessionLocal() as s:
