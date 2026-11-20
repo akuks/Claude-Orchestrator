@@ -16,7 +16,7 @@ no placeholder, the input is appended.
 
 import asyncio
 
-from sqlalchemy import select
+from sqlalchemy import select, update
 
 from .constants import Status
 from .database import SessionLocal
@@ -224,9 +224,21 @@ class WorkflowRunner:
                 await s.commit()
                 return
 
-            if first or run.status == RUN_PENDING:
-                run.status = RUN_RUNNING
-                run.current_stage = 0
+            if run.status == RUN_PENDING:
+                # Claim the run atomically: start_run (request path) and the
+                # background tick can both see a fresh run as pending; only the
+                # one whose conditional UPDATE matches may start stage 0, or the
+                # stage's tasks are created (and billed) twice.
+                claimed = await s.execute(
+                    update(WorkflowRun)
+                    .where(WorkflowRun.id == run_id, WorkflowRun.status == RUN_PENDING)
+                    .values(status=RUN_RUNNING, current_stage=0)
+                    .execution_options(synchronize_session=False)
+                )
+                if claimed.rowcount != 1:
+                    await s.rollback()
+                    return
+                await s.refresh(run)
                 submits = await _start_stage(s, run, 0, self.worker)
                 await s.commit()
                 for t in submits:
