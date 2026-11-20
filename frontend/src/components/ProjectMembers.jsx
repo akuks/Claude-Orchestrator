@@ -191,7 +191,12 @@ export default function ProjectMembers({ project, currentUser, onSaved }) {
             </Popconfirm>
           ))}
         {canEdit && dirty && <Button onClick={() => setDraft(saved)}>Discard changes</Button>}
-        <Button icon={<ReloadOutlined />} onClick={load}>
+        <Button
+          icon={<ReloadOutlined />}
+          onClick={load}
+          disabled={dirty}
+          title={dirty ? 'Save or discard your changes first' : undefined}
+        >
           Reload
         </Button>
       </Space>

@@ -169,8 +169,14 @@ function MemoryPane({ project, canEdit, onSaved }) {
 
   useEffect(() => {
     if (!project) return
-    api.getMemory(project.id).then((m) => setMem(m.memory || ''))
-    api.listSummaries(project.id).then(setSummaries)
+    api
+      .getMemory(project.id)
+      .then((m) => setMem(m.memory || ''))
+      .catch((e) => message.error(e.message))
+    api
+      .listSummaries(project.id)
+      .then(setSummaries)
+      .catch((e) => message.error(e.message))
   }, [project?.id])
 
   const save = async () => {
