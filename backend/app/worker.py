@@ -9,13 +9,13 @@ results + output artifacts. No external broker/queue needed for Phase 1.
 import asyncio
 import json
 import mimetypes
-import os
 from datetime import datetime, timezone
 from pathlib import Path
 
 from sqlalchemy import func, select
 
 from . import auth, context_store, mcp_manager, memory, notifications, security
+from .agent_env import MissingCredential, build_agent_env
 from .config import settings
 from .constants import Priority, Status
 from .database import SessionLocal
@@ -323,6 +323,20 @@ class WorkerManager:
                         plugin_dirs.append(p.local_path)
             await s.commit()
 
+        # Build the subprocess environment from scratch (app.agent_env): the
+        # allowlisted base + project env + the task creator's own credentials
+        # (or the org fallback). Nothing else of the server env is inherited, so
+        # server config (CO_*) and the server's own Claude/GitHub credentials
+        # never reach the agent, which a member can make print its env. No
+        # credential (or a legacy ownerless task): fail before spawning.
+        try:
+            async with SessionLocal() as s:
+                sub_env = await build_agent_env(s, task_owner, project_env=project_env)
+        except MissingCredential as e:
+            await emit("error", {"message": str(e)})
+            await self._finish(task_id, Status.FAILED, error=str(e))
+            return
+
         workspace.mkdir(parents=True, exist_ok=True)
         await emit("started", {"model": model, "max_turns": max_turns})
 
@@ -430,19 +444,11 @@ class WorkerManager:
         }
         stderr_buf: list[str] = []
 
-        # Build the subprocess environment: inherited env + the project's env.
-        # PATH_PREPEND is prepended to PATH (toolchain scoping, e.g. a project-
-        # specific PHP/Node) rather than replacing it.
-        # Server config (CO_*: admin password, DB URL, secret key...) must not reach
-        # the agent, which a member can make print its env. CO_API_TOKEN is re-added
-        # below for tasks that have an owner.
-        sub_env = {k: v for k, v in os.environ.items() if not k.startswith("CO_")}
-        if project_env:
-            prepend = project_env.pop("PATH_PREPEND", None)
-            sub_env.update({k: str(v) for k, v in project_env.items()})
-            if prepend:
-                sub_env["PATH"] = f"{prepend}{os.pathsep}{sub_env.get('PATH', '')}"
-            await emit("env", {"applied": sorted(project_env.keys()) + (["PATH_PREPEND"] if prepend else [])})
+        # Names only, never values.
+        await emit(
+            "env",
+            {"applied": sorted(project_env.keys()), "credentials": sub_env.credentials},
+        )
 
         # Scoped agent token: lets a coordinator call back into the API as the
         # task's owner (dispatch + read own tree). Env only - never in the prompt,

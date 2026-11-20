@@ -114,17 +114,28 @@ async def delete_my_github(request: Request):
     return await _clear(request, "github_enc")
 
 
+# Users with a connection test in flight: one at a time each, so a user can't
+# fan out claude subprocesses (single event loop: check-and-add is atomic).
+_probing: set[str] = set()
+
+
 @router.post("/test", response_model=CredentialTestOut)
 async def test_my_credentials(request: Request, data: Any = Body(...)):
     body = _parse(CredentialTestIn, data)
     uid = _uid(request)
-    # Read what's needed, then release the session before the (slow) probe.
-    async with SessionLocal() as s:
-        if body.which == "claude":
-            probe = await credentials.prepare_claude_probe(s, uid)
-        else:
-            probe = await credentials.prepare_github_probe(s, uid)
-    ok, detail = await probe()
+    if uid in _probing:
+        raise HTTPException(429, "A connection test is already running")
+    _probing.add(uid)
+    try:
+        # Read what's needed, then release the session before the (slow) probe.
+        async with SessionLocal() as s:
+            if body.which == "claude":
+                probe = await credentials.prepare_claude_probe(s, uid)
+            else:
+                probe = await credentials.prepare_github_probe(s, uid)
+        ok, detail = await probe()
+    finally:
+        _probing.discard(uid)
     return CredentialTestOut(ok=ok, detail=detail)
 
 

@@ -681,7 +681,7 @@ def _secret(v: Optional[str]) -> str:
     if v is None or not v.strip():
         raise ValueError("must be a non-empty string")
     v = v.strip()
-    if _CTRL.search(v) or " " in v:
+    if _CTRL.search(v) or any(c.isspace() for c in v):
         raise ValueError("must not contain whitespace or control characters")
     return v
 

@@ -109,11 +109,18 @@ async def run_claude_probe(env: dict[str, str]) -> tuple[bool, str]:
     except (FileNotFoundError, PermissionError):
         return False, "claude binary not found"
     try:
-        _, err = await asyncio.wait_for(proc.communicate(), timeout=PROBE_TIMEOUT)
-    except asyncio.TimeoutError:
-        proc.kill()
-        await proc.wait()
-        return False, f"timed out after {PROBE_TIMEOUT}s"
+        try:
+            _, err = await asyncio.wait_for(proc.communicate(), timeout=PROBE_TIMEOUT)
+        except asyncio.TimeoutError:
+            return False, f"timed out after {PROBE_TIMEOUT}s"
+    finally:
+        # Timeout, cancellation (client gone) or any error: never leave it running.
+        if proc.returncode is None:
+            try:
+                proc.kill()
+            except ProcessLookupError:
+                pass
+            await proc.wait()
     ok = proc.returncode == 0
     detail = redact(err.decode(errors="replace"), secrets).strip()[:DETAIL_MAX]
     if not detail:
@@ -127,17 +134,15 @@ async def _refuse(detail: str) -> tuple[bool, str]:
 
 async def prepare_claude_probe(s, user_id: str):
     """Read what the probe needs, return a zero-arg coroutine function that runs
-    it (so the caller can release the DB session first). The probe uses the
-    credential a task of this user would run on: own, else the org fallback.
-    Task 2 swaps the env for the full agent-env builder."""
-    cred = await get_claude_secret(s, user_id)
-    if cred is None:
-        fb = await get_fallback_key(s)
-        if not fb:
-            return lambda: _refuse(MISSING_CLAUDE)
-        cred = ("ANTHROPIC_API_KEY", fb)
-    env = base_env()
-    env[cred[0]] = cred[1]
+    it (so the caller can release the DB session first). Tests the user's OWN
+    Claude credential only - succeeding on the org key would say nothing about
+    theirs - in the exact env a task of theirs gets (app.agent_env: per-user
+    CLAUDE_CONFIG_DIR etc., never the server's ~/.claude)."""
+    from .agent_env import build_agent_env  # agent_env imports this module
+
+    if await get_claude_secret(s, user_id) is None:
+        return lambda: _refuse(MISSING_CLAUDE)
+    env = dict(await build_agent_env(s, user_id))
     return lambda: run_claude_probe(env)
 
 
