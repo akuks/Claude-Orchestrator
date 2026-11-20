@@ -58,6 +58,8 @@ class TaskOut(BaseModel):
     requires_approval: bool = False
     risk: str = "info"
     decision_reason: Optional[str] = None
+    created_by: Optional[str] = None
+    decided_by: Optional[str] = None
     thread_count: int = 1  # number of steps in this task's thread
     created_at: datetime
     started_at: Optional[datetime]
@@ -584,3 +586,48 @@ class ContextDocOut(BaseModel):
     updated_at: datetime
 
     model_config = {"from_attributes": True}
+
+
+class SetupIn(BaseModel):
+    email: str = Field(min_length=3, max_length=320)
+    name: str = Field(default="", max_length=200)
+    password: str
+
+
+class LoginIn(BaseModel):
+    email: str
+    password: str
+
+
+class PasswordChangeIn(BaseModel):
+    current_password: str
+    new_password: str
+
+
+class UserOut(BaseModel):
+    id: str
+    email: str
+    name: str
+    role: str
+    active: bool
+    created_at: datetime
+    last_login_at: Optional[datetime] = None
+
+    model_config = {"from_attributes": True}
+
+
+class UserCreate(BaseModel):
+    email: str = Field(min_length=3, max_length=320)
+    name: str = Field(default="", max_length=200)
+    role: str = "member"
+    password: str
+
+
+class UserPatch(BaseModel):
+    name: Optional[str] = Field(default=None, max_length=200)
+    role: Optional[str] = None
+    active: Optional[bool] = None
+
+
+class PasswordResetIn(BaseModel):
+    password: str

@@ -10,7 +10,7 @@ from sqlalchemy import (
     String,
     Text,
 )
-from sqlalchemy.orm import Mapped, mapped_column, relationship
+from sqlalchemy.orm import Mapped, mapped_column, relationship, validates
 
 from .constants import Priority, Status
 from .database import Base
@@ -28,6 +28,8 @@ class Task(Base):
     __tablename__ = "tasks"
 
     id: Mapped[str] = mapped_column(String(32), primary_key=True, default=_uuid)
+    created_by: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    decided_by: Mapped[str | None] = mapped_column(String(32), nullable=True)
     title: Mapped[str] = mapped_column(String(200))
     prompt: Mapped[str] = mapped_column(Text)
     project: Mapped[str | None] = mapped_column(String(200), nullable=True, index=True)
@@ -76,7 +78,7 @@ class Task(Base):
     # until a human approves (→ queued) or rejects (→ cancelled).
     requires_approval: Mapped[bool] = mapped_column(default=False)
     risk: Mapped[str] = mapped_column(String(16), default="info")  # info|warning|critical
-    decided_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    decided_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     decision_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
 
     # Results
@@ -90,9 +92,9 @@ class Task(Base):
     output_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
 
     # Timestamps
-    created_at: Mapped[datetime] = mapped_column(DateTime, default=_now, index=True)
-    started_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
-    completed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now, index=True)
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
     events: Mapped[list["TaskEvent"]] = relationship(
         back_populates="task", cascade="all, delete-orphan"
@@ -112,7 +114,7 @@ class TaskEvent(Base):
     seq: Mapped[int] = mapped_column(Integer)
     type: Mapped[str] = mapped_column(String(32))
     payload: Mapped[dict] = mapped_column(JSON, default=dict)
-    created_at: Mapped[datetime] = mapped_column(DateTime, default=_now)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
 
     task: Mapped["Task"] = relationship(back_populates="events")
 
@@ -128,7 +130,7 @@ class Artifact(Base):
     rel_path: Mapped[str] = mapped_column(String(1000))
     size: Mapped[int] = mapped_column(Integer, default=0)
     mime: Mapped[str | None] = mapped_column(String(200), nullable=True)
-    created_at: Mapped[datetime] = mapped_column(DateTime, default=_now)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
 
     task: Mapped["Task"] = relationship(back_populates="artifacts")
 
@@ -137,6 +139,7 @@ class Project(Base):
     __tablename__ = "projects"
 
     id: Mapped[str] = mapped_column(String(32), primary_key=True, default=_uuid)
+    created_by: Mapped[str | None] = mapped_column(String(32), nullable=True)
     name: Mapped[str] = mapped_column(String(200))
     slug: Mapped[str] = mapped_column(String(120), unique=True, index=True)
     directory: Mapped[str] = mapped_column(String(500))
@@ -161,10 +164,10 @@ class Project(Base):
     memory: Mapped[str] = mapped_column(Text, default="")
     memory_prev: Mapped[str | None] = mapped_column(Text, nullable=True)
     memory_enabled: Mapped[bool] = mapped_column(default=True)
-    memory_updated_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    memory_updated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
     archived: Mapped[bool] = mapped_column(default=False)
-    created_at: Mapped[datetime] = mapped_column(DateTime, default=_now)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
 
 
 class TaskSummary(Base):
@@ -175,7 +178,7 @@ class TaskSummary(Base):
     project_id: Mapped[str] = mapped_column(String(32), index=True)
     title: Mapped[str] = mapped_column(String(200), default="")
     summary: Mapped[str] = mapped_column(Text)
-    created_at: Mapped[datetime] = mapped_column(DateTime, default=_now, index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now, index=True)
 
 
 class Agent(Base):
@@ -185,6 +188,7 @@ class Agent(Base):
     __tablename__ = "agents"
 
     id: Mapped[str] = mapped_column(String(32), primary_key=True, default=_uuid)
+    created_by: Mapped[str | None] = mapped_column(String(32), nullable=True)
     name: Mapped[str] = mapped_column(String(200))
     description: Mapped[str | None] = mapped_column(String(500), nullable=True)
     system_prompt: Mapped[str] = mapped_column(Text, default="")  # the role
@@ -212,13 +216,14 @@ class Agent(Base):
     # local API injected, so it can analyse work and delegate by dispatching
     # child tasks to specialists (a coordinator / tech-lead).
     coordinator: Mapped[bool] = mapped_column(default=False)
-    created_at: Mapped[datetime] = mapped_column(DateTime, default=_now)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
 
 
 class Template(Base):
     __tablename__ = "templates"
 
     id: Mapped[str] = mapped_column(String(32), primary_key=True, default=_uuid)
+    created_by: Mapped[str | None] = mapped_column(String(32), nullable=True)
     name: Mapped[str] = mapped_column(String(200))
     description: Mapped[str | None] = mapped_column(String(500), nullable=True)
     prompt: Mapped[str] = mapped_column(Text)
@@ -227,13 +232,14 @@ class Template(Base):
     max_turns: Mapped[int] = mapped_column(Integer, default=25)
     priority: Mapped[str] = mapped_column(String(16), default=Priority.NORMAL)
     tags: Mapped[list] = mapped_column(JSON, default=list)
-    created_at: Mapped[datetime] = mapped_column(DateTime, default=_now)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
 
 
 class Schedule(Base):
     __tablename__ = "schedules"
 
     id: Mapped[str] = mapped_column(String(32), primary_key=True, default=_uuid)
+    created_by: Mapped[str | None] = mapped_column(String(32), nullable=True)
     name: Mapped[str] = mapped_column(String(200))
     cron: Mapped[str] = mapped_column(String(120))
     enabled: Mapped[bool] = mapped_column(default=True)
@@ -256,9 +262,9 @@ class Schedule(Base):
     # inline prompt config above.
     agent_id: Mapped[str | None] = mapped_column(String(32), nullable=True)
 
-    last_run_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
-    next_run_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
-    created_at: Mapped[datetime] = mapped_column(DateTime, default=_now)
+    last_run_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    next_run_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
 
 
 class Finding(Base):
@@ -282,11 +288,11 @@ class Finding(Base):
     # open | fixed | accepted | false_positive
     status: Mapped[str] = mapped_column(String(20), default="open")
     scans_count: Mapped[int] = mapped_column(Integer, default=1)
-    first_seen: Mapped[datetime] = mapped_column(DateTime, default=_now)
-    last_seen: Mapped[datetime] = mapped_column(DateTime, default=_now)
+    first_seen: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+    last_seen: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
     last_scan_id: Mapped[str | None] = mapped_column(String(32), nullable=True)
-    resolved_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
-    created_at: Mapped[datetime] = mapped_column(DateTime, default=_now)
+    resolved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
 
 
 class McpServer(Base):
@@ -311,8 +317,8 @@ class McpServer(Base):
     status: Mapped[str] = mapped_column(String(16), default="unknown")
     status_detail: Mapped[str | None] = mapped_column(String(500), nullable=True)
     tools: Mapped[list] = mapped_column(JSON, default=list)
-    last_checked_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
-    created_at: Mapped[datetime] = mapped_column(DateTime, default=_now)
+    last_checked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
 
     policies: Mapped[list["McpToolPolicy"]] = relationship(
         back_populates="server", cascade="all, delete-orphan"
@@ -330,7 +336,7 @@ class McpToolPolicy(Base):
     classification: Mapped[str] = mapped_column(String(16), default="write")  # read|write|dangerous
     action: Mapped[str] = mapped_column(String(20), default="require_approval")
     # action: auto_approve | require_approval | block
-    created_at: Mapped[datetime] = mapped_column(DateTime, default=_now)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
 
     server: Mapped["McpServer"] = relationship(back_populates="policies")
 
@@ -343,7 +349,7 @@ class McpCall(Base):
     server: Mapped[str] = mapped_column(String(120), index=True)
     tool: Mapped[str] = mapped_column(String(200))
     is_error: Mapped[bool] = mapped_column(default=False)
-    created_at: Mapped[datetime] = mapped_column(DateTime, default=_now, index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now, index=True)
 
 
 class Workflow(Base):
@@ -359,10 +365,11 @@ class Workflow(Base):
     __tablename__ = "workflows"
 
     id: Mapped[str] = mapped_column(String(32), primary_key=True, default=_uuid)
+    created_by: Mapped[str | None] = mapped_column(String(32), nullable=True)
     name: Mapped[str] = mapped_column(String(200))
     description: Mapped[str | None] = mapped_column(String(500), nullable=True)
     stages: Mapped[list] = mapped_column(JSON, default=list)
-    created_at: Mapped[datetime] = mapped_column(DateTime, default=_now)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
 
 
 class WorkflowRun(Base):
@@ -371,6 +378,7 @@ class WorkflowRun(Base):
     __tablename__ = "workflow_runs"
 
     id: Mapped[str] = mapped_column(String(32), primary_key=True, default=_uuid)
+    created_by: Mapped[str | None] = mapped_column(String(32), nullable=True)
     workflow_id: Mapped[str] = mapped_column(String(32), index=True)
     name: Mapped[str] = mapped_column(String(200))  # snapshot of workflow name
     input: Mapped[str] = mapped_column(Text, default="")
@@ -378,8 +386,8 @@ class WorkflowRun(Base):
     status: Mapped[str] = mapped_column(String(16), default="pending")
     current_stage: Mapped[int] = mapped_column(Integer, default=0)
     stages: Mapped[list] = mapped_column(JSON, default=list)  # snapshot at run time
-    created_at: Mapped[datetime] = mapped_column(DateTime, default=_now, index=True)
-    updated_at: Mapped[datetime] = mapped_column(DateTime, default=_now)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now, index=True)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
 
 
 class SkillPack(Base):
@@ -399,7 +407,7 @@ class SkillPack(Base):
     # "global" applies to every task; "project" applies only to its project_id.
     scope: Mapped[str] = mapped_column(String(16), default="global")
     project_id: Mapped[str | None] = mapped_column(String(32), nullable=True, index=True)
-    created_at: Mapped[datetime] = mapped_column(DateTime, default=_now)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
 
 
 class ContextDoc(Base):
@@ -412,6 +420,7 @@ class ContextDoc(Base):
     __tablename__ = "context_docs"
 
     id: Mapped[str] = mapped_column(String(32), primary_key=True, default=_uuid)
+    created_by: Mapped[str | None] = mapped_column(String(32), nullable=True)
     # Hierarchical path, e.g. "runbooks/deploy.md". Unique per scope+project.
     path: Mapped[str] = mapped_column(String(300), index=True)
     title: Mapped[str] = mapped_column(String(200))
@@ -422,5 +431,53 @@ class ContextDoc(Base):
     # (and overrides a global doc with the same path).
     scope: Mapped[str] = mapped_column(String(16), default="global")
     project_id: Mapped[str | None] = mapped_column(String(32), nullable=True, index=True)
-    created_at: Mapped[datetime] = mapped_column(DateTime, default=_now)
-    updated_at: Mapped[datetime] = mapped_column(DateTime, default=_now, onupdate=_now)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now, onupdate=_now)
+
+
+class User(Base):
+    __tablename__ = "users"
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=_uuid)
+    # Stored normalized (stripped + lowercased) so the unique index is case-insensitive.
+    email: Mapped[str] = mapped_column(String(320), unique=True, index=True)
+    name: Mapped[str] = mapped_column(String(200), default="")
+    password_hash: Mapped[str] = mapped_column(String(255))
+    role: Mapped[str] = mapped_column(String(16), default="member")  # "admin" | "member"
+    active: Mapped[bool] = mapped_column(default=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+    last_login_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    @validates("email")
+    def _normalize_email(self, _key, value: str) -> str:
+        # Enforced at the model so no code path can bypass case-insensitive uniqueness.
+        return value.strip().lower()
+
+
+class AuthSession(Base):
+    __tablename__ = "auth_sessions"
+
+    # sha256 hex of the raw session id; the raw id only ever lives in the cookie.
+    id_hash: Mapped[str] = mapped_column(String(64), primary_key=True)
+    user_id: Mapped[str] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), index=True
+    )
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    last_seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+    user_agent: Mapped[str | None] = mapped_column(String(400), nullable=True)
+
+
+class ApiToken(Base):
+    __tablename__ = "api_tokens"
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=_uuid)
+    token_hash: Mapped[str] = mapped_column(String(64), unique=True, index=True)
+    user_id: Mapped[str] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), index=True
+    )
+    purpose: Mapped[str] = mapped_column(String(16))  # "agent-task" | "personal"
+    task_id: Mapped[str | None] = mapped_column(String(32), nullable=True, index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)

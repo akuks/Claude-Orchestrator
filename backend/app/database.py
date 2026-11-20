@@ -1,9 +1,12 @@
+import asyncio
+
 from sqlalchemy.ext.asyncio import (
     AsyncSession,
     async_sessionmaker,
     create_async_engine,
 )
 from sqlalchemy.orm import DeclarativeBase
+from sqlalchemy.pool import NullPool
 
 from .config import settings
 
@@ -12,7 +15,12 @@ class Base(DeclarativeBase):
     pass
 
 
-engine = create_async_engine(settings.database_url, echo=False, future=True)
+engine = create_async_engine(
+    settings.database_url,
+    echo=False,
+    future=True,
+    **({"poolclass": NullPool} if settings.db_null_pool else {}),
+)
 SessionLocal = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
 
 
@@ -103,13 +111,90 @@ def _add_missing_columns(sync_conn) -> None:
         pass
 
 
-async def init_db() -> None:
-    # Import models so they register with Base.metadata before create_all.
-    from . import models  # noqa: F401
+def _alembic_cfg(url: str):
+    from pathlib import Path
 
-    async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
-        await conn.run_sync(_add_missing_columns)
+    from alembic.config import Config
+
+    backend_dir = Path(__file__).resolve().parent.parent
+    cfg = Config(str(backend_dir / "alembic.ini"))
+    cfg.set_main_option("script_location", str(backend_dir / "migrations"))
+    cfg.attributes["url"] = url
+    return cfg
+
+
+def _baseline_metadata(cfg):
+    """Frozen 0001 schema: run Alembic to the baseline on a scratch SQLite file and
+    reflect it. Immune to later model changes (new columns/tables)."""
+    import tempfile
+    from pathlib import Path
+
+    from alembic import command
+    from sqlalchemy import MetaData, create_engine
+
+    with tempfile.TemporaryDirectory(prefix="co-baseline-") as d:
+        scratch = Path(d) / "baseline.db"
+        cfg.attributes["url"] = f"sqlite+aiosqlite:///{scratch}"
+        command.upgrade(cfg, "0001")
+        eng = create_engine(f"sqlite:///{scratch}")
+        try:
+            md = MetaData()
+            md.reflect(eng)
+        finally:
+            eng.dispose()
+    md.remove(md.tables["alembic_version"])
+    return md
+
+
+def run_migrations(url: str) -> None:
+    """Bring the database at `url` to the latest schema (blocking).
+
+    A legacy SQLite DB created by the old create_all path has tables but no
+    alembic_version: patch its missing columns, create any missing baseline
+    tables from the frozen 0001 schema, then stamp it at the baseline so
+    `upgrade head` applies only later migrations."""
+    from alembic import command
+    from sqlalchemy import inspect
+
+    cfg = _alembic_cfg(url)
+
+    async def _is_legacy() -> bool:
+        eng = create_async_engine(url)
+        try:
+            async with eng.begin() as conn:
+
+                def _check(sync_conn) -> bool:
+                    tables = set(inspect(sync_conn).get_table_names())
+                    if "alembic_version" in tables or "tasks" not in tables:
+                        return False
+                    if sync_conn.dialect.name == "sqlite":
+                        _add_missing_columns(sync_conn)
+                    return True
+
+                return await conn.run_sync(_check)
+        finally:
+            await eng.dispose()
+
+    async def _create_missing(baseline) -> None:
+        eng = create_async_engine(url)
+        try:
+            async with eng.begin() as conn:
+                # checkfirst (default) skips tables the legacy DB already has.
+                await conn.run_sync(lambda c: baseline.create_all(c))
+        finally:
+            await eng.dispose()
+
+    legacy = asyncio.run(_is_legacy())
+    if legacy:
+        baseline = _baseline_metadata(cfg)
+        cfg.attributes["url"] = url
+        asyncio.run(_create_missing(baseline))
+        command.stamp(cfg, "0001")
+    command.upgrade(cfg, "head")
+
+
+async def init_db() -> None:
+    await asyncio.to_thread(run_migrations, settings.database_url)
 
 
 async def get_session() -> AsyncSession:

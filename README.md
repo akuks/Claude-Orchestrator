@@ -33,7 +33,7 @@ cost caps, security reviews, and reusable agent roles.
 
 ```
 frontend/  React + Vite + Ant Design + ECharts dashboard
-backend/   FastAPI + async SQLAlchemy (SQLite) + in-process asyncio worker pool
+backend/   FastAPI + async SQLAlchemy (SQLite or PostgreSQL) + in-process asyncio worker pool
 ```
 
 - **Worker manager** spawns `claude --print --output-format stream-json` per task
@@ -42,7 +42,7 @@ backend/   FastAPI + async SQLAlchemy (SQLite) + in-process asyncio worker pool
   (rate limit / overload / network) are auto-retried with exponential backoff.
 - **Streaming** is an in-memory pub/sub broker over WebSocket; every event is also
   persisted so a reconnecting client replays what it missed.
-- **No external services** — SQLite + an in-process queue/scheduler. Everything
+- **No external services required** — SQLite (or Postgres for teams) + an in-process queue/scheduler. Everything
   (worker pool, cron, MCP config, approvals) runs in one process.
 
 ---
@@ -55,7 +55,7 @@ The simplest way to run the whole stack:
 ./start.sh          # sets up deps on first run, then backend :8200 + frontend :5200
 ```
 
-`start.sh` frees the ports first (so stale processes can't pile up) and stops both
+`start.sh` binds the backend to **127.0.0.1** by default (`CO_BIND_HOST` to change) and frees the ports first (so stale processes can't pile up) and stops both
 on Ctrl+C. Then open **http://localhost:5200**. Override ports with
 `CO_BACKEND_PORT` / `CO_FRONTEND_PORT`.
 
@@ -68,7 +68,7 @@ cd backend
 python3 -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
 cp .env.example .env                                  # optional; defaults work
-uvicorn app.main:app --host 0.0.0.0 --port 8200
+uvicorn app.main:app --host 127.0.0.1 --port 8200 --proxy-headers   # single process: no --workers
 
 # Frontend (new terminal)
 cd frontend
@@ -83,11 +83,63 @@ the dashboard header shows a live **Claude readiness** tag (`GET /system/claude`
 
 ---
 
+## Deploying for a team
+
+The orchestrator is multi-user: every request needs a login, and tasks/projects are
+owned by the user who created them. The server is a **single process** — the login
+lockout and first-admin setup lock are held in memory, so **do not run multiple
+uvicorn workers** (or multiple replicas).
+
+**First login.** Either set `CO_ADMIN_EMAIL` and `CO_ADMIN_PASSWORD` before the first
+start (the admin is created if no users exist), or leave them unset and open the UI:
+the first visit shows a **setup screen** to create the first admin. Further users are
+added from the admin Users page. Rows that predate multi-user are assigned to the
+first admin.
+
+**PostgreSQL.** SQLite is fine for one person; for a team use Postgres:
+
+```bash
+createdb claude_orchestrator
+# backend/.env
+CO_DATABASE_URL=postgresql+asyncpg://user:password@localhost/claude_orchestrator
+```
+
+The schema is created/upgraded automatically on start (Alembic). To bring existing
+SQLite data across (stop the app first; run from `backend/`):
+
+```bash
+python scripts/migrate_sqlite_to_postgres.py \
+  --from sqlite:///claude_orchestrator.db \
+  --to   postgresql://user:password@localhost/claude_orchestrator
+```
+
+The source file is never modified (a temporary copy is upgraded and read). The
+target must be empty unless you pass `--force`, which **destroys all existing data in the target** (it deletes every row before copying). Source and target must not be the same database; that is always refused.
+
+**HTTPS via a reverse proxy.** For anything beyond localhost, put nginx/Caddy/etc.
+in front with TLS. The session cookie is marked `Secure` automatically when the
+request arrives over HTTPS. Keep `CO_BIND_HOST` at `127.0.0.1` and let the proxy
+reach it locally. Set `CO_FORWARDED_ALLOW_IPS` to the **proxy's IP** (default
+`127.0.0.1`) so uvicorn honours `X-Forwarded-For` and the login lockout sees real
+client IPs rather than the proxy's. Proxy WebSocket upgrades through as well.
+
+**Origins.** `CO_CORS_ORIGINS` (a JSON list, e.g. `["https://orchestrator.example.com"]`)
+is both the CORS allowlist **and** the WebSocket `Origin` allowlist. A UI served from
+any other origin must be added, or live task streams are rejected.
+
+---
+
 ## Configuration (`backend/.env`, prefix `CO_`)
 
 | Variable | Default | Purpose |
 |---|---|---|
-| `CO_DATABASE_URL` | `sqlite+aiosqlite:///./claude_orchestrator.db` | Task/event store |
+| `CO_DATABASE_URL` | `sqlite+aiosqlite:///./claude_orchestrator.db` | Task/event store (SQLite, or `postgresql+asyncpg://…`) |
+| `CO_ADMIN_EMAIL` / `CO_ADMIN_PASSWORD` | *(unset)* | Bootstrap first admin (else use the setup screen) |
+| `CO_BIND_HOST` | `127.0.0.1` | Interface `start.sh` binds the backend to (read by `start.sh` from the shell or `backend/.env`; not by the app) |
+| `CO_FORWARDED_ALLOW_IPS` | `127.0.0.1` | Reverse-proxy IP(s) trusted for `X-Forwarded-For` (read by `start.sh` from the shell or `backend/.env`; not by the app) |
+| `CO_CORS_ORIGINS` | localhost dev origins (`start.sh` sets it from `CO_FRONTEND_PORT` if unset) | JSON list; CORS **and** WebSocket Origin allowlist |
+| `CO_SESSION_TTL_DAYS` | `7` | Login session lifetime |
+| `CO_LOGIN_MAX_FAILURES` / `CO_LOGIN_WINDOW_SECONDS` | `5` / `900` | Login lockout |
 | `CO_WORKSPACES_DIR` | `./workspaces` | Isolated per-task working dirs (resolved absolute) |
 | `CO_CLAUDE_BIN` | `claude` | Claude Code CLI to spawn |
 | `CO_DEFAULT_MODEL` | `sonnet` | Fallback default model (blank ⇒ CLI default) |
@@ -98,7 +150,7 @@ the dashboard header shows a live **Claude readiness** tag (`GET /system/claude`
 | `CO_FALLBACK_MODEL` | *(unset)* | Fallback model if the primary is unavailable |
 | `CO_RETRY_MAX_ATTEMPTS` / `CO_RETRY_BACKOFF_SECONDS` | `2` / `30` | Auto-retry transient failures |
 | `CO_GATE_CRITICAL_APPROVAL` | `true` | Force approval for critical-risk tasks (merge/deploy/delete) |
-| `CO_GITHUB_WEBHOOK_SECRET` | *(unset)* | HMAC secret for the GitHub PR webhook |
+| `CO_GITHUB_WEBHOOK_SECRET` | *(unset)* | HMAC secret for the GitHub PR webhook (required: the endpoint returns 503 while unset) |
 | `CO_SECRET_KEY` | *(auto)* | AES-256 vault key (else generated to `.secret.key`) |
 | `ANTHROPIC_API_KEY` | *(unset)* | Headless auth for the spawned `claude` |
 

@@ -4,15 +4,17 @@ import re
 import shutil
 from pathlib import Path
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import select
 
+from ..auth import require_admin
 from ..config import settings
 from ..database import SessionLocal
 from ..models import SkillPack
 from ..schemas import SkillPackCreate, SkillPackOut, SkillPackUpdate
 
 router = APIRouter(prefix="/skills", tags=["skills"])
+_admin = [Depends(require_admin)]  # writes are admin-only; reads are open
 
 
 # Curated skill packs (Claude Code plugins). One-click install from the UI.
@@ -73,7 +75,7 @@ async def list_skillpacks():
     return [SkillPackOut.model_validate(r) for r in rows]
 
 
-@router.post("", response_model=SkillPackOut, status_code=201)
+@router.post("", response_model=SkillPackOut, status_code=201, dependencies=_admin)
 async def install_skillpack(payload: SkillPackCreate):
     if not payload.source_url and not payload.local_path:
         raise HTTPException(400, "Provide a source_url (git repo) or a local_path")
@@ -114,7 +116,7 @@ async def install_skillpack(payload: SkillPackCreate):
         return SkillPackOut.model_validate(pack)
 
 
-@router.patch("/{pack_id}", response_model=SkillPackOut)
+@router.patch("/{pack_id}", response_model=SkillPackOut, dependencies=_admin)
 async def update_skillpack(pack_id: str, payload: SkillPackUpdate):
     data = payload.model_dump(exclude_unset=True)
     if "scope" in data and data["scope"] not in ("global", "project"):
@@ -130,7 +132,7 @@ async def update_skillpack(pack_id: str, payload: SkillPackUpdate):
         return SkillPackOut.model_validate(pack)
 
 
-@router.delete("/{pack_id}", status_code=204)
+@router.delete("/{pack_id}", status_code=204, dependencies=_admin)
 async def delete_skillpack(pack_id: str):
     async with SessionLocal() as s:
         pack = await s.get(SkillPack, pack_id)

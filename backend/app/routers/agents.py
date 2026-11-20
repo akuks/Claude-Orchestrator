@@ -13,9 +13,21 @@ from ..schemas import (
     DispatchRequest,
     TaskOut,
 )
+from ..models import Task
 from ..task_service import build_task
 
 router = APIRouter(prefix="/agents", tags=["agents"])
+
+
+async def _creator(s, request: Request, parent_task_id: str | None) -> str:
+    """Owner for a task created under a parent. Only an agent-task token inherits
+    the parent's creator (its coordinator's owner); a human caller always owns
+    what they create, so nobody's tasks run as someone else."""
+    if parent_task_id and request.state.principal.is_agent:
+        parent = await s.get(Task, parent_task_id)
+        if parent is not None and parent.created_by:
+            return parent.created_by
+    return request.state.principal.user.id
 
 # One-click starter agents / templates. Each carries not just a persona
 # (system_prompt) but the governance that makes the role meaningful: model,
@@ -218,7 +230,7 @@ async def list_presets():
 
 
 @router.post("", response_model=AgentOut, status_code=201)
-async def create_agent(payload: AgentCreate):
+async def create_agent(payload: AgentCreate, request: Request):
     if payload.model and payload.model not in VALID_MODELS:
         raise HTTPException(400, f"Invalid model. Use one of {sorted(VALID_MODELS)}")
     async with SessionLocal() as s:
@@ -240,6 +252,7 @@ async def create_agent(payload: AgentCreate):
             read_only=payload.read_only,
             folder=payload.folder,
             coordinator=payload.coordinator,
+            created_by=request.state.principal.user.id,
         )
         s.add(agent)
         await s.commit()
@@ -312,6 +325,7 @@ async def run_agent(agent_id: str, payload: AgentRun, request: Request):
             read_only=agent.read_only,
             input_files=[f.model_dump() for f in payload.input_files],
             parent_task_id=payload.parent_task_id,
+            created_by=await _creator(s, request, payload.parent_task_id),
         )
         await s.commit()
         await s.refresh(task)
@@ -330,11 +344,17 @@ async def dispatch(payload: DispatchRequest, request: Request):
     in parallel). Reuses the normal agent-run path — no separate orchestration."""
     from ..constants import Status
 
+    # An agent-task token may only fan out under its own task.
+    p = request.state.principal
+    if p.is_agent and payload.parent_task_id != p.token.task_id:
+        raise HTTPException(403, "Token may only dispatch under its own task")
+
     async with SessionLocal() as s:
         # Resolve each target agent by id or exact name.
         all_agents = (await s.execute(select(Agent))).scalars().all()
         by_id = {a.id: a for a in all_agents}
         by_name = {a.name: a for a in all_agents}
+        creator = await _creator(s, request, payload.parent_task_id)
         outs = []
         for item in payload.items:
             agent = by_id.get(item.agent) or by_name.get(item.agent)
@@ -356,6 +376,7 @@ async def dispatch(payload: DispatchRequest, request: Request):
                 allow_remote=agent.allow_remote,
                 read_only=agent.read_only,
                 parent_task_id=payload.parent_task_id,
+                created_by=creator,
             )
             outs.append(task)
         await s.commit()
@@ -398,6 +419,7 @@ async def bulk_run_agent(agent_id: str, payload: AgentBulkRun, request: Request)
                     requires_approval=agent.requires_approval,
                     allow_remote=agent.allow_remote,
                     read_only=agent.read_only,
+                    created_by=request.state.principal.user.id,
                 )
             )
         await s.commit()

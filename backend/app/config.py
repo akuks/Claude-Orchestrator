@@ -8,6 +8,8 @@ class Settings(BaseSettings):
 
     # Storage
     database_url: str = "sqlite+aiosqlite:///./claude_orchestrator.db"
+    # Disable connection pooling (tests: asyncpg connections can't cross event loops).
+    db_null_pool: bool = False
     workspaces_dir: Path = Path("./workspaces")
 
     # Claude Code worker
@@ -73,13 +75,22 @@ class Settings(BaseSettings):
     memory_max_chars: int = 6000  # ~1500 tokens
     memory_call_timeout_seconds: int = 120
 
+    # Auth (multi-user)
+    session_ttl_days: int = 7
+    login_max_failures: int = 5
+    login_window_seconds: int = 900
+    # Bootstrap admin, created on first start when no users exist.
+    admin_email: str = ""
+    admin_password: str = ""
+
     # API
     # Base URL a coordinator agent uses to dispatch to other agents (self-call).
     api_base: str = "http://localhost:8200"
     cors_origins: list[str] = [
         "http://localhost:5173",
-        "http://localhost:3000",
         "http://127.0.0.1:5173",
+        "http://localhost:5200",  # start.sh UI (Vite proxy keeps the browser Origin)
+        "http://127.0.0.1:5200",
     ]
 
 

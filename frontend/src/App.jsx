@@ -1,8 +1,10 @@
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import {
   Badge,
   Button,
+  Dropdown,
   Layout,
+  Spin,
   Popconfirm,
   Segmented,
   Select,
@@ -18,6 +20,10 @@ import {
   DeleteOutlined,
   DollarOutlined,
   FolderOutlined,
+  LockOutlined,
+  LogoutOutlined,
+  TeamOutlined,
+  UserOutlined,
   PlusOutlined,
   ReloadOutlined,
   SafetyCertificateOutlined,
@@ -26,7 +32,7 @@ import {
 } from '@ant-design/icons'
 import dayjs from 'dayjs'
 import relativeTime from 'dayjs/plugin/relativeTime'
-import { api, PRIORITY_COLORS, STATUS_COLORS, shortModel } from './api'
+import { api, setUnauthorizedHandler, PRIORITY_COLORS, STATUS_COLORS, shortModel } from './api'
 import StatsBar from './components/StatsBar'
 import CreateTaskModal from './components/CreateTaskModal'
 import CodeReviewModal from './components/CodeReviewModal'
@@ -37,12 +43,87 @@ import AutomationView from './components/AutomationView'
 import ApprovalsView from './components/ApprovalsView'
 import UsageView from './components/UsageView'
 import SecurityView from './components/SecurityView'
+import UsersView from './components/UsersView'
+import LoginPage from './auth/LoginPage'
+import SetupPage from './auth/SetupPage'
+import ChangePasswordModal from './auth/ChangePasswordModal'
 
 dayjs.extend(relativeTime)
 
 const { Header, Content } = Layout
 
+const EXPIRED_MSG = 'Your session expired — please sign in again.'
+
 export default function App() {
+  // phase: loading | setup | login | app
+  const [phase, setPhase] = useState('loading')
+  const [user, setUser] = useState(null)
+  const [notice, setNotice] = useState(null)
+  const userRef = useRef(null)
+  userRef.current = user
+
+  useEffect(() => {
+    setUnauthorizedHandler(() => {
+      if (!userRef.current) return
+      setUser(null)
+      setNotice(EXPIRED_MSG)
+      setPhase('login')
+    })
+    ;(async () => {
+      try {
+        const st = await api.setupStatus()
+        if (st.needs_setup) return setPhase('setup')
+        try {
+          setUser(await api.me())
+          setPhase('app')
+        } catch (e) {
+          setPhase('login')
+        }
+      } catch (e) {
+        setPhase('login')
+      }
+    })()
+  }, [])
+
+  const signedIn = (u) => {
+    setUser(u)
+    setNotice(null)
+    setPhase('app')
+  }
+  const logout = async () => {
+    try {
+      await api.logout() // 401 here just means already logged out
+    } catch (_) {}
+    setUser(null)
+    setNotice(null)
+    setPhase('login')
+  }
+
+  if (phase === 'loading')
+    return (
+      <Layout style={{ minHeight: '100vh' }}>
+        <div style={{ display: 'flex', justifyContent: 'center', paddingTop: 160 }}>
+          <Spin size="large" />
+        </div>
+      </Layout>
+    )
+  if (phase === 'setup')
+    return (
+      <Layout style={{ minHeight: '100vh' }}>
+        <SetupPage onDone={signedIn} />
+      </Layout>
+    )
+  if (phase === 'login')
+    return (
+      <Layout style={{ minHeight: '100vh' }}>
+        <LoginPage notice={notice} onLoggedIn={signedIn} />
+      </Layout>
+    )
+  return <AppInner user={user} onLogout={logout} />
+}
+
+function AppInner({ user, onLogout }) {
+  const [pwOpen, setPwOpen] = useState(false)
   const [tasks, setTasks] = useState([])
   const [stats, setStats] = useState(null)
   const [loading, setLoading] = useState(false)
@@ -213,10 +294,15 @@ export default function App() {
           display: 'flex',
           alignItems: 'center',
           justifyContent: 'space-between',
+          flexWrap: 'wrap',
+          height: 'auto',
+          minHeight: 64,
+          rowGap: 8,
           paddingInline: 24,
+          paddingBlock: 8,
         }}
       >
-        <Space size="large">
+        <Space size="large" wrap>
           <Typography.Title
             level={4}
             style={{ color: '#fff', margin: 0, whiteSpace: 'nowrap' }}
@@ -253,10 +339,13 @@ export default function App() {
               { value: 'security', label: 'Security', icon: <SafetyCertificateOutlined /> },
               { value: 'usage', label: 'Usage', icon: <DollarOutlined /> },
               { value: 'mcp', label: 'MCP Servers', icon: <ApiOutlined /> },
+              ...(user.role === 'admin'
+                ? [{ value: 'users', label: 'Users', icon: <TeamOutlined /> }]
+                : []),
             ]}
           />
         </Space>
-        <Space>
+        <Space wrap>
           {view === 'tasks' && (
             <Select
               allowClear
@@ -280,11 +369,36 @@ export default function App() {
               New Task
             </Button>
           )}
+          <Dropdown
+            trigger={['click']}
+            menu={{
+              items: [
+                {
+                  key: 'me',
+                  disabled: true,
+                  label: (
+                    <span>
+                      {user.name}{' '}
+                      <Tag style={{ marginInlineEnd: 0 }} color={user.role === 'admin' ? 'gold' : 'default'}>
+                        {user.role}
+                      </Tag>
+                    </span>
+                  ),
+                },
+                { type: 'divider' },
+                { key: 'pw', icon: <LockOutlined />, label: 'Change password', onClick: () => setPwOpen(true) },
+                { key: 'out', icon: <LogoutOutlined />, label: 'Log out', onClick: onLogout },
+              ],
+            }}
+          >
+            <Button icon={<UserOutlined />} data-testid="user-menu" title={user.name} aria-label="User menu" />
+          </Dropdown>
         </Space>
       </Header>
 
       <Content style={{ padding: 24 }}>
         {view === 'mcp' && <McpRegistry />}
+        {view === 'users' && user.role === 'admin' && <UsersView currentUser={user} />}
         {view === 'projects' && <ProjectsView onProjectsChanged={loadProjects} />}
         {view === 'automation' && <AutomationView projects={projects} />}
         {view === 'approvals' && <ApprovalsView onChanged={loadApprovalCount} />}
@@ -340,6 +454,7 @@ export default function App() {
         onClose={() => setReviewOpen(false)}
         onCreated={refresh}
       />
+      <ChangePasswordModal open={pwOpen} onClose={() => setPwOpen(false)} />
       <TaskDetail
         taskId={selected}
         onClose={() => setSelected(null)}

@@ -72,6 +72,7 @@ async def build_task(
     parent_task_id: str | None = None,
     workflow_run_id: str | None = None,
     stage_index: int | None = None,
+    created_by: str | None = None,
 ) -> Task:
     """Create a Task row (flushed, not committed) in the given session.
 
@@ -113,6 +114,7 @@ async def build_task(
         parent_task_id=parent.id if parent else None,
         workflow_run_id=workflow_run_id,
         stage_index=stage_index,
+        created_by=created_by,
     )
     s.add(task)
     await s.flush()  # assign id

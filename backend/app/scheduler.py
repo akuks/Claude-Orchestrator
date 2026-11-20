@@ -6,6 +6,7 @@ task_service, and advances next_run_at with croniter.
 """
 
 import asyncio
+import logging
 from datetime import datetime, timezone
 
 from croniter import croniter
@@ -14,8 +15,10 @@ from sqlalchemy import select
 from .config import settings
 from .constants import Status
 from .database import SessionLocal
-from .models import Agent, Schedule, Task
+from .models import Agent, Schedule, Task, User
 from .task_service import build_task
+
+log = logging.getLogger(__name__)
 
 
 async def build_from_schedule(s, sch: Schedule, title_suffix: str):
@@ -39,6 +42,7 @@ async def build_from_schedule(s, sch: Schedule, title_suffix: str):
             requires_approval=sch.requires_approval or agent.requires_approval,
             allow_remote=agent.allow_remote,
             read_only=agent.read_only,
+            created_by=sch.created_by,
         )
     return await build_task(
         s,
@@ -51,6 +55,7 @@ async def build_from_schedule(s, sch: Schedule, title_suffix: str):
         tags=sch.tags,
         schedule_id=sch.id,
         requires_approval=sch.requires_approval,
+        created_by=sch.created_by,
     )
 
 
@@ -107,6 +112,14 @@ class Scheduler:
             for sch in due:
                 if not is_valid_cron(sch.cron):
                     continue
+                if sch.created_by:
+                    owner = await s.get(User, sch.created_by)
+                    if owner is not None and not owner.active:
+                        log.warning(
+                            "Skipping schedule %s (%s): owner is disabled", sch.id, sch.name
+                        )
+                        sch.next_run_at = next_run(sch.cron, now)
+                        continue
                 # Don't stack runs: if this schedule's previous run is still
                 # unresolved (waiting on approval, queued, or running), skip this
                 # firing and just advance the clock. Otherwise gated schedules pile

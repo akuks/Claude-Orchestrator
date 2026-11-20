@@ -27,7 +27,7 @@ import {
   SendOutlined,
   StopOutlined,
 } from '@ant-design/icons'
-import { api, PRIORITY_COLORS, STATUS_COLORS, shortModel } from '../api'
+import { api, notifyUnauthorized, PRIORITY_COLORS, STATUS_COLORS, shortModel } from '../api'
 import { warm } from '../theme'
 
 const EVENT_STYLE = {
@@ -240,6 +240,13 @@ export default function TaskDetail({ taskId, onClose, onChanged, onOpenTask }) {
         api.getTask(taskId).then((t) => !closed && setTask(t))
         api.getArtifacts(taskId).then((a) => !closed && setArtifacts(a))
         onChanged?.()
+      }
+    }
+    ws.onclose = (e) => {
+      if (closed) return
+      if (e.code === 4401) notifyUnauthorized()
+      else if (e.code === 4403) {
+        message.error("Live output blocked: this page's origin isn't in CO_CORS_ORIGINS")
       }
     }
     // Load any already-persisted artifacts (for finished tasks reopened later).

@@ -1,6 +1,8 @@
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 from sqlalchemy import select
 
+from ..auth import ws_principal
+from ..config import settings
 from ..database import SessionLocal
 from ..events import broker
 from ..models import TaskEvent
@@ -10,7 +12,23 @@ router = APIRouter(tags=["stream"])
 
 @router.websocket("/tasks/{task_id}/stream")
 async def stream_task(websocket: WebSocket, task_id: str):
+    # Authenticate (cookie only) before sending anything. Anonymous connections
+    # are accepted then closed with 4401: closing before accept() makes the
+    # server answer the handshake with HTTP 403, and browsers then report only
+    # code 1006, so the UI couldn't tell "logged out" from a network drop.
+    # CORS doesn't cover WebSockets and SameSite=Lax still sends the cookie from
+    # other same-site origins (e.g. another localhost port), so check Origin too.
+    # No Origin header = non-browser client, allowed.
+    origin = websocket.headers.get("origin")
+    if origin is not None and origin not in settings.cors_origins:
+        await websocket.accept()
+        await websocket.close(code=4403)
+        return
+    principal = await ws_principal(websocket)
     await websocket.accept()
+    if principal is None:
+        await websocket.close(code=4401)
+        return
     # Client may pass ?last_seq=N to resume without replaying what it has.
     try:
         last_seq = int(websocket.query_params.get("last_seq", 0))

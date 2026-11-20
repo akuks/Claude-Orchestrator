@@ -72,6 +72,7 @@ async def create_task(payload: TaskCreate, request: Request):
             claude_md=payload.claude_md,
             input_files=[f.model_dump() for f in payload.input_files],
             requires_approval=payload.requires_approval,
+            created_by=request.state.principal.user.id,
         )
         await s.commit()
         await s.refresh(task)
@@ -279,6 +280,7 @@ async def duplicate_task(task_id: str, request: Request):
             max_turns=src.max_turns,
             parent_task_id=src.id,
             status=Status.QUEUED,
+            created_by=request.state.principal.user.id,
         )
         s.add(new)
         await s.flush()
@@ -321,6 +323,7 @@ async def followup_task(task_id: str, payload: FollowupCreate, request: Request)
             resume_session_id=parent.session_id,
             workspace_dir=parent.workspace_dir,  # same workspace = continues context
             status=Status.QUEUED,
+            created_by=request.state.principal.user.id,
         )
         s.add(child)
         await s.commit()

@@ -25,7 +25,7 @@ async def preview_cron(cron: str, count: int = 5):
 
 
 @router.post("", response_model=ScheduleOut, status_code=201)
-async def create_schedule(payload: ScheduleCreate):
+async def create_schedule(payload: ScheduleCreate, request: Request):
     if not is_valid_cron(payload.cron):
         raise HTTPException(400, "Invalid cron expression")
     if payload.model and payload.model not in VALID_MODELS:
@@ -51,6 +51,7 @@ async def create_schedule(payload: ScheduleCreate):
             notify=payload.notify,
             notify_webhook=payload.notify_webhook,
             next_run_at=next_run(payload.cron) if payload.enabled else None,
+            created_by=request.state.principal.user.id,
         )
         s.add(sch)
         await s.commit()
