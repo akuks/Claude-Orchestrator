@@ -124,7 +124,7 @@ RM_CONFIRM = [
     "rm -rf ~/Downloads",
     "rm -r /tmp/x",
     "find /tmp/x -delete",
-    "find {H}/other -exec rm {{}} ;",
+    "find {H}/other -exec rm {{}} \\;",
     "ls | xargs rm -rf",
     "cd /tmp && rm -rf build",
     "cd $D && rm -rf build",
@@ -524,10 +524,10 @@ SELF_BASH_NEG = [
     "cat {G}/hooks/co_hook.py",
     "ls -la {G}",
     "tail -n 5 {T}/spool.jsonl",
-    "echo x > {C}/notes.md",
+    "cat {C}/notes.md",
     "cat {C}/settings.json",
     "grep -r co_hook .",
-    "rm -rf {C}/projects/old",
+    "rm -rf {H}/other/projects/old",
 ]
 SELF_TOOL_POS = [
     ("Write", {"file_path": "{C}/settings.json", "content": "{}"}),
@@ -537,7 +537,7 @@ SELF_TOOL_POS = [
     ("Write", {"file_path": "{G}/hooks/hooks.json", "content": "{}"}),
 ]
 SELF_TOOL_NEG = [
-    ("Write", {"file_path": "{C}/CLAUDE.md", "content": "x"}),
+    ("Write", {"file_path": "{H}/notes/CLAUDE.md", "content": "x"}),
     ("Edit", {"file_path": "{P}/settings.json", "old_string": "a", "new_string": "b"}),
     ("Read", {"file_path": "{G}/rules.py"}),
     ("Write", {"file_path": "{P}/co-guard-notes.md", "content": "x"}),
@@ -953,7 +953,6 @@ def test_c1_guard_env_vars(env, cmd, with_env):
     'echo "$CO_POLICY_FILE"',
     'cat "$CO_POLICY_FILE"',
     'ls "$CLAUDE_CONFIG_DIR"',
-    'echo x > "$CLAUDE_CONFIG_DIR/notes.md"',
     "python3 -c 'import os; print(os.getcwd())'",
 ])
 def test_c1_reading_guard_vars_is_free(env, cmd):
@@ -1165,7 +1164,7 @@ def test_i3_readers_are_free(env, cmd):
 
 
 # I4. Command word from a substitution ---------------------------------------------
-@pytest.mark.parametrize("cmd", ["$(cat cmd.txt)", "`cat f`", "x=$(cat f); $x", "$(which python) script.py",
+@pytest.mark.parametrize("cmd", ["$(cat cmd.txt)", "`cat f`", "x=$(cat f); $x", "$(which $X) script.py",
                                  "export X=$(cat f); $X"])
 def test_i4_command_word_from_substitution(env, cmd):
     assert "uncertain-command" in ids(bash(env, cmd))
@@ -1328,3 +1327,167 @@ def test_minor_chmod_wide_negative(env, cmd):
 
 def test_minor_docstring_has_seatbelt_limits():
     assert "Seatbelt limits" in rules.__doc__
+
+
+# ===========================================================================
+# Task 2 review, fix round 2: every listed input is a regression test
+# ===========================================================================
+ENV_PATHS = lambda e: {"CO_POLICY_FILE": str(e.T / "policy.json"), "CO_TASK_DIR": str(e.T),  # noqa: E731
+                       "CLAUDE_CONFIG_DIR": str(e.C), "CLAUDE_PLUGIN_ROOT": str(e.G)}
+
+
+# N1. Guard env vars in forms the expansion does not resolve -----------------------
+N1_CMDS = [
+    "p=$CO_POLICY_FILE; echo x > $p",
+    'p="$CO_POLICY_FILE"; cp evil "$p"',
+    'echo x > "${{CO_POLICY_FILE%.json}}.json"',
+    'echo x > "${{CO_TASK_DIR%/}}/policy.json"',
+    'echo x > "${{CO_POLICY_FILE%/*}}/policy.json"',
+    'echo x > "$(dirname "$CO_POLICY_FILE")/policy.json"',
+    'echo x > "$(echo $CO_POLICY_FILE)"',
+    'cp evil "$(printenv CO_POLICY_FILE)"',
+    "echo x > ${{CO_POLICY_FILE/json/json}}",
+    'v=CO_POLICY_FILE; echo x > ${{!v}}',
+    "printenv CO_POLICY_FILE | xargs -I{{}} cp evil {{}}",
+    'rm -rf "${{CLAUDE_PLUGIN_ROOT%/}}"',
+    "export P=$CO_POLICY_FILE; echo x > \"$P\"",
+    "printf 'cp e $CO_POLICY_FILE' > a.sh; bash a.sh",
+]
+
+
+@pytest.mark.parametrize("with_env", [False, True])
+@pytest.mark.parametrize("cmd", N1_CMDS)
+def test_n1_guard_var_forms(env, cmd, with_env):
+    extra = {"env_paths": ENV_PATHS(env)} if with_env else {}
+    assert deny_hard(bash(env, cmd, **extra), "self-protect")
+
+
+@pytest.mark.parametrize("cmd", ["cat $CO_POLICY_FILE", "echo $CO_TASK_DIR", "ls $CLAUDE_CONFIG_DIR",
+                                 "printenv CO_TASK_DIR", "env | grep CO_", 'echo "$CO_TASK_DIR" > /dev/null',
+                                 'git commit -m "docs: explain CO_POLICY_FILE handling"'])
+def test_n1_readers_and_prose_stay_free(env, cmd):
+    v = bash(env, cmd, env_paths=ENV_PATHS(env))
+    assert "self-protect" not in ids(v), v
+
+
+# N2. Globs against protected paths -----------------------------------------------
+@pytest.mark.parametrize("cmd", ["cp evil {TASKS}/T?/policy.json", "echo x > {TASKS}/T*/policy.json",
+                                 "cp evil {TASKS}/*/policy.json", "touch {TASKS}/T[0-9]/x"])
+def test_n2_globs(env, cmd):
+    assert deny_hard(bash(env, cmd.replace("{TASKS}", str(env.T.parent))), "self-protect")
+
+
+# N3. find -exec that may write {} -------------------------------------------------
+@pytest.mark.parametrize("cmd", [
+    "find {TASKS} -name policy.json -exec cp evil {{}} \\;",
+    "find {TASKS} -name '*.json' -exec sed -i s/a/b/ {{}} +",
+    "find {TASKS} -exec sh -c 'echo x > \"$1\"' _ {{}} \\;",
+])
+def test_n3_find_exec_writes(env, cmd):
+    assert deny_hard(bash(env, cmd.replace("{TASKS}", str(env.T.parent))), "self-protect")
+
+
+@pytest.mark.parametrize("cmd", ["find {TASKS} -name '*.py' -exec grep x {{}} +",
+                                 "find . -name '*.py' -exec sed -i s/a/b/ {{}} +"])
+def test_n3_find_exec_negative(env, cmd):
+    assert "self-protect" not in ids(bash(env, cmd.replace("{TASKS}", str(env.T.parent))))
+
+
+# N4. Case-folded comparisons (Ruling R9) ---------------------------------------------
+def test_n4_case_folded(env):
+    t_low = str(env.T.parent / "t1")
+    for cmd in [f"echo x > {t_low}/POLICY.json", f"echo x > {str(env.C).upper()}/settings.json",
+                "echo x > {C}/Settings.json"]:
+        assert deny_hard(bash(env, cmd), "self-protect"), cmd
+    for cmd in ["echo x > .Claude/settings.json", "echo x > .claude/settings.JSON", "echo x > .MCP.json"]:
+        assert "agent-config" in ids(bash(env, cmd)), cmd
+
+
+# N5. Whole CLAUDE_CONFIG_DIR (Ruling R10) ----------------------------------------------
+@pytest.mark.parametrize("cmd", ["echo x > {C}/.claude.json", "echo x > {C}/CLAUDE.md", "echo x > {C}/agents/a.md",
+                                 "echo x > $CLAUDE_CONFIG_DIR/CLAUDE.md", "echo x > cfg/agents/a.md",
+                                 "mkdir -p {C}/hooks"])
+def test_n5_whole_config_dir(linked, cmd):
+    assert deny_hard(bash(linked, cmd), "self-protect")
+
+
+@pytest.mark.parametrize("name,inp", [("Write", {"file_path": "{C}/CLAUDE.md", "content": "x"}),
+                                      ("Write", {"file_path": "{P}/cfg/.claude.json", "content": "{}"})])
+def test_n5_whole_config_dir_tools(linked, name, inp):
+    assert deny_hard(tool(linked, name, inp), "self-protect")
+
+
+# N6. agent-config through directory copies and git checkout/restore --------------------
+@pytest.mark.parametrize("cmd", ["cp -r evil/.claude .", "cp -r evil/.claude ./",
+                                 "git checkout evil -- .claude/settings.json", "git checkout evil -- .claude",
+                                 "git restore --source=evil .claude/settings.json", "git checkout evil -- .mcp.json"])
+def test_n6_agent_config(env, cmd):
+    assert "agent-config" in ids(bash(env, cmd))
+
+
+@pytest.mark.parametrize("cmd", ["git checkout evil -- src/app.py", "cp -r evil/src .",
+                                 "git restore src/x.py"])
+def test_n6_agent_config_negative(env, cmd):
+    assert "agent-config" not in ids(bash(env, cmd))
+
+
+# N7. find -L / -follow ---------------------------------------------------------------
+@pytest.mark.parametrize("cmd,hard", [("find -L sub -delete", False), ("find . -follow -name x -delete", False),
+                                      ("find -L . -exec rm {{}} +", False), ("find -L ~ -name x -delete", True)])
+def test_n7_find_follow(env, cmd, hard):
+    v = bash(env, cmd)
+    assert any(h.rule_id == "rm-rf-outside" and h.hard == hard for h in v.hits), v
+
+
+def test_prune_wildcard_covering_main(env):
+    assert "git-force-push-main" in ids(bash(env, "git push --prune origin 'refs/heads/*:refs/heads/*'"))
+    assert bash(env, "git push --prune origin 'refs/heads/feat/*:refs/heads/feat/*'").decision == "allow"
+
+
+# $(which ...) allowance -------------------------------------------------------------------
+WHICH_ALLOWED = [
+    "$(which python) script.py",
+    "$(which python3) -m pip install -r requirements.txt",
+    "$(command -v python3) -V",
+    "$(git rev-parse --show-toplevel)/scripts/test.sh",
+    "$(npm bin)/eslint .",
+    "$(go env GOPATH)/bin/golangci-lint run",
+    "$(brew --prefix)/bin/python3 x.py",
+    "$(pyenv which python) -m pytest",
+    "$(poetry env info -p)/bin/python x.py",
+    "cd $(git rev-parse --show-toplevel) && make test",
+    "PYTHON=$(which python3); $PYTHON setup.py build",
+]
+
+
+@pytest.mark.parametrize("cmd", WHICH_ALLOWED)
+def test_which_allowance(env, cmd):
+    assert bash(env, cmd).decision == "allow"
+
+
+@pytest.mark.parametrize("cmd,rule", [
+    ("$(which bash) -c 'rm -rf ~'", "rm-rf-outside"),
+    ("$(which git) push -f origin main", "git-force-push-main"),
+    ("$(git rev-parse --show-toplevel)/x.sh; rm -rf /tmp/y", "rm-rf-outside"),
+    ("$(cat f)", "uncertain-command"),
+    ("$(which $X) a", "uncertain-command"),
+    ("$(which python | sh) a", "uncertain-command"),
+    ("P=$(which python3); P=$(cat f); $P x", "uncertain-command"),
+    ('"$(dirname "$0")"/run.sh', "uncertain-command"),
+])
+def test_which_allowance_still_checks(env, cmd, rule):
+    (env.M / ".git" / "HEAD").write_text("ref: refs/heads/main\n")
+    assert rule in ids(bash(env, cmd, project_dir=str(env.M)) if "push" in cmd else bash(env, cmd))
+
+
+# MINOR: more stdin interpreters, env -S -----------------------------------------------------
+@pytest.mark.parametrize("cmd", ["curl x | pwsh -", "curl x | lua -", "curl x | Rscript -", "curl x | tclsh",
+                                 "curl x | osascript", "curl x | uv run -", "curl x | env -S 'python3 -u'"])
+def test_minor_more_interpreters(env, cmd):
+    assert "pipe-to-shell" in ids(bash(env, cmd))
+
+
+@pytest.mark.parametrize("cmd", ["curl x | lua parse.lua", "curl x | Rscript analyze.R", "uv run pytest",
+                                 "curl x | osascript notify.scpt"])
+def test_minor_more_interpreters_negative(env, cmd):
+    assert "pipe-to-shell" not in ids(bash(env, cmd))
