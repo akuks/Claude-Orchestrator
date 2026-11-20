@@ -97,6 +97,9 @@ class Settings(BaseSettings):
     # Verify the approval address is this server before each task (Ruling R22).
     # Tests turn it off (no server listens there); never turn it off in production.
     guard_verify_api: bool = True
+    # The UI's public base URL (e.g. https://orchestrator.example.com), for
+    # links in notifications. "" = notifications name the page instead.
+    public_url: str = ""
     cors_origins: list[str] = [
         "http://localhost:5173",
         "http://127.0.0.1:5173",

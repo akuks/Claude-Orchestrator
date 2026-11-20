@@ -7,6 +7,7 @@ read-only plugin directory::
     hooks/hooks.json      every event -> "<server python> -I .../co_hook.py <Event>"
     hooks/co_hook.py
     lib/rules.py, lib/shell.py
+    lib/__pycache__/{rules,shell}.<cache tag>.pyc   checked hash-based pycs
 
 ``root`` is a symlink to a content-addressed sibling ``.co-guard-<hash>``: when
 the content (including the interpreter path) changes, the new version is
@@ -22,6 +23,7 @@ from __future__ import annotations
 
 import fcntl
 import hashlib
+import importlib.util
 import json
 import os
 import shlex
@@ -30,6 +32,7 @@ import stat
 import sys
 import threading
 import uuid
+from importlib._bootstrap_external import _code_to_hash_pyc
 from pathlib import Path
 
 from . import co_hook
@@ -72,16 +75,31 @@ def hooks_json() -> dict:
     return {"hooks": hooks}
 
 
+def _pyc(name: str, source: bytes) -> bytes:
+    """``lib/<name>.py`` compiled for the server's interpreter (the hook's) as a
+    CHECKED hash-based pyc (PEP 552): valid only while the source hash
+    matches, independent of file mtimes, byte-identical for the same source -
+    the hook never compiles the guard library (the dir is read-only, so it
+    could not cache it either)."""
+    code = compile(source, f"{name}.py", "exec", dont_inherit=True)
+    return _code_to_hash_pyc(code, importlib.util.source_hash(source), True)
+
+
 def plugin_files() -> dict[str, bytes]:
     manifest = {"name": NAME, "version": "1.0.0",
                 "description": "Claude Orchestrator guard: blocks dangerous actions, asks a person for approval."}
-    return {
+    files = {
         ".claude-plugin/plugin.json": (json.dumps(manifest, indent=2) + "\n").encode(),
         "hooks/hooks.json": (json.dumps(hooks_json(), indent=2) + "\n").encode(),
         "hooks/co_hook.py": (_SRC / "co_hook.py").read_bytes(),
-        "lib/rules.py": (_SRC / "rules.py").read_bytes(),
-        "lib/shell.py": (_SRC / "shell.py").read_bytes(),
     }
+    tag = sys.implementation.cache_tag
+    for name in ("rules", "shell"):
+        src = (_SRC / f"{name}.py").read_bytes()
+        files[f"lib/{name}.py"] = src
+        if tag:
+            files[f"lib/__pycache__/{name}.{tag}.pyc"] = _pyc(name, src)
+    return files
 
 
 def content_hash(files: dict[str, bytes]) -> str:

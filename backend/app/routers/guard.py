@@ -54,6 +54,7 @@ from pydantic import BaseModel
 from sqlalchemy import and_, func, or_, select, update
 from sqlalchemy.exc import IntegrityError
 
+from .. import notifications
 from ..access import (
     ALL,
     can_see_task,
@@ -79,6 +80,7 @@ MAX_PENDING_PER_TASK = 20
 MAX_TOTAL_PER_TASK = 100  # every status: an agent cannot flood the approvals table
 LIST_LIMIT = 200
 BODY_LIMIT = 16 * 1024  # bytes, POST /guard/approvals and /guard/report
+SUMMARY_LIMIT = 8000  # the full command a person decides on (the hook cuts to fit BODY_LIMIT)
 # Stored request fields, compared whole when an idempotency key is reused.
 CONTENT_FIELDS = ("rule_ids", "tool", "summary", "cwd", "reason", "command_hash")
 
@@ -245,7 +247,7 @@ def _content(body: FileBody, secrets: list[str]) -> dict:
     return {
         "rule_ids": [redact(str(r), secrets)[:64] for r in body.rule_ids][:20],
         "tool": _cut(redact(body.tool, secrets), 200),
-        "summary": _cut(redact(body.summary, secrets), 2000),
+        "summary": _cut(redact(body.summary, secrets), SUMMARY_LIMIT),
         "cwd": _cut(redact(body.cwd, secrets), 1000),
         "reason": _cut(redact(body.reason, secrets), 2000),
         "command_hash": body.command_hash[:128],
@@ -345,6 +347,12 @@ async def file_request(
             if prior is None:
                 raise HTTPException(409, "conflicting request")
             return _replay(prior, content, response)
+        try:  # configured channels (redacted first line, no secrets); never blocks filing
+            note = await notifications.action_waiting_message(s, a, task)
+        except Exception:  # noqa: BLE001
+            note = None
+        if note is not None:
+            notifications.post_in_background(*note)
         return _filed(a)
 
 
@@ -491,8 +499,9 @@ async def report(request: Request, rec: dict = Body(...)):
         if a is None or a.task_id != task_id or a.status != "approved":
             return {"accepted": False}
         # What was approved is what the person saw, not what the caller says
-        # (summary cut like the hook's own record, so the spool copy dedupes).
-        summ = a.summary or ""
+        # (one short line like the hook's own record; the worker dedupes an
+        # approved record with the spool copy by its request id).
+        summ = " ".join((a.summary or "").split())
         if len(summ) > HOOK_SUMMARY_MAX:
             summ = summ[: HOOK_SUMMARY_MAX - 1] + "…"
         rec = dict(rec, tool=a.tool, rule_ids=list(a.rule_ids or []), summary=summ)

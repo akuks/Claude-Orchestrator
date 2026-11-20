@@ -17,6 +17,7 @@ import hashlib
 import hmac
 import ipaddress
 import json
+import logging
 import os
 import pwd
 import secrets
@@ -77,9 +78,9 @@ def whoami_proof(challenge: str) -> str:
 def verify_api_base(base: str, timeout: float = 3.0) -> bool:
     """True only if ``base`` is THIS server (blocking; run in a thread)."""
     challenge = secrets.token_hex(16)
-    from .co_hook import _NoRedirect  # a 3xx is "not verified", never followed
+    from .co_hook import no_redirect_handler  # a 3xx is "not verified", never followed
 
-    opener = build_opener(ProxyHandler({}), _NoRedirect)
+    opener = build_opener(ProxyHandler({}), no_redirect_handler())
     try:
         with opener.open(f"{base}/guard/whoami?challenge={challenge}", timeout=timeout) as resp:
             if resp.status != 200:
@@ -125,6 +126,33 @@ def guard_api_base() -> str:
     url = f"http://[{quote(str(ip), safe=':')}]:{port}" if ip.version == 6 else f"http://{ip}:{port}"
     _API_BASE_CACHE[key] = url
     return url
+
+
+_log = logging.getLogger("app.guard")
+
+
+def log_approval_address() -> None:
+    """Server startup: one line with the address co-guard's hook will use for
+    approvals; a loud warning when CO_BIND_HOST is a hostname (it is resolved
+    once, and must resolve to exactly one address) or cannot be used."""
+    host = (settings.bind_host or "").strip().strip("[]")
+    is_name = False
+    try:
+        ipaddress.ip_address(host or "127.0.0.1")
+    except ValueError:
+        is_name = True
+    try:
+        base = guard_api_base()
+    except GuardConfigError as e:
+        _log.error("co-guard: NO approval address (%s) - every task will fail to start until CO_BIND_HOST "
+                   "(now %r) is a literal IP", e, host)
+        return
+    if is_name:
+        _log.warning("co-guard: CO_BIND_HOST is a hostname (%r), resolved once to %s - set CO_BIND_HOST to a "
+                     "literal IP so the approval address cannot change or be claimed by another listener",
+                     host, base)
+    _log.info("co-guard: approval address %s (CO_BIND_HOST=%s, port %s)", base, host or "127.0.0.1",
+              base.rsplit(":", 1)[-1])
 
 
 def _code_path(path: str | None, keep: list[Path]) -> list[str]:

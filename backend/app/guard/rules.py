@@ -41,6 +41,7 @@ Policy (a dict, as written by the worker into ``policy.json``)::
       "protected_paths": ["/abs/co-guard", "/abs/_tasks/T1", ...],
                                            #   dirs/files (fnmatch patterns ok)
       "claude_config_dir": "/abs/.claude", # its settings*.json are protected
+      "tmpdir": "/abs/tmp",                # optional: the task's $TMPDIR (else env)
       "env_paths": {"CO_POLICY_FILE": "/abs/...", "CO_TASK_DIR": "/abs/...",
                     "CLAUDE_CONFIG_DIR": "/abs/...", "CLAUDE_PLUGIN_ROOT": "/abs/..."}
                                            #   values of the agent's env vars that
@@ -98,7 +99,11 @@ always on), so a new shell-capable tool fails closed without blocking work.
 
 CONFIRMABLE (a person may approve once): ``rm-rf-outside`` (recursive delete
 outside the project, of the project itself or its ``.git``, or of a target we
-cannot resolve), ``git-force-push-main``, ``git-reset-hard``,
+cannot resolve; a delete strictly INSIDE a temp dir is free - ``/tmp``,
+``/private/tmp``, ``$TMPDIR`` (policy ``tmpdir``, else the hook's env; not
+expanded when the command names ``TMPDIR`` other than as ``$TMPDIR`` or may
+assign it), ``/private/var/folders/<a>/`` - never a root itself, nor one that
+is or holds home or the project, nor over ssh), ``git-force-push-main``, ``git-reset-hard``,
 ``git-clean-fdx``, ``git-stash-drop``, ``secret-files``, ``chmod-wide``,
 ``pipe-to-shell``, ``git-internals`` (writes to ``.git/config``,
 ``.git/hooks``, ``.git/info/attributes``, ``.gitmodules`` with an
@@ -289,6 +294,15 @@ _FIND_NARROW = frozenset({"-name", "-iname", "-path", "-ipath", "-wholename", "-
                           "-ilname", "-newermt", "-uid", "-gid"})
 _DELETERS = frozenset({"rm", "rmdir", "unlink", "shred", "rimraf"})
 _WRITE_OPS = frozenset({">", ">>", ">|", "&>", "&>>", "<>", ">&"})
+# Final fix wave (Ruling R29): recursive deletes strictly INSIDE a temp dir are
+# free. Roots: /tmp, /private/tmp, $TMPDIR (policy "tmpdir", else the hook's
+# env) and every /private/var/folders/<a>/ (macOS per-user temp trees). Never
+# the roots themselves; paths are resolved like every delete target.
+_TEMP_ROOTS = ("/tmp", "/private/tmp")
+_VAR_FOLDERS = "/private/var/folders"
+# a bare TMPDIR name (not a plain $TMPDIR / ${TMPDIR} reference): the command
+# may set it, so $TMPDIR is not expanded for that command
+_TMPDIR_REF = re.compile(r"\$TMPDIR(?![A-Za-z0-9_])|\$\{TMPDIR\}")
 _PWD_VAR = re.compile(r"^(\$\{PWD\}|\$PWD|\$\(pwd\)|`pwd`)(?=/|$)")
 _GLOB = re.compile(r"[*?\[]")
 _FETCH_SUB = re.compile(r"(<\(|\$\(|`)\s*(sudo\s+)?(curl|wget|http|https|xh)\b")
@@ -533,8 +547,12 @@ class _Ctx:
             env.setdefault("CLAUDE_CONFIG_DIR", str(cfg))
         self.vars = {k: _real(os.path.abspath(v)) for k, v in env.items() if k in _GUARD_VARS}
         self.vars["HOME"] = self.home
-        self._var_re = re.compile(r"^\$(?:\{(" + "|".join(map(re.escape, self.vars)) + r")(?:[:]?[-?=+][^}]*)?\}|("
-                                  + "|".join(map(re.escape, self.vars)) + r"))(?=/|$)")
+        tmpdir = policy["tmpdir"] if "tmpdir" in policy else os.environ.get("TMPDIR")
+        self.tmpdir = _real(os.path.abspath(str(tmpdir))) if tmpdir else None
+        self.temp_roots = self._temp_roots()
+        if self.tmpdir and self.tmpdir in self.temp_roots:
+            self.vars["TMPDIR"] = self.tmpdir
+        self._build_var_re()
         prot = [str(p) for p in (policy.get("protected_paths") or []) if p]
         if cfg:  # Ruling R10: the whole config dir (Claude Code writes it itself, never through tools)
             prot += [str(cfg), posixpath.join(str(cfg), "settings*.json")]
@@ -555,6 +573,39 @@ class _Ctx:
         self.remote = False  # inside `ssh host CMD`: nothing is the project
         self.depth = 0
         self.evals = 0
+
+    def _build_var_re(self):
+        names = "|".join(map(re.escape, self.vars))
+        self._var_re = re.compile(r"^\$(?:\{(" + names + r")(?:[:]?[-?=+][^}]*)?\}|(" + names + r"))(?=/|$)")
+
+    def _temp_roots(self):
+        """Fixed temp roots plus $TMPDIR; a root that is (or holds) home or
+        the project, or is / , is no temp root."""
+        roots = {_real(r) for r in _TEMP_ROOTS} | set(_TEMP_ROOTS)  # '/tmp' as named (a link on macOS)
+        if self.tmpdir:
+            roots.add(self.tmpdir)
+        return {r for r in roots if r != "/" and not _within(self.home, r) and not _within(self.project, r)}
+
+    def distrust_tmpdir(self):
+        """The command may set TMPDIR itself: do not expand $TMPDIR."""
+        if self.vars.pop("TMPDIR", None) is not None:
+            self._build_var_re()
+
+    def in_temp(self, path, whole):
+        """A delete of ``path`` (whole: the path itself; else some children of
+        it) stays strictly inside a temp root. Never home or above, the
+        project, an ancestor of it or its .git."""
+        if self.remote or not path:
+            return False
+        if _within(self.home, path) or _within(self.project, path) or path == self.project + "/.git":
+            return False
+        roots = set(self.temp_roots)
+        parts = path.split("/")
+        if path.startswith(_VAR_FOLDERS + "/") and len(parts) > 4:
+            root = "/".join(parts[:5])  # /private/var/folders/<a>
+            if not _within(self.home, root) and not _within(self.project, root):
+                roots.add(root)
+        return any(_inside(path, r) if whole else _within(path, r) for r in roots)
 
     # -- hits --------------------------------------------------------------
     def hit(self, rule_id, hard, summary):
@@ -789,7 +840,11 @@ def _classify(ctx, targets, cwd, summary, narrow=False, names=None):
                     continue
                 if project and _inside(path, project) and path != project + "/.git":
                     continue
+                if ctx.in_temp(path, True):  # judged as the folder: never a root itself (/tmp/*)
+                    continue
             elif project and _within(path, project):
+                continue
+            elif ctx.in_temp(path, False):
                 continue
             level = level or "confirm"
     if level:
@@ -1341,6 +1396,9 @@ class _Bash:
 
     def run(self, command, cwd):
         res = _sh.parse(command)
+        pctx = getattr(res, "_ctx", None)
+        if "TMPDIR" in _TMPDIR_REF.sub("", command) or pctx is None or pctx.poison or "TMPDIR" in pctx.writes:
+            self.ctx.distrust_tmpdir()
         if res.too_complex:
             self.ctx.hit("unparseable", True, self.raw)
         self.subst_vars = _subst_assignments(command)

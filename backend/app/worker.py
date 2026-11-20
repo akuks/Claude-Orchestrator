@@ -20,6 +20,7 @@ from pathlib import Path
 from sqlalchemy import func, select
 
 from . import auth, context_store, mcp_manager, memory, notifications, security
+from .access import effective_project_id
 from .agent_env import PROJECT_ENV_BLOCKED, MissingCredential, build_agent_env
 from .config import settings
 from .constants import Priority, Status
@@ -200,14 +201,23 @@ class WorkerManager:
         self._dispatcher = asyncio.create_task(self._dispatch_loop())
         await self._requeue_pending()
 
+    @staticmethod
+    def _signal_group(proc, sig: int) -> None:
+        """Signal claude AND every tool it started: it runs in its own process
+        group (start_new_session); fall back to the process alone."""
+        try:
+            os.killpg(proc.pid, sig)
+        except (ProcessLookupError, PermissionError, OSError):
+            try:
+                proc.send_signal(sig)
+            except ProcessLookupError:
+                pass
+
     async def stop(self) -> None:
         if self._dispatcher:
             self._dispatcher.cancel()
         for proc in list(self._running.values()):
-            try:
-                proc.terminate()
-            except ProcessLookupError:
-                pass
+            self._signal_group(proc, signal.SIGTERM)
 
     async def _requeue_pending(self) -> None:
         """On boot, re-queue anything left QUEUED, and reset orphaned RUNNING."""
@@ -232,10 +242,7 @@ class WorkerManager:
         self._cancelled.add(task_id)
         proc = self._running.get(task_id)
         if proc:
-            try:
-                proc.terminate()
-            except ProcessLookupError:
-                pass
+            self._signal_group(proc, signal.SIGTERM)
 
     async def _retry_after(self, task_id, delay, priority, created_at) -> None:
         await asyncio.sleep(delay)
@@ -358,6 +365,19 @@ class WorkerManager:
                         guard_enabled=getattr(proj, "guard_enabled", True),
                         approval_wait_seconds=getattr(proj, "approval_wait_seconds", 300),
                     )
+            else:
+                # An ad-hoc step of a project thread (follow-up / dispatched
+                # child): the thread root's guard settings, as approvals use
+                # (access.effective_project_id); its own workspace stays its
+                # project dir.
+                eff = await effective_project_id(s, task)
+                proj = await s.get(Project, eff) if eff else None
+                if proj is not None:
+                    guard_project = SimpleNamespace(
+                        directory=None,
+                        guard_enabled=getattr(proj, "guard_enabled", True),
+                        approval_wait_seconds=getattr(proj, "approval_wait_seconds", 300),
+                    )
             # Coordinator: inject the live agent registry + how to delegate — but
             # NOT inside a workflow, where the workflow owns the orchestration and a
             # coordinator agent is used only as a planning step.
@@ -457,8 +477,8 @@ class WorkerManager:
             str(max_turns),
             "--permission-mode",
             settings.claude_permission_mode,
-            # Hook activity (co-guard decisions, hook_no_verdict) in the stream (spike g).
-            "--include-hook-events",
+            # (no --include-hook-events: the co-guard watchdog reads the hook's
+            # spool; stream hook events would only double the event writes)
             # co-guard first, before any skill pack.
             "--plugin-dir",
             guard_plugin,
@@ -618,7 +638,7 @@ class WorkerManager:
             )
             await proc.wait()
         except asyncio.TimeoutError:
-            proc.kill()
+            self._signal_group(proc, signal.SIGKILL)
             await proc.wait()
             await stderr_task
             self._running.pop(task_id, None)
@@ -801,14 +821,7 @@ class WorkerManager:
             return
         g["violation"] = reason
         await g["emit"]("guard", {"event": "watchdog", "decision": "killed", "reason": reason})
-        proc = g["proc"]
-        try:
-            os.killpg(proc.pid, signal.SIGKILL)  # claude and every tool it started
-        except (ProcessLookupError, PermissionError, OSError):
-            try:
-                proc.kill()
-            except ProcessLookupError:
-                pass
+        self._signal_group(g["proc"], signal.SIGKILL)  # claude and every tool it started
 
     @staticmethod
     def _guard_read_spool(g) -> None:
@@ -927,7 +940,12 @@ class WorkerManager:
 
     @staticmethod
     def _guard_key(payload: dict) -> str:
-        # The hook posts the record it spools, minus the spool's ts.
+        # The hook posts the record it spools, minus the spool's ts. An
+        # "approved" record is reported with the stored request's fields (the
+        # server never trusts the caller's), so it is keyed by its request id:
+        # one approval answers exactly one call.
+        if payload.get("decision") == "approved" and payload.get("request_id"):
+            return json.dumps({"approved": payload["request_id"], "event": payload.get("event")})
         return json.dumps({k: v for k, v in payload.items() if k != "ts"}, sort_keys=True, default=str)
 
     async def report_guard(self, task_id: str, rec: dict) -> bool:
@@ -1001,6 +1019,8 @@ class WorkerManager:
         await self._guard_on_event(obj, ctx)
         etype = obj.get("type")
         if etype == "system":
+            if str(obj.get("subtype") or "").startswith("hook_"):
+                return  # hook activity: co-guard's records come from its spool / live report
             sid = obj.get("session_id")
             await emit("system", {"subtype": obj.get("subtype"), "session_id": sid})
             if sid:

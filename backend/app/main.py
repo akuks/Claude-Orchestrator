@@ -87,6 +87,7 @@ async def lifespan(app: FastAPI):
     await init_db()
     # co-guard plugin (read-only, content-hashed): every task loads it first.
     ensure_plugin(guard_runtime.plugin_root())
+    guard_runtime.log_approval_address()
     await auth.bootstrap_admin()
     await auth.assign_orphans_to_first_admin()
     worker = WorkerManager()

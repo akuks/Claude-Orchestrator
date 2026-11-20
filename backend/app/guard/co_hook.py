@@ -40,7 +40,11 @@ call's ``command_hash``; anything else (and any 4xx - e.g. 409 when a request
 with this idempotency key but a different body is already pending - or no
 ``CO_API_TOKEN``) denies at once. The POST also sends ``wait_left`` (seconds to
 this hook's deadline) so the server expires the request no later. The decision is
-printed BEFORE the best-effort report.
+printed BEFORE the best-effort report. The request's ``summary`` is the FULL
+call a person decides on (``full_summary``: the Bash/Monitor command verbatim,
+a file tool's path and a note, otherwise the tool name and pretty JSON of its
+input), redacted, then cut with the server's "… (truncated, N chars)" marker at
+8000 chars or so the body stays under the server's 16 KB cap.
 
 ConfigChange (unverified with a real CLI): exit 2 blocks a settings change
 that sets ``disableAllHooks`` / ``allowManagedHooksOnly`` or disables the
@@ -53,18 +57,17 @@ and best-effort POSTed to ``/guard/report`` (0.5 s timeout). Other events
 an approved call) are spooled only.
 """
 
-import hashlib
 import importlib.util
-import ipaddress
 import json
 import os
 import re
 import sys
 import threading
 import time
-import urllib.error
-import urllib.parse
-import urllib.request
+
+# urllib / ipaddress / hashlib are imported only on the approval path (cost:
+# every hook run starts a fresh interpreter; PostToolUse and allowed calls
+# never talk to the network).
 
 # hooks.json PreToolUse timeout = APPROVAL_WAIT_MAX + 30 (Global Constraints).
 APPROVAL_WAIT_MAX = 900
@@ -75,7 +78,13 @@ POLL_MIN = 0.5
 FILE_BUDGET = 10.0  # seconds to get a request filed before giving up
 UNREACHABLE = "approval service unreachable \u2014 action blocked"
 REPORT_TIMEOUT = 0.5
-SUMMARY_MAX = 300
+SUMMARY_MAX = 300  # spool / run-log lines (single line)
+# The approval card's summary: the FULL redacted call, cut with the server's
+# marker (routers/guard.py _cut) at REQUEST_SUMMARY_MAX chars and so the POST
+# body stays within the server's 16 KB cap (BODY_BUDGET leaves room for the rest).
+REQUEST_SUMMARY_MAX = 8000
+BODY_BUDGET = 15 * 1024
+FILE_TOOLS = ("Write", "Edit", "MultiEdit", "NotebookEdit")
 ERROR_REASON = "co-guard error — action blocked for safety"
 EVENTS = ("PreToolUse", "PostToolUse", "SessionStart", "Stop", "SessionEnd", "SubagentStart", "SubagentStop",
           "ConfigChange")
@@ -113,7 +122,45 @@ def redact(text, limit=SUMMARY_MAX):
     for sec in _secrets():
         text = text.replace(sec, "***")
     text = _URL_USERINFO.sub("://***:***@", _TOKEN_SHAPES.sub("***", text))
-    return text if len(text) <= limit else text[:limit - 1] + "…"
+    return text if limit is None or len(text) <= limit else text[:limit - 1] + "…"
+
+
+def cut(text, limit):
+    """Bound ``text`` with the server's visible marker (routers/guard.py _cut)."""
+    if len(text) <= limit:
+        return text
+    mark = f"\u2026 (truncated, {len(text)} chars)"
+    return text[: max(0, limit - len(mark))] + mark
+
+
+def _chars(value):
+    return f"{len(value)} chars" if isinstance(value, str) else "?"
+
+
+def full_summary(tool, tool_input):
+    """What a person must see to decide (unredacted, uncut): Bash/Monitor the
+    command verbatim; file tools the path and a short note; anything else
+    (MCP, unknown tools) the tool name and its input as pretty JSON."""
+    ti = tool_input if isinstance(tool_input, dict) else {}
+    if tool in ("Bash", "Monitor") and isinstance(ti.get("command"), str):
+        return ti["command"]
+    if tool in FILE_TOOLS:
+        path = ti.get("file_path") or ti.get("notebook_path") or "?"
+        if tool == "Write":
+            note = f"Write: new content, {_chars(ti.get('content'))}"
+        elif tool == "Edit":
+            note = f"Edit: replaces {_chars(ti.get('old_string'))} with {_chars(ti.get('new_string'))}"
+        elif tool == "MultiEdit":
+            edits = ti.get("edits")
+            note = f"MultiEdit: {len(edits) if isinstance(edits, list) else '?'} edits"
+        else:
+            note = f"NotebookEdit: {ti.get('edit_mode') or 'replace'} a cell, {_chars(ti.get('new_source'))}"
+        return f"{path}\n({note})"
+    try:
+        body = json.dumps(tool_input, indent=2, sort_keys=True, ensure_ascii=False, default=str)
+    except (TypeError, ValueError):
+        body = str(tool_input)
+    return f"{tool}\n{body}"
 
 
 # -- output -----------------------------------------------------------------
@@ -199,6 +246,9 @@ def _spool(record):
 def _api(policy):
     """The approval API: http://<literal IP>:<port> only (C2: a hostname such as
     localhost may resolve to an address an agent can listen on)."""
+    import ipaddress
+    import urllib.parse
+
     base = str(policy.get("api_base") or "").rstrip("/")
     u = urllib.parse.urlsplit(base)
     try:
@@ -211,15 +261,33 @@ def _api(policy):
     return base
 
 
-class _NoRedirect(urllib.request.HTTPRedirectHandler):
-    def redirect_request(self, *a, **k):
-        return None  # never follow a redirect away from the approval API
+_OPENER = None
 
 
-_OPENER = urllib.request.build_opener(urllib.request.ProxyHandler({}), _NoRedirect)
+def no_redirect_handler():
+    """A urllib handler class that never follows a redirect away from the
+    approval API (imports urllib on first use)."""
+    import urllib.request
+
+    class _NoRedirect(urllib.request.HTTPRedirectHandler):
+        def redirect_request(self, *a, **k):
+            return None
+
+    return _NoRedirect
+
+
+def _opener():
+    global _OPENER
+    if _OPENER is None:
+        import urllib.request
+
+        _OPENER = urllib.request.build_opener(urllib.request.ProxyHandler({}), no_redirect_handler())
+    return _OPENER
 
 
 def _request(method, url, body=None, timeout=5.0, headers=None):
+    import urllib.request
+
     data = json.dumps(body).encode() if body is not None else None
     req = urllib.request.Request(url, data=data, method=method)
     req.add_header("Authorization", "Bearer " + os.environ.get("CO_API_TOKEN", ""))
@@ -227,7 +295,7 @@ def _request(method, url, body=None, timeout=5.0, headers=None):
         req.add_header(k, v)
     if data is not None:
         req.add_header("Content-Type", "application/json")
-    with _OPENER.open(req, timeout=max(0.1, timeout)) as resp:
+    with _opener().open(req, timeout=max(0.1, timeout)) as resp:
         return json.loads(resp.read().decode() or "null")
 
 
@@ -257,6 +325,16 @@ def wait_seconds(policy):
     return max(0.0, min(w, float(APPROVAL_WAIT_MAX)))
 
 
+def _fit(body, summary):
+    """The summary cut so the whole JSON body stays within BODY_BUDGET."""
+    limit = REQUEST_SUMMARY_MAX
+    while True:
+        body["summary"] = cut(summary, limit)
+        if len(json.dumps(body).encode()) <= BODY_BUDGET or limit <= 200:
+            return
+        limit = int(limit * 0.8)
+
+
 def request_approval(policy, payload, verdict, summary, deadline):
     """('approved' | 'rejected' | 'expired' | 'timeout' | 'refused', request id, detail).
 
@@ -264,6 +342,10 @@ def request_approval(policy, payload, verdict, summary, deadline):
     ``{"id": ..., "status": "pending"}`` (Ruling R2) and every GET must carry
     that same id. 4xx answers, a missing token or an untrusted API address
     refuse at once; network errors and 5xx are retried until the deadline."""
+    import hashlib
+    import urllib.error
+    import urllib.parse
+
     token = os.environ.get("CO_API_TOKEN")
     if not token:
         return "refused", None, "no CO_API_TOKEN for this task"
@@ -278,11 +360,13 @@ def request_approval(policy, payload, verdict, summary, deadline):
         "task_id": policy.get("task_id") or os.environ.get("CO_TASK_ID"),
         "rule_ids": [h.rule_id for h in verdict.hits],
         "tool": tool,
-        "summary": redact(summary, 2000),
-        "cwd": str(payload.get("cwd") or policy.get("cwd") or ""),
+        "summary": "",
+        "cwd": redact(payload.get("cwd") or policy.get("cwd") or "", 1000),
         "reason": redact("; ".join(h.reason for h in verdict.hits), 2000),
         "command_hash": command_hash,
+        "wait_left": 0.0,
     }
+    _fit(body, redact(summary, None))  # redact the whole text first, then cut
     idem = hashlib.sha256((command_hash + ":" + str(payload.get("tool_use_id") or "")).encode()).hexdigest()
     poll = poll_seconds(policy)
     req_id = None
@@ -358,7 +442,8 @@ def pre_tool_use(payload, policy, started):
         return post_report(policy, rec)
     hard_deadline = started + HOOK_TIMEOUT - EXIT_MARGIN
     deadline = min(time.monotonic() + wait_seconds(policy), hard_deadline - 2)
-    status, req_id, detail = request_approval(policy, payload, verdict, summary, deadline)
+    status, req_id, detail = request_approval(policy, payload, verdict,
+                                              full_summary(tool, payload.get("tool_input")), deadline)
     rec = dict(base, decision="approved" if status == "approved" else "deny", status=status, request_id=req_id,
                reason=redact(reason))
     if detail:
