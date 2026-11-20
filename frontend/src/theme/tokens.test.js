@@ -142,3 +142,28 @@ describe('statusVar', () => {
     expect(statusVar('queued')).toBe('var(--co-text-muted)')
   })
 })
+
+describe('comet tokens', () => {
+  const contrast = (a, b) => {
+    const [hi, lo] = [luminance(a), luminance(b)].sort((x, y) => y - x)
+    return (hi + 0.05) / (lo + 0.05)
+  }
+  const KEYS = [
+    '--co-comet-flow',
+    '--co-comet-flow-opacity',
+    '--co-comet-wait-fill',
+    '--co-comet-label-current',
+    '--co-comet-label-failed',
+    '--co-comet-label-wait',
+  ]
+  it('exist in both modes', () => {
+    for (const m of ['light', 'night']) for (const k of KEYS) expect(cssVars(m)[k], `${m} ${k}`).toBeTruthy()
+  })
+  it('head labels stay readable on the panel surface (>= 4.5:1)', () => {
+    for (const m of ['light', 'night']) {
+      const bg = palette[m].surfaceSolid
+      for (const k of ['--co-comet-label-current', '--co-comet-label-failed', '--co-comet-label-wait'])
+        expect(contrast(cssVars(m)[k], bg), `${m} ${k}`).toBeGreaterThanOrEqual(4.5)
+    }
+  })
+})
