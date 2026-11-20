@@ -9,6 +9,7 @@ results + output artifacts. No external broker/queue needed for Phase 1.
 import asyncio
 import json
 import mimetypes
+from types import SimpleNamespace
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -20,6 +21,8 @@ from .config import settings
 from .constants import Priority, Status
 from .database import SessionLocal
 from .events import broker
+from .guard import runtime as guard_runtime
+from .guard.plugin import ensure_plugin
 from .models import Agent, Artifact, McpCall, Project, SkillPack, Task, TaskEvent, User
 from .redaction import redact, redact_obj, secrets_from_env
 
@@ -332,10 +335,18 @@ class WorkerManager:
             workspace = Path(task.workspace_dir or (settings.workspaces_dir / task_id))
             # Per-project environment (toolchain scoping) for this task's subprocess.
             project_env = {}
+            # co-guard: the project's guard settings (columns arrive in Task 4).
+            guard_project = None
             if task.project_id:
                 proj = await s.get(Project, task.project_id)
                 if proj and proj.env:
                     project_env = dict(proj.env)
+                if proj is not None:
+                    guard_project = SimpleNamespace(
+                        directory=proj.directory,
+                        guard_enabled=getattr(proj, "guard_enabled", True),
+                        approval_wait_seconds=getattr(proj, "approval_wait_seconds", 300),
+                    )
             # Coordinator: inject the live agent registry + how to delegate — but
             # NOT inside a workflow, where the workflow owns the orchestration and a
             # coordinator agent is used only as a planning step.
@@ -413,6 +424,14 @@ class WorkerManager:
         mcp_config_dir = settings.workspaces_dir / "_mcp_configs" / task_id
         mcp = await mcp_manager.prepare_for_task(project, mcp_config_dir)
 
+        # co-guard: per-task policy + spool dir (outside the cwd), env, and the
+        # settings that could switch its hooks off (Ruling R6 follow-up).
+        guard_plugin, setting_sources = await self._prepare_guard(
+            task_id, guard_project, workspace, sub_env, mcp, emit
+        )
+        if guard_plugin is None:
+            return
+
         # Repo-backed project tasks: skip artifact diffing (git tracks changes and
         # scanning a whole repo is slow/noisy). Sandbox tasks still collect outputs.
         before = {} if project_id else _snapshot(workspace)
@@ -427,7 +446,14 @@ class WorkerManager:
             str(max_turns),
             "--permission-mode",
             settings.claude_permission_mode,
+            # Hook activity (co-guard decisions, hook_no_verdict) in the stream (spike g).
+            "--include-hook-events",
+            # co-guard first, before any skill pack.
+            "--plugin-dir",
+            guard_plugin,
         ]
+        if setting_sources:
+            cmd += ["--setting-sources", setting_sources]
         # Only force a model when one was chosen; otherwise Claude Code uses its
         # own configured default.
         if model:
@@ -527,6 +553,7 @@ class WorkerManager:
                 limit=settings.stream_buffer_limit_bytes,
             )
         except FileNotFoundError:
+            guard_runtime.remove_task_dir(task_id)
             await emit("error", {"message": f"Claude binary not found: {settings.claude_bin}"})
             await self._finish(
                 task_id, Status.FAILED, error=f"Claude binary not found: {settings.claude_bin}"
@@ -564,6 +591,7 @@ class WorkerManager:
             await proc.wait()
             await stderr_task
             self._running.pop(task_id, None)
+            await self._ingest_guard_spool(task_id, emit)
             await emit("error", {"message": "Task exceeded time limit"})
             await self._finish(task_id, Status.FAILED, error="Task exceeded time limit")
             return
@@ -572,6 +600,7 @@ class WorkerManager:
 
         self._running.pop(task_id, None)
         exit_code = proc.returncode
+        await self._ingest_guard_spool(task_id, emit)
 
         if task_id in self._cancelled:
             self._cancelled.discard(task_id)
@@ -642,6 +671,80 @@ class WorkerManager:
 
         # Notify if this run came from a schedule (honors its notify policy).
         asyncio.create_task(notifications.notify_task_finished(task_id))
+
+    # ---- co-guard ----------------------------------------------------------
+
+    _GUARD_KEYS = (
+        "event", "decision", "rule_ids", "tool", "summary", "reason", "status", "request_id",
+        "tool_use_id", "agent_id", "agent_type", "source", "ts",
+    )
+
+    async def _prepare_guard(self, task_id, guard_project, workspace, sub_env, mcp, emit):
+        """Write the task's policy (0600) into a fresh CO_TASK_DIR, add the
+        guard env and return (plugin dir, --setting-sources value or None);
+        (None, None) when the task must not start (it is then finished)."""
+        for k in guard_runtime.HOOK_DISABLING_ENV:  # bare/safe mode would skip plugin hooks
+            sub_env.pop(k, None)
+        root = guard_runtime.plugin_root()
+        if not root.exists():
+            ensure_plugin(root)
+        config_dir = sub_env.get("CLAUDE_CONFIG_DIR")
+        blockers = guard_runtime.hook_blockers(workspace, config_dir)
+        if blockers["user"]:
+            msg = "co-guard: the user's Claude settings switch hooks off (disableAllHooks); task not started"
+            await emit("error", {"message": msg})
+            await self._finish(task_id, Status.FAILED, error=msg)
+            return None, None
+        tdir = guard_runtime.make_task_dir(task_id)
+        policy = guard_runtime.build_policy(
+            task_id=task_id,
+            project=guard_project,
+            workspace=workspace,
+            cwd=workspace,
+            claude_config_dir=config_dir,
+            mcp_tools=(mcp or {}).get("tool_policies"),
+        )
+        policy_file = guard_runtime.write_policy(task_id, policy)
+        sub_env.update(
+            {
+                "CO_TASK_ID": task_id,
+                "CO_API_BASE": settings.api_base.rstrip("/"),
+                "CO_POLICY_FILE": str(policy_file.resolve()),
+                "CO_TASK_DIR": str(tdir.resolve()),
+            }
+        )
+        sources = None
+        if blockers["project"]:
+            # Claude Code ORs disableAllHooks over its sources: a flag setting
+            # cannot undo the repo's. Drop project/local settings for this run.
+            sources = "user"
+            await emit(
+                "guard",
+                {
+                    "event": "settings_override",
+                    "reason": "project settings switch hooks off; project and local settings "
+                    "(incl. the repo's CLAUDE.md) are not loaded for this run",
+                    "files": blockers["project"],
+                },
+            )
+        return str(root.resolve()), sources
+
+    async def _ingest_guard_spool(self, task_id: str, emit) -> None:
+        """The hook's spool -> `guard` events (emit redacts), then drop the task dir."""
+        try:
+            for rec in guard_runtime.read_spool(task_id):
+                payload = {k: rec[k] for k in self._GUARD_KEYS if k in rec}
+                for k, v in list(payload.items()):
+                    if isinstance(v, str):
+                        payload[k] = v[:2000]
+                    elif k == "rule_ids":
+                        payload[k] = [str(x)[:64] for x in v][:20] if isinstance(v, list) else []
+                    elif not isinstance(v, (int, float, bool)) and v is not None:
+                        payload[k] = str(v)[:2000]
+                if payload:
+                    await emit("guard", payload)
+        finally:
+            guard_runtime.remove_task_dir(task_id)
 
     async def _consume_stdout(self, proc, emit, result, ctx) -> None:
         # Read raw chunks and split on newlines ourselves. A single stream-json
@@ -789,6 +892,7 @@ class WorkerManager:
         if error:
             error = redact(error, secrets or [])
         context_store.cleanup(task_id)  # drop this task's knowledge snapshot
+        guard_runtime.remove_task_dir(task_id)  # co-guard policy + spool (normally gone already)
         async with SessionLocal() as s:
             await auth.revoke_task_tokens(s, task_id)
             await s.commit()

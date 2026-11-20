@@ -106,8 +106,12 @@ async def prepare_for_task(project: str | None, config_dir: Path) -> dict | None
         ).scalars().all()
 
     allowed, disallowed = [], []
+    # co-guard: every policy of this task's servers, keyed by the tool's wire
+    # name (a "*" tool name becomes the server-level pattern mcp__<srv>__*).
+    tool_policies: dict[str, str] = {}
     for p in policies:
         ref = f"mcp__{name_by_id[p.server_id]}__{p.tool_name}"
+        tool_policies[ref] = p.action
         if p.action == "block":
             disallowed.append(ref)
         elif p.action == "auto_approve":
@@ -117,6 +121,7 @@ async def prepare_for_task(project: str | None, config_dir: Path) -> dict | None
         "allowed": allowed,
         "disallowed": disallowed,
         "server_names": [s.name for s in servers],
+        "tool_policies": tool_policies,
     }
 
 

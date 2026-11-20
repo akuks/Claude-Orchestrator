@@ -15,6 +15,8 @@ from .config import settings
 from .credentials import credential_status
 from .constants import Status
 from .database import SessionLocal, init_db
+from .guard import runtime as guard_runtime
+from .guard.plugin import ensure_plugin
 from .models import Task
 from .routers import (
     agents,
@@ -82,6 +84,8 @@ async def _approval_timeout_loop():
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     await init_db()
+    # co-guard plugin (read-only, content-hashed): every task loads it first.
+    ensure_plugin(guard_runtime.plugin_root())
     await auth.bootstrap_admin()
     await auth.assign_orphans_to_first_admin()
     worker = WorkerManager()
