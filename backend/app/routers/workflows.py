@@ -10,8 +10,11 @@ from ..access import (
 )
 from ..auth import ensure_admin
 from ..database import SessionLocal
+from ..constants import Status
 from ..models import Agent, Task, Workflow, WorkflowRun
 from ..schemas import (
+    LiveItemOut,
+    LiveStageOut,
     TaskOut,
     WorkflowCreate,
     WorkflowOut,
@@ -247,6 +250,114 @@ async def list_runs(request: Request, limit: int = Query(50, ge=1, le=500)):
                 )
             )
     return [WorkflowRunOut.model_validate(r) for r in out[:limit]]
+
+
+LIVE_MAX = 50
+_THREAD_STATE = {
+    Status.COMPLETED: "done",
+    Status.RUNNING: "current",
+    Status.QUEUED: "current",
+    Status.AWAITING_APPROVAL: "waiting_approval",
+    Status.FAILED: "failed",
+    Status.CANCELLED: "failed",
+}
+
+
+def _stage_state(statuses: list[str], index: int, current: int) -> str:
+    if statuses:
+        if all(st == Status.COMPLETED for st in statuses):
+            return "done"
+        if any(st in (Status.FAILED, Status.CANCELLED) for st in statuses):
+            return "failed"
+        if Status.AWAITING_APPROVAL in statuses:
+            return "waiting_approval"
+    return "current" if index == current else "next"
+
+
+@router.get("/runs/live", response_model=list[LiveItemOut])
+async def live_runs(request: Request):
+    """Active workflow runs and running coordinator threads the viewer can see,
+    newest first, max 50 — the data behind the Home comet scene. Declared before
+    `/runs/{run_id}` so "live" isn't taken as a run id."""
+    p = request.state.principal
+    items: list[LiveItemOut] = []
+    async with SessionLocal() as s:
+        visible = await visible_project_ids(s, p)
+        clause = await task_visibility_clause(s, p)
+        # Run visibility is an overlap test on a JSON column (no portable SQL),
+        # so filter in Python. That's cheap here: only pending/running/paused
+        # runs are loaded, and the number of active runs is small.
+        runs = (
+            await s.execute(
+                select(WorkflowRun)
+                .where(WorkflowRun.status.in_(("pending", "running", "paused")))
+                .order_by(WorkflowRun.created_at.desc(), WorkflowRun.id.desc())
+            )
+        ).scalars().all()
+        for run in (r for r in runs if _run_visible(p, r, visible)):
+            tasks = (
+                await s.execute(
+                    select(Task.stage_index, Task.status).where(
+                        and_(Task.workflow_run_id == run.id, clause)
+                    )
+                )
+            ).all()
+            by_stage: dict[int, list[str]] = {}
+            for idx, st in tasks:
+                by_stage.setdefault(idx, []).append(st)
+            stages = []
+            for i, st in enumerate(run.stages or []):
+                sts = by_stage.get(i, [])
+                stages.append(
+                    LiveStageOut(
+                        name=(st.get("name") if isinstance(st, dict) else None) or f"Stage {i + 1}",
+                        state=_stage_state(sts, i, run.current_stage),
+                        task_count=len(sts),
+                    )
+                )
+            items.append(
+                LiveItemOut(
+                    kind="run", id=run.id, title=run.name, project_ids=list(run.project_ids or []),
+                    status=run.status, created_at=run.created_at, stages=stages,
+                )
+            )
+        # Threads: running/queued root tasks of a coordinator agent (not stage tasks).
+        roots = (
+            await s.execute(
+                select(Task)
+                .join(Agent, Agent.id == Task.agent_id)
+                .where(
+                    Agent.coordinator.is_(True),
+                    Task.parent_task_id.is_(None),
+                    Task.workflow_run_id.is_(None),
+                    Task.status.in_((Status.RUNNING, Status.QUEUED)),
+                    clause,
+                )
+                .order_by(Task.created_at.desc(), Task.id.desc())
+                .limit(LIVE_MAX)
+            )
+        ).scalars().all()
+        for root in roots:
+            kids = (
+                await s.execute(
+                    select(Task)
+                    .where(and_(Task.parent_task_id == root.id, clause))
+                    .order_by(Task.created_at, Task.id)
+                )
+            ).scalars().all()
+            pids = list(dict.fromkeys(t.project_id for t in [root, *kids] if t.project_id))
+            items.append(
+                LiveItemOut(
+                    kind="thread", id=root.id, title=root.title, project_ids=pids,
+                    status=root.status, created_at=root.created_at,
+                    stages=[
+                        LiveStageOut(name=k.title, state=_THREAD_STATE.get(k.status, "next"), task_count=1)
+                        for k in kids
+                    ],
+                )
+            )
+    items.sort(key=lambda i: i.created_at, reverse=True)
+    return items[:LIVE_MAX]
 
 
 @router.get("/runs/{run_id}")

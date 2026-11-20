@@ -528,6 +528,25 @@ class WorkflowRunOut(BaseModel):
     model_config = {"from_attributes": True}
 
 
+class LiveStageOut(BaseModel):
+    name: str
+    # done | current | next | failed | waiting_approval
+    state: str
+    task_count: int
+
+
+class LiveItemOut(BaseModel):
+    """A live workflow run or coordinator thread, for the Home comet scene."""
+
+    kind: str  # run | thread
+    id: str
+    title: str
+    project_ids: list[str] = []
+    status: str
+    created_at: datetime
+    stages: list[LiveStageOut]
+
+
 # ---- Skill packs (Claude Code plugins) ------------------------------------
 
 
