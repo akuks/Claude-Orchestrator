@@ -6,6 +6,7 @@ daemons. Health checks validate connectivity on demand and periodically.
 """
 
 import json
+import re
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -18,6 +19,16 @@ from .mcp_client import probe_stdio
 from .models import McpServer, McpToolPolicy
 
 _READ_PREFIXES = ("get", "list", "read", "search", "fetch", "query", "describe", "find")
+
+
+def mcp_server_prefix(server_name: str) -> str:
+    """The server part of Claude Code's MCP tool names: every character other
+    than [a-zA-Z0-9_-] becomes "_" ("github.com" -> "github_com")."""
+    return re.sub(r"[^a-zA-Z0-9_-]", "_", server_name)
+
+
+def mcp_tool_ref(server_name: str, tool_name: str) -> str:
+    return f"mcp__{mcp_server_prefix(server_name)}__{tool_name}"
 
 
 def classify_tool(name: str) -> str:
@@ -110,7 +121,7 @@ async def prepare_for_task(project: str | None, config_dir: Path) -> dict | None
     # name (a "*" tool name becomes the server-level pattern mcp__<srv>__*).
     tool_policies: dict[str, str] = {}
     for p in policies:
-        ref = f"mcp__{name_by_id[p.server_id]}__{p.tool_name}"
+        ref = mcp_tool_ref(name_by_id[p.server_id], p.tool_name)
         tool_policies[ref] = p.action
         if p.action == "block":
             disallowed.append(ref)

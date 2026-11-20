@@ -9,6 +9,9 @@ results + output artifacts. No external broker/queue needed for Phase 1.
 import asyncio
 import json
 import mimetypes
+import os
+import signal
+import time
 from types import SimpleNamespace
 from datetime import datetime, timezone
 from pathlib import Path
@@ -473,6 +476,8 @@ class WorkerManager:
             await emit("skills", {"plugin_dirs": plugin_dirs})
         allowed_tools = list(mcp["allowed"]) if mcp else []
         disallowed_tools = list(mcp["disallowed"]) if mcp else []
+        # co-guard cannot check PowerShell (Ruling R17): never offer it.
+        disallowed_tools.append("PowerShell")
         # SSH is opt-in per agent: unless the task is remote-enabled, deny outbound
         # ssh/scp/sftp. Deny rules win even under --permission-mode bypassPermissions.
         if not allow_remote:
@@ -551,6 +556,8 @@ class WorkerManager:
                 stderr=asyncio.subprocess.PIPE,
                 # Raise the per-line buffer limit; stream-json events can be large.
                 limit=settings.stream_buffer_limit_bytes,
+                # own process group, so the co-guard watchdog can stop the tools it started too
+                start_new_session=True,
             )
         except FileNotFoundError:
             guard_runtime.remove_task_dir(task_id)
@@ -579,7 +586,14 @@ class WorkerManager:
 
         stderr_task = asyncio.create_task(read_stderr())
 
-        ctx = {"task_id": task_id, "mcp_ids": {}, "secrets": run_secrets}
+        ctx = {
+            "task_id": task_id,
+            "mcp_ids": {},
+            "secrets": run_secrets,
+            # co-guard watchdog (Ruling R19a): tool_use id -> [name, seen at, hooked]
+            "guard": {"tools": {}, "credit": {}, "violation": None, "proc": proc, "emit": emit},
+        }
+        watch = asyncio.create_task(self._guard_watch(ctx))
         try:
             await asyncio.wait_for(
                 self._consume_stdout(proc, emit, result, ctx),
@@ -596,11 +610,21 @@ class WorkerManager:
             await self._finish(task_id, Status.FAILED, error="Task exceeded time limit")
             return
         finally:
+            watch.cancel()
             await stderr_task
 
         self._running.pop(task_id, None)
         exit_code = proc.returncode
         await self._ingest_guard_spool(task_id, emit)
+
+        if ctx["guard"]["violation"]:
+            # never retried: the guard was not protecting this run
+            self._cancelled.discard(task_id)
+            msg = "co-guard was not running — task stopped for safety"
+            await emit("error", {"message": msg})
+            await self._finish(task_id, Status.FAILED, exit_code=exit_code,
+                               error=f"{msg} ({ctx['guard']['violation']})", secrets=run_secrets)
+            return
 
         if task_id in self._cancelled:
             self._cancelled.discard(task_id)
@@ -686,8 +710,14 @@ class WorkerManager:
         for k in guard_runtime.HOOK_DISABLING_ENV:  # bare/safe mode would skip plugin hooks
             sub_env.pop(k, None)
         root = guard_runtime.plugin_root()
-        if not root.exists():
-            ensure_plugin(root)
+        try:
+            ensure_plugin(root)  # cheap when unchanged; repairs a tampered or missing plugin
+            api_base = guard_runtime.guard_api_base()
+        except (OSError, RuntimeError, guard_runtime.GuardConfigError) as e:
+            msg = f"co-guard could not be set up; task not started: {e}"
+            await emit("error", {"message": msg})
+            await self._finish(task_id, Status.FAILED, error=msg)
+            return None, None
         config_dir = sub_env.get("CLAUDE_CONFIG_DIR")
         blockers = guard_runtime.hook_blockers(workspace, config_dir)
         if blockers["user"]:
@@ -708,7 +738,7 @@ class WorkerManager:
         sub_env.update(
             {
                 "CO_TASK_ID": task_id,
-                "CO_API_BASE": settings.api_base.rstrip("/"),
+                "CO_API_BASE": api_base,
                 "CO_POLICY_FILE": str(policy_file.resolve()),
                 "CO_TASK_DIR": str(tdir.resolve()),
             }
@@ -728,6 +758,76 @@ class WorkerManager:
                 },
             )
         return str(root.resolve()), sources
+
+    # Ruling R19a: with --include-hook-events every tool call shows a co-guard
+    # PreToolUse `hook_started` (hook_name "PreToolUse:<tool>"; the events carry
+    # no tool_use id, so calls are matched to hooks by tool name, in order). A
+    # tool_result for a call with no such hook, a call left unmatched past the
+    # grace window, a cancelled (timed-out) PreToolUse hook or a hook_no_verdict
+    # notice for co-guard means the guard is not running: the task is killed.
+
+    async def _guard_violation(self, ctx, reason: str) -> None:
+        g = ctx.get("guard")
+        if not g or g["violation"]:
+            return
+        g["violation"] = reason
+        await g["emit"]("guard", {"event": "watchdog", "decision": "killed", "reason": reason})
+        proc = g["proc"]
+        try:
+            os.killpg(proc.pid, signal.SIGKILL)  # claude and every tool it started
+        except (ProcessLookupError, PermissionError, OSError):
+            try:
+                proc.kill()
+            except ProcessLookupError:
+                pass
+
+    async def _guard_watch(self, ctx) -> None:
+        g = ctx["guard"]
+        while not g["violation"]:
+            await asyncio.sleep(min(1.0, settings.guard_hook_grace_seconds / 2))
+            now = time.monotonic()
+            for tid, (name, seen, hooked) in list(g["tools"].items()):
+                if not hooked and now - seen > settings.guard_hook_grace_seconds:
+                    await self._guard_violation(ctx, f"no co-guard check for {name} call {tid}")
+                    return
+
+    async def _guard_on_event(self, obj: dict, ctx) -> None:
+        g = ctx.get("guard")
+        if not g:
+            return
+        etype, sub = obj.get("type"), obj.get("subtype")
+        if etype == "system" and sub in ("hook_started", "hook_response") and obj.get("hook_event") == "PreToolUse":
+            plugin = obj.get("plugin_name")
+            if plugin and not str(plugin).startswith("co-guard"):
+                return  # another plugin's hook proves nothing about ours
+            if sub == "hook_response":
+                if obj.get("outcome") == "cancelled":
+                    await self._guard_violation(ctx, "co-guard's PreToolUse hook was cancelled (timed out)")
+                return
+            name = str(obj.get("hook_name") or "").partition(":")[2]
+            for tid, entry in g["tools"].items():
+                if entry[0] == name and not entry[2]:
+                    entry[2] = True
+                    return
+            g["credit"][name] = g["credit"].get(name, 0) + 1
+        elif etype == "system" and (obj.get("tag") == "hook_no_verdict" or sub == "hook_no_verdict"):
+            if "co-guard" in json.dumps(obj, default=str):
+                await self._guard_violation(ctx, "co-guard gave no verdict for an action")
+        elif etype == "assistant":
+            for block in (obj.get("message") or {}).get("content") or []:
+                if isinstance(block, dict) and block.get("type") == "tool_use":
+                    name, tid = str(block.get("name") or ""), str(block.get("id") or "")
+                    hooked = g["credit"].get(name, 0) > 0
+                    if hooked:
+                        g["credit"][name] -= 1
+                    g["tools"][tid] = [name, time.monotonic(), hooked]
+        elif etype == "user":
+            content = (obj.get("message") or {}).get("content")
+            for block in content if isinstance(content, list) else []:
+                if isinstance(block, dict) and block.get("type") == "tool_result":
+                    entry = g["tools"].pop(str(block.get("tool_use_id") or ""), None)
+                    if entry is not None and not entry[2]:
+                        await self._guard_violation(ctx, f"{entry[0]} ran without a co-guard check")
 
     async def _ingest_guard_spool(self, task_id: str, emit) -> None:
         """The hook's spool -> `guard` events (emit redacts), then drop the task dir."""
@@ -780,6 +880,7 @@ class WorkerManager:
         await self._handle_stream_event(obj, emit, result, ctx)
 
     async def _handle_stream_event(self, obj: dict, emit, result, ctx) -> None:
+        await self._guard_on_event(obj, ctx)
         etype = obj.get("type")
         if etype == "system":
             sid = obj.get("session_id")
