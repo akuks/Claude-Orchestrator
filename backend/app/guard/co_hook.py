@@ -42,7 +42,7 @@ with this idempotency key but a different body is already pending - or no
 this hook's deadline) so the server expires the request no later. The decision is
 printed BEFORE the best-effort report. The request's ``summary`` is the FULL
 call a person decides on (``full_summary``: the Bash/Monitor command verbatim,
-a file tool's path and a note, otherwise the tool name and pretty JSON of its
+a file tool's path and what it writes, otherwise the tool name and pretty JSON of its
 input), redacted, then cut with the server's "… (truncated, N chars)" marker at
 8000 chars or so the body stays under the server's 16 KB cap.
 
@@ -137,25 +137,46 @@ def _chars(value):
     return f"{len(value)} chars" if isinstance(value, str) else "?"
 
 
+def _text(value):
+    return value if isinstance(value, str) else json.dumps(value, ensure_ascii=False, default=str)
+
+
+def _edit_text(old, new, label="Edit"):
+    return (f"--- {label}: replace ({_chars(old)}):\n{_text(old)}\n"
+            f"--- with ({_chars(new)}):\n{_text(new)}")
+
+
 def full_summary(tool, tool_input):
     """What a person must see to decide (unredacted, uncut): Bash/Monitor the
-    command verbatim; file tools the path and a short note; anything else
-    (MCP, unknown tools) the tool name and its input as pretty JSON."""
+    command verbatim; file tools the path and WHAT will be written (Write's
+    content, Edit's old -> new, every MultiEdit edit, NotebookEdit's source);
+    anything else (MCP, unknown tools) the tool name and its input as pretty
+    JSON."""
     ti = tool_input if isinstance(tool_input, dict) else {}
     if tool in ("Bash", "Monitor") and isinstance(ti.get("command"), str):
         return ti["command"]
     if tool in FILE_TOOLS:
         path = ti.get("file_path") or ti.get("notebook_path") or "?"
         if tool == "Write":
-            note = f"Write: new content, {_chars(ti.get('content'))}"
+            body = f"--- Write: new content ({_chars(ti.get('content'))}):\n{_text(ti.get('content'))}"
         elif tool == "Edit":
-            note = f"Edit: replaces {_chars(ti.get('old_string'))} with {_chars(ti.get('new_string'))}"
+            label = "Edit (replace_all: every occurrence)" if ti.get("replace_all") else "Edit"
+            body = _edit_text(ti.get("old_string"), ti.get("new_string"), label)
         elif tool == "MultiEdit":
-            edits = ti.get("edits")
-            note = f"MultiEdit: {len(edits) if isinstance(edits, list) else '?'} edits"
+            edits = ti.get("edits") if isinstance(ti.get("edits"), list) else []
+            parts = [f"--- MultiEdit: {len(edits)} edits"]
+            for i, e in enumerate(edits, 1):
+                e = e if isinstance(e, dict) else {}
+                label = f"Edit {i} of {len(edits)}"
+                if e.get("replace_all"):
+                    label += " (replace_all: every occurrence)"
+                parts.append(_edit_text(e.get("old_string"), e.get("new_string"), label))
+            body = "\n".join(parts)
         else:
-            note = f"NotebookEdit: {ti.get('edit_mode') or 'replace'} a cell, {_chars(ti.get('new_source'))}"
-        return f"{path}\n({note})"
+            body = (f"--- NotebookEdit: {ti.get('edit_mode') or 'replace'} cell {ti.get('cell_id') or '?'}"
+                    f" ({ti.get('cell_type') or 'cell'}), new source ({_chars(ti.get('new_source'))}):\n"
+                    f"{_text(ti.get('new_source'))}")
+        return f"{path}\n{body}"
     try:
         body = json.dumps(tool_input, indent=2, sort_keys=True, ensure_ascii=False, default=str)
     except (TypeError, ValueError):

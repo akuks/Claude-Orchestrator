@@ -41,7 +41,7 @@ Policy (a dict, as written by the worker into ``policy.json``)::
       "protected_paths": ["/abs/co-guard", "/abs/_tasks/T1", ...],
                                            #   dirs/files (fnmatch patterns ok)
       "claude_config_dir": "/abs/.claude", # its settings*.json are protected
-      "tmpdir": "/abs/tmp",                # optional: the task's $TMPDIR (else env)
+      "tmpdir": "/abs/tmp",                # optional: one more temp root ($TMPDIR comes from the env)
       "env_paths": {"CO_POLICY_FILE": "/abs/...", "CO_TASK_DIR": "/abs/...",
                     "CLAUDE_CONFIG_DIR": "/abs/...", "CLAUDE_PLUGIN_ROOT": "/abs/..."}
                                            #   values of the agent's env vars that
@@ -100,10 +100,11 @@ always on), so a new shell-capable tool fails closed without blocking work.
 CONFIRMABLE (a person may approve once): ``rm-rf-outside`` (recursive delete
 outside the project, of the project itself or its ``.git``, or of a target we
 cannot resolve; a delete strictly INSIDE a temp dir is free - ``/tmp``,
-``/private/tmp``, ``$TMPDIR`` (policy ``tmpdir``, else the hook's env; not
+``/private/tmp``, ``$TMPDIR`` (the hook's env, plus policy ``tmpdir``; not
 expanded when the command names ``TMPDIR`` other than as ``$TMPDIR`` or may
-assign it), ``/private/var/folders/<a>/`` - never a root itself, nor one that
-is or holds home or the project, nor over ssh), ``git-force-push-main``, ``git-reset-hard``,
+assign it), ``/private/var/folders/<a>/<b>/T`` - never a root itself, nor
+``/private/var/folders``, ``<a>`` or ``<a>/<b>`` (caches), nor a root that is
+or holds home or the project, nor over ssh), ``git-force-push-main``, ``git-reset-hard``,
 ``git-clean-fdx``, ``git-stash-drop``, ``secret-files``, ``chmod-wide``,
 ``pipe-to-shell``, ``git-internals`` (writes to ``.git/config``,
 ``.git/hooks``, ``.git/info/attributes``, ``.gitmodules`` with an
@@ -295,9 +296,11 @@ _FIND_NARROW = frozenset({"-name", "-iname", "-path", "-ipath", "-wholename", "-
 _DELETERS = frozenset({"rm", "rmdir", "unlink", "shred", "rimraf"})
 _WRITE_OPS = frozenset({">", ">>", ">|", "&>", "&>>", "<>", ">&"})
 # Final fix wave (Ruling R29): recursive deletes strictly INSIDE a temp dir are
-# free. Roots: /tmp, /private/tmp, $TMPDIR (policy "tmpdir", else the hook's
-# env) and every /private/var/folders/<a>/ (macOS per-user temp trees). Never
-# the roots themselves; paths are resolved like every delete target.
+# free. Roots: /tmp, /private/tmp, $TMPDIR (the hook's own environment - the
+# same value the agent's shell has - and policy "tmpdir" if set) and every
+# macOS per-user temp dir /private/var/folders/<a>/<b>/T. Never the roots
+# themselves, and never /private/var/folders, <a> or <a>/<b> (they also hold
+# caches, <a>/<b>/C); paths are resolved like every delete target.
 _TEMP_ROOTS = ("/tmp", "/private/tmp")
 _VAR_FOLDERS = "/private/var/folders"
 # a bare TMPDIR name (not a plain $TMPDIR / ${TMPDIR} reference): the command
@@ -547,9 +550,10 @@ class _Ctx:
             env.setdefault("CLAUDE_CONFIG_DIR", str(cfg))
         self.vars = {k: _real(os.path.abspath(v)) for k, v in env.items() if k in _GUARD_VARS}
         self.vars["HOME"] = self.home
-        tmpdir = policy["tmpdir"] if "tmpdir" in policy else os.environ.get("TMPDIR")
+        # $TMPDIR as the agent's shell sees it: the hook runs with Claude Code's env
+        tmpdir = os.environ.get("TMPDIR") or policy.get("tmpdir")
         self.tmpdir = _real(os.path.abspath(str(tmpdir))) if tmpdir else None
-        self.temp_roots = self._temp_roots()
+        self.temp_roots = self._temp_roots(policy.get("tmpdir"))
         if self.tmpdir and self.tmpdir in self.temp_roots:
             self.vars["TMPDIR"] = self.tmpdir
         self._build_var_re()
@@ -578,12 +582,14 @@ class _Ctx:
         names = "|".join(map(re.escape, self.vars))
         self._var_re = re.compile(r"^\$(?:\{(" + names + r")(?:[:]?[-?=+][^}]*)?\}|(" + names + r"))(?=/|$)")
 
-    def _temp_roots(self):
+    def _temp_roots(self, policy_tmpdir=None):
         """Fixed temp roots plus $TMPDIR; a root that is (or holds) home or
-        the project, or is / , is no temp root."""
+        the project, is / or a top-level folder, or is /private/var/folders
+        or one of its first two levels, is no temp root."""
         roots = {_real(r) for r in _TEMP_ROOTS} | set(_TEMP_ROOTS)  # '/tmp' as named (a link on macOS)
-        if self.tmpdir:
-            roots.add(self.tmpdir)
+        extra = {self.tmpdir} | ({_real(os.path.abspath(str(policy_tmpdir)))} if policy_tmpdir else set())
+        roots |= {r for r in extra if r and r.count("/") >= 2 and not _within(_VAR_FOLDERS, r)
+                  and not (_inside(r, _VAR_FOLDERS) and r.count("/") < 6)}
         return {r for r in roots if r != "/" and not _within(self.home, r) and not _within(self.project, r)}
 
     def distrust_tmpdir(self):
@@ -601,8 +607,8 @@ class _Ctx:
             return False
         roots = set(self.temp_roots)
         parts = path.split("/")
-        if path.startswith(_VAR_FOLDERS + "/") and len(parts) > 4:
-            root = "/".join(parts[:5])  # /private/var/folders/<a>
+        if path.startswith(_VAR_FOLDERS + "/") and len(parts) > 6 and parts[6] == "T":
+            root = "/".join(parts[:7])  # /private/var/folders/<a>/<b>/T
             if not _within(self.home, root) and not _within(self.project, root):
                 roots.add(root)
         return any(_inside(path, r) if whole else _within(path, r) for r in roots)
