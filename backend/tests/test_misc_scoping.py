@@ -218,16 +218,19 @@ def test_project_scoped_mcp_and_skill_hidden(client, tmp_path):
 
 
 def test_mcp_project_match_after_rename(client):
-    """Matching is by the project's *current* name, resolved per request."""
+    """A rename carries project-scoped servers along (R11); matching is by the
+    project's current name."""
     p = _mk_project(client)
     inside = _user(client, p["id"], "contributor")
+    srv, team_srv = _mcp(client, project=p["name"]), _mcp(client, scope="team")
     new_name = f"renamed-{_uid()}"
     assert client.patch(f"/projects/{p['id']}", json={"name": new_name}).status_code == 200
-    srv = _mcp(client, project=new_name)
-    assert inside.get(f"/mcp/servers/{srv}").status_code == 200
+    r = inside.get(f"/mcp/servers/{srv}")
+    assert r.status_code == 200 and r.json()["project"] == new_name
     assert srv in {s["id"] for s in inside.get("/mcp/servers").json()}
-    # The old name no longer resolves to the project: a server still carrying it
-    # is admin-only, and a new project that takes the old name owns it instead.
+    assert client.get(f"/mcp/servers/{team_srv}").json()["project"] is None
+    # A server created later with the old name doesn't resolve to the renamed
+    # project; a project that later takes the old name owns it instead.
     stale = _mcp(client, project=p["name"])
     assert inside.get(f"/mcp/servers/{stale}").status_code == 404
     q = _mk_project(client)
@@ -235,6 +238,16 @@ def test_mcp_project_match_after_rename(client):
     q_member = _user(client, q["id"], "contributor")
     assert q_member.get(f"/mcp/servers/{stale}").status_code == 200
     assert q_member.get(f"/mcp/servers/{srv}").status_code == 404
+
+
+def test_usage_budget_from_visible_projects_only(client):
+    """An invisible project sharing a visible one's name can't supply its budget."""
+    p, twin = _mk_project(client), _mk_project(client)
+    assert client.patch(f"/projects/{twin['id']}", json={"name": p["name"], "budget_usd": 0.01}).status_code == 200
+    u = _user(client, p["id"], "contributor")
+    _add(_task(p, 2.0))
+    row = next(r for r in u.get("/usage/by-project").json() if r["project"] == p["name"])
+    assert row["budget_usd"] is None and row["over_budget"] is False
 
 
 # ---------------------------------------------------------------- knowledge docs
