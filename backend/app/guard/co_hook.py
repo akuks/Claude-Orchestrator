@@ -421,7 +421,9 @@ def config_change(payload):
     path = payload.get("file_path")
     if not isinstance(path, str) or not path:
         raise ValueError("no file_path")
-    with open(path, encoding="utf-8") as f:  # any error: blocked (main)
+    # any error - including a DELETED settings file (FileNotFoundError) - blocks
+    # the change in main(): fail closed
+    with open(path, encoding="utf-8") as f:
         data = json.loads(f.read())
     if not isinstance(data, dict):
         raise ValueError("settings are not an object")

@@ -31,6 +31,13 @@ from urllib.request import ProxyHandler, build_opener
 from ..config import settings
 from .co_hook import APPROVAL_WAIT_MAX
 
+# Help text for the project's guard settings (shown by the UI in Task 5).
+GUARD_SETTINGS_HELP = (
+    "co-guard checks every tool call before it runs: dangerous commands are blocked or need a person's "
+    "approval, and MCP tools follow their policies. Inline !`cmd` in skills, slash commands and skill "
+    "packs is disabled for every task, because it would run without that check."
+)
+
 APPROVAL_WAIT_MIN = 60
 APPROVAL_WAIT_DEFAULT = 300
 SPOOL_NAME = "spool.jsonl"
@@ -67,7 +74,9 @@ def whoami_proof(challenge: str) -> str:
 def verify_api_base(base: str, timeout: float = 3.0) -> bool:
     """True only if ``base`` is THIS server (blocking; run in a thread)."""
     challenge = secrets.token_hex(16)
-    opener = build_opener(ProxyHandler({}))
+    from .co_hook import _NoRedirect  # a 3xx is "not verified", never followed
+
+    opener = build_opener(ProxyHandler({}), _NoRedirect)
     try:
         with opener.open(f"{base}/guard/whoami?challenge={challenge}", timeout=timeout) as resp:
             if resp.status != 200:
@@ -353,16 +362,19 @@ def read_spool(task_id: str) -> list[dict]:
     out: list[dict] = []
     try:
         with open(path, encoding="utf-8", errors="replace") as f:
-            for i, line in enumerate(f):
-                if i >= MAX_SPOOL_LINES:
-                    out.append({"event": "spool", "decision": "truncated"})
-                    break
+            kept = 0
+            for line in f:
                 try:
                     rec = json.loads(line)
                 except ValueError:
                     continue
-                if isinstance(rec, dict):
-                    out.append(rec)
+                if not isinstance(rec, dict) or rec.get("seen") is True:
+                    continue  # watchdog bookkeeping: never counts against the cap
+                if kept >= MAX_SPOOL_LINES:
+                    out.append({"event": "spool", "decision": "truncated"})
+                    break
+                kept += 1
+                out.append(rec)
     except OSError:
         pass
     return out
