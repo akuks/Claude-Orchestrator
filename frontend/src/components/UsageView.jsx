@@ -12,6 +12,17 @@ import {
 } from 'antd'
 import ReactECharts from 'echarts-for-react'
 import { api } from '../api'
+import { modeTokens, palette } from '../theme/tokens'
+import { useThemeMode } from '../theme/ThemeModeContext.jsx'
+
+// Categorical series colours: brand sunset first, then status hues.
+const SERIES_COLORS = [
+  palette.orange,
+  palette.rose,
+  palette.amber,
+  palette.status.info,
+  palette.status.success,
+]
 
 const money = (v) => `$${(v || 0).toFixed(2)}`
 const compact = (n) =>
@@ -41,6 +52,18 @@ function SummaryCards({ s }) {
 }
 
 export default function UsageView() {
+  const { mode } = useThemeMode()
+  const t = modeTokens(mode)
+  const tooltipStyle = {
+    backgroundColor: t.elevated,
+    borderColor: t.border,
+    textStyle: { color: t.text },
+  }
+  const axisStyle = {
+    axisLine: { lineStyle: { color: t.border } },
+    axisTick: { lineStyle: { color: t.border } },
+    splitLine: { lineStyle: { color: t.borderSecondary } },
+  }
   const [summary, setSummary] = useState(null)
   const [series, setSeries] = useState([])
   const [byProject, setByProject] = useState([])
@@ -71,28 +94,42 @@ export default function UsageView() {
   }, [refresh])
 
   const costChart = {
-    tooltip: { trigger: 'axis' },
+    backgroundColor: 'transparent',
+    textStyle: { fontFamily: 'Inter, system-ui, sans-serif' },
+    tooltip: { trigger: 'axis', ...tooltipStyle },
     grid: { left: 50, right: 20, top: 20, bottom: 30 },
-    xAxis: { type: 'category', data: series.map((d) => d.date) },
-    yAxis: { type: 'value', axisLabel: { formatter: '${value}' } },
+    xAxis: {
+      type: 'category',
+      data: series.map((d) => d.date),
+      axisLabel: { color: t.textSecondary },
+      ...axisStyle,
+    },
+    yAxis: {
+      type: 'value',
+      axisLabel: { formatter: '${value}', color: t.textSecondary },
+      ...axisStyle,
+    },
     series: [
       {
         type: 'bar',
         data: series.map((d) => d.cost_usd),
-        itemStyle: { color: '#d97757' },
+        itemStyle: { color: palette.primary, borderRadius: [4, 4, 0, 0] },
         name: 'Daily cost',
       },
     ],
   }
 
   const modelPie = {
-    tooltip: { trigger: 'item', formatter: '{b}: ${c} ({d}%)' },
+    backgroundColor: 'transparent',
+    color: SERIES_COLORS,
+    tooltip: { trigger: 'item', formatter: '{b}: ${c} ({d}%)', ...tooltipStyle },
     series: [
       {
         type: 'pie',
         radius: ['45%', '75%'],
         data: byModel.map((m) => ({ name: m.model, value: m.cost_usd })),
-        label: { fontSize: 11 },
+        label: { fontSize: 11, color: t.textSecondary },
+        itemStyle: { borderColor: t.surfaceSolid, borderWidth: 1 },
       },
     ],
   }

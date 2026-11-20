@@ -29,21 +29,21 @@ import {
   StopOutlined,
 } from '@ant-design/icons'
 import { api, notifyUnauthorized, PRIORITY_COLORS, STATUS_COLORS, shortModel } from '../api'
-import { warm } from '../theme'
+import { statusVar } from '../theme/tokens'
 
 const EVENT_STYLE = {
-  started: { color: '#8c8c8c', prefix: '▶' },
-  system: { color: '#8c8c8c', prefix: '·' },
-  text_output: { color: '#e6e6e6', prefix: '' },
-  tool_use: { color: '#5ac8fa', prefix: '⚙' },
-  tool_result: { color: '#7a7a7a', prefix: '↳' },
-  log: { color: '#8c8c8c', prefix: '' },
-  error: { color: '#ff4d4f', prefix: '✖' },
-  completed: { color: '#52c41a', prefix: '✔' },
+  started: { color: 'var(--co-terminal-muted)', prefix: '▶' },
+  system: { color: 'var(--co-terminal-muted)', prefix: '·' },
+  text_output: { color: 'var(--co-terminal-text)', prefix: '' },
+  tool_use: { color: 'var(--co-terminal-accent)', prefix: '⚙' },
+  tool_result: { color: 'var(--co-terminal-dim)', prefix: '↳' },
+  log: { color: 'var(--co-terminal-muted)', prefix: '' },
+  error: { color: 'var(--co-terminal-error)', prefix: '✖' },
+  completed: { color: 'var(--co-terminal-success)', prefix: '✔' },
 }
 
 function renderLine(ev) {
-  const s = EVENT_STYLE[ev.type] || { color: '#ccc', prefix: '' }
+  const s = EVENT_STYLE[ev.type] || { color: 'var(--co-terminal-text)', prefix: '' }
   const p = ev.payload || {}
   let text
   switch (ev.type) {
@@ -91,12 +91,12 @@ function titleBody(t) {
 
 // Status → icon + colour for the workflow tree.
 const STATUS_ICON = {
-  completed: { icon: <CheckCircleFilled />, color: '#52c41a' },
-  failed: { icon: <CloseCircleFilled />, color: '#ff4d4f' },
-  running: { icon: <LoadingOutlined spin />, color: '#1677ff' },
-  queued: { icon: <ClockCircleFilled />, color: '#8c8c8c' },
-  awaiting_approval: { icon: <ExclamationCircleFilled />, color: '#faad14' },
-  cancelled: { icon: <MinusCircleFilled />, color: '#8c8c8c' },
+  completed: { icon: <CheckCircleFilled />, color: statusVar('completed') },
+  failed: { icon: <CloseCircleFilled />, color: statusVar('failed') },
+  running: { icon: <LoadingOutlined spin />, color: statusVar('running') },
+  queued: { icon: <ClockCircleFilled />, color: statusVar('queued') },
+  awaiting_approval: { icon: <ExclamationCircleFilled />, color: statusVar('awaiting_approval') },
+  cancelled: { icon: <MinusCircleFilled />, color: statusVar('cancelled') },
 }
 const fmtCost = (c) => (c == null ? null : `$${Number(c).toFixed(2)}`)
 
@@ -104,7 +104,7 @@ const fmtCost = (c) => (c == null ? null : `$${Number(c).toFixed(2)}`)
 // top, parallel children + follow-ups nested under their parent with proper tree
 // connector lines, a status icon, agent chip and clean cost — trackable at a glance.
 function DelegationTree({ thread, currentId, onOpenTask }) {
-  const GUIDE = 'rgba(150,130,110,0.35)'
+  const GUIDE = 'var(--co-guide)'
   const byParent = {}
   const ids = new Set(thread.map((t) => t.id))
   for (const t of thread) {
@@ -114,7 +114,7 @@ function DelegationTree({ thread, currentId, onOpenTask }) {
   const sortKey = (t) => t.created_at || ''
 
   const Node = ({ t, isChild }) => {
-    const st = STATUS_ICON[t.status] || { icon: <ClockCircleFilled />, color: '#8c8c8c' }
+    const st = STATUS_ICON[t.status] || { icon: <ClockCircleFilled />, color: statusVar('queued') }
     const agent = agentOf(t)
     const active = t.id === currentId
     const kids = (byParent[t.id] || []).sort((a, b) => sortKey(a).localeCompare(sortKey(b)))
@@ -142,12 +142,12 @@ function DelegationTree({ thread, currentId, onOpenTask }) {
             padding: '5px 8px',
             borderRadius: 6,
             cursor: active ? 'default' : 'pointer',
-            background: active ? 'rgba(255,170,100,0.14)' : 'transparent',
-            border: active ? '1px solid rgba(255,170,100,0.4)' : '1px solid transparent',
+            background: active ? 'var(--co-active-bg)' : 'transparent',
+            border: active ? '1px solid var(--co-active-border)' : '1px solid transparent',
             transition: 'background 0.12s',
           }}
           onMouseEnter={(e) => {
-            if (!active) e.currentTarget.style.background = 'rgba(150,130,110,0.1)'
+            if (!active) e.currentTarget.style.background = 'var(--co-hover)'
           }}
           onMouseLeave={(e) => {
             if (!active) e.currentTarget.style.background = 'transparent'
@@ -159,7 +159,7 @@ function DelegationTree({ thread, currentId, onOpenTask }) {
               {agent}
             </Tag>
           ) : (
-            <Tag style={{ margin: 0, color: '#8a7a6d' }}>follow-up</Tag>
+            <Tag style={{ margin: 0, color: 'var(--co-text-secondary)' }}>follow-up</Tag>
           )}
           <span
             style={{
@@ -195,10 +195,10 @@ function DelegationTree({ thread, currentId, onOpenTask }) {
   return (
     <div
       style={{
-        border: '1px solid rgba(150,130,110,0.25)',
+        border: '1px solid var(--co-border)',
         borderRadius: 8,
         padding: 8,
-        background: 'rgba(150,130,110,0.04)',
+        background: 'var(--co-surface)',
       }}
     >
       {roots.map((t) => (
@@ -208,7 +208,10 @@ function DelegationTree({ thread, currentId, onOpenTask }) {
   )
 }
 
-export default function TaskDetail({ taskId, onClose, onChanged, onOpenTask, onOpenCredentials }) {
+// The task drawer (Tasks page), or with `inline` the same content as a panel
+// (embedded on the run page). One component, so live output, follow-ups and
+// actions behave the same in both places.
+export default function TaskDetail({ taskId, onClose, onChanged, onOpenTask, onOpenCredentials, inline = false }) {
   const [task, setTask] = useState(null)
   const [events, setEvents] = useState([])
   const [artifacts, setArtifacts] = useState([])
@@ -223,6 +226,11 @@ export default function TaskDetail({ taskId, onClose, onChanged, onOpenTask, onO
   useEffect(() => {
     if (!taskId) return
     let closed = false
+    if (inline) {
+      // the panel stays mounted across tasks: don't show the previous one's header
+      setTask(null)
+      setThread([])
+    }
     setEvents([])
     setArtifacts([])
     setFollowup('')
@@ -295,51 +303,47 @@ export default function TaskDetail({ taskId, onClose, onChanged, onOpenTask, onO
   const isActive = task && ['queued', 'running', 'awaiting_approval'].includes(task.status)
   const canFollowUp = task && !isActive && task.session_id
 
-  return (
-    <Drawer
-      open={!!taskId}
-      onClose={onClose}
-      width={720}
-      title={task ? task.title : 'Task'}
-      extra={
-        <Space>
-          {isActive && (
-            <Button
-              danger
-              icon={<StopOutlined />}
-              onClick={() => act(api.cancelTask, 'Cancelled')}
-            >
-              Cancel
-            </Button>
-          )}
-          {task && !isActive && (
-            <Button icon={<ReloadOutlined />} onClick={() => act(api.retryTask, 'Retrying')}>
-              Retry
-            </Button>
-          )}
-          <Button icon={<CopyOutlined />} onClick={() => act(api.duplicateTask, 'Duplicated')}>
-            Duplicate
-          </Button>
-          {task && !isActive && (
-            <Popconfirm
-              title="Delete this task?"
-              onConfirm={async () => {
-                try {
-                  await api.deleteTask(taskId)
-                  message.success('Task deleted')
-                  onChanged?.()
-                  onClose()
-                } catch (e) {
-                  message.error(e.message)
-                }
-              }}
-            >
-              <Button danger icon={<DeleteOutlined />} />
-            </Popconfirm>
-          )}
-        </Space>
-      }
-    >
+  const actions = (
+    <Space wrap>
+      {isActive && (
+        <Button
+          danger
+          icon={<StopOutlined />}
+          onClick={() => act(api.cancelTask, 'Cancelled')}
+        >
+          Cancel
+        </Button>
+      )}
+      {task && !isActive && (
+        <Button icon={<ReloadOutlined />} onClick={() => act(api.retryTask, 'Retrying')}>
+          Retry
+        </Button>
+      )}
+      <Button icon={<CopyOutlined />} onClick={() => act(api.duplicateTask, 'Duplicated')}>
+        Duplicate
+      </Button>
+      {task && !isActive && (
+        <Popconfirm
+          title="Delete this task?"
+          onConfirm={async () => {
+            try {
+              await api.deleteTask(taskId)
+              message.success('Task deleted')
+              onChanged?.()
+              onClose?.()
+            } catch (e) {
+              message.error(e.message)
+            }
+          }}
+        >
+          <Button danger icon={<DeleteOutlined />} title="Delete" />
+        </Popconfirm>
+      )}
+    </Space>
+  )
+
+  const body = (
+    <>
       {thread.length > 1 &&
         (() => {
           const ids = new Set(thread.map((t) => t.id))
@@ -427,14 +431,11 @@ export default function TaskDetail({ taskId, onClose, onChanged, onOpenTask, onO
       <Typography.Title level={5}>Live Output</Typography.Title>
       <div
         ref={termRef}
+        className="co-terminal"
         style={{
-          background: warm.bgTerminal,
-          border: `1px solid ${warm.border}`,
-          borderRadius: 6,
           padding: 12,
           height: 320,
           overflowY: 'auto',
-          fontFamily: 'ui-monospace, SFMono-Regular, Menlo, monospace',
           fontSize: 12,
           lineHeight: 1.5,
           whiteSpace: 'pre-wrap',
@@ -442,7 +443,7 @@ export default function TaskDetail({ taskId, onClose, onChanged, onOpenTask, onO
         }}
       >
         {events.length === 0 && (
-          <span style={{ color: warm.textMuted }}>Waiting for output…</span>
+          <span className="co-terminal-muted">Waiting for output…</span>
         )}
         {events.map((ev, i) => {
           const line = renderLine(ev)
@@ -480,9 +481,9 @@ export default function TaskDetail({ taskId, onClose, onChanged, onOpenTask, onO
       {task?.result_text ? (
         <div
           style={{
-            background: warm.bgElevated,
-            border: `1px solid ${warm.border}`,
-            borderRadius: 6,
+            background: 'var(--co-surface-solid)',
+            border: '1px solid var(--co-border)',
+            borderRadius: 10,
             padding: 12,
             whiteSpace: 'pre-wrap',
             fontSize: 13,
@@ -558,6 +559,25 @@ export default function TaskDetail({ taskId, onClose, onChanged, onOpenTask, onO
             : 'This task has no resumable session to continue.'}
         </Typography.Text>
       )}
+    </>
+  )
+
+  if (inline) {
+    if (!taskId) return null
+    return (
+      <section className="co-surface co-task-inline" data-testid="task-detail-inline" aria-label="Task detail">
+        <header className="co-task-inline-head">
+          <h3 className="co-task-inline-title">{task ? task.title : 'Task'}</h3>
+          {actions}
+        </header>
+        {body}
+      </section>
+    )
+  }
+
+  return (
+    <Drawer open={!!taskId} onClose={onClose} width={720} title={task ? task.title : 'Task'} extra={actions}>
+      {body}
     </Drawer>
   )
 }

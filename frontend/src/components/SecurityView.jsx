@@ -14,7 +14,7 @@ import {
   message,
 } from 'antd'
 import { ReloadOutlined } from '@ant-design/icons'
-import dayjs from 'dayjs'
+import { when } from '../time'
 import { api, FINDING_STATUS_COLORS, SEVERITY_COLORS } from '../api'
 
 const STATUS_OPTS = [
@@ -75,7 +75,7 @@ export default function SecurityView({ projects = [] }) {
         <div>
           <b>{t}</b>
           {row.description && (
-            <div style={{ fontSize: 12, color: '#8a7a6d' }}>{row.description}</div>
+            <div style={{ fontSize: 12, color: 'var(--co-text-secondary)' }}>{row.description}</div>
           )}
         </div>
       ),
@@ -103,7 +103,7 @@ export default function SecurityView({ projects = [] }) {
         <span>
           {row.cwe && <Tag>{row.cwe}</Tag>}
           {c && (
-            <div style={{ fontSize: 11, color: '#8a7a6d' }}>{c}</div>
+            <div style={{ fontSize: 11, color: 'var(--co-text-secondary)' }}>{c}</div>
           )}
         </span>
       ),
@@ -114,7 +114,7 @@ export default function SecurityView({ projects = [] }) {
       width: 110,
       render: (n, row) => (
         <Tooltip
-          title={`First seen ${dayjs(row.first_seen).format('MMM D')} · last ${dayjs(
+          title={`First seen ${when(row.first_seen).format('MMM D')} · last ${when(
             row.last_seen
           ).format('MMM D')}`}
         >
@@ -147,7 +147,7 @@ export default function SecurityView({ projects = [] }) {
               <Statistic
                 title="Open critical"
                 value={summary.open_critical}
-                valueStyle={{ color: '#ff4d4f' }}
+                valueStyle={{ color: 'var(--co-danger)' }}
               />
             </Card>
           </Col>
@@ -156,7 +156,7 @@ export default function SecurityView({ projects = [] }) {
               <Statistic
                 title="Open high"
                 value={summary.open_high}
-                valueStyle={{ color: '#fa541c' }}
+                valueStyle={{ color: 'var(--co-warning-text)' }}
               />
             </Card>
           </Col>

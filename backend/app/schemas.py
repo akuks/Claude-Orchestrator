@@ -458,6 +458,8 @@ class ScheduleOut(BaseModel):
     last_run_at: Optional[datetime]
     next_run_at: Optional[datetime]
     created_at: datetime
+    # Owner (runs are created, approved and billed as this user).
+    created_by: Optional[str] = None
     # Why the scheduler skips it right now (scheduler.owner_block_reason).
     blocked_reason: Optional[str] = None
 
@@ -522,10 +524,30 @@ class WorkflowRunOut(BaseModel):
     current_stage: int
     stages: list
     project_ids: list[str] = []
+    created_by: Optional[str] = None  # who started the run (run page header)
     created_at: datetime
     updated_at: datetime
 
     model_config = {"from_attributes": True}
+
+
+class LiveStageOut(BaseModel):
+    name: str
+    # done | current | next | failed | waiting_approval
+    state: str
+    task_count: int
+
+
+class LiveItemOut(BaseModel):
+    """A live workflow run or coordinator thread, for the Home comet scene."""
+
+    kind: str  # run | thread
+    id: str
+    title: str
+    project_ids: list[str] = []
+    status: str
+    created_at: datetime
+    stages: list[LiveStageOut]
 
 
 # ---- Skill packs (Claude Code plugins) ------------------------------------

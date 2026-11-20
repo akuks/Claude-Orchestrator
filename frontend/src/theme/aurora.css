@@ -1,0 +1,321 @@
+/* Aurora Sunset shell styles. Every colour comes from the --co-* variables
+   that ThemeModeProvider writes onto <html> (see tokens.js cssVars). */
+
+/* The page gradient lives on <html> (the canvas), not <body>: the aurora haze
+   sits at z-index -1, which paints above the root background but below any
+   in-flow body background. */
+html {
+  background-color: var(--co-bg-solid);
+  background-image: var(--co-bg);
+  background-attachment: fixed;
+  color-scheme: light;
+}
+html[data-mode='night'] {
+  color-scheme: dark;
+}
+
+body {
+  margin: 0;
+  min-height: 100vh;
+  background: transparent;
+  color: var(--co-text);
+  font-family: var(--co-font);
+  font-size: 14px;
+  -webkit-font-smoothing: antialiased;
+}
+
+/* Numbers line up in stats and tables. */
+.ant-statistic-content,
+.ant-table,
+.co-num {
+  font-variant-numeric: tabular-nums;
+}
+
+/* Drifting aurora haze across the top of the shell. Sits behind content
+   (z-index -1 under transparent layout backgrounds). */
+.co-aurora {
+  position: fixed;
+  top: -70px;
+  left: -15%;
+  right: -15%;
+  height: 230px;
+  background: var(--co-haze);
+  filter: blur(30px);
+  opacity: var(--co-haze-opacity);
+  z-index: -1;
+  pointer-events: none;
+  animation: co-aurora-drift 26s ease-in-out infinite alternate;
+}
+html[data-mode='night'] .co-aurora {
+  height: 300px;
+  filter: blur(36px) saturate(1.35);
+}
+@keyframes co-aurora-drift {
+  0% {
+    transform: translateX(-6%) scaleY(1);
+  }
+  50% {
+    transform: translateX(2%) scaleY(1.12);
+  }
+  100% {
+    transform: translateX(6%) scaleY(0.94);
+  }
+}
+html[data-reduce-motion='true'] .co-aurora {
+  animation: none;
+}
+@media (prefers-reduced-motion: reduce) {
+  .co-aurora {
+    animation: none;
+  }
+}
+
+/* Glass surface utility. */
+.co-surface {
+  background: var(--co-surface);
+  border: 1px solid var(--co-border);
+  border-radius: var(--co-radius);
+  box-shadow: var(--co-shadow);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+}
+
+/* antd cards and the header pick up the glass look. */
+.ant-card {
+  box-shadow: var(--co-shadow);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+}
+.ant-layout-header {
+  backdrop-filter: blur(14px);
+  -webkit-backdrop-filter: blur(14px);
+  border-bottom: 1px solid var(--co-border);
+}
+
+/* Primary buttons carry the brand gradient. "html body" outranks antd's
+   zero-specificity :where() hover rules injected after this sheet. */
+html body .ant-btn.ant-btn-primary:not(:disabled):not(.ant-btn-dangerous),
+html body .ant-btn.ant-btn-primary:not(:disabled):not(.ant-btn-dangerous):hover,
+html body .ant-btn.ant-btn-primary:not(:disabled):not(.ant-btn-dangerous):active {
+  background: var(--co-gradient);
+  border-color: transparent;
+  font-weight: 600;
+}
+html body .ant-btn.ant-btn-primary:not(:disabled):not(.ant-btn-dangerous):hover {
+  filter: brightness(1.07);
+}
+
+/* The live-output terminal and code blocks stay dark in both modes. */
+.co-terminal,
+pre {
+  background: var(--co-terminal-bg);
+  border: 1px solid var(--co-terminal-border);
+  border-radius: 10px;
+  color: var(--co-terminal-text);
+  font-family: var(--co-mono);
+}
+pre {
+  padding: 10px 12px;
+}
+.co-terminal .co-terminal-muted {
+  color: var(--co-terminal-muted);
+}
+
+/* Brand mark (conic amber → orange → rose). */
+.co-logo {
+  display: inline-block;
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  background: var(--co-logo);
+  box-shadow: 0 0 14px var(--co-glow);
+  vertical-align: middle;
+}
+
+/* ---- App shell: icon rail + top bar (Task 3) ---------------------------- */
+.co-shell {
+  display: flex;
+  min-height: 100vh;
+}
+.co-rail {
+  position: sticky;
+  top: 0;
+  height: 100vh;
+  width: 64px;
+  flex: 0 0 64px;
+  box-sizing: border-box;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 10px;
+  padding-top: 14px;
+  background: var(--co-header);
+  border-right: 1px solid var(--co-border);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+  z-index: 10;
+}
+.co-rail-logo {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 36px;
+  height: 36px;
+  margin-bottom: 8px;
+  border-radius: 12px;
+}
+.co-rail-logo .co-logo {
+  width: 30px;
+  height: 30px;
+  border-radius: 11px;
+}
+.co-rail-item {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 40px;
+  height: 40px;
+  border-radius: 12px;
+  color: var(--co-text-secondary);
+  font-size: 17px;
+  transition: background 0.15s, color 0.15s, box-shadow 0.15s;
+}
+.co-rail-item:hover {
+  background: var(--co-hover);
+  color: var(--co-primary);
+}
+.co-rail-item-on,
+.co-rail-item-on:hover {
+  background: var(--co-surface-solid);
+  color: var(--co-primary);
+  box-shadow: 0 6px 14px rgba(249, 115, 22, 0.22);
+}
+html[data-mode='night'] .co-rail-item-on {
+  background: var(--co-active-bg);
+  box-shadow: inset 0 0 0 1px var(--co-active-border), 0 0 16px rgba(249, 115, 22, 0.25);
+}
+.co-rail-item:focus-visible,
+.co-cmd:focus-visible,
+.co-avatar:focus-visible {
+  outline: 2px solid var(--co-primary);
+  outline-offset: 2px;
+}
+.co-rail-icon {
+  display: inline-flex;
+  color: inherit;
+  font-size: 17px;
+}
+
+.co-main {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+}
+.co-topbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  flex-wrap: wrap;
+  padding: 14px 24px 6px;
+}
+.co-cmd {
+  flex: 1;
+  max-width: 440px;
+  min-width: 220px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+  border-radius: 12px;
+  border: 1px solid var(--co-border);
+  background: var(--co-surface-solid);
+  box-shadow: var(--co-shadow);
+  color: var(--co-text-muted);
+  font: inherit;
+  font-size: 13px;
+  text-align: left;
+  cursor: text;
+}
+html[data-mode='night'] .co-cmd {
+  background: var(--co-surface);
+}
+.co-cmd:hover {
+  border-color: var(--co-active-border);
+}
+.co-cmd-text {
+  flex: 1;
+}
+.co-cmd kbd,
+.co-palette-hint kbd {
+  font-family: var(--co-font);
+  font-size: 11px;
+  padding: 1px 6px;
+  border-radius: 5px;
+  background: var(--co-active-bg);
+  color: var(--co-primary);
+}
+.co-avatar {
+  width: 32px;
+  height: 32px;
+  border-radius: 50%;
+  border: none;
+  background: var(--co-gradient);
+  color: #fff;
+  font: inherit;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  box-shadow: 0 4px 10px rgba(225, 29, 72, 0.25);
+}
+.co-content {
+  padding: 12px 24px 24px;
+}
+/* ⌘K palette */
+.co-palette .ant-modal-content {
+  padding: 8px;
+}
+.co-palette-list {
+  max-height: 360px;
+  overflow-y: auto;
+  margin-top: 4px;
+  border-top: 1px solid var(--co-border);
+  padding-top: 4px;
+}
+.co-palette-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 8px 12px;
+  border-radius: 10px;
+  cursor: pointer;
+  color: var(--co-text);
+}
+.co-palette-item-on {
+  background: var(--co-active-bg);
+  box-shadow: inset 0 0 0 1px var(--co-active-border);
+}
+.co-palette-label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.co-palette-group {
+  flex: none;
+  font-size: 12px;
+  color: var(--co-text-secondary);
+}
+.co-palette-empty {
+  padding: 16px 12px;
+  color: var(--co-text-secondary);
+}
+.co-palette-hint {
+  padding: 8px 12px 4px;
+  font-size: 12px;
+  color: var(--co-text-secondary);
+}
+.co-palette-hint kbd {
+  margin-right: 2px;
+}

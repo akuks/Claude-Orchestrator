@@ -1,20 +1,21 @@
 import { Card, Col, Row, Statistic } from 'antd'
 import ReactECharts from 'echarts-for-react'
-
-const STATUS_COLOR = {
-  completed: '#52c41a',
-  failed: '#ff4d4f',
-  running: '#1668dc',
-  queued: '#8c8c8c',
-  cancelled: '#595959',
-  awaiting_approval: '#faad14',
-}
+import { modeTokens, statusColor } from '../theme/tokens'
+import { useThemeMode } from '../theme/ThemeModeContext.jsx'
 
 export default function StatsBar({ stats }) {
+  const { mode } = useThemeMode()
   if (!stats) return null
+  const t = modeTokens(mode)
   const entries = Object.entries(stats.by_status || {})
   const donut = {
-    tooltip: { trigger: 'item' },
+    backgroundColor: 'transparent',
+    tooltip: {
+      trigger: 'item',
+      backgroundColor: t.elevated,
+      borderColor: t.border,
+      textStyle: { color: t.text },
+    },
     series: [
       {
         type: 'pie',
@@ -24,7 +25,7 @@ export default function StatsBar({ stats }) {
         data: entries.map(([k, v]) => ({
           name: k,
           value: v,
-          itemStyle: { color: STATUS_COLOR[k] || '#888' },
+          itemStyle: { color: statusColor(k, mode), borderColor: t.surfaceSolid, borderWidth: 1 },
         })),
       },
     ],
@@ -39,7 +40,7 @@ export default function StatsBar({ stats }) {
       </Col>
       <Col flex="1">
         <Card size="small">
-          <Statistic title="Running" value={stats.running} valueStyle={{ color: '#1668dc' }} />
+          <Statistic title="Running" value={stats.running} valueStyle={{ color: 'var(--co-info-text)' }} />
         </Card>
       </Col>
       <Col flex="1">
@@ -53,7 +54,7 @@ export default function StatsBar({ stats }) {
             title="Success Rate"
             value={Math.round((stats.success_rate || 0) * 100)}
             suffix="%"
-            valueStyle={{ color: '#52c41a' }}
+            valueStyle={{ color: 'var(--co-success-text)' }}
           />
         </Card>
       </Col>

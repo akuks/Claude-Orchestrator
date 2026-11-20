@@ -23,7 +23,7 @@ export default function ChangePasswordModal({ open, onClose }) {
     }
   }
   return (
-    <Modal title="Change password" open={open} onCancel={onClose} onOk={submit} confirmLoading={busy} okText="Change" destroyOnClose>
+    <Modal title="Change password" open={open} onCancel={onClose} onOk={submit} confirmLoading={busy} okText="Change" destroyOnHidden>
       <Form form={form} layout="vertical">
         <Form.Item name="current" label="Current password" rules={[{ required: true }]}>
           <Input.Password autoComplete="current-password" />

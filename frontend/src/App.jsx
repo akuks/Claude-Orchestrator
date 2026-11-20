@@ -1,13 +1,10 @@
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
   Alert,
-  Badge,
   Button,
-  Dropdown,
   Layout,
   Spin,
   Popconfirm,
-  Segmented,
   Select,
   Space,
   Table,
@@ -16,23 +13,14 @@ import {
   message,
 } from 'antd'
 import {
-  ApiOutlined,
-  ClockCircleOutlined,
   DeleteOutlined,
-  DollarOutlined,
-  FolderOutlined,
   KeyOutlined,
-  LockOutlined,
-  LogoutOutlined,
-  TeamOutlined,
-  UserOutlined,
   PlusOutlined,
   ReloadOutlined,
   SafetyCertificateOutlined,
-  SafetyOutlined,
-  UnorderedListOutlined,
 } from '@ant-design/icons'
 import dayjs from 'dayjs'
+import { when } from './time'
 import relativeTime from 'dayjs/plugin/relativeTime'
 import { api, setUnauthorizedHandler, PRIORITY_COLORS, STATUS_COLORS, shortModel } from './api'
 import StatsBar from './components/StatsBar'
@@ -47,14 +35,20 @@ import UsageView from './components/UsageView'
 import SecurityView from './components/SecurityView'
 import UsersView from './components/UsersView'
 import TeamsView from './components/TeamsView'
+import HomeView from './home/HomeView'
+import RunView from './runs/RunView'
 import LoginPage from './auth/LoginPage'
 import SetupPage from './auth/SetupPage'
 import ChangePasswordModal from './auth/ChangePasswordModal'
 import MyCredentials from './components/MyCredentials'
+import { useThemeMode } from './theme/ThemeModeContext.jsx'
+import { interceptHashLinks, redirectIfForbidden, returnTo, useRoute } from './shell/router'
+import { buildCommands, isPaletteShortcut } from './shell/commands'
+import Rail from './shell/Rail'
+import TopBar from './shell/TopBar'
+import CommandPalette from './shell/CommandPalette'
 
 dayjs.extend(relativeTime)
-
-const { Header, Content } = Layout
 
 const EXPIRED_MSG = 'Your session expired — please sign in again.'
 
@@ -128,6 +122,8 @@ export default function App() {
 
 function AppInner({ user, onLogout }) {
   const isAdmin = user.role === 'admin'
+  const [route, navigate] = useRoute()
+  const page = route.page
   const [pwOpen, setPwOpen] = useState(false)
   const [credsOpen, setCredsOpen] = useState(false)
   const [tasks, setTasks] = useState([])
@@ -135,13 +131,30 @@ function AppInner({ user, onLogout }) {
   const [loading, setLoading] = useState(false)
   const [createOpen, setCreateOpen] = useState(false)
   const [reviewOpen, setReviewOpen] = useState(false)
-  const [selected, setSelected] = useState(null)
   const [statusFilter, setStatusFilter] = useState()
-  const [view, setView] = useState('tasks')
+  const { mode, setMode } = useThemeMode()
   const [projects, setProjects] = useState([])
   const [activeProjectId, setActiveProjectId] = useState(null)
   const [approvalCount, setApprovalCount] = useState(0)
   const [claudeInfo, setClaudeInfo] = useState(null)
+  const [paletteOpen, setPaletteOpen] = useState(false)
+  const [paletteData, setPaletteData] = useState({ workflows: [], runs: [], recent: [], loading: false })
+  const [runWorkflowId, setRunWorkflowId] = useState(null)
+
+  // #/tasks/<id> opens that task's detail drawer.
+  const selected = page === 'tasks' && route.id ? route.id : null
+  // Opening a task pushes (Back returns to the list); switching steps inside
+  // an already-open drawer replaces, so closing still steps back to the list.
+  const openTask = useCallback(
+    (id) => navigate({ page: 'tasks', id }, { replace: Boolean(selected) }),
+    [navigate, selected],
+  )
+  useEffect(() => interceptHashLinks(navigate), [navigate])
+
+  // Admin-only pages: a member following a stale link lands on Home.
+  useEffect(() => {
+    redirectIfForbidden({ page }, isAdmin, navigate)
+  }, [isAdmin, page, navigate])
 
   const loadClaudeInfo = useCallback(() => {
     api.claudeStatus().then(setClaudeInfo).catch(() => setClaudeInfo(null))
@@ -197,13 +210,71 @@ function AppInner({ user, onLogout }) {
   }, [statusFilter, activeProjectId])
 
   useEffect(() => {
-    if (view !== 'tasks') return
+    if (page !== 'tasks') return
     refresh()
     const id = setInterval(refresh, 3000) // poll for live feed updates
     return () => clearInterval(id)
-  }, [refresh, view])
+  }, [refresh, page])
 
-  const activeProject = projects.find((p) => p.id === activeProjectId) || null
+  // ---- ⌘K ----
+  const openPalette = useCallback(() => setPaletteOpen(true), [])
+  const closePalette = useCallback(() => setPaletteOpen(false), [])
+
+  useEffect(() => {
+    const onKey = (e) => {
+      if (!isPaletteShortcut(e)) return
+      e.preventDefault()
+      setPaletteOpen((o) => !o)
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [])
+
+  // Workflows (and recent tasks, if the Tasks page hasn't loaded them) are
+  // fetched lazily each time the palette opens.
+  useEffect(() => {
+    if (!paletteOpen) return
+    let live = true
+    setPaletteData((d) => ({ ...d, loading: true }))
+    Promise.all([
+      api.listWorkflows().catch(() => []),
+      tasks.length ? Promise.resolve(null) : api.listTasks({ limit: 20 }).catch(() => []),
+      api.listWorkflowRuns({ limit: 20 }).catch(() => []),
+    ]).then(([workflows, recent, runs]) => {
+      if (live) setPaletteData((d) => ({ workflows, runs, recent: recent ?? d.recent, loading: false }))
+    })
+    return () => {
+      live = false
+    }
+  }, [paletteOpen]) // eslint-disable-line react-hooks/exhaustive-deps
+
+  const commands = useMemo(
+    () =>
+      buildCommands({
+        projects,
+        tasks: (tasks.length ? tasks : paletteData.recent).slice(0, 20),
+        runs: paletteData.runs,
+        workflows: paletteData.workflows,
+        isAdmin,
+        actions: {
+          navigate,
+          // No per-project page yet: show its tasks.
+          openProject: (p) => {
+            setActiveProjectId(p.id)
+            navigate({ page: 'tasks' })
+          },
+          newTask: () => setCreateOpen(true),
+          runWorkflow: (w) => {
+            setRunWorkflowId(w.id)
+            navigate({ page: 'automation' })
+          },
+          toggleNight: () => setMode(mode === 'night' ? 'light' : 'night'),
+          openCredentials: () => setCredsOpen(true),
+        },
+      }),
+    [projects, tasks, paletteData, isAdmin, navigate, mode, setMode],
+  )
+  const clearRunRequest = useCallback(() => setRunWorkflowId(null), [])
 
   const deleteTask = async (id) => {
     try {
@@ -221,7 +292,7 @@ function AppInner({ user, onLogout }) {
       dataIndex: 'title',
       render: (t, row) => (
         <Space>
-          <a onClick={() => setSelected(row.id)}>{t}</a>
+          <a href={`#/tasks/${encodeURIComponent(row.id)}`}>{t}</a>
           {row.thread_count > 1 && (
             <Tag color="cyan" title={`${row.thread_count} steps in this thread`}>
               🧵 {row.thread_count}
@@ -270,7 +341,7 @@ function AppInner({ user, onLogout }) {
       title: 'Created',
       dataIndex: 'created_at',
       width: 130,
-      render: (d) => dayjs(d).fromNow(),
+      render: (d) => when(d).fromNow(),
     },
     {
       title: '',
@@ -303,181 +374,140 @@ function AppInner({ user, onLogout }) {
   ]
 
   return (
-    <Layout style={{ minHeight: '100vh' }}>
-      <Header
-        style={{
-          display: 'flex',
-          alignItems: 'center',
-          justifyContent: 'space-between',
-          flexWrap: 'wrap',
-          height: 'auto',
-          minHeight: 64,
-          rowGap: 8,
-          paddingInline: 24,
-          paddingBlock: 8,
-        }}
-      >
-        <Space size="large" wrap>
-          <Typography.Title
-            level={4}
-            style={{ color: '#fff', margin: 0, whiteSpace: 'nowrap' }}
-            title="Claude Orchestrator"
-          >
-            🪄 CO
-          </Typography.Title>
-          {claudeInfo && <ClaudeTag info={claudeInfo} isAdmin={isAdmin} onClick={() => setCredsOpen(true)} />}
-          <Segmented
-            value={view}
-            onChange={setView}
-            options={[
-              { value: 'tasks', label: 'Tasks', icon: <UnorderedListOutlined /> },
-              { value: 'projects', label: 'Projects', icon: <FolderOutlined /> },
-              { value: 'automation', label: 'Automation', icon: <ClockCircleOutlined /> },
-              {
-                value: 'approvals',
-                icon: <SafetyOutlined />,
-                label: (
-                  <Badge count={approvalCount} size="small" offset={[8, -2]}>
-                    <span>Approvals</span>
-                  </Badge>
-                ),
-              },
-              { value: 'security', label: 'Security', icon: <SafetyCertificateOutlined /> },
-              { value: 'usage', label: 'Usage', icon: <DollarOutlined /> },
-              { value: 'mcp', label: 'MCP Servers', icon: <ApiOutlined /> },
-              ...(isAdmin
-                ? [
-                    { value: 'users', label: 'Users', icon: <UserOutlined /> },
-                    { value: 'teams', label: 'Teams', icon: <TeamOutlined /> },
-                  ]
-                : []),
-            ]}
-          />
-        </Space>
-        <Space wrap>
-          {view === 'tasks' && (
-            <Select
-              allowClear
-              placeholder="All projects"
-              style={{ width: 200 }}
-              value={activeProjectId}
-              onChange={(v) => setActiveProjectId(v || null)}
-              options={projects.map((p) => ({ value: p.id, label: p.name }))}
+    <div className="co-shell">
+      <Rail page={page} isAdmin={isAdmin} approvalCount={approvalCount} />
+      <div className="co-main">
+        <TopBar
+          user={user}
+          claudeInfo={claudeInfo}
+          isAdmin={isAdmin}
+          onOpenPalette={openPalette}
+          onOpenCredentials={() => setCredsOpen(true)}
+          onChangePassword={() => setPwOpen(true)}
+          onLogout={onLogout}
+        />
+
+        <main className="co-content" data-testid={`page-${page}`}>
+          {noCredential && (
+            <Alert
+              data-testid="no-credential-banner"
+              type="warning"
+              showIcon
+              style={{ marginBottom: 16 }}
+              message="Claude isn't set up for you"
+              description={
+                isAdmin
+                  ? 'Tasks you start will fail until you add your own Claude token or API key, or set an org fallback key for everyone on the Users page. Your schedules and PR auto-reviews are paused until then.'
+                  : 'Tasks you start will fail until you add your own Claude token or API key (or an admin sets an org fallback key). Your schedules and PR auto-reviews are paused until then.'
+              }
+              action={
+                <Space direction="vertical">
+                  <Button size="small" type="primary" icon={<KeyOutlined />} onClick={() => setCredsOpen(true)}>
+                    My credentials
+                  </Button>
+                  {isAdmin && (
+                    <Button size="small" onClick={() => navigate({ page: 'users' })}>
+                      Org fallback key
+                    </Button>
+                  )}
+                </Space>
+              }
             />
           )}
-          {view === 'tasks' && (
-            <Button
-              icon={<SafetyCertificateOutlined />}
-              onClick={() => setReviewOpen(true)}
-            >
-              Security Review
-            </Button>
+          {page === 'home' && (
+            <HomeView
+              user={user}
+              navigate={navigate}
+              onOpenCredentials={() => setCredsOpen(true)}
+              onApprovalsChanged={loadApprovalCount}
+              refreshSignal={claudeInfo?.you?.claude}
+            />
           )}
-          {view === 'tasks' && (
-            <Button type="primary" icon={<PlusOutlined />} onClick={() => setCreateOpen(true)}>
-              New Task
-            </Button>
+          {page === 'runs' && (
+            <RunView
+              key={route.id}
+              id={route.id}
+              stage={route.stage}
+              onSelectStage={(i) => navigate({ page: 'runs', id: route.id, stage: i })}
+              user={user}
+              projects={projects}
+              navigate={navigate}
+              onOpenCredentials={() => setCredsOpen(true)}
+            />
           )}
-          <Dropdown
-            trigger={['click']}
-            menu={{
-              items: [
-                {
-                  key: 'me',
-                  disabled: true,
-                  label: (
-                    <span>
-                      {user.name}{' '}
-                      <Tag style={{ marginInlineEnd: 0 }} color={user.role === 'admin' ? 'gold' : 'default'}>
-                        {user.role}
-                      </Tag>
-                    </span>
-                  ),
-                },
-                { type: 'divider' },
-                { key: 'creds', icon: <KeyOutlined />, label: 'My credentials', onClick: () => setCredsOpen(true) },
-                { key: 'pw', icon: <LockOutlined />, label: 'Change password', onClick: () => setPwOpen(true) },
-                { key: 'out', icon: <LogoutOutlined />, label: 'Log out', onClick: onLogout },
-              ],
-            }}
-          >
-            <Button icon={<UserOutlined />} data-testid="user-menu" title={user.name} aria-label="User menu" />
-          </Dropdown>
-        </Space>
-      </Header>
+          {page === 'mcp' && <McpRegistry />}
+          {page === 'users' && isAdmin && <UsersView currentUser={user} onFallbackChanged={loadClaudeInfo} />}
+          {page === 'teams' && isAdmin && <TeamsView />}
+          {page === 'projects' && <ProjectsView currentUser={user} onProjectsChanged={loadProjects} />}
+          {page === 'automation' && (
+            <AutomationView
+              projects={projects}
+              isAdmin={isAdmin}
+              runWorkflowId={runWorkflowId}
+              onRunHandled={clearRunRequest}
+            />
+          )}
+          {page === 'approvals' && <ApprovalsView onChanged={loadApprovalCount} />}
+          {page === 'usage' && <UsageView />}
+          {page === 'security' && <SecurityView projects={projects} />}
+          {page === 'tasks' && (
+            <>
+              <StatsBar stats={stats} />
 
-      <Content style={{ padding: 24 }}>
-        {noCredential && (
-          <Alert
-            data-testid="no-credential-banner"
-            type="warning"
-            showIcon
-            style={{ marginBottom: 16 }}
-            message="Claude isn't set up for you"
-            description={
-              isAdmin
-                ? 'Tasks you start will fail until you add your own Claude token or API key, or set an org fallback key for everyone on the Users page. Your schedules and PR auto-reviews are paused until then.'
-                : 'Tasks you start will fail until you add your own Claude token or API key (or an admin sets an org fallback key). Your schedules and PR auto-reviews are paused until then.'
-            }
-            action={
-              <Space direction="vertical">
-                <Button size="small" type="primary" icon={<KeyOutlined />} onClick={() => setCredsOpen(true)}>
-                  My credentials
-                </Button>
-                {isAdmin && (
-                  <Button size="small" onClick={() => setView('users')}>
-                    Org fallback key
+              <Space style={{ marginBottom: 12, width: '100%', justifyContent: 'space-between' }} wrap>
+                <Space wrap>
+                  <Select
+                    allowClear
+                    placeholder="All projects"
+                    style={{ width: 200 }}
+                    value={activeProjectId}
+                    onChange={(v) => setActiveProjectId(v || null)}
+                    options={projects.map((p) => ({ value: p.id, label: p.name }))}
+                    data-testid="task-project-filter"
+                  />
+                  <Select
+                    allowClear
+                    placeholder="Filter status"
+                    style={{ width: 180 }}
+                    value={statusFilter}
+                    onChange={setStatusFilter}
+                    options={[
+                      'queued',
+                      'running',
+                      'awaiting_approval',
+                      'completed',
+                      'failed',
+                      'cancelled',
+                    ].map((s) => ({ value: s, label: s }))}
+                  />
+                  <Button icon={<ReloadOutlined />} onClick={refresh}>
+                    Refresh
                   </Button>
-                )}
+                </Space>
+                <Space wrap>
+                  <Button icon={<SafetyCertificateOutlined />} onClick={() => setReviewOpen(true)}>
+                    Security Review
+                  </Button>
+                  <Button type="primary" icon={<PlusOutlined />} onClick={() => setCreateOpen(true)}>
+                    New Task
+                  </Button>
+                </Space>
               </Space>
-            }
-          />
-        )}
-        {view === 'mcp' && <McpRegistry />}
-        {view === 'users' && isAdmin && <UsersView currentUser={user} onFallbackChanged={loadClaudeInfo} />}
-        {view === 'teams' && isAdmin && <TeamsView />}
-        {view === 'projects' && <ProjectsView currentUser={user} onProjectsChanged={loadProjects} />}
-        {view === 'automation' && <AutomationView projects={projects} isAdmin={isAdmin} />}
-        {view === 'approvals' && <ApprovalsView onChanged={loadApprovalCount} />}
-        {view === 'usage' && <UsageView />}
-        {view === 'security' && <SecurityView projects={projects} />}
-        {view === 'tasks' && (
-        <>
-        <StatsBar stats={stats} />
 
-        <Space style={{ marginBottom: 12 }} wrap>
-          <Select
-            allowClear
-            placeholder="Filter status"
-            style={{ width: 180 }}
-            value={statusFilter}
-            onChange={setStatusFilter}
-            options={[
-              'queued',
-              'running',
-              'awaiting_approval',
-              'completed',
-              'failed',
-              'cancelled',
-            ].map((s) => ({ value: s, label: s }))}
-          />
-          <Button icon={<ReloadOutlined />} onClick={refresh}>
-            Refresh
-          </Button>
-        </Space>
+              <Table
+                rowKey="id"
+                size="middle"
+                loading={loading}
+                columns={columns}
+                dataSource={tasks}
+                pagination={{ pageSize: 15, showSizeChanger: false }}
+              />
+            </>
+          )}
+        </main>
+      </div>
 
-        <Table
-          rowKey="id"
-          size="middle"
-          loading={loading}
-          columns={columns}
-          dataSource={tasks}
-          pagination={{ pageSize: 15, showSizeChanger: false }}
-        />
-        </>
-        )}
-      </Content>
-
+      <CommandPalette open={paletteOpen} commands={commands} loading={paletteData.loading} onClose={closePalette} />
       <CreateTaskModal
         open={createOpen}
         projects={projects}
@@ -495,52 +525,11 @@ function AppInner({ user, onLogout }) {
       <MyCredentials open={credsOpen} onClose={() => setCredsOpen(false)} onChanged={onCredsChanged} />
       <TaskDetail
         taskId={selected}
-        onClose={() => setSelected(null)}
+        onClose={() => returnTo({ page: 'tasks' }, navigate)}
         onChanged={refresh}
-        onOpenTask={(id) => setSelected(id)}
+        onOpenTask={openTask}
         onOpenCredentials={() => setCredsOpen(true)}
       />
-    </Layout>
-  )
-}
-
-// Header tag: whether *you* can run tasks (your own Claude credential, the org
-// fallback, or none), plus a server-side note if the CLI binary is missing.
-function ClaudeTag({ info, isAdmin, onClick }) {
-  if (!info.found)
-    return (
-      <Tag color="red" title="The claude CLI isn't installed on the server (check CO_CLAUDE_BIN).">
-        claude CLI not found
-      </Tag>
-    )
-  const you = info.you?.claude
-  const version = info.version?.split(' ')[0]
-  const title = version ? `claude ${version} on the server` : undefined
-  if (you === 'own')
-    return (
-      <Tag color="green" title={title} style={{ cursor: 'pointer' }} onClick={onClick}>
-        Claude: {info.you.claude_kind === 'api_key' ? 'your API key' : 'your token'}
-      </Tag>
-    )
-  if (you === 'fallback')
-    return (
-      <Tag color="blue" title={title} style={{ cursor: 'pointer' }} onClick={onClick}>
-        Claude: org fallback
-      </Tag>
-    )
-  return (
-    <Tag
-      color="red"
-      data-testid="claude-not-set-up"
-      style={{ cursor: 'pointer' }}
-      onClick={onClick}
-      title={
-        isAdmin
-          ? 'Add your own credential under My credentials, or set an org fallback key on the Users page'
-          : 'Add your own credential under My credentials (or ask an admin to set an org fallback key)'
-      }
-    >
-      Claude: not set up
-    </Tag>
+    </div>
   )
 }

@@ -33,7 +33,7 @@ import {
   RobotOutlined,
   ThunderboltOutlined,
 } from '@ant-design/icons'
-import dayjs from 'dayjs'
+import { when } from '../time'
 import { api, STATUS_COLORS } from '../api'
 import AgentsView from './AgentsView'
 import ServersView from './ServersView'
@@ -155,7 +155,7 @@ function ScheduleModal({ open, schedule, projects, onClose, onSaved }) {
           </Space.Compact>
           <Typography.Text type="secondary" style={{ fontSize: 12 }}>
             {preview.length
-              ? `Next: ${preview.slice(0, 3).map((d) => dayjs(d).format('MMM D HH:mm')).join(' · ')}`
+              ? `Next: ${preview.slice(0, 3).map((d) => when(d).format('MMM D HH:mm')).join(' · ')}`
               : 'Enter a valid cron to preview run times'}
           </Typography.Text>
         </Form.Item>
@@ -255,7 +255,7 @@ function RunsDrawer({ schedule, onClose }) {
                 description={t.title}
               />
               <Typography.Text type="secondary" style={{ fontSize: 12 }}>
-                {dayjs(t.created_at).format('MMM D HH:mm')}
+                {when(t.created_at).format('MMM D HH:mm')}
               </Typography.Text>
             </List.Item>
           )}
@@ -326,12 +326,12 @@ function SchedulesTab({ projects }) {
     {
       title: 'Next run',
       dataIndex: 'next_run_at',
-      render: (d) => (d ? dayjs(d).format('MMM D HH:mm') : '—'),
+      render: (d) => (d ? when(d).format('MMM D HH:mm') : '—'),
     },
     {
       title: 'Last run',
       dataIndex: 'last_run_at',
-      render: (d) => (d ? dayjs(d).fromNow() : 'never'),
+      render: (d) => (d ? when(d).fromNow() : 'never'),
     },
     {
       title: 'Notify',
@@ -570,13 +570,28 @@ function TemplatesTab({ projects, isAdmin }) {
   )
 }
 
-export default function AutomationView({ projects = [], isAdmin = false }) {
+// runWorkflowId (from ⌘K "Run <workflow>…") switches to the Workflows tab and
+// opens that workflow's run dialog; onRunHandled clears the request.
+// The open tab survives leaving the page (e.g. Workflows → a run page → Back).
+let lastTab = 'agents'
+
+export default function AutomationView({ projects = [], isAdmin = false, runWorkflowId = null, onRunHandled }) {
   const [allAgents, setAllAgents] = useState([])
+  const [tab, setTabState] = useState(runWorkflowId ? 'workflows' : lastTab)
+  const setTab = (t) => {
+    lastTab = t
+    setTabState(t)
+  }
   useEffect(() => {
     api.listAgents().then(setAllAgents).catch(() => {})
   }, [])
+  useEffect(() => {
+    if (runWorkflowId) setTab('workflows')
+  }, [runWorkflowId])
   return (
     <Tabs
+      activeKey={tab}
+      onChange={setTab}
       items={[
         {
           key: 'agents',
@@ -594,7 +609,14 @@ export default function AutomationView({ projects = [], isAdmin = false }) {
               <ApartmentOutlined /> Workflows
             </span>
           ),
-          children: <WorkflowsView agents={allAgents} isAdmin={isAdmin} />,
+          children: (
+            <WorkflowsView
+              agents={allAgents}
+              isAdmin={isAdmin}
+              runWorkflowId={runWorkflowId}
+              onRunHandled={onRunHandled}
+            />
+          ),
         },
         {
           key: 'schedules',

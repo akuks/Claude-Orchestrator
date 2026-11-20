@@ -20,20 +20,36 @@ _env_key() {
 BACKEND_PORT="${CO_BACKEND_PORT:-8200}"
 FRONTEND_PORT="${CO_FRONTEND_PORT:-5200}"
 
-# --- backend deps ---
+# --- deps ---
+# True when $1 is newer than the stamp $2 (or the stamp is missing): the
+# dependency list changed since the last install.
+_stale() { [ ! -e "$2" ] || [ "$1" -nt "$2" ]; }
+
+# backend: reinstall when requirements.txt is newer than the venv's stamp.
 cd "$ROOT/backend"
+REQ_STAMP=.venv/.requirements-stamp
 if [ ! -d .venv ]; then
   echo "Creating backend virtualenv and installing deps (first run)…"
   python3 -m venv .venv
   ./.venv/bin/pip install -q --upgrade pip
   ./.venv/bin/pip install -q -r requirements.txt
+  touch "$REQ_STAMP"
+elif _stale requirements.txt "$REQ_STAMP"; then
+  echo "backend/requirements.txt changed — updating backend deps…"
+  ./.venv/bin/pip install -q -r requirements.txt
+  touch "$REQ_STAMP"
 fi
 
-# --- frontend deps ---
+# frontend: npm records what it installed in node_modules/.package-lock.json;
+# reinstall when package-lock.json is newer (e.g. after a pull added a package).
 cd "$ROOT/frontend"
 if [ ! -d node_modules ]; then
   echo "Installing frontend deps (first run)…"
   npm install
+elif _stale package-lock.json node_modules/.package-lock.json; then
+  echo "frontend/package-lock.json changed — updating frontend deps…"
+  npm install --no-audit --no-fund
+  touch node_modules/.package-lock.json
 fi
 
 # --- free the ports if something is already bound ---

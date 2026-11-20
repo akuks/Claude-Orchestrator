@@ -168,10 +168,10 @@ export default function ServersView({ projects = [], isAdmin = false }) {
       render: (n) =>
         n ? (
           <Tooltip title={n}>
-            <span style={{ color: '#8a7a6d' }}>{n.split('\n')[0].slice(0, 40)}</span>
+            <span style={{ color: 'var(--co-text-secondary)' }}>{n.split('\n')[0].slice(0, 40)}</span>
           </Tooltip>
         ) : (
-          <span style={{ color: '#c4b8ad' }}>—</span>
+          <span style={{ color: 'var(--co-text-muted)' }}>—</span>
         ),
     },
     isAdmin && {

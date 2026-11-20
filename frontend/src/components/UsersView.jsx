@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useState } from 'react'
 import { Button, Form, Input, Modal, Popconfirm, Select, Space, Switch, Table, Tag, Typography, message } from 'antd'
 import { KeyOutlined, PlusOutlined, ReloadOutlined } from '@ant-design/icons'
-import dayjs from 'dayjs'
+import { when } from '../time'
 import { api } from '../api'
 import OrgFallbackCard from './OrgFallbackCard'
 
@@ -32,7 +32,7 @@ function CreateModal({ open, onClose, onDone }) {
     }
   }
   return (
-    <Modal title="Add user" open={open} onCancel={onClose} onOk={submit} confirmLoading={busy} okText="Create" destroyOnClose>
+    <Modal title="Add user" open={open} onCancel={onClose} onOk={submit} confirmLoading={busy} okText="Create" destroyOnHidden>
       <Form form={form} layout="vertical">
         <Form.Item name="name" label="Name" rules={[{ required: true }]}>
           <Input />
@@ -72,7 +72,7 @@ function ResetModal({ user, onClose }) {
     }
   }
   return (
-    <Modal title={`Reset password — ${user?.email || ''}`} open={!!user} onCancel={onClose} onOk={submit} confirmLoading={busy} okText="Reset" destroyOnClose>
+    <Modal title={`Reset password — ${user?.email || ''}`} open={!!user} onCancel={onClose} onOk={submit} confirmLoading={busy} okText="Reset" destroyOnHidden>
       <Form form={form} layout="vertical">
         <Form.Item name="password" label="New password" rules={[{ required: true, min: 8, message: 'At least 8 characters' }]}>
           <Input.Password autoComplete="new-password" />
@@ -142,7 +142,7 @@ export default function UsersView({ currentUser, onFallbackChanged }) {
       title: 'Last login',
       dataIndex: 'last_login_at',
       width: 140,
-      render: (d) => (d ? dayjs(d).fromNow() : <Typography.Text type="secondary">never</Typography.Text>),
+      render: (d) => (d ? when(d).fromNow() : <Typography.Text type="secondary">never</Typography.Text>),
     },
     {
       title: '',

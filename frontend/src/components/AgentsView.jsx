@@ -527,7 +527,7 @@ export default function AgentsView({ projects = [], isAdmin = false }) {
             </Tag>
           )}
           {row.description && (
-            <div style={{ fontSize: 12, color: '#8a7a6d' }}>{row.description}</div>
+            <div style={{ fontSize: 12, color: 'var(--co-text-secondary)' }}>{row.description}</div>
           )}
         </div>
       ),
@@ -536,7 +536,7 @@ export default function AgentsView({ projects = [], isAdmin = false }) {
       title: 'Default project',
       dataIndex: 'project_id',
       width: 150,
-      render: (id) => (id ? <Tag>{projName(id) || id.slice(0, 6)}</Tag> : <span style={{ color: '#8a7a6d' }}>any</span>),
+      render: (id) => (id ? <Tag>{projName(id) || id.slice(0, 6)}</Tag> : <span style={{ color: 'var(--co-text-secondary)' }}>any</span>),
     },
     { title: 'Model', dataIndex: 'model', width: 90, render: (m) => m || 'default' },
     {
