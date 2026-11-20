@@ -886,3 +886,113 @@ EVERYDAY_FP = [
 def test_everyday_commands_are_certain(cmd):
     res = parse(cmd)
     assert not res.uncertain, [(s.argv, s.reasons) for s in walk(res)]
+
+
+# ===========================================================================
+# Fix round 3 (fail-closed rules): regression tests with the reviewer's exact inputs
+# ===========================================================================
+# 1. A script FILE run while the same stage has stdin input (or a pipe into it).
+@pytest.mark.parametrize("cmd", [
+    "bash ../../../../../../dev/stdin <<< 'rm -rf ~'",
+    "source ../../../../../../../dev/stdin <<< 'rm -rf ~'",
+    "bash ~/../../dev/stdin <<< 'rm -rf ~'",
+    "cd /dev && bash stdin <<< 'rm -rf ~'",
+    "cd /dev; bash ./stdin <<< 'rm -rf ~'",
+    "bash ./../../../../dev/stdin <<< 'rm -rf ~'",
+    "echo 'rm -rf ~' | bash ../../dev/stdin",
+    "bash x.sh < input.txt",
+])
+def test_script_file_with_stdin_is_uncertain(cmd):
+    assert seen_or_uncertain(cmd) and parse(cmd).uncertain, [(s.argv, s.reasons) for s in walk(parse(cmd))]
+
+
+# 2. xargs/parallel placeholder in the command word.
+@pytest.mark.parametrize("cmd", [
+    "echo rm | xargs -I{} {} -rf ~",
+    "echo rm | xargs -I% %",
+    "echo rm | xargs --replace=Q Q -rf ~",
+    "echo 'rm -rf ~' | xargs eval",
+    "echo 'rm -rf ~' | xargs sh",
+])
+def test_xargs_input_in_command_word(cmd):
+    assert parse(cmd).uncertain
+
+
+# 3. parallel ::: command lines.
+def test_parallel_triple_colon_scripts():
+    assert runs("parallel ::: 'rm -rf ~'", "rm", "-rf", "~")
+
+
+@pytest.mark.parametrize("cmd", ["parallel sh -c ::: 'rm -rf ~'", "parallel eval ::: 'rm -rf ~'",
+                                 "parallel :::: cmds.txt"])
+def test_parallel_script_from_args_uncertain(cmd):
+    assert parse(cmd).uncertain
+
+
+# 4. git, fail closed.
+@pytest.mark.parametrize("cmd", [
+    "git -c include.path=/tmp/x log",
+    "git -c includeIf.gitdir:~/x.path=/tmp/x log",
+    "GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=core.pager GIT_CONFIG_VALUE_0='rm -rf ~' git log",
+    "GIT_CONFIG_GLOBAL=/tmp/cfg git log",
+    "GIT_EXEC_PATH=/tmp git log",
+    "git -c uploadpack.packObjectsHook='rm -rf ~' fetch",
+    "git -c core.gitProxy='rm -rf ~' fetch",
+    "git -c remote.origin.uploadpack='rm -rf ~' fetch",
+    "git -c remote.origin.receivepack='rm -rf ~' push",
+    "git -c protocol.ext.allow=always fetch 'ext::sh -c rm% -rf% ~'",
+    "git -c core.alternateRefsCommand='rm -rf ~' fetch",
+    "git -c mergetool.x.cmd='rm -rf ~' mergetool -t x",
+    "git -c difftool.x.cmd='rm -rf ~' difftool -t x",
+    "git -c foo.bar='rm -rf ~' log",
+    "git config weird.key /tmp/x",
+])
+def test_git_fail_closed(cmd):
+    assert parse(cmd).uncertain, [(s.argv, s.reasons) for s in walk(parse(cmd))]
+
+
+@pytest.mark.parametrize("cmd", [
+    "git -c uploadpack.packObjectsHook='rm -rf ~' fetch",
+    "git -c core.gitProxy='rm -rf ~' fetch",
+    "git -c mergetool.x.cmd='rm -rf ~' mergetool -t x",
+    "git -c core.pager='!rm -rf ~' log",
+])
+def test_git_command_values_nested(cmd):
+    assert runs(cmd, "rm", "-rf", "~"), effective(cmd)
+
+
+@pytest.mark.parametrize("cmd", [
+    "git -c user.name=x commit -m y",
+    "git -c color.ui=always log",
+    "git config credential.helper store",
+    "git -c diff.external=difft diff",
+    "git -c core.pager=less log",
+    "git config core.editor 'code --wait'",
+    "git config user.name 'A B'",
+    "git config remote.origin.url https://github.com/o/r.git",
+    "git -c core.excludesFile=~/.gitignore status",
+])
+def test_git_everyday_settings_certain(cmd):
+    assert not parse(cmd).uncertain, [(s.argv, s.reasons) for s in walk(parse(cmd))]
+
+
+# 5. Bare sudo -s / su / sudo su with no visible input.
+@pytest.mark.parametrize("cmd", ["sudo -s", "su", "sudo su", "sudo -i", "su - root"])
+def test_bare_privileged_shell_uncertain(cmd):
+    assert parse(cmd).uncertain
+
+
+@pytest.mark.parametrize("cmd", ["sudo -s <<< 'rm -rf ~'", "su <<< 'rm -rf ~'", "echo 'rm -rf ~' | sudo su"])
+def test_privileged_shell_visible_input(cmd):
+    assert runs(cmd, "rm", "-rf", "~"), effective(cmd)
+
+
+@pytest.mark.parametrize("cmd", ["sudo -v", "sudo -l", "sudo apt-get update", "su -c 'whoami' root"])
+def test_sudo_su_everyday_certain(cmd):
+    assert not parse(cmd).uncertain
+
+
+# Extra fail-closed: a heredoc body after a dangling operator (bash syntax error).
+def test_heredoc_after_dangling_operator():
+    assert parse("cat <<'E' |\nbash\nrm -rf ~\nE").uncertain
+    assert not parse("cat <<EOF | tr a b\nx\nEOF").uncertain
