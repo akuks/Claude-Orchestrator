@@ -224,7 +224,7 @@ async def observability(request: Request, days: int = 7):
     async with SessionLocal() as s:
         # Admins count every call (including ones with no task); everyone else
         # only calls made by tasks they can see.
-        if p.is_admin and p.user.active:
+        if await visible_project_ids(s, p) is ALL:
             window = McpCall.created_at >= since
         else:
             seen = select(Task.id).where(await task_visibility_clause(s, p))

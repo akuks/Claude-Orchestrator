@@ -3,7 +3,7 @@ from datetime import datetime, timedelta, timezone
 from fastapi import APIRouter, Request
 from sqlalchemy import func, select
 
-from ..access import task_visibility_clause
+from ..access import ALL, task_visibility_clause, visible_project_ids
 from ..database import SessionLocal
 from ..models import Project, Task, User
 
@@ -71,8 +71,9 @@ async def timeseries(request: Request, days: int = 30):
 @router.get("/by-project")
 async def by_project(request: Request):
     # Group by project name so legacy tasks (name set, no project_id) merge.
+    p = request.state.principal
     async with SessionLocal() as s:
-        visible = await task_visibility_clause(s, request.state.principal)
+        visible = await task_visibility_clause(s, p)
         rows = (
             await s.execute(
                 select(Task.project, _COST, _IN + _OUT, func.count())
@@ -80,10 +81,13 @@ async def by_project(request: Request):
                 .group_by(Task.project)
             )
         ).all()
-        budgets = {
-            p.name: p.budget_usd
-            for p in (await s.execute(select(Project))).scalars().all()
-        }
+        # Budgets only from visible projects, so an invisible same-named
+        # project can't leak or override one.
+        projects = await visible_project_ids(s, p)
+        pq = select(Project.name, Project.budget_usd)
+        if projects is not ALL:
+            pq = pq.where(Project.id.in_(projects))
+        budgets = {name: budget for name, budget in (await s.execute(pq)).all()}
     out = []
     for pname, cost, toks, n in rows:
         name = pname or "(no project)"

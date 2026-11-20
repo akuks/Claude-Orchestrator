@@ -6,14 +6,14 @@ from pathlib import Path
 
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel
-from sqlalchemy import delete, func, select
+from sqlalchemy import delete, func, select, update
 
 from .. import memory
 from ..config import settings
 from ..constants import VALID_MODELS, Status
 from ..database import SessionLocal
 from ..access import ALL, project_role, require_project_role, visible_project_ids
-from ..models import Project, ProjectMember, Task, TaskSummary, Team, User
+from ..models import McpServer, Project, ProjectMember, Task, TaskSummary, Team, User
 from ..schemas import (
     MemberIn,
     MemberOut,
@@ -328,6 +328,14 @@ async def update_project(project_id: str, payload: ProjectUpdate, request: Reque
             except OSError as exc:
                 raise HTTPException(400, f"Could not access directory: {exc}")
             project.directory = str(d.resolve())
+        if data.get("name") and data["name"] != project.name:
+            # Project-scoped MCP servers reference the project by name; carry
+            # them along so runtime matching and visibility follow the rename.
+            await s.execute(
+                update(McpServer)
+                .where(McpServer.scope == "project", McpServer.project == project.name)
+                .values(project=data["name"])
+            )
         for k, v in data.items():
             setattr(project, k, v)
         await s.commit()
