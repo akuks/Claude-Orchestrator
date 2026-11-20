@@ -30,11 +30,12 @@ class Stub:
     scripted statuses in order (the last repeats); records every request."""
 
     def __init__(self, statuses=("approved",), post_status=201, get_status=200, post_body=None, get_id="req-1",
-                 report_delay=0.0):
+                 report_delay=0.0, get_hash="echo"):
         self.statuses = list(statuses)
         self.post_status = post_status
         self.post_body = post_body or {"id": "req-1", "status": "pending", "expires_at": "x"}
         self.get_id = get_id
+        self.get_hash = get_hash  # "echo": the command_hash of the filed request
         self.report_delay = report_delay
         self.headers = []
         self.get_status = get_status
@@ -67,7 +68,13 @@ class Stub:
             def do_GET(self):
                 stub.requests.append(("GET", self.path, self.headers.get("Authorization"), None))
                 st = stub.statuses.pop(0) if len(stub.statuses) > 1 else stub.statuses[0]
-                self._reply(stub.get_status, {"id": stub.get_id, "status": st})
+                ans = {"id": stub.get_id, "status": st}
+                if stub.get_hash == "echo":
+                    filed = [b for _m, p, _a, b in stub.requests if p == "/guard/approvals"]
+                    ans["command_hash"] = filed[-1]["command_hash"] if filed else None
+                elif stub.get_hash is not None:
+                    ans["command_hash"] = stub.get_hash
+                self._reply(stub.get_status, ans)
 
         self.server = ThreadingHTTPServer(("127.0.0.1", 0), H)
         self.base = f"http://127.0.0.1:{self.server.server_address[1]}"
@@ -191,7 +198,8 @@ def test_approve_then_approved(plugin, tmp_path):
         assert len(posts) == 1
         _m, _p, auth, body = posts[0]
         assert auth == f"Bearer {TOKEN}"
-        assert set(body) == {"task_id", "rule_ids", "tool", "summary", "cwd", "reason", "command_hash"}
+        assert set(body) == {"task_id", "rule_ids", "tool", "summary", "cwd", "reason", "command_hash", "wait_left"}
+        assert 0 < body["wait_left"] <= 5
         assert body["task_id"] == "T1" and body["rule_ids"] == ["git-reset-hard"] and body["tool"] == "Bash"
         assert body["summary"] == "git reset --hard HEAD~1" and body["cwd"] == str(run.project)
         assert len(body["command_hash"]) == 64
@@ -639,3 +647,27 @@ def test_config_change_without_file_or_payload_blocks(run, tmp_path):
                        input=json.dumps({"source": "project_settings", "file_path": str(tmp_path / "gone.json")}),
                        capture_output=True, text=True, env=run.env, timeout=30)
     assert p.returncode == 2
+
+
+@pytest.mark.parametrize("get_hash", ["0" * 64, None])
+def test_get_for_another_action_is_refused(plugin, tmp_path, get_hash):
+    """Fix round 1: the request behind the hook's id must be THIS call
+    (same command_hash), or the approval does not count."""
+    stub = Stub(statuses=("approved",), get_hash=get_hash)
+    try:
+        run = Run(plugin, tmp_path, stub.base)
+        out = run(_approve_cmd())
+        assert decision(out) == "deny" and "another action" in reason(out)
+    finally:
+        stub.close()
+
+
+def test_conflicting_request_409_denies_at_once(plugin, tmp_path):
+    stub = Stub(post_status=409, post_body={"detail": "conflicting request"})
+    try:
+        run = Run(plugin, tmp_path, stub.base, approval_wait_seconds=30)
+        out = run(_approve_cmd())
+        assert decision(out) == "deny" and "409" in reason(out) and run.elapsed < 10
+        assert stub.paths("GET") == []
+    finally:
+        stub.close()

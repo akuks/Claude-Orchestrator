@@ -58,14 +58,14 @@ class Hook:
             "env_paths": {"CO_POLICY_FILE": str(tdir / "policy.json"), "CO_TASK_DIR": str(tdir)},
         }
         (tdir / "policy.json").write_text(json.dumps(policy))
-        self.tdir, self.proj, self.plugin = tdir, proj, live["plugin"]
+        self.tdir, self.proj, self.plugin, self.token = tdir, proj, live["plugin"], token
         self.env = {"PATH": os.environ.get("PATH", ""), "CO_POLICY_FILE": str(tdir / "policy.json"),
                     "CO_TASK_DIR": str(tdir), "CO_TASK_ID": self.task_id, "CO_API_BASE": policy["api_base"],
                     "CO_API_TOKEN": token}
 
-    def start(self, cmd="git reset --hard HEAD~1"):
+    def start(self, cmd="git reset --hard HEAD~1", tool_use_id=None):
         payload = {"hook_event_name": "PreToolUse", "tool_name": "Bash", "tool_input": {"command": cmd},
-                   "tool_use_id": "tu-" + uuid.uuid4().hex[:6], "session_id": "s1"}
+                   "tool_use_id": tool_use_id or "tu-" + uuid.uuid4().hex[:6], "session_id": "s1"}
         self.proc = subprocess.Popen(
             [sys.executable, "-I", "-S", str(self.plugin / "hooks" / "co_hook.py"), "PreToolUse"],
             stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
@@ -131,3 +131,28 @@ def test_hook_timeout_then_late_approval_is_refused(live, tmp_path):
         time.sleep(0.1)
     r = live["decider"].post(f"/guard/approvals/{rid}/approve")
     assert r.status_code == 409 and r.json()["detail"] == "expired"
+
+
+def test_planted_request_with_the_hooks_key_is_refused(live, tmp_path):
+    """Fix round 1: the agent (same token) pre-files a harmless-looking request
+    under the key the hook will use; the hook's POST conflicts and it denies -
+    a person can never approve the planted text for the real call."""
+    import hashlib
+
+    from app.main import app
+    from fastapi.testclient import TestClient
+
+    hook = Hook(live, tmp_path)
+    cmd, tuid = "git reset --hard HEAD~3", "tu-planted"
+    canon = json.dumps({"tool_name": "Bash", "tool_input": {"command": cmd}}, sort_keys=True, default=str)
+    chash = hashlib.sha256(canon.encode()).hexdigest()
+    key = hashlib.sha256((chash + ":" + tuid).encode()).hexdigest()
+    agent = TestClient(app)
+    agent.headers["Authorization"] = f"Bearer {hook.token}"
+    planted = agent.post("/guard/approvals", headers={"Idempotency-Key": key}, json={
+        "task_id": hook.task_id, "rule_ids": ["git-reset-hard"], "tool": "Bash", "summary": "git status",
+        "cwd": str(hook.proj), "reason": "harmless", "command_hash": chash})
+    assert planted.status_code == 201
+    out = hook.start(cmd, tool_use_id=tuid).result()
+    assert out["permissionDecision"] == "deny" and "409" in out["permissionDecisionReason"]
+    assert planted.json()["id"] not in out["permissionDecisionReason"]

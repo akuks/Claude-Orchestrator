@@ -351,7 +351,7 @@ def test_agent_token_guard_routes_are_own_task_only(thread, client):
     r = t.post("/guard/approvals", json=body)
     assert r.status_code == 201, r.text
     rid = r.json()["id"]
-    assert t.get(f"/guard/approvals/{rid}").json() == {"id": rid, "status": "pending"}
+    assert t.get(f"/guard/approvals/{rid}").json() == {"id": rid, "status": "pending", "command_hash": "h"}
     # same thread is not enough for co-guard routes
     assert t.post("/guard/approvals", json=dict(body, task_id=sibling)).status_code == 403
     assert t.post("/guard/report", json={"task_id": sibling, "decision": "deny"}).status_code == 403

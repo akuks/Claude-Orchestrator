@@ -181,7 +181,8 @@ def test_same_key_after_a_decision_files_a_new_request(world, task):
     assert new_call.json()["status"] == "pending"
     # the approved one still reads approved (a second GET is harmless)
     for _ in range(2):
-        assert agent.get(f"/guard/approvals/{first}").json() == {"id": first, "status": "approved"}
+        assert agent.get(f"/guard/approvals/{first}").json() == {"id": first, "status": "approved",
+                                                                 "command_hash": "a" * 64}
 
 
 def test_agent_may_file_only_for_its_own_task(world, task):
@@ -562,3 +563,149 @@ def test_dedupe_holds_when_the_record_carries_a_run_secret(monkeypatch):
 
     _run(go())
     assert len(got) == 1
+
+
+
+# ---- fix round 1 ----------------------------------------------------------------------------
+
+
+def test_same_key_different_body_is_a_conflict(world, task):
+    """The agent shares the hook's token and can predict its key: a pre-filed
+    row with that key but other content must never be reused for the hook."""
+    tid, agent = task
+    planted = _file(agent, tid, key="hookkey", summary="ls -la", rule_ids=["git-reset-hard"]).json()["id"]
+    real = _file(agent, tid, key="hookkey", summary="git reset --hard HEAD~5")
+    assert real.status_code == 409 and real.json()["detail"] == "conflicting request"
+    for field, value in (("tool", "Read"), ("rule_ids", ["git-clean-fdx"]), ("reason", "other"), ("cwd", "/x"),
+                         ("command_hash", "b" * 64)):
+        assert _file(agent, tid, key="hookkey", summary="ls -la", **{field: value}).status_code == 409, field
+    same = _file(agent, tid, key="hookkey", summary="ls -la", wait_left=40)  # wait_left is not content
+    assert same.status_code == 200 and same.json()["id"] == planted
+
+
+def test_get_answers_the_command_hash(task):
+    tid, agent = task
+    rid = _file(agent, tid, command_hash="c" * 64).json()["id"]
+    assert agent.get(f"/guard/approvals/{rid}").json() == {"id": rid, "status": "pending", "command_hash": "c" * 64}
+
+
+@pytest.mark.parametrize("wait_left,expect", [(90, 90), (1000, 300), (None, 300)])
+def test_wait_left_caps_expiry(task, wait_left, expect):
+    tid, agent = task
+    extra = {} if wait_left is None else {"wait_left": wait_left}
+    out = _file(agent, tid, **extra).json()
+    left = (datetime.fromisoformat(out["expires_at"]) - datetime.now(timezone.utc)).total_seconds()
+    assert expect - 10 < left <= expect
+
+
+def test_no_wait_left_means_already_expired(world, task):
+    tid, agent = task
+    rid = _file(agent, tid, wait_left=-5).json()["id"]
+    assert agent.get(f"/guard/approvals/{rid}").json()["status"] == "expired"
+    assert world["m"].post(f"/guard/approvals/{rid}/approve").status_code == 409
+
+
+def test_total_requests_per_task_are_capped(task):
+    from app.routers.guard import MAX_TOTAL_PER_TASK
+
+    tid, agent = task
+    now = datetime.now(timezone.utc)
+
+    async def fill():
+        async with SessionLocal() as s:
+            s.add_all([ActionApproval(task_id=tid, status="rejected", created_at=now, expires_at=now)
+                       for _ in range(MAX_TOTAL_PER_TASK)])
+            await s.commit()
+
+    _run(fill())
+    assert _file(agent, tid).status_code == 429
+
+
+def test_pending_key_is_unique_in_the_database(task):
+    from sqlalchemy.exc import IntegrityError
+
+    tid, _agent = task
+    now = datetime.now(timezone.utc)
+
+    async def add(status):
+        async with SessionLocal() as s:
+            s.add(ActionApproval(task_id=tid, idempotency_key="uk", status=status, created_at=now,
+                                 expires_at=now + timedelta(minutes=5)))
+            await s.commit()
+
+    _run(add("pending"))
+    _run(add("rejected"))  # decided rows may share the key
+    with pytest.raises(IntegrityError):
+        _run(add("pending"))
+
+
+@pytest.mark.parametrize("same", [True, False])
+def test_concurrent_filing_with_one_key(monkeypatch, task, same):
+    """Two POSTs race past the lookup: the unique index catches the second,
+    which answers the first row when the content matches, else 409."""
+    from app.routers import guard as guard_router
+
+    tid, agent = task
+    first = _file(agent, tid, key="race").json()["id"]
+    real = guard_router._find_pending
+    calls = []
+
+    async def miss_once(s, task_id, key):
+        calls.append(key)
+        return None if len(calls) == 1 else await real(s, task_id, key)
+
+    monkeypatch.setattr(guard_router, "_find_pending", miss_once)
+    r = _file(agent, tid, key="race", **({} if same else {"summary": "different"}))
+    if same:
+        assert r.status_code == 200 and r.json()["id"] == first
+    else:
+        assert r.status_code == 409 and r.json()["detail"] == "conflicting request"
+
+
+def test_bodies_are_size_capped(world, task):
+    from app.routers.guard import BODY_LIMIT
+
+    tid, agent = task
+    big = "x" * (BODY_LIMIT + 1)
+    assert _file(agent, tid, summary=big).status_code == 413
+    r = agent.post("/guard/report", json={"task_id": tid, "event": "PreToolUse", "decision": "deny", "summary": big})
+    assert r.status_code == 413
+
+
+def test_truncated_summary_is_marked(task):
+    tid, agent = task
+    rid = _file(agent, tid, summary="y" * 2500, reason="z" * 2100).json()["id"]
+    row = _get(ActionApproval, rid)
+    assert len(row.summary) <= 2000 and row.summary.endswith("(truncated, 2500 chars)")
+    assert len(row.reason) <= 2000 and row.reason.endswith("(truncated, 2100 chars)")
+
+
+def test_forged_approved_report_shows_the_stored_request(world, task):
+    tid, agent = task
+    rid = _file(agent, tid, summary="git push --force origin main", rule_ids=["git-force-push-main"]).json()["id"]
+    assert world["m"].post(f"/guard/approvals/{rid}/approve").status_code == 200
+    worker = app.state.worker
+    got = []
+
+    async def emit(etype, payload):
+        got.append(payload)
+
+    worker._guard_live[tid] = {"emit": emit, "reported": Counter()}
+    try:
+        r = agent.post("/guard/report", json={
+            "task_id": tid, "event": "PreToolUse", "decision": "approved", "status": "approved", "request_id": rid,
+            "tool": "Read", "summary": "harmless read", "rule_ids": []})
+        assert r.json() == {"accepted": True}
+    finally:
+        worker._guard_live.pop(tid, None)
+    assert got[0]["tool"] == "Bash" and got[0]["summary"] == "git push --force origin main"
+    assert got[0]["rule_ids"] == ["git-force-push-main"]
+
+
+def test_guard_payload_redacts_before_cutting():
+    from app.worker import WorkerManager
+
+    secret = "SECRETVALUE-" + "9" * 20
+    rec = {"event": "PreToolUse", "summary": "x" * 1995 + secret}
+    out = WorkerManager.guard_payload(rec, [secret])
+    assert "SECRE" not in out["summary"] and out["summary"].endswith("***")
