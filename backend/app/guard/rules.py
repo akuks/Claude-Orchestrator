@@ -66,8 +66,16 @@ HARD (never approvable):
   a target or ``cd`` that names ``$CO_POLICY_FILE``, ``$CO_TASK_DIR``,
   ``$CLAUDE_CONFIG_DIR`` or ``$CLAUDE_PLUGIN_ROOT`` when its value is not
   known; inline interpreter code that names those variables or a protected
-  path; running ``co_hook.py`` by hand. With the guard off ``rm -rf ~`` is
-  still denied when home holds the Claude config dir;
+  path; running ``co_hook.py`` by hand. Backstop: a guard variable NAME
+  (or a ``$NAME`` reference) anywhere in the command line -
+  ``p=$CO_POLICY_FILE``, ``${CO_POLICY_FILE%.json}``, ``$(printenv
+  CO_TASK_DIR)``, ``${!v}`` - is hard unless every stage is a pure reader
+  with no file writes (``cat $CO_POLICY_FILE``, ``echo $CO_TASK_DIR``,
+  ``ls $CLAUDE_CONFIG_DIR``). The WHOLE ``CLAUDE_CONFIG_DIR`` is protected
+  (Ruling R10). Protected and agent-config paths are compared case-folded
+  (Ruling R9), and path globs are matched against protected paths per
+  component (``/work/_tasks/T?/policy.json``). With the guard off
+  ``rm -rf ~`` is still denied when home holds the Claude config dir;
 * ``unparseable``: the parser gave up (``too_complex``, Ruling R3), a malformed
   ``tool_input``, or write-then-run/ssh re-checks deeper than 6 levels or more
   than 64 per call;
@@ -106,8 +114,14 @@ Bash: every stage is checked, nested ones (``$( )``, ``sh -c``, ``eval``,
   ``~``, ``/``). A command word that comes from a command substitution, or
   from a variable assigned from one, is always ``uncertain-command`` (a
   ``$(cat F)`` of a file written literally earlier in the line is checked as
-  that text). Uncertain stages with only harmless words (``"$EDITOR" f``)
-  are allowed. Interpreter one-liners that run shell or delete files
+  that text). Narrow allowance: ``$(which X)``, ``$(command -v X)``,
+  ``$(type -P X)``, ``$(pyenv which X)`` (X a plain tool name),
+  ``$(git rev-parse --show-toplevel)/REL`` (the project dir), ``$(npm bin)/X``,
+  ``$(npm root)/.bin/X``, ``$(go env GOPATH|GOROOT)/bin/X``,
+  ``$(brew --prefix [pkg])/bin/X`` and ``$(poetry env info -p)/bin/X`` - also
+  through a variable assigned exactly once from one of them - are checked as
+  ``X args`` (``$(which bash) -c 'rm -rf ~'`` is still checked as bash).
+  Uncertain stages with only harmless words (``"$EDITOR" f``) are allowed. Interpreter one-liners that run shell or delete files
   (``python -c``, ``perl -e``, ``ruby -e``, ``node -e``, ``php -r``,
   ``awk 'system(..)'``, ``vim -c '!..'``, GNU ``sed`` ``e``) are also
   ``uncertain-command``.
@@ -117,7 +131,12 @@ Bash: every stage is checked, nested ones (``$( )``, ``sh -c``, ``eval``,
 * ``find ROOT ... -delete`` / ``-exec rm ...`` (and ``fd ... -x/-X rm``,
   ``rimraf``/``npx rimraf``): ROOT is a delete target (with a name/path/time
   filter, only things strictly inside ROOT - except home and ``/``, which
-  are always hard).
+  are always hard). ``find -L``/``-follow`` with a delete is at least
+  confirmable. ``find ROOT ... -exec CMD {}`` with a CMD that may write is
+  hard when ROOT covers a protected path (judged by its ``-name`` filters).
+* ``git checkout|restore [<tree>] -- PATHS`` into ``.claude``/``.mcp.json``
+  is ``agent-config``; ``git push --prune`` with a wildcard covering main is
+  ``git-force-push-main``.
 * write-then-run in one command line (``echo .. > x.sh; bash x.sh``,
   ``cat > x <<EOF .. EOF; sh x``, ``sh < x``, ``cat x | bash``,
   ``curl -o x u && ./x``, a written ``Makefile`` then ``make``): the written
@@ -125,7 +144,8 @@ Bash: every stage is checked, nested ones (``$( )``, ``sh -c``, ``eval``,
   anything else is ``uncertain-command``.
 * ``pipe-to-shell``: a download (curl, wget, httpie, xh) earlier in the same
   pipeline than a stage that reads its program from stdin (a shell, or an
-  interpreter with no script / ``-`` / ``/dev/stdin``, ``deno|bun run -``);
+  interpreter with no script / ``-`` / ``/dev/stdin``, ``deno|bun|uv run -``,
+  ``pwsh``, ``lua``, ``Rscript``, ``tclsh``, ``osascript``, ``env -S 'python3'``);
   ``<(curl ..)``/``$(curl ..)`` as a shell's or interpreter's argument; a
   downloaded file run later in the same line.
 * ``secret-files``: redirects, ``tee``, ``sed -i``/``perl -i``, ``truncate``
@@ -142,7 +162,12 @@ exist on disk (``bash script.sh``, ``make`` with an existing Makefile,
 builtins built from strings, base64-decoded code), GNU ``sed`` scripts read
 from files, ``ssh host bash -s < file``, symlinks created by earlier tool
 calls that point somewhere harmless at check time, and anything a program does
-with paths it computes at run time.
+with paths it computes at run time - including environment variable names
+computed in interpreter code (``os.getenv('CO_'+'POLICY_FILE')``). Archive and
+patch tools write files whose names it cannot see: ``tar -x``, ``unzip``,
+``git apply``, ``patch``, ``git stash pop``, ``cp -r evil/. .`` and
+``rsync -a evil/ .`` can therefore drop ``.claude/`` or ``.mcp.json`` files
+unnoticed. ``"$(dirname "$0")"/run.sh`` stays ``uncertain-command``.
 """
 
 from __future__ import annotations
@@ -206,11 +231,13 @@ _MAX_EVALS = 64  # write-then-run / ssh re-evaluations per tool call
 SHELLS = _sh.SHELLS
 _GUARD_VARS = ("CO_POLICY_FILE", "CO_TASK_DIR", "CLAUDE_CONFIG_DIR", "CLAUDE_PLUGIN_ROOT")
 _GUARD_VAR_REF = re.compile(r"\$\{?(" + "|".join(_GUARD_VARS) + r")\b")
+_GUARD_REF_RAW = re.compile(r"\$\{?[#!]?(" + "|".join(_GUARD_VARS) + r")(?![A-Za-z0-9_])")
+_GUARD_NAME = re.compile(r"(?<![A-Za-z0-9_])(" + "|".join(_GUARD_VARS) + r")(?![A-Za-z0-9_])")
 _FETCH = frozenset({"curl", "wget", "http", "https", "xh", "xhs"})
 _PY = re.compile(r"(python|pypy)[\d.]*")
 _TEMPLATE_WORDS = frozenset({"example", "sample", "template", "dist"})
 _SECRET_NAMES = frozenset({".netrc", "_netrc", ".npmrc", ".pypirc", "authorized_keys", ".git-credentials"})
-_READERS = frozenset({"cat", "less", "more", "head", "tail", "grep", "egrep", "fgrep", "rg", "ag", "wc", "file",
+_READERS = frozenset({"printenv", "cat", "less", "more", "head", "tail", "grep", "egrep", "fgrep", "rg", "ag", "wc", "file",
                       "stat", "ls", "diff", "cmp", "sha256sum", "sha1sum", "sha512sum", "md5sum", "md5", "shasum",
                       "b2sum", "cksum", "bat", "strings", "od", "xxd", "hexdump", "test", "[", "[[", "echo",
                       "printf", "realpath", "readlink", "dirname", "basename", "tree", "du", "jq", "nl", "cd",
@@ -409,7 +436,7 @@ def _is_template(path):
 
 def _git_internal_kind(path):
     """'config' | 'hooks' | 'attributes' | 'gitmodules' | None for an absolute path."""
-    parts = path.split("/")
+    parts = path.lower().split("/")
     if parts and parts[-1] == ".gitmodules":
         return "gitmodules"
     for i in range(len(parts) - 1, -1, -1):
@@ -427,7 +454,7 @@ def _git_internal_kind(path):
 
 def _agent_config(path):
     """A .claude/settings*.json, .claude/hooks/** or .mcp.json path (R6/R7)."""
-    parts = path.split("/")
+    parts = path.lower().split("/")
     if parts and parts[-1] == ".mcp.json":
         return True
     for i in range(len(parts) - 1, -1, -1):
@@ -466,8 +493,8 @@ class _Ctx:
         self._var_re = re.compile(r"^\$(?:\{(" + "|".join(map(re.escape, self.vars)) + r")(?:[:]?[-?=+][^}]*)?\}|("
                                   + "|".join(map(re.escape, self.vars)) + r"))(?=/|$)")
         prot = [str(p) for p in (policy.get("protected_paths") or []) if p]
-        if cfg:
-            prot.append(posixpath.join(str(cfg), "settings*.json"))
+        if cfg:  # Ruling R10: the whole config dir (Claude Code writes it itself, never through tools)
+            prot += [str(cfg), posixpath.join(str(cfg), "settings*.json")]
         prot += [v for k, v in self.vars.items() if k in ("CO_POLICY_FILE", "CO_TASK_DIR", "CLAUDE_PLUGIN_ROOT")]
         self.protected = []  # (pattern, is_glob)
         self.glob_dirs = set()  # folders of protected globs (CLAUDE_CONFIG_DIR)
@@ -475,6 +502,7 @@ class _Ctx:
             p = os.path.abspath(os.path.expanduser(p))
             for v in {_norm(p), _real_last(p) if _GLOB.search(posixpath.basename(p)) else _real(p)}:
                 is_glob = bool(_GLOB.search(v))
+                v = v.lower()  # Ruling R9: compared case-folded everywhere
                 self.protected.append((v, is_glob))
                 if is_glob and not _GLOB.search(posixpath.dirname(v)):
                     self.glob_dirs.add(posixpath.dirname(v))
@@ -537,6 +565,7 @@ class _Ctx:
         protected path is inside it (deleting/moving a parent folder)."""
         if not path:
             return False
+        path = path.lower()
         for pat, is_glob in self.protected:
             if is_glob:
                 if fnmatch.fnmatchcase(path, pat):
@@ -552,7 +581,32 @@ class _Ctx:
     def is_protected_dest(self, path):
         """A copy/move destination or command argument: protected, or the
         folder of a protected glob (CLAUDE_CONFIG_DIR for settings*.json)."""
-        return self.is_protected(path) or path in self.glob_dirs
+        return bool(path) and (self.is_protected(path) or path.lower() in self.glob_dirs or
+                               self.glob_hits_protected(path))
+
+    def glob_hits_protected(self, pattern):
+        """A path glob that could name a protected path or something inside one
+        (/work/_tasks/T?/policy.json), compared per component, case-folded."""
+        if not pattern or not _GLOB.search(pattern):
+            return False
+        pp = pattern.lower().strip("/").split("/")
+        for pat, is_glob in self.protected:
+            base = posixpath.dirname(pat) if is_glob else pat
+            if _GLOB.search(base):
+                continue
+            pc = base.strip("/").split("/")
+            if len(pp) >= len(pc) and all(fnmatch.fnmatchcase(c, g) for c, g in zip(pc, pp)):
+                return True
+        return False
+
+    def guard_var_unresolved(self, word, cwd=None):
+        """The word names a guard env var and cannot be fully expanded."""
+        if not _GUARD_NAME.search(word):
+            return False
+        if self.guard_var_unknown(word):
+            return True
+        e = self.expand(word, cwd)
+        return e is None or "$" in e or "`" in e
 
     def project_or_none(self):
         return None if self.remote else self.project
@@ -621,6 +675,7 @@ def _protect_delete(ctx, path, glob, summary):
         return
     if glob is None:
         return
+    path, glob = path.lower(), glob if glob == _SOME else glob.lower()
     for pat, is_glob in ctx.protected:
         base = posixpath.dirname(pat) if is_glob else pat
         if is_glob and _GLOB.search(base):
@@ -641,6 +696,7 @@ def _protect_find(ctx, root, names, summary):
     if ctx.is_protected(root):
         ctx.hit("self-protect", True, summary)  # rooted inside a protected folder
         return
+    root = root.lower()
     for pat, is_glob in ctx.protected:
         base = posixpath.dirname(pat) if is_glob else pat
         if _GLOB.search(base) or not _within(base, root):
@@ -650,7 +706,9 @@ def _protect_find(ctx, root, names, summary):
             leaf = posixpath.basename(pat)
             cands += [_GLOB.sub("", leaf), _GLOB.sub("x", leaf)]
         cands = [c for c in cands if c]
-        if names is None or any(fnmatch.fnmatch(c.lower(), n.lower()) for c in cands for n in names):
+        if not is_glob and not os.path.isfile(base):
+            cands.append("*")  # a protected folder: any name may match inside it
+        if names is None or "*" in cands or any(fnmatch.fnmatch(c.lower(), n.lower()) for c in cands for n in names):
             ctx.hit("self-protect", True, summary)
             return
 
@@ -727,13 +785,34 @@ def _find_check(ctx, argv, dyn, cwd, summary):
         i += 1
     expr = args[i:]
     deletes = "-delete" in expr
+    writes = False
     for j, a in enumerate(expr):
         if a in ("-exec", "-execdir", "-ok", "-okdir") and j + 1 < len(expr):
             inner = _sh.expand_wrappers(expr[j + 1:]) or []
             if inner and _sh.command_name(inner[0]) in _DELETERS:
                 deletes = True
+            elif inner and _sh.command_name(inner[0]) not in _READERS:
+                writes = True  # cp evil {}, sed -i .. {}, sh -c '.. > {}' ...
+    follow = follow or "-follow" in expr
     acts = any(a in _FIND_ACTIONS for a in expr)
     roots = roots or [(".", False)]
+    names = [expr[k + 1] for k, a in enumerate(expr) if a in ("-name", "-iname") and k + 1 < len(expr)]
+    only_names = names and not any(a in _FIND_NARROW and a not in ("-name", "-iname") for a in expr)
+    if writes:  # N3: a command that may write {} : protect what the roots cover
+        for w, d in roots:
+            p = ctx.path(w, cwd, d)
+            if p is None:
+                if ctx.guard_var_unresolved(w, cwd):
+                    ctx.hit("self-protect", True, summary)
+                continue
+            if ctx.is_protected(p, as_ancestor=False) or p.lower() in ctx.glob_dirs:
+                ctx.hit("self-protect", True, summary)
+            else:
+                _protect_find(ctx, p, names if only_names else None, summary)
+    if follow and deletes:  # N7: -L / -follow: links inside the tree are followed out of it
+        for w, d in roots:
+            p = ctx.path(w, cwd, d)
+            ctx.hit("rm-rf-outside", p is not None and _is_home_or_above(ctx, p), summary)
     if acts:  # find rooted inside a protected folder that runs or deletes anything
         for w, d in roots:
             p = ctx.path(w, cwd, d)
@@ -744,8 +823,6 @@ def _find_check(ctx, argv, dyn, cwd, summary):
     if follow:
         roots = [(w if w.endswith("/") else w + "/", d) for w, d in roots]
     narrow = any(a in _FIND_NARROW for a in expr)
-    names = [expr[k + 1] for k, a in enumerate(expr) if a in ("-name", "-iname") and k + 1 < len(expr)]
-    only_names = names and not any(a in _FIND_NARROW and a not in ("-name", "-iname") for a in expr)
     _classify(ctx, roots, cwd, summary, narrow=narrow, names=names if only_names else None)
 
 
@@ -881,7 +958,7 @@ def _is_main(dst, directory):
 
 
 def _push_force_main(rest, directory, conf_specs, conf_mirror):
-    force = all_ = delete = mirror = False
+    force = all_ = delete = mirror = prune = False
     positional = []
     i = 0
     while i < len(rest):
@@ -900,6 +977,8 @@ def _push_force_main(rest, directory, conf_specs, conf_mirror):
                 mirror = True
             if "--delete" in m:
                 delete = True
+            if "--prune" in m:
+                prune = True
         elif re.fullmatch(r"-[a-zA-Z]+", a):
             force = force or "f" in a
             delete = delete or "d" in a
@@ -909,6 +988,8 @@ def _push_force_main(rest, directory, conf_specs, conf_mirror):
     if mirror or conf_mirror:
         return True  # --mirror force-updates and deletes every ref
     refspecs = positional[1:] or list(conf_specs)
+    if prune and any(_GLOB.search(r) and _is_main(r.lstrip("+").split(":")[-1], directory) for r in refspecs):
+        return True  # --prune deletes remote refs the wildcard covers
     if delete and any(_is_main(r.lstrip("+").split(":")[-1], directory) for r in refspecs):
         return True
     if any(r.startswith(":") and _is_main(r[1:], directory) for r in refspecs):
@@ -950,6 +1031,16 @@ def _git_check(ctx, argv, dyn, cwd, summary, bash):
         if sub == "checkout" and any(re.fullmatch(r"-[a-zA-Z]*f[a-zA-Z]*", a) or "--force" in _long(a, _CHECKOUT_LONG)
                                      for a in rest if a != "--"):
             rule = "git-reset-hard"
+        if "--" in rest:
+            paths = rest[rest.index("--") + 1:]
+        else:
+            pos = [a for a in rest if not a.startswith("-")]
+            paths = pos if sub == "restore" else pos[1:]
+        for w in paths:
+            p = ctx.path(w, d, False) if d is not None or w.startswith("/") else None
+            if p and (_agent_config(p) or posixpath.basename(p).lower() == ".claude" or
+                      _agent_config(p + "/settings.json")):
+                ctx.hit("agent-config", False, summary)
     elif sub == "clean":
         flags, longs = "", set()
         for a in rest:
@@ -1202,11 +1293,16 @@ class _Bash:
         self.nonliteral = set()  # variables assigned from a substitution or unknown value
         self.git_push_specs = []
         self.git_mirror = False
+        self.subst_vars = {}
 
     def run(self, command, cwd):
         res = _sh.parse(command)
         if res.too_complex:
             self.ctx.hit("unparseable", True, self.raw)
+        self.subst_vars = _subst_assignments(command)
+        if (_names_guard_var(res) or _GUARD_REF_RAW.search(command)) and \
+                not all(_pure_reader(st) for st in _sh.walk(res)):
+            self.ctx.hit("self-protect", True, self.raw)  # N1 backstop: a guard var NAME near a non-reader
         self.result(res, cwd)
         if res.errors and not any(st.uncertain for st in _sh.walk(res)) and _dangerous(_stage_tokens(res)):
             self.ctx.hit("uncertain-command", False, self.raw)
@@ -1284,12 +1380,15 @@ class _Bash:
         """One written path: self-protect, git-internals, agent-config,
         secret-files; records literal content for write-then-run."""
         ctx, raw = self.ctx, self.raw
-        if d and ctx.guard_var_unknown(word):
+        if ctx.guard_var_unresolved(word, cwd):
+            ctx.hit("self-protect", True, raw)
+        e = ctx.expand(word, cwd)
+        if e and ctx.glob_hits_protected(_norm(e)):
             ctx.hit("self-protect", True, raw)
         if kind in ("redirect", "tee", "edit", "copy", "link") and not d and is_secret_name(word):
             if not (kind == "copy" and src is not None and _is_template(src)):
                 ctx.hit("secret-files", False, raw)
-        p = ctx.path(word, cwd, d, follow=kind != "move-src")
+        p = ctx.path(word, cwd, d, follow=kind != "move-src" or word.endswith(("/", "/.")))
         if p is None:
             return None
         if kind in ("copy", "link", "copydir") and ctx.is_protected_dest(p):
@@ -1312,8 +1411,10 @@ class _Bash:
         gk = _git_internal_kind(p)
         if gk and (gk != "gitmodules" or not isinstance(content, str) or _GITMODULES_EXEC.search(content)):
             ctx.hit("git-internals", False, raw)
-        if _agent_config(p):
+        if _agent_config(p) or (kind in ("copy", "link") and posixpath.basename(p).lower() == ".claude"):
             ctx.hit("agent-config", False, raw)
+        if kind in ("copy", "link") and posixpath.basename(p).lower() == ".git":
+            ctx.hit("git-internals", False, raw)
         if kind in ("chmod", "chmod-r", "touch"):
             return p
         self.written[p] = content
@@ -1419,6 +1520,8 @@ class _Bash:
             return
         if is_dir is None:
             is_dir = False
+        elif dword in (".", "..") or dword.endswith(("/.", "/..")):
+            is_dir = True
         elif is_dir is False:
             is_dir = os.path.isdir(dpath) or dpath in ctx.glob_dirs or ctx.is_protected(dpath) and \
                 os.path.isdir(dpath) or _git_internal_kind(dpath) == "hooks" or dpath.endswith("/.claude") or \
@@ -1446,6 +1549,15 @@ class _Bash:
         # writes: secret-files, git-internals, agent-config, self-protect, write-then-run
         self.writes(st, argv, dyn, cwd, pipeline)
 
+        # env -S 'python3 -u' fed by a download
+        if st.argv[:1] and _sh.command_name(st.argv[0]) == "env" and \
+                any(a.startswith(("-S", "--split-string")) or re.fullmatch(r"-[a-zA-Z]*S.*", a) for a in st.argv):
+            for res in st.nested:
+                for s2 in res:
+                    a2 = _sh.expand_wrappers(s2) or []
+                    if a2 and _reads_stdin(_sh.command_name(a2[0]), a2[1:]) and _fetch_before(st, pipeline):
+                        ctx.hit("pipe-to-shell", False, raw)
+
         if not argv:
             return
 
@@ -1453,12 +1565,13 @@ class _Bash:
         if name not in _READERS or name in ("cd", "pushd"):
             for a, d in zip(args, dargs):
                 for w in ([a] + ([a.split("=", 1)[1]] if "=" in a else [])):
-                    if d and ctx.guard_var_unknown(w):
+                    if ctx.guard_var_unresolved(w, cwd):
                         ctx.hit("self-protect", True, raw)
                     if name in ("cd", "pushd"):
                         continue
                     p = ctx.path(w, cwd, d) if ("/" in w or w.startswith(("~", "$"))) else None
-                    if p and ctx.is_protected_dest(p):
+                    e = ctx.expand(w, cwd) if "/" in w else None
+                    if (p and ctx.is_protected_dest(p)) or (e and ctx.glob_hits_protected(_norm(e))):
                         ctx.hit("self-protect", True, raw)
 
         # recursive deletes
@@ -1499,7 +1612,7 @@ class _Bash:
                 if d or _code_runs_shell(kind, code):
                     ctx.hit("uncertain-command", False, raw)
                 if "co_hook" in code or any(v in code for v in _GUARD_VARS) or any(
-                        m in code for m in ctx.mentions):
+                        m in code.lower() for m in ctx.mentions):
                     ctx.hit("self-protect", True, raw)
             if kind not in ("awk", "vim") and _reads_stdin(name, args):
                 for _dl, _q, body in st.heredocs:
@@ -1530,10 +1643,17 @@ class _Bash:
 
         # a command word from a command substitution, or a variable assigned from one
         cw = argv[0]
+        allowed = False
         if dyn[0]:
             m = _CAT_SUB.match(cw)
             ref = re.fullmatch(r"\$\{?([A-Za-z_]\w*)\}?", cw)
-            if m:
+            repl = _allowed_sub(ctx, cw)
+            if repl is None and ref and ref.group(1) in self.subst_vars:
+                repl = _allowed_sub(ctx, self.subst_vars[ref.group(1)])
+            if repl is not None:  # $(which X) args ...: checked as `X args ...`
+                allowed = True
+                self.nested_eval(" ".join(_quote(w) for w in [repl] + args), cwd)
+            elif m:
                 p = ctx.path(m.group(1) or m.group(2), cwd)
                 if p in self.written and isinstance(self.written[p], str):
                     self.nested_eval(self.written[p], cwd)
@@ -1546,7 +1666,9 @@ class _Bash:
         self.write_then_run(st, argv, dyn, name, args, cwd, kind, pipeline)
 
         # uncertainty near a dangerous verb
-        if st.uncertain:
+        if allowed and all(r.startswith("command word is not a literal") for r in st.reasons):
+            pass
+        elif st.uncertain:
             toks = _stage_tokens(pipeline) | outer
             first_unknown = bool(st.dynamic[:1] and st.dynamic[0]) or bool(dyn[:1] and dyn[0])
             if _dangerous(toks) or (first_unknown and any(_DANGEROUS_ARGS.fullmatch(a) for a in argv[1:])):
@@ -1566,14 +1688,8 @@ class _Bash:
             words = [script] if script else args
             if any(w and _FETCH_SUB.search(w) for w in words):
                 ctx.hit("pipe-to-shell", False, raw)
-        if _reads_stdin(name, args):
-            for p in pipeline:
-                if p.index >= st.index:
-                    continue
-                pargv = _sh.expand_wrappers(p) or []
-                if pargv and _sh.command_name(pargv[0]) in _FETCH:
-                    ctx.hit("pipe-to-shell", False, raw)
-                    break
+        if _reads_stdin(name, args) and _fetch_before(st, pipeline):
+            ctx.hit("pipe-to-shell", False, raw)
 
     def tracked(self, word, cwd):
         p = self.ctx.path(word, cwd)
@@ -1777,7 +1893,101 @@ def _reads_stdin(name, args):
     if _interp_kind(name) in ("python", "perl", "ruby", "node", "php"):
         s = _script_arg(name, args)
         return s is not None and (s == "" or s in _STDIN_PATHS)
+    if name in _OTHER_INTERP or re.fullmatch(r"lua[\d.]*|luajit", name):
+        pos = [a for a in args if not a.startswith("-") or a == "-"]
+        return not pos or pos[0] in _STDIN_PATHS or "-" in args
+    if name == "uv":
+        return args[:1] == ["run"] and any(a in _STDIN_PATHS for a in args[1:])
     return False
+
+
+_OTHER_INTERP = frozenset({"pwsh", "powershell", "rscript", "tclsh", "wish", "osascript"})
+
+
+def _fetch_before(st, pipeline):
+    for p in pipeline:
+        if p.index < st.index:
+            pargv = _sh.expand_wrappers(p) or []
+            if pargv and _sh.command_name(pargv[0]) in _FETCH:
+                return True
+    return False
+
+
+_PURE_SINK = frozenset({"/dev/null", "/dev/stdout", "/dev/stderr"})
+
+
+def _pure_reader(st):
+    """Reads only: a reader command (or an assignment), no file writes."""
+    if any(op in _WRITE_OPS and t not in _PURE_SINK and not t.isdigit() for op, t in st.redirects):
+        return False
+    argv = _sh.expand_wrappers(st)
+    if not argv:
+        return not st.argv or _sh.command_name(st.argv[0]) in ("env", "printenv", "export") and \
+            all("=" not in a for a in st.argv[1:])
+    name = _sh.command_name(argv[0])
+    return (name in _READERS or name in ("printenv", "env", "set")) and \
+        not (st.wrappers and set(st.wrappers) & {"xargs", "parallel", "sudo", "doas"})
+
+
+def _names_guard_var(res):
+    """A guard variable NAME appears as a command-line word (not prose data):
+    in a word without spaces, a word that still holds $..., a redirect
+    target or an assignment value, at any depth."""
+    for st in _sh.walk(res):
+        for w, d in zip(st.argv, st.dynamic):
+            if _GUARD_NAME.search(w) and (d or not re.search(r"\s", w)):
+                return True
+        for _op, t in st.redirects:
+            if _GUARD_NAME.search(t):
+                return True
+        for v in st.env.values():
+            if v and _GUARD_NAME.search(v):
+                return True
+    return False
+
+
+_SUBST_ASSIGN = re.compile(r"(?:^|[;&|\n(]|\bexport)\s*([A-Za-z_]\w*)=([\"']?)(\$\([^()`]*\))\2(?=[\s;&|)]|$)")
+
+
+def _subst_assignments(text):
+    """{name: "$(...)"} for variables assigned exactly once, from one substitution."""
+    out = {}
+    for m in _SUBST_ASSIGN.finditer(text):
+        name = m.group(1)
+        if len(re.findall(r"(?<![\w$])" + re.escape(name) + r"\+?=", text)) == 1:
+            out[name] = m.group(3)
+    return out
+
+
+_TOOL_NAME = r"[A-Za-z0-9._+-]+"
+
+
+def _allowed_sub(ctx, word):
+    """The narrow $(which X) allowance: the command name or path a well-known
+    lookup substitution stands for, or None."""
+    m = re.fullmatch(r"\$\(([^()`$]*)\)(/[^$`]*)?", word)
+    if not m:
+        return None
+    res = _sh.parse(m.group(1))
+    if len(res) != 1 or res.uncertain or res[0].nested or res[0].redirects or any(res[0].dynamic):
+        return None
+    a, rest = res[0].argv, m.group(2) or ""
+    if not rest:
+        if len(a) == 2 and a[0] == "which" or len(a) == 3 and a[:2] in (["command", "-v"], ["type", "-P"],
+                                                                         ["pyenv", "which"]):
+            return a[-1] if re.fullmatch(_TOOL_NAME, a[-1]) else None
+        return None
+    if a == ["git", "rev-parse", "--show-toplevel"]:
+        return ctx.project + rest
+    tail = None
+    if a == ["npm", "bin"]:
+        tail = re.fullmatch(r"/(" + _TOOL_NAME + ")", rest)
+    elif a == ["npm", "root"]:
+        tail = re.fullmatch(r"/\.bin/(" + _TOOL_NAME + ")", rest)
+    elif a[:2] == ["go", "env"] and a[2:] in (["GOPATH"], ["GOROOT"]) or a[:2] == ["brew", "--prefix"] and \
+            len(a) <= 3 or a in (["poetry", "env", "info", "-p"], ["poetry", "env", "info", "--path"]):
+        tail = re.fullmatch(r"/bin/(" + _TOOL_NAME + ")", rest)
+    return tail.group(1) if tail else None
 
 
 def _inline_code(kind, args, dargs):
