@@ -11,7 +11,7 @@ from sqlalchemy import select
 from app import auth
 from app.database import SessionLocal
 from app.main import app
-from app.models import Schedule, Task, WorkflowRun
+from app.models import Schedule, Task, User
 from conftest import login_as
 
 
@@ -169,14 +169,6 @@ def test_dispatch_refused_message(client):
     assert r.json()["detail"] == f"{email} is not a contributor on project {hidden['name']}"
 
 
-def _stored_project_ids(run_id):
-    async def go():
-        async with SessionLocal() as s:
-            return (await s.get(WorkflowRun, run_id)).project_ids
-
-    return asyncio.run(go())
-
-
 def test_workflow_run_needs_all_projects(client):
     p1, p2 = _mk_project(client), _mk_project(client)
     a1, a2 = _agent(client, p1["id"]), _agent(client, p2["id"])
@@ -188,14 +180,16 @@ def test_workflow_run_needs_all_projects(client):
     _grant(client, p2["id"], one.user_id, "contributor")
     r = one.post(f"/workflows/{wf['id']}/run", json={"input": "i"})
     assert r.status_code == 201, r.text
-    assert sorted(_stored_project_ids(r.json()["id"])) == sorted([p1["id"], p2["id"]])
+    assert sorted(r.json()["project_ids"]) == sorted([p1["id"], p2["id"]])
+    got = one.get(f"/workflows/runs/{r.json()['id']}").json()["run"]
+    assert sorted(got["project_ids"]) == sorted([p1["id"], p2["id"]])
 
     # No project touched: anyone may run it.
     free = _workflow(client, [_agent(client)["id"]])
     nobody = _user(client)
     r = nobody.post(f"/workflows/{free['id']}/run", json={"input": "i"})
     assert r.status_code == 201, r.text
-    assert _stored_project_ids(r.json()["id"]) == []
+    assert r.json()["project_ids"] == []
 
 
 def test_workflow_run_visible_with_any_overlap(client):
@@ -229,8 +223,31 @@ def test_workflow_run_visible_with_any_overlap(client):
     assert client.get(f"/workflows/runs/{mine['id']}").status_code == 200
     assert outsider.post(f"/workflows/runs/{mine['id']}/cancel").status_code == 200
 
-    # The non-admin list honours `limit` after filtering.
-    assert len(outsider.get("/workflows/runs?limit=1").json()) == 1
+    # The non-admin list honours `limit` after filtering: a newer run the
+    # outsider can't see must not crowd out their own.
+    hidden = client.post(f"/workflows/{wf['id']}/run", json={"input": "later"}).json()
+    got = outsider.get("/workflows/runs?limit=1").json()
+    assert [r["id"] for r in got] == [mine["id"]], (hidden["id"], got)
+    assert outsider.get("/workflows/runs?limit=0").status_code == 422
+    assert outsider.get("/workflows/runs?limit=501").status_code == 422
+    assert client.get("/workflows/runs?limit=501").status_code == 422
+
+
+def test_parent_task_must_be_visible(client):
+    p = _mk_project(client)
+    u = _user(client, [(p["id"], "contributor")])
+    a = _agent(client)
+    hidden_parent = client.post("/tasks", json={"prompt": "x", "requires_approval": True}).json()
+    seen_parent = client.post("/tasks", json={"prompt": "x", "requires_approval": True,
+                                              "project_id": p["id"]}).json()
+    item = [{"agent": a["id"], "prompt": "go"}]
+    assert u.post(f"/agents/{a['id']}/run", json={"parent_task_id": hidden_parent["id"]}).status_code == 404
+    assert u.post("/agents/dispatch", json={"parent_task_id": hidden_parent["id"], "items": item}).status_code == 404
+    assert u.post(f"/agents/{a['id']}/run", json={"parent_task_id": "nope"}).status_code == 404
+    r = u.post(f"/agents/{a['id']}/run", json={"parent_task_id": seen_parent["id"]})
+    assert r.status_code == 201 and r.json()["created_by"] == u.user_id
+    r = u.post("/agents/dispatch", json={"parent_task_id": seen_parent["id"], "items": item})
+    assert r.status_code == 201 and r.json()[0]["created_by"] == u.user_id
 
 
 def _sched(c, pid=None, **kw):
@@ -285,6 +302,33 @@ def test_schedule_scoping(client):
     assert maint.delete(f"/schedules/{sch['id']}").status_code == 204
 
 
+def _set_active(user_id, active):
+    async def go():
+        async with SessionLocal() as s:
+            (await s.get(User, user_id)).active = active
+            await s.commit()
+
+    asyncio.run(go())
+
+
+def test_run_now_applies_owner_checks(client):
+    p = _mk_project(client)
+    u = _user(client, [(p["id"], "contributor")])
+    sch = _sched(u, p["id"]).json()
+    _set_active(u.user_id, False)
+    try:
+        r = client.post(f"/schedules/{sch['id']}/run")
+    finally:
+        _set_active(u.user_id, True)
+    assert r.status_code == 409
+    assert r.json()["detail"] == "Schedule owner is disabled"
+    assert client.put(f"/projects/{p['id']}/members", json=[]).status_code == 200
+    r = client.post(f"/schedules/{sch['id']}/run")
+    assert r.status_code == 409
+    assert r.json()["detail"] == "Schedule owner lost access to project"
+    assert client.post(f"/schedules/{_sched(client).json()['id']}/run").status_code == 201
+
+
 class _Worker:
     async def submit(self, *a):
         pass
@@ -316,3 +360,27 @@ def test_scheduler_skips_owner_without_access(client, caplog):
     assert n == 0
     assert nxt.replace(tzinfo=None) > datetime.datetime(2001, 1, 1)
     assert any("owner lost access to project" in m for m in caplog.messages)
+
+
+def test_scheduler_skips_missing_owner(client, caplog):
+    import app.scheduler as sched_mod
+
+    sch = _sched(client).json()
+
+    async def drive():
+        async with SessionLocal() as s:
+            row = await s.get(Schedule, sch["id"])
+            row.created_by = "no-such-user"
+            row.next_run_at = datetime.datetime(2000, 1, 1)
+            await s.commit()
+        await sched_mod.Scheduler(_Worker())._tick()
+        async with SessionLocal() as s:
+            n = len((await s.execute(select(Task).where(Task.schedule_id == sch["id"]))).scalars().all())
+            nxt = (await s.get(Schedule, sch["id"])).next_run_at
+        return n, nxt
+
+    with caplog.at_level("WARNING", logger="app.scheduler"):
+        n, nxt = asyncio.run(drive())
+    assert n == 0
+    assert nxt.replace(tzinfo=None) > datetime.datetime(2001, 1, 1)
+    assert any("owner no longer exists" in m for m in caplog.messages)
