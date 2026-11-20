@@ -4,6 +4,8 @@
 #
 # Ports are configurable:  CO_BACKEND_PORT (default 8200)  CO_FRONTEND_PORT (default 5200)
 # Bind address: CO_BIND_HOST (default 127.0.0.1); proxy IPs: CO_FORWARDED_ALLOW_IPS
+# CO_BIND_HOST / CO_BACKEND_PORT (shell or backend/.env) are also co-guard's
+# approval address: use a literal IP for CO_BIND_HOST.
 
 set -e
 ROOT="$(cd "$(dirname "$0")" && pwd)"
@@ -17,8 +19,13 @@ _env_key() {
 }
 [ -z "${CO_BIND_HOST:-}" ] && CO_BIND_HOST="$(_env_key CO_BIND_HOST)"
 [ -z "${CO_FORWARDED_ALLOW_IPS:-}" ] && CO_FORWARDED_ALLOW_IPS="$(_env_key CO_FORWARDED_ALLOW_IPS)"
+[ -z "${CO_BACKEND_PORT:-}" ] && CO_BACKEND_PORT="$(_env_key CO_BACKEND_PORT)"
 BACKEND_PORT="${CO_BACKEND_PORT:-8200}"
 FRONTEND_PORT="${CO_FRONTEND_PORT:-5200}"
+# co-guard's hook asks for approvals at CO_BIND_HOST:CO_BACKEND_PORT: the
+# server must know the address uvicorn really listens on.
+export CO_BACKEND_PORT="$BACKEND_PORT"
+[ -n "${CO_BIND_HOST:-}" ] && export CO_BIND_HOST
 
 # --- deps ---
 # True when $1 is newer than the stamp $2 (or the stamp is missing): the
