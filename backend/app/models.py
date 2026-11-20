@@ -170,7 +170,40 @@ class Project(Base):
     archived: Mapped[bool] = mapped_column(default=False)
     # Whose credentials webhook-triggered work runs on; None = the project creator.
     automation_owner_id: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    # co-guard: check every tool call of this project's tasks; how long a call
+    # that needs a person's approval waits for one (60-900 s).
+    guard_enabled: Mapped[bool] = mapped_column(default=True)
+    approval_wait_seconds: Mapped[int] = mapped_column(Integer, default=300)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+
+
+class ActionApproval(Base):
+    """A running task's request (filed by co-guard's hook with the task's agent
+    token) for a person to allow one tool call. pending -> approved | rejected
+    | expired; a pending row past expires_at, or whose task stopped running,
+    reads as expired. Each row answers exactly one waiting hook (one-shot)."""
+
+    __tablename__ = "action_approvals"
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=_uuid)
+    task_id: Mapped[str] = mapped_column(ForeignKey("tasks.id", ondelete="CASCADE"), index=True)
+    # Effective project (the task's own, or its thread root's) and the task's
+    # owner, captured at filing: the decide list filters on them in SQL.
+    project_id: Mapped[str | None] = mapped_column(String(32), nullable=True, index=True)
+    requested_by: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    rule_ids: Mapped[list] = mapped_column(JSON, default=list)
+    tool: Mapped[str] = mapped_column(String(200), default="")
+    summary: Mapped[str] = mapped_column(Text, default="")
+    cwd: Mapped[str] = mapped_column(Text, default="")
+    reason: Mapped[str] = mapped_column(Text, default="")
+    command_hash: Mapped[str] = mapped_column(String(128), default="")
+    idempotency_key: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    status: Mapped[str] = mapped_column(String(16), default="pending", index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    decided_by: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    decided_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    decision_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
 
 
 class TaskSummary(Base):

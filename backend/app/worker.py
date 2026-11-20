@@ -12,6 +12,7 @@ import mimetypes
 import os
 import signal
 import time
+from collections import Counter
 from types import SimpleNamespace
 from datetime import datetime, timezone
 from pathlib import Path
@@ -187,6 +188,10 @@ class WorkerManager:
         self._cancelled: set[str] = set()
         # task_id -> the current run's secret values (see _run_job's emit).
         self._run_secrets: dict[str, list[str]] = {}
+        # task_id -> {"emit", "reported"} of a live run: POST /guard/report
+        # emits through the run's own emit (same seq, same redaction), and the
+        # spool ingestion skips what was already reported (Counter of keys).
+        self._guard_live: dict[str, dict] = {}
         self._dispatcher: asyncio.Task | None = None
 
     # ---- lifecycle -------------------------------------------------------
@@ -263,6 +268,7 @@ class WorkerManager:
             )
         finally:
             self._run_secrets.pop(task_id, None)
+            self._guard_live.pop(task_id, None)
             self._sem.release()
 
     # ---- execution -------------------------------------------------------
@@ -293,6 +299,8 @@ class WorkerManager:
                 s.add(TaskEvent(task_id=task_id, seq=seq, type=etype, payload=payload))
                 await s.commit()
             await broker.publish(task_id, {"seq": seq, "type": etype, "payload": payload})
+
+        self._guard_live[task_id] = {"emit": emit, "reported": Counter()}
 
         # A disabled user's queued/automated tasks must not run.
         async with SessionLocal() as s:
@@ -707,6 +715,8 @@ class WorkerManager:
 
     # ---- co-guard ----------------------------------------------------------
 
+    GUARD_REPORT_CAP = 500  # live /guard/report events per run (the spool still has the rest)
+
     _GUARD_KEYS = (
         "event", "decision", "rule_ids", "tool", "summary", "reason", "status", "request_id",
         "tool_use_id", "agent_id", "agent_type", "source", "ts",
@@ -900,22 +910,57 @@ class WorkerManager:
                 else:
                     await self._guard_violation(ctx, f"{name} call {tid} ran without a co-guard check")
 
+    @classmethod
+    def guard_payload(cls, rec: dict) -> dict:
+        """A hook record (spool line or /guard/report body) -> the `guard`
+        event payload: known keys only, bounded. emit() redacts it."""
+        payload = {k: rec[k] for k in cls._GUARD_KEYS if k in rec}
+        for k, v in list(payload.items()):
+            if isinstance(v, str):
+                payload[k] = v[:2000]
+            elif k == "rule_ids":
+                payload[k] = [str(x)[:64] for x in v][:20] if isinstance(v, list) else []
+            elif not isinstance(v, (int, float, bool)) and v is not None:
+                payload[k] = str(v)[:2000]
+        return payload
+
+    @staticmethod
+    def _guard_key(payload: dict) -> str:
+        # The hook posts the record it spools, minus the spool's ts.
+        return json.dumps({k: v for k, v in payload.items() if k != "ts"}, sort_keys=True, default=str)
+
+    async def report_guard(self, task_id: str, rec: dict) -> bool:
+        """POST /guard/report: emit the hook's record now as a `guard` event of
+        the live run. False (dropped) when the task has no live run here; the
+        spool still carries the record for a run that is ending."""
+        live = self._guard_live.get(task_id)
+        if live is None:
+            return False
+        payload = self.guard_payload(rec)
+        if not payload or sum(live["reported"].values()) >= self.GUARD_REPORT_CAP:
+            return False
+        live["reported"][self._guard_key(payload)] += 1
+        await live["emit"]("guard", payload)
+        return True
+
     async def _ingest_guard_spool(self, task_id: str, emit) -> None:
-        """The hook's spool -> `guard` events (emit redacts), then drop the task dir."""
+        """The hook's spool -> `guard` events (emit redacts), then drop the task
+        dir. Records already reported live (POST /guard/report) are skipped."""
+        live = self._guard_live.get(task_id)
+        reported = live["reported"] if live else Counter()
         try:
             for rec in guard_runtime.read_spool(task_id):
                 if rec.get("seen") is True:
                     continue  # watchdog bookkeeping, not an event
-                payload = {k: rec[k] for k in self._GUARD_KEYS if k in rec}
-                for k, v in list(payload.items()):
-                    if isinstance(v, str):
-                        payload[k] = v[:2000]
-                    elif k == "rule_ids":
-                        payload[k] = [str(x)[:64] for x in v][:20] if isinstance(v, list) else []
-                    elif not isinstance(v, (int, float, bool)) and v is not None:
-                        payload[k] = str(v)[:2000]
-                if payload:
-                    await emit("guard", payload)
+                payload = self.guard_payload(rec)
+                if not payload:
+                    continue
+                # keyed like report_guard's input (redacted by the router)
+                key = self._guard_key(redact_obj(payload, self._run_secrets.get(task_id) or []))
+                if reported[key] > 0:
+                    reported[key] -= 1
+                    continue
+                await emit("guard", payload)
         finally:
             guard_runtime.remove_task_dir(task_id)
 

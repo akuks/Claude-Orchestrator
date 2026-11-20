@@ -159,6 +159,7 @@ for _r in (
     teams.router,
     credentials.router,
     credentials.admin_router,
+    guard.api,
 ):
     app.include_router(_r, dependencies=_authed)
 

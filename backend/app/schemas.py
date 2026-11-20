@@ -244,6 +244,9 @@ class ProjectUpdate(BaseModel):
     env: Optional[dict[str, str]] = None
     # Who webhook-triggered work runs as; null = the project creator.
     automation_owner_id: Optional[str] = None
+    # co-guard (maintainer-editable); null means "leave it".
+    guard_enabled: Optional[bool] = None
+    approval_wait_seconds: Optional[int] = Field(None, ge=60, le=900)
 
 
 class ProjectOut(BaseModel):
@@ -263,6 +266,8 @@ class ProjectOut(BaseModel):
     auto_review_prs: bool = False
     env: dict = {}
     automation_owner_id: Optional[str] = None
+    guard_enabled: bool = True
+    approval_wait_seconds: int = 300
     task_count: int = 0
     total_cost_usd: float = 0.0
     my_role: Optional[str] = None
