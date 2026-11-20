@@ -209,8 +209,37 @@ def test_webhook_runs_as_automation_owner(client):
     finally:
         _set_active(maint.user_id, True)
 
+    # Demoted to contributor after being chosen: falls back to the creator.
+    _grant(client, pid, maint.user_id, "contributor")
+    out = _pr_hook(client, repo)
+    assert _created_by(out["task_id"]) == creator
 
-def test_webhook_ignored_without_usable_owner(client):
+
+def test_webhook_ignored_when_owner_has_no_credential(client, caplog):
+    repo = f"acme/ao-{_uid()}"
+    pid = _project(client, github_repo=repo, auto_review_prs=True)
+    maint = login_as(f"ao-nc-{_uid()}@test.local")
+    _grant(client, pid, maint.user_id, "maintainer")
+    r = client.patch(f"/projects/{pid}", json={"automation_owner_id": maint.user_id})
+    assert r.status_code == 200, r.text
+
+    async def count():
+        async with SessionLocal() as s:
+            return len((await s.execute(select(Task.id).where(Task.project_id == pid))).all())
+
+    assert client.delete("/admin/org-fallback").status_code in (200, 204)
+    try:
+        with caplog.at_level("WARNING", logger="app.routers.webhooks"):
+            out = _pr_hook(client, repo)
+    finally:
+        r = client.put("/admin/org-fallback", json={"api_key": FALLBACK})
+        assert r.status_code == 200, r.status_code
+    assert out == {"ok": True, "ignored": "automation owner has no Claude credential"}
+    assert asyncio.run(count()) == 0
+    assert any(pid in m and "no Claude credential" in m for m in caplog.messages)
+
+
+def test_webhook_ignored_without_usable_owner(client, caplog):
     repo = f"acme/ao-{_uid()}"
     pid = _project(client, github_repo=repo, auto_review_prs=True)
     gone = "no-such-user-" + _uid()
@@ -230,9 +259,11 @@ def test_webhook_ignored_without_usable_owner(client):
         async with SessionLocal() as s:
             return len((await s.execute(select(Task.id).where(Task.project_id == pid))).all())
 
-    out = _pr_hook(client, repo)
+    with caplog.at_level("WARNING", logger="app.routers.webhooks"):
+        out = _pr_hook(client, repo)
     assert out == {"ok": True, "ignored": "no automation owner"}
     assert asyncio.run(count()) == 0
+    assert any(pid in m and "no automation owner" in m for m in caplog.messages)
 
 
 # ---- Task 3 review follow-ups ------------------------------------------------
