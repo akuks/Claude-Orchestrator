@@ -24,6 +24,7 @@ from .routers import (
     auth,
     context_docs,
     credentials,
+    guard,
     findings,
     mcp,
     projects,
@@ -135,6 +136,8 @@ app.add_middleware(
 app.include_router(auth.router)
 app.include_router(webhooks.router)
 app.include_router(stream.router)
+# co-guard identity check (no auth by design, see the route).
+app.include_router(guard.router)
 
 # Everything else requires a logged-in user or an API token.
 _authed = [Depends(current_principal)]

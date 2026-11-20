@@ -94,6 +94,9 @@ class Settings(BaseSettings):
     # co-guard watchdog: a tool call with no co-guard PreToolUse hook seen in the
     # stream within this many seconds stops the task.
     guard_hook_grace_seconds: float = 15.0
+    # Verify the approval address is this server before each task (Ruling R22).
+    # Tests turn it off (no server listens there); never turn it off in production.
+    guard_verify_api: bool = True
     cors_origins: list[str] = [
         "http://localhost:5173",
         "http://127.0.0.1:5173",

@@ -495,6 +495,13 @@ class WorkerManager:
             cmd += ["--add-dir", kb_log["dir"]]
         if mcp:
             cmd += ["--mcp-config", mcp["config_path"], "--strict-mcp-config"]
+        else:
+            # Ruling R20a: always strict - no project .mcp.json and no subagent
+            # frontmatter mcpServers (those start processes outside PreToolUse).
+            cmd += ["--mcp-config", self._empty_mcp_config(mcp_config_dir), "--strict-mcp-config"]
+        # Ruling R20c: skills' / slash commands' inline !`cmd` would run outside PreToolUse.
+        cmd += ["--settings", json.dumps({"disableSkillShellExecution": True})]
+        if mcp:
             await emit(
                 "mcp",
                 {
@@ -590,8 +597,9 @@ class WorkerManager:
             "task_id": task_id,
             "mcp_ids": {},
             "secrets": run_secrets,
-            # co-guard watchdog (Ruling R19a): tool_use id -> [name, seen at, hooked]
-            "guard": {"tools": {}, "credit": {}, "violation": None, "proc": proc, "emit": emit},
+            # co-guard watchdog (Ruling R21): tool_use ids checked through the spool
+            "guard": {"pending": {}, "seen": set(), "offset": 0, "violation": None, "proc": proc, "emit": emit,
+                      "spool": guard_runtime.task_dir(task_id) / guard_runtime.SPOOL_NAME},
         }
         watch = asyncio.create_task(self._guard_watch(ctx))
         try:
@@ -703,6 +711,13 @@ class WorkerManager:
         "tool_use_id", "agent_id", "agent_type", "source", "ts",
     )
 
+    @staticmethod
+    def _empty_mcp_config(config_dir: Path) -> str:
+        config_dir.mkdir(parents=True, exist_ok=True)
+        path = (config_dir / ".mcp-config.json").resolve()
+        path.write_text(json.dumps({"mcpServers": {}}))
+        return str(path)
+
     async def _prepare_guard(self, task_id, guard_project, workspace, sub_env, mcp, emit):
         """Write the task's policy (0600) into a fresh CO_TASK_DIR, add the
         guard env and return (plugin dir, --setting-sources value or None);
@@ -711,8 +726,13 @@ class WorkerManager:
             sub_env.pop(k, None)
         root = guard_runtime.plugin_root()
         try:
-            ensure_plugin(root)  # cheap when unchanged; repairs a tampered or missing plugin
+            # cheap when unchanged; repairs a tampered or missing plugin (no pruning:
+            # running tasks may still use an older version)
+            await asyncio.to_thread(ensure_plugin, root, False)
             api_base = guard_runtime.guard_api_base()
+            if settings.guard_verify_api and not await asyncio.to_thread(guard_runtime.verify_api_base, api_base):
+                raise guard_runtime.GuardConfigError(
+                    f"co-guard approval address not verified ({api_base} did not prove it is this server)")
         except (OSError, RuntimeError, guard_runtime.GuardConfigError) as e:
             msg = f"co-guard could not be set up; task not started: {e}"
             await emit("error", {"message": msg})
@@ -759,12 +779,14 @@ class WorkerManager:
             )
         return str(root.resolve()), sources
 
-    # Ruling R19a: with --include-hook-events every tool call shows a co-guard
-    # PreToolUse `hook_started` (hook_name "PreToolUse:<tool>"; the events carry
-    # no tool_use id, so calls are matched to hooks by tool name, in order). A
-    # tool_result for a call with no such hook, a call left unmatched past the
-    # grace window, a cancelled (timed-out) PreToolUse hook or a hook_no_verdict
-    # notice for co-guard means the guard is not running: the task is killed.
+    # Ruling R21: co-guard's hook appends {"event":"PreToolUse","tool_use_id":..,
+    # "seen":true} to the spool BEFORE it evaluates a call. Every tool_result in
+    # the stream (main thread or subagent) must have its tool_use id in the
+    # spool: a successful result without one means the call ran unchecked, so
+    # the task is killed; an is_error result without one (schema/validation
+    # rejections never reach hooks) is only logged. A call with no result and
+    # no spool record after the grace window is killed too. Hook stream events
+    # carry no tool_use id or plugin name (phase 1 spike), so they are not used.
 
     async def _guard_violation(self, ctx, reason: str) -> None:
         g = ctx.get("guard")
@@ -781,58 +803,80 @@ class WorkerManager:
             except ProcessLookupError:
                 pass
 
+    @staticmethod
+    def _guard_read_spool(g) -> None:
+        """Read the spool's new complete lines; collect the ids co-guard saw."""
+        try:
+            with open(g["spool"], "rb") as f:
+                f.seek(g["offset"])
+                data = f.read()
+        except OSError:
+            return
+        end = data.rfind(b"\n")
+        if end < 0:
+            return
+        g["offset"] += end + 1
+        for line in data[: end + 1].splitlines():
+            try:
+                rec = json.loads(line)
+            except ValueError:
+                continue
+            if isinstance(rec, dict) and rec.get("seen") is True and rec.get("tool_use_id"):
+                g["seen"].add(str(rec["tool_use_id"]))
+
+    def _guard_checked(self, g, tid: str) -> bool:
+        if tid not in g["seen"]:
+            self._guard_read_spool(g)
+        return tid in g["seen"]
+
     async def _guard_watch(self, ctx) -> None:
         g = ctx["guard"]
         while not g["violation"]:
             await asyncio.sleep(min(1.0, settings.guard_hook_grace_seconds / 2))
             now = time.monotonic()
-            for tid, (name, seen, hooked) in list(g["tools"].items()):
-                if not hooked and now - seen > settings.guard_hook_grace_seconds:
-                    await self._guard_violation(ctx, f"no co-guard check for {name} call {tid}")
-                    return
+            for tid, (name, seen_at) in list(g["pending"].items()):
+                if now - seen_at <= settings.guard_hook_grace_seconds:
+                    continue
+                if self._guard_checked(g, tid):
+                    g["pending"].pop(tid, None)  # checked; maybe waiting for a person
+                    continue
+                await self._guard_violation(ctx, f"no co-guard check for {name} call {tid}")
+                return
 
     async def _guard_on_event(self, obj: dict, ctx) -> None:
         g = ctx.get("guard")
         if not g:
             return
-        etype, sub = obj.get("type"), obj.get("subtype")
-        if etype == "system" and sub in ("hook_started", "hook_response") and obj.get("hook_event") == "PreToolUse":
-            plugin = obj.get("plugin_name")
-            if plugin and not str(plugin).startswith("co-guard"):
-                return  # another plugin's hook proves nothing about ours
-            if sub == "hook_response":
-                if obj.get("outcome") == "cancelled":
-                    await self._guard_violation(ctx, "co-guard's PreToolUse hook was cancelled (timed out)")
-                return
-            name = str(obj.get("hook_name") or "").partition(":")[2]
-            for tid, entry in g["tools"].items():
-                if entry[0] == name and not entry[2]:
-                    entry[2] = True
-                    return
-            g["credit"][name] = g["credit"].get(name, 0) + 1
-        elif etype == "system" and (obj.get("tag") == "hook_no_verdict" or sub == "hook_no_verdict"):
-            if "co-guard" in json.dumps(obj, default=str):
-                await self._guard_violation(ctx, "co-guard gave no verdict for an action")
-        elif etype == "assistant":
-            for block in (obj.get("message") or {}).get("content") or []:
-                if isinstance(block, dict) and block.get("type") == "tool_use":
-                    name, tid = str(block.get("name") or ""), str(block.get("id") or "")
-                    hooked = g["credit"].get(name, 0) > 0
-                    if hooked:
-                        g["credit"][name] -= 1
-                    g["tools"][tid] = [name, time.monotonic(), hooked]
+        etype = obj.get("type")
+        content = (obj.get("message") or {}).get("content") if isinstance(obj.get("message"), dict) else None
+        blocks = [b for b in content if isinstance(b, dict)] if isinstance(content, list) else []
+        if etype == "assistant":
+            for block in blocks:
+                if block.get("type") == "tool_use" and block.get("id"):
+                    tid = str(block["id"])
+                    if tid not in g["seen"]:
+                        g["pending"][tid] = (str(block.get("name") or ""), time.monotonic())
         elif etype == "user":
-            content = (obj.get("message") or {}).get("content")
-            for block in content if isinstance(content, list) else []:
-                if isinstance(block, dict) and block.get("type") == "tool_result":
-                    entry = g["tools"].pop(str(block.get("tool_use_id") or ""), None)
-                    if entry is not None and not entry[2]:
-                        await self._guard_violation(ctx, f"{entry[0]} ran without a co-guard check")
+            for block in blocks:
+                if block.get("type") != "tool_result":
+                    continue
+                tid = str(block.get("tool_use_id") or "")
+                entry = g["pending"].pop(tid, None)
+                name = entry[0] if entry else "a tool"
+                if self._guard_checked(g, tid):
+                    continue
+                if block.get("is_error"):
+                    await g["emit"]("guard", {"event": "unchecked_error", "tool_use_id": tid, "tool": name,
+                                              "reason": "a call rejected before hooks ran (not executed)"})
+                else:
+                    await self._guard_violation(ctx, f"{name} call {tid} ran without a co-guard check")
 
     async def _ingest_guard_spool(self, task_id: str, emit) -> None:
         """The hook's spool -> `guard` events (emit redacts), then drop the task dir."""
         try:
             for rec in guard_runtime.read_spool(task_id):
+                if rec.get("seen") is True:
+                    continue  # watchdog bookkeeping, not an event
                 payload = {k: rec[k] for k in self._GUARD_KEYS if k in rec}
                 for k, v in list(payload.items()):
                     if isinstance(v, str):
