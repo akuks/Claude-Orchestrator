@@ -18,7 +18,7 @@ const terminal = {
   border: '#2e2033',
   text: '#f5e9ef',
   muted: '#9a8592',
-  dim: '#7a6672',
+  dim: '#8c7886',
   accent: '#7dd3fc',
   error: '#fb7185',
   success: '#34d399',
@@ -32,7 +32,7 @@ export const palette = {
   gradient: 'linear-gradient(135deg,#e11d48,#f97316)',
   logo: 'conic-gradient(from 210deg,#f59e0b,#f97316,#e11d48,#f59e0b)',
   haze:
-    'linear-gradient(90deg, transparent, rgba(245,158,11,.28), rgba(249,115,22,.25), rgba(225,29,72,.22), transparent)',
+    'linear-gradient(90deg, transparent, rgba(245,158,11,.42), rgba(249,115,22,.4), rgba(225,29,72,.36), transparent)',
   glow: 'rgba(249,115,22,.45)',
   radius: 16,
   status,
@@ -48,8 +48,8 @@ export const palette = {
     borderSecondary: '#feefe3',
     shadow: '0 10px 24px rgba(249,115,22,.08)',
     text: '#3b2433',
-    textSecondary: '#8a6f7d',
-    textMuted: '#a8919d',
+    textSecondary: '#7d6272',
+    textMuted: '#8f7886',
     hover: 'rgba(249,115,22,.06)',
     activeBg: 'rgba(249,115,22,.10)',
     activeBorder: 'rgba(249,115,22,.40)',
@@ -73,7 +73,7 @@ export const palette = {
     activeBg: 'rgba(249,115,22,.16)',
     activeBorder: 'rgba(249,115,22,.50)',
     guide: 'rgba(251,239,243,.22)',
-    hazeOpacity: '1',
+    hazeOpacity: '0.7',
   },
 }
 

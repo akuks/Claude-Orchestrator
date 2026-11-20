@@ -25,10 +25,43 @@ describe('palette', () => {
     expect(palette.light.surface).toBe('rgba(255,255,255,.85)')
     expect(palette.light.border).toBe('#fde7d6')
     expect(palette.light.text).toBe('#3b2433')
-    expect(palette.light.textSecondary).toBe('#8a6f7d')
+    // Ruling R3: accessibility beats the exact spec token (#8a6f7d was ~4.4:1).
+    expect(palette.light.textSecondary).toBe('#7d6272')
+    expect(palette.light.textMuted).toBe('#8f7886')
+    expect(palette.terminal.dim).toBe('#8c7886')
     expect(palette.night.surface).toBe('rgba(255,255,255,.06)')
     expect(palette.night.text).toBe('#fbeff3')
     expect(palette.night.bg).toBe('linear-gradient(180deg,#0f0a14,#1a0f1f)')
+  })
+})
+
+// WCAG contrast ratio between two #rrggbb colours.
+function contrast(a, b) {
+  const [hi, lo] = [luminance(a), luminance(b)].sort((x, y) => y - x)
+  return (hi + 0.05) / (lo + 0.05)
+}
+
+describe('readability (Ruling R3)', () => {
+  it('light secondary text reaches 4.5:1 on white and on the page tint', () => {
+    expect(contrast(palette.light.textSecondary, '#ffffff')).toBeGreaterThanOrEqual(4.5)
+    expect(contrast(palette.light.textSecondary, '#fff7f0')).toBeGreaterThanOrEqual(4.5)
+  })
+
+  it('light muted text stays legible (>= 3.5:1 on white)', () => {
+    expect(contrast(palette.light.textMuted, '#ffffff')).toBeGreaterThanOrEqual(3.5)
+  })
+
+  it('terminal dim text is legible on the terminal background', () => {
+    expect(contrast(palette.terminal.dim, palette.terminal.bg)).toBeGreaterThanOrEqual(4.5)
+  })
+
+  it('aurora haze is strong enough to read like the mockup (~.4 alpha)', () => {
+    const alphas = [...palette.haze.matchAll(/rgba\([^)]*,\s*(\.?\d*\.?\d+)\)/g)].map((m) => Number(m[1]))
+    expect(alphas.length).toBe(3)
+    for (const a of alphas) {
+      expect(a).toBeGreaterThanOrEqual(0.35)
+      expect(a).toBeLessThanOrEqual(0.45)
+    }
   })
 })
 
