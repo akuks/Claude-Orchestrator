@@ -193,7 +193,18 @@ def test_member_children_owned_by_member_not_parent_owner(client, member_client)
 
 def test_member_followup_owned_by_member(client, member_client):
     me = member_client.get("/auth/me").json()["id"]
-    parent = _make_member_task_parent(client)
+    # Phase 2: following up on someone else's task needs maintainer on its project.
+    import uuid
+
+    pid = client.post("/projects", json={"name": f"own-fu-{uuid.uuid4().hex[:8]}"}).json()["id"]
+    r = client.put(
+        f"/projects/{pid}/members",
+        json=[{"subject_type": "user", "subject_id": me, "role": "maintainer"}],
+    )
+    assert r.status_code == 200, r.text
+    parent = client.post(
+        "/tasks", json={"prompt": "admin parent", "project_id": pid, "requires_approval": True}
+    ).json()
 
     async def setsess():
         async with SessionLocal() as s:
