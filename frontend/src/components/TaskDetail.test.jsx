@@ -1,3 +1,4 @@
+import { act } from 'react'
 import { afterEach, beforeAll, describe, expect, it, vi } from 'vitest'
 import { flush, render } from '../home/testRender'
 
@@ -6,6 +7,8 @@ vi.mock('../api', () => ({
     getTask: vi.fn(async (id) => ({ id, title: `Task ${id}`, status: 'running', prompt: 'p' })),
     getThread: vi.fn(async () => []),
     getArtifacts: vi.fn(async () => []),
+    taskActionApprovals: vi.fn(async () => []),
+    userDirectory: vi.fn(async () => [{ id: 'u2', name: 'Bea', email: 'b@x.io' }]),
     streamUrl: (id, seq) => `ws://test/tasks/${id}/stream?after=${seq}`,
     reportUrl: () => '#',
     artifactUrl: () => '#',
@@ -16,6 +19,7 @@ vi.mock('../api', () => ({
   shortModel: (m) => m,
 }))
 
+import { api } from '../api'
 import TaskDetail from './TaskDetail'
 
 // A fake socket that records what the component opens and closes.
@@ -64,5 +68,56 @@ describe('TaskDetail inline: live stream lifecycle', () => {
     view = null
     expect(FakeSocket.all[1].closed).toBe(true)
     expect(FakeSocket.all).toHaveLength(2)
+  })
+})
+
+describe('TaskDetail: co-guard lines', () => {
+  let view
+  const RealWS = globalThis.WebSocket
+  afterEach(async () => {
+    await view?.unmount()
+    view = null
+    globalThis.WebSocket = RealWS
+    FakeSocket.all = []
+  })
+
+  const send = (ev) => act(async () => FakeSocket.all.at(-1).onmessage({ data: JSON.stringify(ev) }))
+  const line = (c, kind) => [...c.querySelectorAll(`[data-testid="guard-line-${kind}"]`)]
+
+  it('renders each guard event kind as its own line with an icon', async () => {
+    globalThis.WebSocket = FakeSocket
+    api.taskActionApprovals.mockImplementation(async () => [
+      { id: 'r1', status: 'approved', decided_by: 'u2' },
+      { id: 'r2', status: 'rejected', decided_by: 'u2', decision_reason: 'nope' },
+      { id: 'r4', status: 'pending', tool: 'Bash', summary: '<b>git push --force</b>', rule_ids: ['git-force-push-main'], expires_at: '2099-01-01T00:00:00Z' },
+    ])
+    view = await render(<TaskDetail inline taskId="a" />)
+    await flush()
+    const base = { event: 'PreToolUse', tool: 'Bash', summary: 'rm -rf ~' }
+    let seq = 1
+    for (const payload of [
+      { ...base, decision: 'deny', rule_ids: ['rm-rf-outside'], reason: 'home (rm-rf-outside)' },
+      { ...base, decision: 'approved', status: 'approved', request_id: 'r1', summary: 'git reset --hard' },
+      { ...base, decision: 'deny', status: 'rejected', request_id: 'r2' },
+      { ...base, decision: 'deny', status: 'timeout', request_id: 'r3' },
+      { event: 'settings_override', reason: 'project settings switch hooks off', files: ['.claude/settings.json'] },
+      { event: 'PreToolUse', decision: 'deny', rule_ids: [], reason: 'co-guard error' },
+      { event: 'watchdog', decision: 'killed', reason: 'Bash call x ran without a co-guard check' },
+    ])
+      await send({ seq: seq++, type: 'guard', payload })
+    await flush()
+    const c = view.container
+    for (const kind of ['blocked', 'approved', 'rejected', 'expired', 'override', 'error', 'watchdog', 'waiting'])
+      expect(line(c, kind).length, kind).toBe(1)
+    for (const el of c.querySelectorAll('[data-testid^="guard-line-"]')) expect(el.querySelector('.anticon')).not.toBeNull()
+    expect(line(c, 'approved')[0].textContent).toContain('approved by Bea')
+    expect(line(c, 'rejected')[0].textContent).toContain('nope')
+    expect(line(c, 'override')[0].textContent).toContain('.claude/settings.json')
+    // waiting: the pending request, linked to its card, as plain text
+    const waiting = line(c, 'waiting')[0]
+    expect(waiting.querySelector('a[href="#/approvals/r4"]')).not.toBeNull()
+    expect(waiting.textContent).toContain('<b>git push --force</b>')
+    expect(waiting.querySelector('b')).toBeNull()
+    expect(api.taskActionApprovals).toHaveBeenCalledWith('a')
   })
 })

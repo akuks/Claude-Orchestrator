@@ -17,6 +17,16 @@ function actions() {
 }
 
 describe('buildCommands', () => {
+  it('has "Open approvals" (pending tasks and actions) for everyone', () => {
+    const a = actions()
+    const cmds = buildCommands({ isAdmin: false, actions: a })
+    const hit = searchCommands(cmds, 'open approvals')[0]
+    expect(hit.label).toBe('Open approvals')
+    hit.run()
+    expect(a.navigate).toHaveBeenLastCalledWith({ page: 'approvals' })
+    expect(searchCommands(cmds, 'guard')[0].id).toBe('action:approvals')
+  })
+
   it('hides Users/Teams for non-admins', () => {
     const labels = buildCommands({ projects, tasks, workflows, isAdmin: false, actions: actions() }).map((c) => c.label)
     expect(labels).not.toContain('Users')

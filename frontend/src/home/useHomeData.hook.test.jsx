@@ -5,6 +5,7 @@ import { flush, render, setVisibility } from './testRender'
 vi.mock('../api', () => ({
   api: {
     listApprovals: vi.fn(async () => []),
+    listActionApprovals: vi.fn(async () => []),
     listTasks: vi.fn(async () => []),
     listSchedules: vi.fn(async () => []),
     myCredentials: vi.fn(async () => ({ claude: 'own' })),
