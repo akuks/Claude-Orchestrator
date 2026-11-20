@@ -21,6 +21,7 @@ from .routers import (
     approvals,
     auth,
     context_docs,
+    credentials,
     findings,
     mcp,
     projects,
@@ -149,6 +150,8 @@ for _r in (
     users.router,
     users.directory_router,
     teams.router,
+    credentials.router,
+    credentials.admin_router,
 ):
     app.include_router(_r, dependencies=_authed)
 

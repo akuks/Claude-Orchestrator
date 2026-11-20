@@ -1,7 +1,8 @@
 from datetime import datetime
-from typing import Optional
+import re
+from typing import Literal, Optional
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 
 class InputFile(BaseModel):
@@ -668,3 +669,92 @@ class MemberOut(BaseModel):
     subject_id: str
     role: str
     label: str
+
+
+# --------------------------------------------------------------------------- credentials
+
+_CTRL = re.compile(r"[\x00-\x1f\x7f]")
+
+
+def _secret(v: Optional[str]) -> str:
+    # null is not "clear" for a secret (use DELETE); blank is never a secret.
+    if v is None or not v.strip():
+        raise ValueError("must be a non-empty string")
+    v = v.strip()
+    if _CTRL.search(v) or " " in v:
+        raise ValueError("must not contain whitespace or control characters")
+    return v
+
+
+class CredentialsIn(BaseModel):
+    """Fields left out are unchanged; git_name/git_email null (or blank) clears."""
+
+    model_config = {"extra": "forbid"}
+
+    claude_token: Optional[str] = Field(default=None, max_length=4096)
+    claude_kind: Optional[Literal["oauth_token", "api_key"]] = None
+    github_token: Optional[str] = Field(default=None, max_length=4096)
+    git_name: Optional[str] = Field(default=None, max_length=200)
+    git_email: Optional[str] = Field(default=None, max_length=320)
+
+    @field_validator("git_name", "git_email")
+    @classmethod
+    def _identity(cls, v: Optional[str]) -> Optional[str]:
+        if v is None:
+            return None
+        v = v.strip()
+        if _CTRL.search(v):  # lands in a gitconfig file: no newlines/control chars
+            raise ValueError("must not contain control characters")
+        return v or None
+
+    @field_validator("git_email")
+    @classmethod
+    def _email(cls, v: Optional[str]) -> Optional[str]:
+        if v is not None and (v.count("@") != 1 or " " in v or v.startswith("@") or v.endswith("@")):
+            raise ValueError("must be an email address")
+        return v
+
+    @model_validator(mode="after")
+    def _check(self):
+        for f in ("claude_token", "github_token"):
+            if f in self.model_fields_set:
+                setattr(self, f, _secret(getattr(self, f)))
+        has_token = "claude_token" in self.model_fields_set
+        has_kind = "claude_kind" in self.model_fields_set and self.claude_kind is not None
+        if has_token != has_kind:
+            raise ValueError("claude_token and claude_kind must be given together")
+        return self
+
+
+class CredentialStatus(BaseModel):
+    claude: Literal["own", "fallback", "none"]
+    claude_kind: Optional[Literal["oauth_token", "api_key"]] = None
+    github: bool
+    git_name: Optional[str] = None
+    git_email: Optional[str] = None
+
+
+class CredentialTestIn(BaseModel):
+    which: Literal["claude", "github"]
+
+
+class CredentialTestOut(BaseModel):
+    ok: bool
+    detail: str
+
+
+class OrgFallbackIn(BaseModel):
+    model_config = {"extra": "forbid"}
+
+    api_key: str = Field(max_length=4096)
+
+    @field_validator("api_key")
+    @classmethod
+    def _key(cls, v: str) -> str:
+        return _secret(v)
+
+
+class OrgFallbackOut(BaseModel):
+    set: bool
+    updated_at: Optional[datetime] = None
+    updated_by: Optional[str] = None
