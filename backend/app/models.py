@@ -2,7 +2,9 @@ import uuid
 from datetime import datetime, timezone
 
 from sqlalchemy import (
+    Index,
     UniqueConstraint,
+    text,
     JSON,
     DateTime,
     Float,
@@ -184,6 +186,13 @@ class ActionApproval(Base):
     reads as expired. Each row answers exactly one waiting hook (one-shot)."""
 
     __tablename__ = "action_approvals"
+    # One pending request per (task, idempotency key); decided ones may repeat it.
+    __table_args__ = (
+        Index(
+            "uq_action_approvals_pending_key", "task_id", "idempotency_key", unique=True,
+            sqlite_where=text("status = 'pending'"), postgresql_where=text("status = 'pending'"),
+        ),
+    )
 
     id: Mapped[str] = mapped_column(String(32), primary_key=True, default=_uuid)
     task_id: Mapped[str] = mapped_column(ForeignKey("tasks.id", ondelete="CASCADE"), index=True)

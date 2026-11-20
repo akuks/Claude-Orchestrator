@@ -6,13 +6,17 @@
 co-guard's hook and decided by people, and the hook's live decision reports.
 
 * ``POST /guard/approvals`` - agent token only, for its own task (Ruling R2
-  body; ``Idempotency-Key`` header). 201 ``{id, status: "pending",
-  expires_at}``; a retry with the same key while that request is still pending
-  answers 200 with the same id. Once it is decided or expired the key files a
+  body + ``wait_left``; ``Idempotency-Key`` header; body <= BODY_LIMIT).
+  201 ``{id, status: "pending", expires_at}``; a retry with the same key while
+  that request is still pending answers 200 with the same id - only when its
+  stored content (rule_ids, tool, summary, cwd, reason, command_hash) is the
+  same, else 409 "conflicting request" (the hook denies). A partial unique
+  index keeps one pending row per (task, key). At most 20 pending and 100
+  total requests per task (429). Once it is decided or expired the key files a
   NEW request (the hook only re-POSTs a key while retrying before a decision),
   so every approval answers exactly one waiting hook (one-shot).
 * ``GET /guard/approvals/{id}`` - the agent of the request's task (``{id,
-  status}`` only), or a person who can see the task (the full card); else 404.
+  status, command_hash}`` only; the hook checks the hash is its own call's), or a person who can see the task (the full card); else 404.
 * ``POST /guard/approvals/{id}/approve|reject`` - people only (agent tokens are
   refused by the allowlist in auth.py): an admin, or a maintainer of the task's
   effective project who does not own the task (Ruling R25, two-person rule);
@@ -27,11 +31,13 @@ co-guard's hook and decided by people, and the hook's live decision reports.
   the spool ingestion, which then skips it); a deny that names a request the
   hook gave up on expires that request. Only PreToolUse deny/approved records
   are taken, an "approved" one only for a request a person approved (the
-  agent can read the token and call this too), at most REPORT_CAP per run.
+  agent can read the token and call this too) and then with the stored
+  request's tool/summary/rule_ids, at most GUARD_REPORT_CAP per run.
 
-Expiry: ``expires_at = created_at + approval_wait_seconds`` - the value in the
-task's own policy file (what its hook waits), else the project's, clamped
-60-900. A pending request past ``expires_at``, or whose task is no longer
+Expiry: ``expires_at = created_at + min(approval_wait_seconds, wait_left)`` -
+the wait in the task's own policy file (what its hook waits), else the
+project's, clamped 60-900; ``wait_left`` is what the hook has left. A
+pending request past ``expires_at``, or whose task is no longer
 running, reads as ``expired`` (lazily, persisted when read). Decisions close
 ``DECIDE_MARGIN`` seconds before ``expires_at``: the hook polls every 2 s and
 stops at its own deadline, so a later approval could land on a call that was
@@ -43,9 +49,10 @@ import re
 from datetime import datetime, timedelta, timezone
 from typing import Literal, Optional
 
-from fastapi import APIRouter, Body, Header, HTTPException, Query, Request, Response
+from fastapi import APIRouter, Body, Depends, Header, HTTPException, Query, Request, Response
 from pydantic import BaseModel
 from sqlalchemy import and_, func, or_, select, update
+from sqlalchemy.exc import IntegrityError
 
 from ..access import (
     ALL,
@@ -58,8 +65,9 @@ from ..access import (
 from ..constants import Status
 from ..database import SessionLocal
 from ..guard import runtime as guard_runtime
+from ..guard.co_hook import SUMMARY_MAX as HOOK_SUMMARY_MAX
 from ..models import ActionApproval, Project, Task
-from ..redaction import redact, redact_obj
+from ..redaction import redact
 
 router = APIRouter(prefix="/guard", tags=["guard"])
 api = APIRouter(prefix="/guard", tags=["guard"])
@@ -68,7 +76,11 @@ _CHALLENGE = re.compile(r"[0-9a-f]{16,128}")
 
 DECIDE_MARGIN = 5  # seconds before expires_at when decisions close
 MAX_PENDING_PER_TASK = 20
+MAX_TOTAL_PER_TASK = 100  # every status: an agent cannot flood the approvals table
 LIST_LIMIT = 200
+BODY_LIMIT = 16 * 1024  # bytes, POST /guard/approvals and /guard/report
+# Stored request fields, compared whole when an idempotency key is reused.
+CONTENT_FIELDS = ("rule_ids", "tool", "summary", "cwd", "reason", "command_hash")
 
 
 @router.get("/whoami")
@@ -108,6 +120,25 @@ def _require_agent_for(p, task_id) -> None:
         raise HTTPException(403, "Only a task's agent token may call this")
     if not task_id or task_id != p.token.task_id:
         raise HTTPException(403, "Token not allowed for this task")
+
+
+async def _limit_body(request: Request) -> None:
+    """413 for a body over BODY_LIMIT (declared length, or the bytes read)."""
+    declared = request.headers.get("content-length")
+    try:
+        too_big = declared is not None and int(declared) > BODY_LIMIT
+    except ValueError:
+        raise HTTPException(400, "Bad Content-Length")
+    if too_big or len(await request.body()) > BODY_LIMIT:
+        raise HTTPException(413, "Request body too large")
+
+
+def _cut(text: str, limit: int) -> str:
+    """Bound a stored text; a cut is visible (UI: render as text only)."""
+    if len(text) <= limit:
+        return text
+    mark = f"… (truncated, {len(text)} chars)"
+    return text[: limit - len(mark)] + mark
 
 
 def _wait_seconds(task_id: str, project: Project | None) -> int:
@@ -205,9 +236,58 @@ class FileBody(BaseModel):
     cwd: str = ""
     reason: str = ""
     command_hash: str = ""
+    # seconds left before the hook's own deadline (not part of the content)
+    wait_left: Optional[float] = None
 
 
-@api.post("/approvals", status_code=201)
+def _content(body: FileBody, secrets: list[str]) -> dict:
+    """The request's stored form: redacted first, then bounded."""
+    return {
+        "rule_ids": [redact(str(r), secrets)[:64] for r in body.rule_ids][:20],
+        "tool": _cut(redact(body.tool, secrets), 200),
+        "summary": _cut(redact(body.summary, secrets), 2000),
+        "cwd": _cut(redact(body.cwd, secrets), 1000),
+        "reason": _cut(redact(body.reason, secrets), 2000),
+        "command_hash": body.command_hash[:128],
+    }
+
+
+def _same_content(a: ActionApproval, content: dict) -> bool:
+    return all(
+        (list(a.rule_ids or []) if k == "rule_ids" else getattr(a, k)) == content[k] for k in CONTENT_FIELDS
+    )
+
+
+async def _find_pending(s, task_id: str, key: str) -> ActionApproval | None:
+    return (
+        await s.execute(
+            select(ActionApproval)
+            .where(
+                ActionApproval.task_id == task_id,
+                ActionApproval.idempotency_key == key,
+                ActionApproval.status == "pending",
+            )
+            .order_by(ActionApproval.created_at.desc())
+            .limit(1)
+        )
+    ).scalar_one_or_none()
+
+
+def _filed(a: ActionApproval) -> dict:
+    return {"id": a.id, "status": "pending", "expires_at": _aware(a.expires_at)}
+
+
+def _replay(a: ActionApproval, content: dict, response: Response) -> dict:
+    """The pending request filed under this key - only if it is the same
+    request. The agent shares the hook's token and can predict its key: a
+    planted row with other content must never stand in for the hook's call."""
+    if not _same_content(a, content):
+        raise HTTPException(409, "conflicting request")
+    response.status_code = 200
+    return _filed(a)
+
+
+@api.post("/approvals", status_code=201, dependencies=[Depends(_limit_body)])
 async def file_request(
     body: FileBody,
     request: Request,
@@ -222,54 +302,50 @@ async def file_request(
         task = await s.get(Task, body.task_id)
         if task is None or task.status != Status.RUNNING:
             raise HTTPException(409, "Task is not running")
+        content = _content(body, _run_secrets(request, task.id))
         if key is not None:
-            prior = (
-                await s.execute(
-                    select(ActionApproval)
-                    .where(
-                        ActionApproval.task_id == task.id,
-                        ActionApproval.idempotency_key == key,
-                        ActionApproval.status == "pending",
-                    )
-                    .order_by(ActionApproval.created_at.desc())
-                    .limit(1)
-                )
-            ).scalar_one_or_none()
+            prior = await _find_pending(s, task.id, key)
             if prior is not None and await _settle(s, prior, task) == "pending":
-                response.status_code = 200
-                return {"id": prior.id, "status": "pending", "expires_at": _aware(prior.expires_at)}
-        pending = (
+                return _replay(prior, content, response)
+        counts = (
             await s.execute(
-                select(func.count(ActionApproval.id)).where(
-                    ActionApproval.task_id == task.id,
-                    ActionApproval.status == "pending",
-                    ActionApproval.expires_at > now,
-                )
+                select(
+                    func.count(ActionApproval.id),
+                    func.count(ActionApproval.id).filter(
+                        ActionApproval.status == "pending", ActionApproval.expires_at > now
+                    ),
+                ).where(ActionApproval.task_id == task.id)
             )
-        ).scalar_one()
-        if pending >= MAX_PENDING_PER_TASK:
-            raise HTTPException(429, "Too many pending requests for this task")
+        ).one()
+        if counts[0] >= MAX_TOTAL_PER_TASK or counts[1] >= MAX_PENDING_PER_TASK:
+            raise HTTPException(429, "Too many approval requests for this task")
         project_id = await effective_project_id(s, task)
         project = await s.get(Project, project_id) if project_id else None
-        secrets = _run_secrets(request, task.id)
+        wait = float(_wait_seconds(task.id, project))
+        if body.wait_left is not None and body.wait_left == body.wait_left:  # not NaN
+            wait = max(0.0, min(wait, body.wait_left))  # never past the hook's own deadline
         a = ActionApproval(
             task_id=task.id,
             project_id=project_id,
             requested_by=task.created_by,
-            rule_ids=[redact(str(r), secrets)[:64] for r in body.rule_ids][:20],
-            tool=redact(body.tool, secrets)[:200],
-            summary=redact(body.summary, secrets)[:2000],
-            cwd=redact(body.cwd, secrets)[:1000],
-            reason=redact(body.reason, secrets)[:2000],
-            command_hash=body.command_hash[:128],
             idempotency_key=key,
             status="pending",
             created_at=now,
-            expires_at=now + timedelta(seconds=_wait_seconds(task.id, project)),
+            expires_at=now + timedelta(seconds=wait),
+            **content,
         )
+        tid = task.id  # ORM attributes expire on rollback
         s.add(a)
-        await s.commit()
-        return {"id": a.id, "status": "pending", "expires_at": _aware(a.expires_at)}
+        try:
+            await s.commit()
+        except IntegrityError:
+            # Another POST with this key won the race (unique pending key).
+            await s.rollback()
+            prior = await _find_pending(s, tid, key) if key is not None else None
+            if prior is None:
+                raise HTTPException(409, "conflicting request")
+            return _replay(prior, content, response)
+        return _filed(a)
 
 
 # ---- reading ------------------------------------------------------------------------------
@@ -327,7 +403,8 @@ async def get_request(approval_id: str, request: Request):
         if p.is_agent:
             if a is None or a.task_id != p.token.task_id:
                 raise HTTPException(404, "Not found")
-            return {"id": a.id, "status": await _settle(s, a, task)}
+            # command_hash: the hook checks the id stands for ITS call
+            return {"id": a.id, "status": await _settle(s, a, task), "command_hash": a.command_hash}
         if a is None or task is None or not await can_see_task(s, p, task):
             raise HTTPException(404, "Not found")
         st = await _settle(s, a, task)
@@ -385,7 +462,7 @@ async def reject(approval_id: str, request: Request, body: Optional[RejectBody] 
 # ---- live report (agent) -------------------------------------------------------------------
 
 
-@api.post("/report", status_code=202)
+@api.post("/report", status_code=202, dependencies=[Depends(_limit_body)])
 async def report(request: Request, rec: dict = Body(...)):
     """The hook's decision record (best effort, after it answered Claude Code)."""
     p = request.state.principal
@@ -413,8 +490,14 @@ async def report(request: Request, rec: dict = Body(...)):
             a = await s.get(ActionApproval, rid) if isinstance(rid, str) and rid else None
         if a is None or a.task_id != task_id or a.status != "approved":
             return {"accepted": False}
+        # What was approved is what the person saw, not what the caller says
+        # (summary cut like the hook's own record, so the spool copy dedupes).
+        summ = a.summary or ""
+        if len(summ) > HOOK_SUMMARY_MAX:
+            summ = summ[: HOOK_SUMMARY_MAX - 1] + "…"
+        rec = dict(rec, tool=a.tool, rule_ids=list(a.rule_ids or []), summary=summ)
     w = _worker(request)
     accepted = False
     if w is not None and hasattr(w, "report_guard"):
-        accepted = await w.report_guard(task_id, redact_obj(rec, _run_secrets(request, task_id)))
+        accepted = await w.report_guard(task_id, rec)  # redacts with the run's secrets
     return {"accepted": accepted}

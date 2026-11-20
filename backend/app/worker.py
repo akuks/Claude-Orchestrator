@@ -911,10 +911,11 @@ class WorkerManager:
                     await self._guard_violation(ctx, f"{name} call {tid} ran without a co-guard check")
 
     @classmethod
-    def guard_payload(cls, rec: dict) -> dict:
+    def guard_payload(cls, rec: dict, secrets: list[str] | None = None) -> dict:
         """A hook record (spool line or /guard/report body) -> the `guard`
-        event payload: known keys only, bounded. emit() redacts it."""
-        payload = {k: rec[k] for k in cls._GUARD_KEYS if k in rec}
+        event payload: known keys only, redacted FIRST (so no partial secret
+        survives a cut, and both sources key alike), then bounded."""
+        payload = redact_obj({k: rec[k] for k in cls._GUARD_KEYS if k in rec}, secrets or [])
         for k, v in list(payload.items()):
             if isinstance(v, str):
                 payload[k] = v[:2000]
@@ -936,7 +937,7 @@ class WorkerManager:
         live = self._guard_live.get(task_id)
         if live is None:
             return False
-        payload = self.guard_payload(rec)
+        payload = self.guard_payload(rec, self._run_secrets.get(task_id))
         if not payload or sum(live["reported"].values()) >= self.GUARD_REPORT_CAP:
             return False
         live["reported"][self._guard_key(payload)] += 1
@@ -952,11 +953,10 @@ class WorkerManager:
             for rec in guard_runtime.read_spool(task_id):
                 if rec.get("seen") is True:
                     continue  # watchdog bookkeeping, not an event
-                payload = self.guard_payload(rec)
+                payload = self.guard_payload(rec, self._run_secrets.get(task_id))
                 if not payload:
                     continue
-                # keyed like report_guard's input (redacted by the router)
-                key = self._guard_key(redact_obj(payload, self._run_secrets.get(task_id) or []))
+                key = self._guard_key(payload)  # same form as report_guard's
                 if reported[key] > 0:
                     reported[key] -= 1
                     continue

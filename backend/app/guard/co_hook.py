@@ -35,8 +35,11 @@ unreachable - action blocked"; after filing, 3 refused connections in a row
 do the same.
 
 The approval API must be ``http://<literal IP>:<port>``, the POST must answer
-``status: "pending"`` with an id, and every GET must carry that id; anything
-else (and any 4xx, or no ``CO_API_TOKEN``) denies at once. The decision is
+``status: "pending"`` with an id, and every GET must carry that id and this
+call's ``command_hash``; anything else (and any 4xx - e.g. 409 when a request
+with this idempotency key but a different body is already pending - or no
+``CO_API_TOKEN``) denies at once. The POST also sends ``wait_left`` (seconds to
+this hook's deadline) so the server expires the request no later. The decision is
 printed BEFORE the best-effort report.
 
 ConfigChange (unverified with a real CLI): exit 2 blocks a settings change
@@ -291,6 +294,8 @@ def request_approval(policy, payload, verdict, summary, deadline):
         left = deadline - time.monotonic()
         try:
             if req_id is None:
+                # the server never keeps the request open past this hook's own deadline
+                body["wait_left"] = round(max(0.0, left), 1)
                 res = _request("POST", base + "/guard/approvals", body, timeout=min(5.0, left),
                                headers={"Idempotency-Key": idem})
                 rid = res.get("id") if isinstance(res, dict) else None
@@ -303,6 +308,9 @@ def request_approval(policy, payload, verdict, summary, deadline):
                                timeout=min(5.0, left))
                 if not isinstance(res, dict) or str(res.get("id")) != req_id:
                     return "refused", req_id, "the approval API answered for another request"
+                if res.get("command_hash") != command_hash:
+                    # the request behind this id is not the action this hook is checking
+                    return "refused", req_id, "the approval API answered for another action"
                 status = res.get("status")
                 if status in ("approved", "rejected", "expired"):
                     return status, req_id, ""
