@@ -5,7 +5,7 @@ import dayjs from 'dayjs'
 import relativeTime from 'dayjs/plugin/relativeTime'
 import { api } from '../api'
 import { layoutComets } from '../comets/layout'
-import CometSvg from '../comets/CometSvg'
+import Comets3D from '../comets/Comets3D'
 import { displayName, greetingFor, parseTime, useHomeData } from './useHomeData'
 import './home.css'
 
@@ -217,7 +217,8 @@ export default function HomeView({ user, navigate, onOpenCredentials, onApproval
               </Button>
             </Empty>
           ) : (
-            <CometSvg
+            <Comets3D
+              variant="scene"
               comets={comets}
               overflow={overflow}
               onOpen={openComet}
