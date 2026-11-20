@@ -271,6 +271,9 @@ def _stage_state(statuses: list[str], index: int, current: int) -> str:
             return "failed"
         if Status.AWAITING_APPROVAL in statuses:
             return "waiting_approval"
+    elif index < current:
+        # The run has moved past it; the viewer just can't see its tasks.
+        return "done"
     return "current" if index == current else "next"
 
 
@@ -294,17 +297,21 @@ async def live_runs(request: Request):
                 .order_by(WorkflowRun.created_at.desc(), WorkflowRun.id.desc())
             )
         ).scalars().all()
-        for run in (r for r in runs if _run_visible(p, r, visible)):
-            tasks = (
+        runs = [r for r in runs if _run_visible(p, r, visible)][:LIVE_MAX]
+        # Stage task statuses for every run in one grouped query.
+        by_run: dict[str, dict[int, list[str]]] = {}
+        if runs:
+            rows = (
                 await s.execute(
-                    select(Task.stage_index, Task.status).where(
-                        and_(Task.workflow_run_id == run.id, clause)
+                    select(Task.workflow_run_id, Task.stage_index, Task.status).where(
+                        and_(Task.workflow_run_id.in_([r.id for r in runs]), clause)
                     )
                 )
             ).all()
-            by_stage: dict[int, list[str]] = {}
-            for idx, st in tasks:
-                by_stage.setdefault(idx, []).append(st)
+            for run_id, idx, st in rows:
+                by_run.setdefault(run_id, {}).setdefault(idx, []).append(st)
+        for run in runs:
+            by_stage = by_run.get(run.id, {})
             stages = []
             for i, st in enumerate(run.stages or []):
                 sts = by_stage.get(i, [])
@@ -337,14 +344,20 @@ async def live_runs(request: Request):
                 .limit(LIVE_MAX)
             )
         ).scalars().all()
-        for root in roots:
+        # All visible children of those roots in one query.
+        kids_of: dict[str, list[Task]] = {}
+        if roots:
             kids = (
                 await s.execute(
                     select(Task)
-                    .where(and_(Task.parent_task_id == root.id, clause))
+                    .where(and_(Task.parent_task_id.in_([r.id for r in roots]), clause))
                     .order_by(Task.created_at, Task.id)
                 )
             ).scalars().all()
+            for k in kids:
+                kids_of.setdefault(k.parent_task_id, []).append(k)
+        for root in roots:
+            kids = kids_of.get(root.id, [])
             pids = list(dict.fromkeys(t.project_id for t in [root, *kids] if t.project_id))
             items.append(
                 LiveItemOut(

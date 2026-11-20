@@ -125,3 +125,60 @@ def test_live_waiting_approval_state(client):
     _stage_task(rid, 1, "queued", pid)
     item = _find(_live(client), rid)
     assert [s["state"] for s in item["stages"]] == ["waiting_approval", "next", "next"]
+
+
+def test_stage_state_earlier_stage_without_tasks_is_done():
+    from app.routers.workflows import _stage_state
+
+    assert _stage_state([], 0, 2) == "done"
+    assert _stage_state([], 2, 2) == "current"
+    assert _stage_state([], 3, 2) == "next"
+    # Visible tasks still decide when there are some.
+    assert _stage_state(["failed"], 0, 2) == "failed"
+
+
+def test_live_earlier_stage_with_no_visible_tasks_is_done(client):
+    pid = _project(client)
+    rid = _run(pid, current=2, n_stages=4)
+    _stage_task(rid, 1, "completed", pid)
+    _stage_task(rid, 2, "running", pid)
+    item = _find(_live(client), rid)
+    assert [s["state"] for s in item["stages"]] == ["done", "done", "current", "next"]
+
+
+def test_live_caps_runs_and_batches_task_queries(client, monkeypatch):
+    from sqlalchemy import event
+
+    from app.database import engine
+    from app.routers import workflows
+
+    monkeypatch.setattr(workflows, "LIVE_MAX", 3)
+    pid = _project(client)
+    rids = []
+    for _ in range(6):
+        rid = _run(pid)
+        _stage_task(rid, 0, "completed", pid)
+        _stage_task(rid, 1, "running", pid)
+        rids.append(rid)
+
+    seen: list[str] = []
+
+    def count(conn, cursor, statement, params, context, executemany):
+        if "FROM tasks" in statement:
+            seen.append(statement)
+
+    event.listen(engine.sync_engine, "before_cursor_execute", count)
+    try:
+        items = _live(client)
+    finally:
+        event.remove(engine.sync_engine, "before_cursor_execute", count)
+
+    assert len(items) <= 3
+    # Newest first: the three most recent runs make the cut, older ones don't.
+    assert [i["id"] for i in items if i["id"] in rids] == rids[::-1][:3]
+    for i in items:
+        if i["id"] in rids:
+            assert [s["state"] for s in i["stages"]] == ["done", "current"]
+    # Stage tasks for all runs in one query, thread roots in one, their
+    # children in one — not one query per run / per thread.
+    assert len(seen) <= 3, seen
