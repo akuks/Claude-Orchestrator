@@ -48,6 +48,8 @@ MAINTAINER_FIELDS = {
     "github_repo",
     "auto_review_prs",
     "automation_owner_id",
+    "guard_enabled",
+    "approval_wait_seconds",
 }
 ADMIN_FIELDS = {"directory", "env", "archived"}
 MASK = "••••"
@@ -336,8 +338,9 @@ async def get_project(project_id: str, request: Request):
 async def update_project(project_id: str, payload: ProjectUpdate, request: Request):
     principal = request.state.principal
     data = payload.model_dump(exclude_unset=True)
-    if "name" in data and data["name"] is None:
-        del data["name"]  # name is required; null means "leave it"
+    for k in ("name", "guard_enabled", "approval_wait_seconds"):
+        if k in data and data[k] is None:
+            del data[k]  # required columns; null means "leave it"
     async with SessionLocal() as s:
         # Visibility (404) and role (403) are checked before any validation or write.
         role = await require_project_role(s, principal, project_id, "maintainer")

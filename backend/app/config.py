@@ -86,6 +86,20 @@ class Settings(BaseSettings):
     # API
     # Base URL a coordinator agent uses to dispatch to other agents (self-call).
     api_base: str = "http://localhost:8200"
+    # Where uvicorn listens (start.sh: CO_BIND_HOST / CO_BACKEND_PORT). co-guard's
+    # hook talks to the server only at this LITERAL ip:port (never a hostname an
+    # agent could answer on); a wildcard bind means loopback.
+    bind_host: str = "127.0.0.1"
+    backend_port: int | None = None  # None: the port of api_base
+    # co-guard watchdog: a tool call with no co-guard PreToolUse hook seen in the
+    # stream within this many seconds stops the task.
+    guard_hook_grace_seconds: float = 15.0
+    # Verify the approval address is this server before each task (Ruling R22).
+    # Tests turn it off (no server listens there); never turn it off in production.
+    guard_verify_api: bool = True
+    # The UI's public base URL (e.g. https://orchestrator.example.com), for
+    # links in notifications. "" = notifications name the page instead.
+    public_url: str = ""
     cors_origins: list[str] = [
         "http://localhost:5173",
         "http://127.0.0.1:5173",

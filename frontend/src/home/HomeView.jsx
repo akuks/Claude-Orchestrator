@@ -1,6 +1,6 @@
 import { useMemo, useState } from 'react'
 import { Alert, Button, Skeleton, Tag, Tooltip, message } from 'antd'
-import { CheckOutlined, KeyOutlined, PlusOutlined } from '@ant-design/icons'
+import { CheckOutlined, EyeOutlined, KeyOutlined, PlusOutlined } from '@ant-design/icons'
 import dayjs from 'dayjs'
 import relativeTime from 'dayjs/plugin/relativeTime'
 import { api } from '../api'
@@ -14,6 +14,7 @@ dayjs.extend(relativeTime)
 const KIND_TAG = {
   credential: { color: 'warning', text: 'set up' },
   approval: { color: 'magenta', text: 'approve' },
+  action: { color: 'volcano', text: 'action' },
   failed: { color: 'error', text: 'failed' },
   schedule: { color: 'gold', text: 'paused' },
 }
@@ -69,6 +70,8 @@ export default function HomeView({ user, navigate, onOpenCredentials, onApproval
   const [approving, setApproving] = useState(null)
   const { comets, overflow } = useMemo(() => layoutComets(live), [live])
 
+  // Task approvals only: action requests are reviewed on their full card
+  // (Ruling R27), never approved from a one-line row.
   const approve = async (item) => {
     setApproving(item.id)
     try {
@@ -78,6 +81,8 @@ export default function HomeView({ user, navigate, onOpenCredentials, onApproval
       await reload()
     } catch (e) {
       message.error(e.message)
+      // 409 (already decided / expired): show the real state
+      if (e.status === 409) reload()
     } finally {
       setApproving(null)
     }
@@ -86,6 +91,7 @@ export default function HomeView({ user, navigate, onOpenCredentials, onApproval
   const openItem = (item) => {
     if (item.kind === 'credential') onOpenCredentials?.()
     else if (item.kind === 'schedule') navigate({ page: 'automation' })
+    else if (item.kind === 'action') navigate({ page: 'approvals', id: item.id })
     else navigate({ page: 'tasks', id: item.id })
   }
   const openComet = (c) => navigate(c.kind === 'run' ? { page: 'runs', id: c.id } : { page: 'tasks', id: c.id })
@@ -119,7 +125,7 @@ export default function HomeView({ user, navigate, onOpenCredentials, onApproval
               <Skeleton active paragraph={{ rows: 3 }} title={false} />
             ) : needsYou.length === 0 ? (
               // An all-clear only when every source behind it loaded.
-              errors.needsYou ? null : <Empty title="You're all caught up" text="Approvals, failed tasks and paused schedules will show up here." />
+              errors.needsYou ? null : <Empty title="You're all caught up" text="Approvals, paused actions, failed tasks and paused schedules will show up here." />
             ) : (
               <ul className="co-home-rows">
                 {needsYou.map((item) => (
@@ -129,7 +135,7 @@ export default function HomeView({ user, navigate, onOpenCredentials, onApproval
                         {KIND_TAG[item.kind].text}
                       </Tag>
                       <div className="co-home-row-text">
-                        <div className="co-home-row-title" title={item.title}>
+                        <div className="co-home-row-title" title={item.fullTitle || item.title}>
                           {item.title}
                         </div>
                         {(item.detail || item.at) && (
@@ -155,6 +161,10 @@ export default function HomeView({ user, navigate, onOpenCredentials, onApproval
                       {item.kind === 'credential' ? (
                         <Button size="small" type="primary" icon={<KeyOutlined />} onClick={() => openItem(item)}>
                           My credentials
+                        </Button>
+                      ) : item.kind === 'action' ? (
+                        <Button size="small" type="primary" icon={<EyeOutlined />} onClick={() => openItem(item)}>
+                          Review
                         </Button>
                       ) : (
                         <Button size="small" onClick={() => openItem(item)}>

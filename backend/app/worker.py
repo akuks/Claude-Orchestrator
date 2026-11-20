@@ -9,17 +9,25 @@ results + output artifacts. No external broker/queue needed for Phase 1.
 import asyncio
 import json
 import mimetypes
+import os
+import signal
+import time
+from collections import Counter
+from types import SimpleNamespace
 from datetime import datetime, timezone
 from pathlib import Path
 
 from sqlalchemy import func, select
 
 from . import auth, context_store, mcp_manager, memory, notifications, security
+from .access import effective_project_id
 from .agent_env import PROJECT_ENV_BLOCKED, MissingCredential, build_agent_env
 from .config import settings
 from .constants import Priority, Status
 from .database import SessionLocal
 from .events import broker
+from .guard import runtime as guard_runtime
+from .guard.plugin import ensure_plugin
 from .models import Agent, Artifact, McpCall, Project, SkillPack, Task, TaskEvent, User
 from .redaction import redact, redact_obj, secrets_from_env
 
@@ -181,6 +189,10 @@ class WorkerManager:
         self._cancelled: set[str] = set()
         # task_id -> the current run's secret values (see _run_job's emit).
         self._run_secrets: dict[str, list[str]] = {}
+        # task_id -> {"emit", "reported"} of a live run: POST /guard/report
+        # emits through the run's own emit (same seq, same redaction), and the
+        # spool ingestion skips what was already reported (Counter of keys).
+        self._guard_live: dict[str, dict] = {}
         self._dispatcher: asyncio.Task | None = None
 
     # ---- lifecycle -------------------------------------------------------
@@ -189,14 +201,23 @@ class WorkerManager:
         self._dispatcher = asyncio.create_task(self._dispatch_loop())
         await self._requeue_pending()
 
+    @staticmethod
+    def _signal_group(proc, sig: int) -> None:
+        """Signal claude AND every tool it started: it runs in its own process
+        group (start_new_session); fall back to the process alone."""
+        try:
+            os.killpg(proc.pid, sig)
+        except (ProcessLookupError, PermissionError, OSError):
+            try:
+                proc.send_signal(sig)
+            except ProcessLookupError:
+                pass
+
     async def stop(self) -> None:
         if self._dispatcher:
             self._dispatcher.cancel()
         for proc in list(self._running.values()):
-            try:
-                proc.terminate()
-            except ProcessLookupError:
-                pass
+            self._signal_group(proc, signal.SIGTERM)
 
     async def _requeue_pending(self) -> None:
         """On boot, re-queue anything left QUEUED, and reset orphaned RUNNING."""
@@ -221,10 +242,7 @@ class WorkerManager:
         self._cancelled.add(task_id)
         proc = self._running.get(task_id)
         if proc:
-            try:
-                proc.terminate()
-            except ProcessLookupError:
-                pass
+            self._signal_group(proc, signal.SIGTERM)
 
     async def _retry_after(self, task_id, delay, priority, created_at) -> None:
         await asyncio.sleep(delay)
@@ -257,6 +275,7 @@ class WorkerManager:
             )
         finally:
             self._run_secrets.pop(task_id, None)
+            self._guard_live.pop(task_id, None)
             self._sem.release()
 
     # ---- execution -------------------------------------------------------
@@ -287,6 +306,8 @@ class WorkerManager:
                 s.add(TaskEvent(task_id=task_id, seq=seq, type=etype, payload=payload))
                 await s.commit()
             await broker.publish(task_id, {"seq": seq, "type": etype, "payload": payload})
+
+        self._guard_live[task_id] = {"emit": emit, "reported": Counter()}
 
         # A disabled user's queued/automated tasks must not run.
         async with SessionLocal() as s:
@@ -332,10 +353,31 @@ class WorkerManager:
             workspace = Path(task.workspace_dir or (settings.workspaces_dir / task_id))
             # Per-project environment (toolchain scoping) for this task's subprocess.
             project_env = {}
+            # co-guard: the project's guard settings (columns arrive in Task 4).
+            guard_project = None
             if task.project_id:
                 proj = await s.get(Project, task.project_id)
                 if proj and proj.env:
                     project_env = dict(proj.env)
+                if proj is not None:
+                    guard_project = SimpleNamespace(
+                        directory=proj.directory,
+                        guard_enabled=getattr(proj, "guard_enabled", True),
+                        approval_wait_seconds=getattr(proj, "approval_wait_seconds", 300),
+                    )
+            else:
+                # An ad-hoc step of a project thread (follow-up / dispatched
+                # child): the thread root's guard settings, as approvals use
+                # (access.effective_project_id); its own workspace stays its
+                # project dir.
+                eff = await effective_project_id(s, task)
+                proj = await s.get(Project, eff) if eff else None
+                if proj is not None:
+                    guard_project = SimpleNamespace(
+                        directory=None,
+                        guard_enabled=getattr(proj, "guard_enabled", True),
+                        approval_wait_seconds=getattr(proj, "approval_wait_seconds", 300),
+                    )
             # Coordinator: inject the live agent registry + how to delegate — but
             # NOT inside a workflow, where the workflow owns the orchestration and a
             # coordinator agent is used only as a planning step.
@@ -413,6 +455,14 @@ class WorkerManager:
         mcp_config_dir = settings.workspaces_dir / "_mcp_configs" / task_id
         mcp = await mcp_manager.prepare_for_task(project, mcp_config_dir)
 
+        # co-guard: per-task policy + spool dir (outside the cwd), env, and the
+        # settings that could switch its hooks off (Ruling R6 follow-up).
+        guard_plugin, setting_sources = await self._prepare_guard(
+            task_id, guard_project, workspace, sub_env, mcp, emit
+        )
+        if guard_plugin is None:
+            return
+
         # Repo-backed project tasks: skip artifact diffing (git tracks changes and
         # scanning a whole repo is slow/noisy). Sandbox tasks still collect outputs.
         before = {} if project_id else _snapshot(workspace)
@@ -427,7 +477,14 @@ class WorkerManager:
             str(max_turns),
             "--permission-mode",
             settings.claude_permission_mode,
+            # (no --include-hook-events: the co-guard watchdog reads the hook's
+            # spool; stream hook events would only double the event writes)
+            # co-guard first, before any skill pack.
+            "--plugin-dir",
+            guard_plugin,
         ]
+        if setting_sources:
+            cmd += ["--setting-sources", setting_sources]
         # Only force a model when one was chosen; otherwise Claude Code uses its
         # own configured default.
         if model:
@@ -447,6 +504,8 @@ class WorkerManager:
             await emit("skills", {"plugin_dirs": plugin_dirs})
         allowed_tools = list(mcp["allowed"]) if mcp else []
         disallowed_tools = list(mcp["disallowed"]) if mcp else []
+        # co-guard cannot check PowerShell (Ruling R17): never offer it.
+        disallowed_tools.append("PowerShell")
         # SSH is opt-in per agent: unless the task is remote-enabled, deny outbound
         # ssh/scp/sftp. Deny rules win even under --permission-mode bypassPermissions.
         if not allow_remote:
@@ -463,7 +522,14 @@ class WorkerManager:
             # Let the agent Read the snapshot even outside bypassPermissions mode.
             cmd += ["--add-dir", kb_log["dir"]]
         if mcp:
+            # Ruling R23: strict only when the orchestrator supplies MCP servers, so
+            # tasks keep the MCP servers of admin-installed skill packs. Subagent
+            # frontmatter mcpServers stay closed by R20b: writes to .claude/agents/**
+            # need approval (agent-config) and the per-user config dir is hard-protected.
             cmd += ["--mcp-config", mcp["config_path"], "--strict-mcp-config"]
+        # Ruling R20c: skills' / slash commands' inline !`cmd` would run outside PreToolUse.
+        cmd += ["--settings", json.dumps({"disableSkillShellExecution": True})]
+        if mcp:
             await emit(
                 "mcp",
                 {
@@ -525,8 +591,11 @@ class WorkerManager:
                 stderr=asyncio.subprocess.PIPE,
                 # Raise the per-line buffer limit; stream-json events can be large.
                 limit=settings.stream_buffer_limit_bytes,
+                # own process group, so the co-guard watchdog can stop the tools it started too
+                start_new_session=True,
             )
         except FileNotFoundError:
+            guard_runtime.remove_task_dir(task_id)
             await emit("error", {"message": f"Claude binary not found: {settings.claude_bin}"})
             await self._finish(
                 task_id, Status.FAILED, error=f"Claude binary not found: {settings.claude_bin}"
@@ -552,7 +621,16 @@ class WorkerManager:
 
         stderr_task = asyncio.create_task(read_stderr())
 
-        ctx = {"task_id": task_id, "mcp_ids": {}, "secrets": run_secrets}
+        ctx = {
+            "task_id": task_id,
+            "mcp_ids": {},
+            "secrets": run_secrets,
+            # co-guard watchdog (Ruling R21): tool_use ids checked through the spool
+            "guard": {"calls": {}, "lanes": {}, "done": set(), "seen": set(), "offset": 0, "violation": None,
+                      "proc": proc, "emit": emit,
+                      "spool": guard_runtime.task_dir(task_id) / guard_runtime.SPOOL_NAME},
+        }
+        watch = asyncio.create_task(self._guard_watch(ctx))
         try:
             await asyncio.wait_for(
                 self._consume_stdout(proc, emit, result, ctx),
@@ -560,18 +638,30 @@ class WorkerManager:
             )
             await proc.wait()
         except asyncio.TimeoutError:
-            proc.kill()
+            self._signal_group(proc, signal.SIGKILL)
             await proc.wait()
             await stderr_task
             self._running.pop(task_id, None)
+            await self._ingest_guard_spool(task_id, emit)
             await emit("error", {"message": "Task exceeded time limit"})
             await self._finish(task_id, Status.FAILED, error="Task exceeded time limit")
             return
         finally:
+            watch.cancel()
             await stderr_task
 
         self._running.pop(task_id, None)
         exit_code = proc.returncode
+        await self._ingest_guard_spool(task_id, emit)
+
+        if ctx["guard"]["violation"]:
+            # never retried: the guard was not protecting this run
+            self._cancelled.discard(task_id)
+            msg = "co-guard was not running — task stopped for safety"
+            await emit("error", {"message": msg})
+            await self._finish(task_id, Status.FAILED, exit_code=exit_code,
+                               error=f"{msg} ({ctx['guard']['violation']})", secrets=run_secrets)
+            return
 
         if task_id in self._cancelled:
             self._cancelled.discard(task_id)
@@ -643,6 +733,255 @@ class WorkerManager:
         # Notify if this run came from a schedule (honors its notify policy).
         asyncio.create_task(notifications.notify_task_finished(task_id))
 
+    # ---- co-guard ----------------------------------------------------------
+
+    GUARD_REPORT_CAP = 500  # live /guard/report events per run (the spool still has the rest)
+
+    _GUARD_KEYS = (
+        "event", "decision", "rule_ids", "tool", "summary", "reason", "status", "request_id",
+        "tool_use_id", "agent_id", "agent_type", "source", "ts",
+    )
+
+    async def _prepare_guard(self, task_id, guard_project, workspace, sub_env, mcp, emit):
+        """Write the task's policy (0600) into a fresh CO_TASK_DIR, add the
+        guard env and return (plugin dir, --setting-sources value or None);
+        (None, None) when the task must not start (it is then finished)."""
+        for k in guard_runtime.HOOK_DISABLING_ENV:  # bare/safe mode would skip plugin hooks
+            sub_env.pop(k, None)
+        root = guard_runtime.plugin_root()
+        try:
+            # cheap when unchanged; repairs a tampered or missing plugin (no pruning:
+            # running tasks may still use an older version)
+            await asyncio.to_thread(ensure_plugin, root, False)
+            api_base = guard_runtime.guard_api_base()
+            if settings.guard_verify_api and not await asyncio.to_thread(guard_runtime.verify_api_base, api_base):
+                raise guard_runtime.GuardConfigError(
+                    f"co-guard approval address not verified ({api_base} did not prove it is this server)")
+        except (OSError, RuntimeError, guard_runtime.GuardConfigError) as e:
+            msg = f"co-guard could not be set up; task not started: {e}"
+            await emit("error", {"message": msg})
+            await self._finish(task_id, Status.FAILED, error=msg)
+            return None, None
+        config_dir = sub_env.get("CLAUDE_CONFIG_DIR")
+        blockers = guard_runtime.hook_blockers(workspace, config_dir)
+        if blockers["user"]:
+            msg = "co-guard: the user's Claude settings switch hooks off (disableAllHooks); task not started"
+            await emit("error", {"message": msg})
+            await self._finish(task_id, Status.FAILED, error=msg)
+            return None, None
+        tdir = guard_runtime.make_task_dir(task_id)
+        policy = guard_runtime.build_policy(
+            task_id=task_id,
+            project=guard_project,
+            workspace=workspace,
+            cwd=workspace,
+            claude_config_dir=config_dir,
+            mcp_tools=(mcp or {}).get("tool_policies"),
+        )
+        policy_file = guard_runtime.write_policy(task_id, policy)
+        sub_env.update(
+            {
+                "CO_TASK_ID": task_id,
+                "CO_API_BASE": api_base,
+                "CO_POLICY_FILE": str(policy_file.resolve()),
+                "CO_TASK_DIR": str(tdir.resolve()),
+            }
+        )
+        sources = None
+        if blockers["project"]:
+            # Claude Code ORs disableAllHooks over its sources: a flag setting
+            # cannot undo the repo's. Drop project/local settings for this run.
+            sources = "user"
+            await emit(
+                "guard",
+                {
+                    "event": "settings_override",
+                    "reason": "project settings switch hooks off; project and local settings "
+                    "(incl. the repo's CLAUDE.md) are not loaded for this run",
+                    "files": blockers["project"],
+                },
+            )
+        return str(root.resolve()), sources
+
+    # Ruling R21: co-guard's hook appends {"event":"PreToolUse","tool_use_id":..,
+    # "seen":true} to the spool BEFORE it evaluates a call. Every tool_result in
+    # the stream (main thread or subagent) must have its tool_use id in the
+    # spool: a successful result without one means the call ran unchecked, so
+    # the task is killed; an is_error result without one (schema/validation
+    # rejections never reach hooks) is only logged. A call with no result and
+    # no spool record after the grace window is killed too. Hook stream events
+    # carry no tool_use id or plugin name (phase 1 spike), so they are not used.
+    # Limit (same OS user, like R18): the spool proves the hook ran only while
+    # hooks are on - once they are off, an agent could append forged `seen`
+    # lines itself (CO_TASK_DIR is protected only by the hooks).
+
+    async def _guard_violation(self, ctx, reason: str) -> None:
+        g = ctx.get("guard")
+        if not g or g["violation"]:
+            return
+        g["violation"] = reason
+        await g["emit"]("guard", {"event": "watchdog", "decision": "killed", "reason": reason})
+        self._signal_group(g["proc"], signal.SIGKILL)  # claude and every tool it started
+
+    @staticmethod
+    def _guard_read_spool(g) -> None:
+        """Read the spool's new complete lines; collect the ids co-guard saw."""
+        try:
+            with open(g["spool"], "rb") as f:
+                f.seek(g["offset"])
+                data = f.read()
+        except OSError:
+            return
+        end = data.rfind(b"\n")
+        if end < 0:
+            return
+        g["offset"] += end + 1
+        for line in data[: end + 1].splitlines():
+            try:
+                rec = json.loads(line)
+            except ValueError:
+                continue
+            if isinstance(rec, dict) and rec.get("seen") is True and rec.get("tool_use_id"):
+                g["seen"].add(str(rec["tool_use_id"]))
+
+    def _guard_checked(self, g, tid: str) -> bool:
+        if tid not in g["seen"]:
+            self._guard_read_spool(g)
+        return tid in g["seen"]
+
+    # Ruling R24: calls that cannot run in parallel run one at a time, and their
+    # hook (so the `seen` record) starts only when they start. A lane is one
+    # assistant message (message.id) in one thread (parent_tool_use_id); a call's
+    # grace timer starts only once every EARLIER call in its lane has a result.
+    # The tool_result check stays definitive.
+
+    @staticmethod
+    def _guard_earlier_open(g, tid: str) -> bool:
+        c = g["calls"].get(tid)
+        lane = g["lanes"].get(c["lane"], []) if c else []
+        return any(t not in g["done"] for t in lane[: lane.index(tid)]) if tid in lane else False
+
+    @staticmethod
+    def _guard_start_next(g, lane_key) -> None:
+        for t in g["lanes"].get(lane_key, []):
+            if t in g["done"]:
+                continue
+            c = g["calls"].get(t)
+            if c is not None and c["start"] is None:
+                c["start"] = time.monotonic()
+            return  # only the first unfinished call can be running now
+
+    async def _guard_watch(self, ctx) -> None:
+        g = ctx["guard"]
+        while not g["violation"]:
+            await asyncio.sleep(min(1.0, settings.guard_hook_grace_seconds / 2))
+            now = time.monotonic()
+            for tid, c in list(g["calls"].items()):
+                if c["start"] is None or c["checked"] or now - c["start"] <= settings.guard_hook_grace_seconds:
+                    continue
+                if self._guard_checked(g, tid):
+                    c["checked"] = True  # seen; may be running long or waiting for a person
+                    continue
+                if self._guard_earlier_open(g, tid):
+                    continue  # still waiting its turn
+                await self._guard_violation(ctx, f"no co-guard check for {c['name']} call {tid}")
+                return
+
+    async def _guard_on_event(self, obj: dict, ctx) -> None:
+        g = ctx.get("guard")
+        if not g:
+            return
+        etype = obj.get("type")
+        msg = obj.get("message") if isinstance(obj.get("message"), dict) else {}
+        content = msg.get("content")
+        blocks = [b for b in content if isinstance(b, dict)] if isinstance(content, list) else []
+        if etype == "assistant":
+            for block in blocks:
+                if block.get("type") == "tool_use" and block.get("id"):
+                    tid = str(block["id"])
+                    key = (str(msg.get("id") or tid), str(obj.get("parent_tool_use_id") or ""))
+                    g["lanes"].setdefault(key, []).append(tid)
+                    g["calls"][tid] = {"name": str(block.get("name") or ""), "lane": key, "start": None,
+                                       "checked": tid in g["seen"]}
+                    if not self._guard_earlier_open(g, tid):
+                        g["calls"][tid]["start"] = time.monotonic()
+        elif etype == "user":
+            for block in blocks:
+                if block.get("type") != "tool_result":
+                    continue
+                tid = str(block.get("tool_use_id") or "")
+                g["done"].add(tid)
+                c = g["calls"].pop(tid, None)
+                name = c["name"] if c else "a tool"
+                if c is not None:
+                    self._guard_start_next(g, c["lane"])
+                if self._guard_checked(g, tid):
+                    continue
+                if block.get("is_error"):
+                    await g["emit"]("guard", {"event": "unchecked_error", "tool_use_id": tid, "tool": name,
+                                              "reason": "a call rejected before hooks ran (not executed)"})
+                else:
+                    await self._guard_violation(ctx, f"{name} call {tid} ran without a co-guard check")
+
+    @classmethod
+    def guard_payload(cls, rec: dict, secrets: list[str] | None = None) -> dict:
+        """A hook record (spool line or /guard/report body) -> the `guard`
+        event payload: known keys only, redacted FIRST (so no partial secret
+        survives a cut, and both sources key alike), then bounded."""
+        payload = redact_obj({k: rec[k] for k in cls._GUARD_KEYS if k in rec}, secrets or [])
+        for k, v in list(payload.items()):
+            if isinstance(v, str):
+                payload[k] = v[:2000]
+            elif k == "rule_ids":
+                payload[k] = [str(x)[:64] for x in v][:20] if isinstance(v, list) else []
+            elif not isinstance(v, (int, float, bool)) and v is not None:
+                payload[k] = str(v)[:2000]
+        return payload
+
+    @staticmethod
+    def _guard_key(payload: dict) -> str:
+        # The hook posts the record it spools, minus the spool's ts. An
+        # "approved" record is reported with the stored request's fields (the
+        # server never trusts the caller's), so it is keyed by its request id:
+        # one approval answers exactly one call.
+        if payload.get("decision") == "approved" and payload.get("request_id"):
+            return json.dumps({"approved": payload["request_id"], "event": payload.get("event")})
+        return json.dumps({k: v for k, v in payload.items() if k != "ts"}, sort_keys=True, default=str)
+
+    async def report_guard(self, task_id: str, rec: dict) -> bool:
+        """POST /guard/report: emit the hook's record now as a `guard` event of
+        the live run. False (dropped) when the task has no live run here; the
+        spool still carries the record for a run that is ending."""
+        live = self._guard_live.get(task_id)
+        if live is None:
+            return False
+        payload = self.guard_payload(rec, self._run_secrets.get(task_id))
+        if not payload or sum(live["reported"].values()) >= self.GUARD_REPORT_CAP:
+            return False
+        live["reported"][self._guard_key(payload)] += 1
+        await live["emit"]("guard", payload)
+        return True
+
+    async def _ingest_guard_spool(self, task_id: str, emit) -> None:
+        """The hook's spool -> `guard` events (emit redacts), then drop the task
+        dir. Records already reported live (POST /guard/report) are skipped."""
+        live = self._guard_live.get(task_id)
+        reported = live["reported"] if live else Counter()
+        try:
+            for rec in guard_runtime.read_spool(task_id):
+                if rec.get("seen") is True:
+                    continue  # watchdog bookkeeping, not an event
+                payload = self.guard_payload(rec, self._run_secrets.get(task_id))
+                if not payload:
+                    continue
+                key = self._guard_key(payload)  # same form as report_guard's
+                if reported[key] > 0:
+                    reported[key] -= 1
+                    continue
+                await emit("guard", payload)
+        finally:
+            guard_runtime.remove_task_dir(task_id)
+
     async def _consume_stdout(self, proc, emit, result, ctx) -> None:
         # Read raw chunks and split on newlines ourselves. A single stream-json
         # line can be enormous (big PR diffs / tool results); asyncio's readline
@@ -677,8 +1016,11 @@ class WorkerManager:
         await self._handle_stream_event(obj, emit, result, ctx)
 
     async def _handle_stream_event(self, obj: dict, emit, result, ctx) -> None:
+        await self._guard_on_event(obj, ctx)
         etype = obj.get("type")
         if etype == "system":
+            if str(obj.get("subtype") or "").startswith("hook_"):
+                return  # hook activity: co-guard's records come from its spool / live report
             sid = obj.get("session_id")
             await emit("system", {"subtype": obj.get("subtype"), "session_id": sid})
             if sid:
@@ -789,6 +1131,7 @@ class WorkerManager:
         if error:
             error = redact(error, secrets or [])
         context_store.cleanup(task_id)  # drop this task's knowledge snapshot
+        guard_runtime.remove_task_dir(task_id)  # co-guard policy + spool (normally gone already)
         async with SessionLocal() as s:
             await auth.revoke_task_tokens(s, task_id)
             await s.commit()

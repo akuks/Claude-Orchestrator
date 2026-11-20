@@ -28,6 +28,24 @@ describe('selectNeedsYou', () => {
     expect(items[0].title).toBe('Deploy')
   })
 
+  it('includes pending action approvals after task approvals', () => {
+    const items = selectNeedsYou({
+      ...base,
+      approvals: [{ id: 'a1', title: 'Deploy', created_at: hoursAgo(1) }],
+      actionApprovals: [
+        { id: 'r1', task_id: 't1', task_title: 'Clean', tool: 'Bash', summary: 'git reset --hard\nmore', rule_ids: ['git-reset-hard'], created_at: hoursAgo(0.1), can_decide: true },
+      ],
+    })
+    expect(items.map((i) => [i.kind, i.id])).toEqual([
+      ['approval', 'a1'],
+      ['action', 'r1'],
+    ])
+    expect(items[1].title).toBe('Bash: git reset --hard')
+    expect(items[1].detail).toContain('Clean')
+    expect(items[1].detail).toContain('Discard uncommitted work')
+    expect(items[1].fullTitle).toBe('Bash: git reset --hard\nmore')
+  })
+
   it('keeps only own failed tasks within the last 24h', () => {
     const items = selectNeedsYou({
       ...base,

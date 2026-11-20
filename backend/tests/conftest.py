@@ -19,8 +19,54 @@ _PROBE_VARS = (
     "CLAUDE_CODE_OAUTH_TOKEN ANTHROPIC_API_KEY GH_TOKEN GITHUB_TOKEN "
     "GIT_AUTHOR_NAME GIT_AUTHOR_EMAIL GIT_COMMITTER_NAME GIT_COMMITTER_EMAIL "
     "CLAUDE_CONFIG_DIR GH_CONFIG_DIR GIT_CONFIG_GLOBAL RANDOM_SERVER_VAR "
-    "PATH PROBE_PROJECT_VAR"
+    "PATH PROBE_PROJECT_VAR CO_TASK_ID CO_API_BASE CO_POLICY_FILE CO_TASK_DIR "
+    "CLAUDE_CODE_SIMPLE CLAUDE_CODE_SAFE_MODE"
 )
+# Test seam (co-guard): a task prompt carrying [guard-spool] makes the mock act
+# like co-guard's hook: it appends spool lines to $CO_TASK_DIR/spool.jsonl, one
+# of them quoting the run's GH_TOKEN / CO_API_TOKEN (must come out redacted).
+_GUARD_SPOOL = r"""
+  if [[ -n "$CO_TASK_DIR" && -d "$CO_TASK_DIR" ]]; then
+    printf '{"event":"PreToolUse","decision":"deny","rule_ids":["rm-rf-outside"],"tool":"Bash","summary":"rm -rf ~","reason":"deletes home"}\n' >>"$CO_TASK_DIR/spool.jsonl"
+    printf '{"event":"PreToolUse","decision":"approved","rule_ids":["mcp-require-approval"],"tool":"mcp__db__query","summary":"token %s and %s","status":"approved","request_id":"r1"}\n' "$GH_TOKEN" "$CO_API_TOKEN" >>"$CO_TASK_DIR/spool.jsonl"
+    printf 'not json\n' >>"$CO_TASK_DIR/spool.jsonl"
+    printf '{"event":"SessionEnd","reason":"other","junk_key":"dropped"}\n' >>"$CO_TASK_DIR/spool.jsonl"
+    printf '{"event":"ConfigChange","source":"project_settings","decision":"blocked"}\n' >>"$CO_TASK_DIR/spool.jsonl"
+  fi"""
+# Test seam (co-guard watchdog, Ruling R21): [guard-tool:MODE] makes the mock
+# emit Bash tool_use(s) + tool_result(s); "seen X" means it first appends
+# co-guard's spool record for id X (as the real hook does before evaluating):
+# hooked (seen A), nohook (none), errnohook (none, is_error result), parallel
+# (two calls, seen B then A, results B then A), subagent (a subagent's call,
+# parent_tool_use_id set, seen), waiting (seen A, result after 3 s: a call
+# waiting for a person), slow (no record, result after 4 s). Lanes (R24):
+# queued/queuedthree (calls in one message run one at a time; each later call's
+# seen comes after the earlier result), lanes (B in another message, never
+# seen), laneexpire (A done, B in the same lane never seen).
+_GUARD_TOOL = r"""
+  mode="${BASH_REMATCH[1]}"
+  sp="$CO_TASK_DIR/spool.jsonl"
+  seen() { printf '{"event":"PreToolUse","tool_use_id":"%s","seen":true}\n' "$1" >>"$sp"; }
+  tu() { printf '{"type":"assistant","message":{"id":"%s","model":"claude-test","content":[{"type":"tool_use","id":"%s","name":"Bash","input":{"command":"ls"}}]}}\n' "${2:-msg-$1}" "$1"; }
+  tr() { printf '{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"%s","content":"ok","is_error":%s}]}}\n' "$1" "${2:-false}"; }
+  printf '{"type":"system","subtype":"init","session_id":"test-session"}\n'
+  case "$mode" in
+    hooked) tu tuA; seen tuA; tr tuA ;;
+    nohook) tu tuA; tr tuA ;;
+    errnohook) tu tuA; tr tuA true ;;
+    parallel) tu tuA; tu tuB; seen tuB; seen tuA; tr tuB; tr tuA ;;
+    subagent) seen tuS
+      printf '{"type":"assistant","parent_tool_use_id":"tuAgent","agent_id":"a1","message":{"content":[{"type":"tool_use","id":"tuS","name":"Bash","input":{"command":"echo sub"}}]}}\n'
+      printf '{"type":"user","parent_tool_use_id":"tuAgent","agent_id":"a1","message":{"content":[{"type":"tool_result","tool_use_id":"tuS","content":"sub"}]}}\n' ;;
+    waiting) tu tuA; seen tuA; sleep 3; tr tuA ;;
+    queued) tu tuA m1; tu tuB m1; seen tuA; sleep 3; tr tuA; sleep 0.5; seen tuB; tr tuB ;;
+    queuedthree) tu tuA m1; tu tuB m1; tu tuC m1; seen tuA; sleep 2; tr tuA; seen tuB; sleep 2; tr tuB; seen tuC; tr tuC ;;
+    lanes) tu tuA m1; tu tuB m2; seen tuA; sleep 4; tr tuA; tr tuB ;;
+    laneexpire) tu tuA m1; tu tuB m1; seen tuA; tr tuA; sleep 4; tr tuB ;;
+    slow) tu tuA; sleep 4; tr tuA ;;
+  esac
+  printf '{"type":"result","subtype":"success","result":"done","num_turns":1,"total_cost_usd":0.01,"duration_ms":100,"is_error":false,"usage":{"input_tokens":1,"output_tokens":1}}\n'
+  exit 0"""
 # Test seam: a task prompt carrying [env-echo] makes the mock behave like an
 # agent that prints its env: "NAME=value " for each of _ECHO_VARS that is set
 # goes into its assistant text, a tool_use input, a tool_result, a raw
@@ -39,6 +85,7 @@ _ENV_ECHO = r"""
   j=$(jesc "$dump")
   printf '{"type":"system","subtype":"init","session_id":"test-session"}\n'
   printf '{"type":"assistant","message":{"model":"claude-test","content":[{"type":"text","text":"env: %s"},{"type":"tool_use","id":"tu1","name":"Bash","input":{"command":"echo %s"}}]}}\n' "$j" "$j"
+  printf '{"event":"PreToolUse","tool_use_id":"tu1","seen":true}\n' >>"$CO_TASK_DIR/spool.jsonl"
   printf '{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"tu1","content":"%s"}]}}\n' "$j"
   printf 'raw stdout %s\n' "$dump"
   printf 'stderr %s\n' "$dump" >&2
@@ -68,6 +115,12 @@ if [[ "$args" == *"stream-json"* && "$prompt" =~ \\[env-probe:([A-Za-z0-9_-]+)\\
   } >"$f.vars.tmp"
   env | cut -d= -f1 >"$f.names"
   printf '%s\\n' "$@" >"$f.args"
+  # co-guard: the policy file (deleted at task end) and its mode, the task dir's mode
+  if [[ -n "$CO_POLICY_FILE" && -f "$CO_POLICY_FILE" ]]; then
+    cp "$CO_POLICY_FILE" "$f.policy"
+    (stat -c %a "$CO_POLICY_FILE" 2>/dev/null || stat -f %Lp "$CO_POLICY_FILE") >"$f.policymode"
+    (stat -c %a "$CO_TASK_DIR" 2>/dev/null || stat -f %Lp "$CO_TASK_DIR") >"$f.taskdirmode"
+  fi
   mv "$f.vars.tmp" "$f.vars"
 fi
 # Server-side one-shot calls (memory: --print; findings: --print --json-schema)
@@ -85,8 +138,14 @@ if [[ "$args" != *"stream-json"* && "$prompt" =~ \\[call-probe:([A-Za-z0-9_-]+)\
   mv "$f.names.tmp.$$" "$f.names"
   mv "$f.vars.tmp.$$" "$f.vars"
 fi
+if [[ "$args" == *"stream-json"* && "$prompt" == *"[guard-spool]"* ]]; then
+  __GUARD_SPOOL__
+fi
 if [[ "$args" == *"stream-json"* && "$prompt" == *"[env-echo"* ]]; then
   __ENV_ECHO__
+fi
+if [[ "$args" == *"stream-json"* && "$prompt" =~ \\[guard-tool:([a-z]+)\\] ]]; then
+  __GUARD_TOOL__
 fi
 if [[ "$args" == *"stream-json"* ]]; then
   printf '{"type":"system","subtype":"init","session_id":"test-session"}\\n'
@@ -107,6 +166,8 @@ fi
 """.replace("__PROBES__", str(_PROBES))
     .replace("__PROBE_VARS__", _PROBE_VARS)
     .replace("__ENV_ECHO__", _ENV_ECHO)
+    .replace("__GUARD_SPOOL__", _GUARD_SPOOL)
+    .replace("__GUARD_TOOL__", _GUARD_TOOL)
     .replace("__ECHO_VARS__", _ECHO_VARS)
 )
 _MOCK.chmod(0o755)
@@ -129,6 +190,9 @@ os.environ.update(
         "CO_ADMIN_PASSWORD": "test-password-123",
         "CO_RETRY_MAX_ATTEMPTS": "0",
         "CO_GATE_CRITICAL_APPROVAL": "true",
+        # No server listens on the approval address in tests; test_guard_worker
+        # turns the check on against a real listener.
+        "CO_GUARD_VERIFY_API": "false",
     }
 )
 
@@ -239,8 +303,14 @@ def read_probe_args(key: str) -> list[str] | None:
     return f.read_text().splitlines() if f.exists() else None
 
 
+def read_probe_file(key: str, suffix: str) -> str | None:
+    """Another file the probed run recorded (policy, policymode, taskdirmode)."""
+    f = _PROBES / f"{key}.{suffix}"
+    return f.read_text() if f.exists() else None
+
+
 def clear_env_probe(key: str) -> None:
-    for suffix in ("vars", "names", "args"):
+    for suffix in ("vars", "names", "args", "policy", "policymode", "taskdirmode"):
         (_PROBES / f"{key}.{suffix}").unlink(missing_ok=True)
 
 

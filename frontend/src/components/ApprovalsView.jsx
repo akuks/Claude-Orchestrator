@@ -18,8 +18,9 @@ import {
 } from '@ant-design/icons'
 import { when } from '../time'
 import { api, RISK_COLORS } from '../api'
+import ActionApprovals from '../guard/ActionApprovals'
 
-export default function ApprovalsView({ onChanged }) {
+export default function ApprovalsView({ onChanged, focusId }) {
   const [pending, setPending] = useState([])
   const [loading, setLoading] = useState(false)
   const [busy, setBusy] = useState(null)
@@ -91,9 +92,10 @@ export default function ApprovalsView({ onChanged }) {
 
   return (
     <>
+      <ActionApprovals onChanged={onChanged} focusId={focusId} />
       <Space style={{ marginBottom: 16 }}>
         <Typography.Title level={5} style={{ margin: 0 }}>
-          <SafetyOutlined /> Approval Inbox ({pending.length})
+          <SafetyOutlined /> Tasks waiting to start ({pending.length})
         </Typography.Title>
         <Button icon={<ReloadOutlined />} onClick={refresh} loading={loading}>
           Refresh

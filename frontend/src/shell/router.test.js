@@ -14,6 +14,7 @@ const ROUTES = [
   '#/projects',
   '#/automation',
   '#/approvals',
+  '#/approvals/r1',
   '#/mcp',
   '#/usage',
   '#/security',
@@ -26,6 +27,9 @@ describe('parseHash', () => {
     expect(parseHash('#/runs/abc')).toEqual({ page: 'runs', id: 'abc' })
     expect(parseHash('#/tasks/42')).toEqual({ page: 'tasks', id: '42' })
     expect(parseHash('#/tasks')).toEqual({ page: 'tasks' })
+    // an action approval card: #/approvals/<request id>
+    expect(parseHash('#/approvals/r1')).toEqual({ page: 'approvals', id: 'r1' })
+    expect(parseHash('#/approvals')).toEqual({ page: 'approvals' })
   })
 
   it('falls back to home for unknown, empty or malformed hashes', () => {

@@ -1,0 +1,180 @@
+/* co-guard: action approval cards, run-log guard lines, project guard settings.
+   Colours come from the theme's CSS variables only. */
+.co-guard-section {
+  margin-bottom: 28px;
+}
+.co-guard-sub {
+  margin: 4px 0 12px !important;
+  max-width: 760px;
+}
+.co-guard-cards {
+  display: grid;
+  gap: 12px;
+}
+.co-guard-card {
+  padding: 12px 16px;
+  min-width: 0;
+  border-left: 3px solid var(--co-warning);
+}
+.co-guard-card-done {
+  border-left-color: var(--co-border);
+  opacity: 0.85;
+}
+.co-guard-card-focus {
+  box-shadow: 0 0 0 2px var(--co-active-border);
+}
+.co-guard-card-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+.co-guard-card-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  font-weight: 600;
+}
+.co-guard-card-title a {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.co-guard-card-icon {
+  color: var(--co-warning);
+}
+.co-guard-tool {
+  font-family: var(--co-mono);
+  font-weight: 400;
+}
+.co-guard-countdown {
+  color: var(--co-warning-text);
+  font-weight: 600;
+  white-space: nowrap;
+}
+.co-guard-rules {
+  margin: 8px 0 6px;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+.co-guard-rules .ant-tag {
+  margin: 0;
+}
+.co-guard-cmd {
+  margin: 0;
+  padding: 8px 10px;
+  border-radius: 8px;
+  background: var(--co-terminal-bg);
+  border: 1px solid var(--co-terminal-border);
+  color: var(--co-terminal-text);
+  font-family: var(--co-mono);
+  font-size: 12.5px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  word-break: break-word;
+  overflow-wrap: anywhere;
+  max-height: 480px;
+  overflow: auto;
+}
+.co-guard-cmd-clamped {
+  max-height: 140px;
+  overflow: hidden;
+  -webkit-mask-image: linear-gradient(180deg, black 70%, transparent);
+  mask-image: linear-gradient(180deg, black 70%, transparent);
+}
+.co-guard-truncated {
+  margin-bottom: 8px;
+}
+.co-guard-more {
+  padding-left: 0 !important;
+}
+.co-guard-reason {
+  margin-top: 8px;
+  color: var(--co-text);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.co-guard-meta {
+  display: grid;
+  grid-template-columns: max-content minmax(0, 1fr);
+  gap: 2px 12px;
+  margin: 8px 0 0;
+  font-size: 12.5px;
+  color: var(--co-text-secondary);
+}
+.co-guard-meta dt {
+  color: var(--co-text-muted);
+}
+.co-guard-meta dd {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+.co-guard-mono {
+  font-family: var(--co-mono);
+}
+.co-guard-actions {
+  margin-top: 12px;
+}
+.co-guard-note {
+  display: block;
+  margin-top: 10px;
+  font-size: 12.5px;
+}
+
+/* Run log: guard lines stand out from the plain stream. */
+.co-guard-line {
+  display: flex;
+  gap: 6px;
+  align-items: baseline;
+  margin: 2px 0;
+  padding: 2px 6px;
+  border-radius: 4px;
+  background: var(--co-terminal-elevated);
+  border-left: 2px solid currentColor;
+}
+.co-guard-line .anticon {
+  flex: 0 0 auto;
+}
+.co-guard-line-text {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.co-guard-line a {
+  color: var(--co-terminal-accent);
+  text-decoration: underline;
+  margin-left: 6px;
+}
+.co-guard-line-blocked,
+.co-guard-line-rejected,
+.co-guard-line-error,
+.co-guard-line-watchdog {
+  color: var(--co-terminal-error);
+}
+.co-guard-line-approved,
+.co-guard-line-ran {
+  color: var(--co-terminal-success);
+}
+.co-guard-line-waiting,
+.co-guard-line-override {
+  color: var(--co-warning);
+}
+.co-guard-line-expired,
+.co-guard-line-info {
+  color: var(--co-terminal-muted);
+}
+
+/* Project settings: Guard tab. */
+.co-guard-settings-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+  margin-bottom: 16px;
+}
+.co-guard-settings-slider {
+  flex: 1 1 260px;
+  min-width: 200px;
+}

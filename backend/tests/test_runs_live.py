@@ -149,7 +149,6 @@ def test_live_earlier_stage_with_no_visible_tasks_is_done(client):
 def test_live_caps_runs_and_batches_task_queries(client, monkeypatch):
     from sqlalchemy import event
 
-    from app.database import engine
     from app.routers import workflows
 
     monkeypatch.setattr(workflows, "LIVE_MAX", 3)
@@ -161,17 +160,27 @@ def test_live_caps_runs_and_batches_task_queries(client, monkeypatch):
         _stage_task(rid, 1, "running", pid)
         rids.append(rid)
 
+    # Count only the endpoint's own queries: the sessions it opens. An
+    # engine-wide listener also saw the worker / scheduler loops querying
+    # tasks at the same time (flaky on Postgres, where a re-used database
+    # has leftover running tasks the worker re-queues at startup).
     seen: list[str] = []
+    real_factory = workflows.SessionLocal
 
-    def count(conn, cursor, statement, params, context, executemany):
-        if "FROM tasks" in statement:
-            seen.append(statement)
+    def counted_session(*a, **k):
+        s = real_factory(*a, **k)
 
-    event.listen(engine.sync_engine, "before_cursor_execute", count)
-    try:
-        items = _live(client)
-    finally:
-        event.remove(engine.sync_engine, "before_cursor_execute", count)
+        def count(state):
+            text = str(state.statement)
+            if "FROM tasks" in text:
+                seen.append(text)
+
+        event.listen(s.sync_session, "do_orm_execute", count)
+        return s
+
+    monkeypatch.setattr(workflows, "SessionLocal", counted_session)
+    items = _live(client)
+    monkeypatch.setattr(workflows, "SessionLocal", real_factory)
 
     assert len(items) <= 3
     # Newest first: the three most recent runs make the cut, older ones don't.
@@ -181,4 +190,4 @@ def test_live_caps_runs_and_batches_task_queries(client, monkeypatch):
             assert [s["state"] for s in i["stages"]] == ["done", "current"]
     # Stage tasks for all runs in one query, thread roots in one, their
     # children in one — not one query per run / per thread.
-    assert len(seen) <= 3, seen
+    assert 1 <= len(seen) <= 3, seen  # (the counter does see the endpoint)

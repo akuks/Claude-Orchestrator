@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { api } from '../api'
 import { parseTime } from '../time'
+import { actionTitle, ruleName } from '../guard/guard'
 
 // Data behind Home: what needs the viewer, live workflows, their recent work
 // and today's cost. Every source is fetched independently (one failing never
@@ -22,9 +23,10 @@ const ts = parseTime
 // ---- pure selectors -------------------------------------------------------
 
 // Items for the "Needs you" panel, in display order: missing credential,
-// approvals (the server already filters to ones the viewer can decide), own
-// failed tasks from the last 24h, own paused schedules.
-export function selectNeedsYou({ approvals, failedTasks, schedules, creds, me, now = Date.now() } = {}) {
+// approvals (the server already filters to ones the viewer can decide), then
+// co-guard action approvals (same), own failed tasks from the last 24h, own
+// paused schedules.
+export function selectNeedsYou({ approvals, actionApprovals, failedTasks, schedules, creds, me, now = Date.now() } = {}) {
   const meId = me?.id
   const items = []
   if (creds?.claude === 'none')
@@ -44,6 +46,17 @@ export function selectNeedsYou({ approvals, failedTasks, schedules, creds, me, n
       detail: a.project || null,
       risk: a.risk,
       at: a.created_at,
+    })
+  for (const a of actionApprovals || [])
+    items.push({
+      key: `action:${a.id}`,
+      kind: 'action',
+      id: a.id,
+      title: actionTitle(a),
+      detail: [a.task_title, (a.rule_ids || []).map(ruleName).join(', ')].filter(Boolean).join(' · ') || null,
+      at: a.created_at,
+      // the whole request, for the row's tooltip (Home never approves it: R27)
+      fullTitle: a.tool ? `${a.tool}: ${a.summary || ''}` : a.summary || '',
     })
   for (const t of failedTasks || []) {
     if (!meId || t.created_by !== meId) continue
@@ -101,6 +114,7 @@ export function greetingFor(date = new Date()) {
 
 const SOURCES = {
   approvals: () => api.listApprovals(),
+  actionApprovals: () => api.listActionApprovals(),
   failedTasks: () => api.listTasks({ status: 'failed', limit: 50 }),
   schedules: () => api.listSchedules(),
   creds: () => api.myCredentials(),
@@ -113,6 +127,7 @@ const SLOW = { usage: USAGE_POLL_MS }
 // Which panel a failing source belongs to.
 const SECTION = {
   approvals: 'needsYou',
+  actionApprovals: 'needsYou',
   failedTasks: 'needsYou',
   schedules: 'needsYou',
   creds: 'needsYou',
@@ -196,13 +211,14 @@ export function useHomeData(user, { refreshSignal, intervalMs = POLL_MS } = {}) 
     () =>
       selectNeedsYou({
         approvals: raw.approvals,
+        actionApprovals: raw.actionApprovals,
         failedTasks: raw.failedTasks,
         schedules: raw.schedules,
         creds: raw.creds,
         me: user,
         now,
       }),
-    [raw.approvals, raw.failedTasks, raw.schedules, raw.creds, user, now],
+    [raw.approvals, raw.actionApprovals, raw.failedTasks, raw.schedules, raw.creds, user, now],
   )
   const recent = useMemo(() => selectRecent(raw.tasks, user), [raw.tasks, user])
   const live = raw.live || []

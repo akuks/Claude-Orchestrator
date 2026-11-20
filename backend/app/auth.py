@@ -185,6 +185,14 @@ _SAFE_METHODS = {"GET", "HEAD", "OPTIONS"}
 # Dispatch is further checked in its handler (parent_task_id == token.task_id).
 _AGENT_DISPATCH = ("POST", "/agents/dispatch")
 _AGENT_TASK_READS = {("GET", "/tasks/{task_id}"), ("GET", "/tasks/{task_id}/events")}
+# co-guard's hook (Global Constraints): file/poll its own task's approval
+# requests and report decisions. The handlers confine each call to the
+# token's OWN task (not its thread): body task_id, or the request's task.
+_AGENT_GUARD = {
+    ("POST", "/guard/report"),
+    ("POST", "/guard/approvals"),
+    ("GET", "/guard/approvals/{approval_id}"),
+}
 
 _templates: dict[tuple[int, int], str] = {}
 
@@ -256,6 +264,10 @@ async def current_principal(request: Request) -> Principal:
                 key = (request.method, route_template(request))
                 if key == _AGENT_DISPATCH:
                     pass  # parent_task_id checked by the dispatch handler
+                elif key in _AGENT_GUARD:
+                    if not principal.token.task_id:
+                        raise HTTPException(403, "Token not allowed for this route")
+                    # own task checked by the guard handlers
                 elif key in _AGENT_TASK_READS:
                     if not await _agent_may_read(
                         s, principal.token, request.path_params.get("task_id")

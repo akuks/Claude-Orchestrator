@@ -15,6 +15,8 @@ from .config import settings
 from .credentials import credential_status
 from .constants import Status
 from .database import SessionLocal, init_db
+from .guard import runtime as guard_runtime
+from .guard.plugin import ensure_plugin
 from .models import Task
 from .routers import (
     agents,
@@ -22,6 +24,7 @@ from .routers import (
     auth,
     context_docs,
     credentials,
+    guard,
     findings,
     mcp,
     projects,
@@ -82,6 +85,9 @@ async def _approval_timeout_loop():
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     await init_db()
+    # co-guard plugin (read-only, content-hashed): every task loads it first.
+    ensure_plugin(guard_runtime.plugin_root())
+    guard_runtime.log_approval_address()
     await auth.bootstrap_admin()
     await auth.assign_orphans_to_first_admin()
     worker = WorkerManager()
@@ -131,6 +137,8 @@ app.add_middleware(
 app.include_router(auth.router)
 app.include_router(webhooks.router)
 app.include_router(stream.router)
+# co-guard identity check (no auth by design, see the route).
+app.include_router(guard.router)
 
 # Everything else requires a logged-in user or an API token.
 _authed = [Depends(current_principal)]
@@ -152,6 +160,7 @@ for _r in (
     teams.router,
     credentials.router,
     credentials.admin_router,
+    guard.api,
 ):
     app.include_router(_r, dependencies=_authed)
 

@@ -11,14 +11,14 @@ import asyncio
 import re
 import threading
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import pytest
 from starlette.websockets import WebSocketDisconnect
 
 from app.database import SessionLocal
 from app.main import app
-from app.models import Finding, McpCall, Task
+from app.models import ActionApproval, Finding, McpCall, Task
 from conftest import login_as
 from test_lockdown import OPEN_ROUTES, _all_http_routes, _all_ws_routes
 
@@ -159,6 +159,16 @@ def world(client, tmp_path_factory):
         output_tokens=50, model_used=f"cov-model-{tag}", completed_at=datetime.now(timezone.utc),
     ))
     _add(McpCall(task_id=done_id, server=f"cov-mcp-{tag}", tool="t"))
+    # A running P task with a pending co-guard action request (owned by the
+    # admin, so it is decidable by P's maintainers and listed for them).
+    running_id = uuid.uuid4().hex
+    _add(Task(id=running_id, title=f"cov-running-{tag}", prompt="x", project=p["name"], project_id=pid,
+              root_id=running_id, status="running"))
+    now = datetime.now(timezone.utc)
+    (approval_id,) = _add(ActionApproval(
+        task_id=running_id, project_id=pid, rule_ids=["git-reset-hard"], tool="Bash",
+        summary=f"cov-action-{tag}", status="pending", created_at=now, expires_at=now + timedelta(hours=1),
+    ))
     team = _ok(client.post("/teams", json={"name": f"cov-team-{tag}"}))
 
     outsider = login_as(f"cov-out-{tag}@test.local")
@@ -177,6 +187,7 @@ def world(client, tmp_path_factory):
         "filename": "out.txt",
         "user_id": outsider.user_id,
         "team_id": team["id"],
+        "approval_id": approval_id,
     }
     # Strings that must never appear in a list the outsider gets back. Agents,
     # templates and workflows are global by spec, so their ids aren't secret.
@@ -185,6 +196,7 @@ def world(client, tmp_path_factory):
         finding_title, doc["id"], f"cov/{tag}.md", pack["id"], f"cov-pack-{tag}",
         server["id"], f"cov-mcp-{tag}", run["id"], f"cov-run-{tag}",
         done_id, f"cov-done-{tag}", f"cov-model-{tag}",
+        running_id, f"cov-running-{tag}", approval_id, f"cov-action-{tag}",
     }
     return {
         "ids": ids, "secrets": secrets, "outsider": outsider, "project": p,
@@ -216,6 +228,10 @@ def _bodies(world) -> dict:
                                  "project_id": i["project_id"]},
         ("PATCH", "/schedules/{schedule_id}"): {"name": "hijack"},
         ("POST", "/approvals/{task_id}/reject"): {},
+        # co-guard: filing/reporting name P's task in the body (agent tokens only).
+        ("POST", "/guard/approvals"): {"task_id": i["task_id"], "rule_ids": ["git-reset-hard"], "tool": "Bash"},
+        ("POST", "/guard/report"): {"task_id": i["task_id"], "event": "PreToolUse", "decision": "deny"},
+        ("POST", "/guard/approvals/{approval_id}/reject"): {"reason": "x"},
         ("POST", "/approvals/approve"): {"task_ids": [i["task_id"]]},
         ("PATCH", "/findings/{finding_id}"): {"status": "accepted"},
         ("POST", "/agents"): {"name": f"cov-a-{_uid()}", "system_prompt": "x", "default_prompt": "x",
@@ -314,6 +330,8 @@ def test_every_project_bound_route_enforces_membership(client, world):
     assert finding["status"] == "open"
     me = next(u for u in client.get("/users").json() if u["id"] == ids["user_id"])
     assert me["role"] == "member"
+    act = client.get(f"/guard/approvals/{ids['approval_id']}").json()
+    assert act["status"] == "pending" and act["decided_by"] is None
 
 
 def test_body_borne_project_refs_refused(client, world):

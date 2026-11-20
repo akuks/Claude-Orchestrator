@@ -10,6 +10,30 @@ cost caps, security reviews, and reusable agent roles.
 > reports, headless deploy, and CI. Remaining: Team & Auth. Full roadmap in
 > `claude-orchestrator-features.md`.
 
+> **Upgrading to the guard release?** Every task now runs under **co-guard**,
+> a hook that checks each tool call before it runs. What changes for you:
+>
+> - **The guard is on for every project** (Project → Guard). Turning it off
+>   switches off the built-in command rules only; MCP approvals/blocks and the
+>   orchestrator's self-protection always apply.
+> - **MCP tools set to "Require approval" now pause the run** for up to the
+>   project's approval wait (default **300 s**, 60–900) until a person decides in
+>   **Approvals → Actions**; if nobody answers, the call is **denied**. Change a
+>   tool to **Auto-approve** in MCP Servers if it must run unattended.
+> - **Some commands need a person's approval, some are always denied** (see
+>   [Agent guard](#agent-guard-co-guard)) — e.g. `git reset --hard`, force-push to
+>   main, `rm -rf` outside the project (temp dirs are fine) need approval;
+>   `rm -rf ~` / `rm -rf /` and touching the orchestrator's own files are denied.
+> - **Inline `` !`cmd` `` in skills, slash commands and skill packs is disabled**
+>   (`disableSkillShellExecution`), and the **PowerShell tool is disallowed**.
+> - **Rarely, project settings are dropped for a run** (`--setting-sources
+>   user`): when a project's `.claude/settings*.json` would switch hooks off.
+> - **`CO_BIND_HOST` / `CO_BACKEND_PORT` are now load-bearing**: they are the
+>   approval address the hook calls. Use a literal IP for `CO_BIND_HOST`.
+> - **Tools co-guard does not know** (e.g. new ones after a Claude Code CLI
+>   update) **need approval** until co-guard learns them.
+> - It is a **seatbelt, not a sandbox** — see the accepted limits below.
+
 ---
 
 ## What it does
@@ -135,7 +159,9 @@ any other origin must be added, or live task streams are rejected.
 |---|---|---|
 | `CO_DATABASE_URL` | `sqlite+aiosqlite:///./claude_orchestrator.db` | Task/event store (SQLite, or `postgresql+asyncpg://…`) |
 | `CO_ADMIN_EMAIL` / `CO_ADMIN_PASSWORD` | *(unset)* | Bootstrap first admin (else use the setup screen) |
-| `CO_BIND_HOST` | `127.0.0.1` | Interface `start.sh` binds the backend to (read by `start.sh` from the shell or `backend/.env`; not by the app) |
+| `CO_BIND_HOST` | `127.0.0.1` | Interface `start.sh` binds the backend to (shell or `backend/.env`). Also co-guard's **approval address**: use a literal IP (a hostname is resolved once and must have exactly one address; `0.0.0.0` means loopback). Logged at startup |
+| `CO_BACKEND_PORT` | `8200` | Backend port (`start.sh` reads it from the shell or `backend/.env` and passes it on); the approval address's port |
+| `CO_PUBLIC_URL` | *(unset)* | The UI's public base URL, for links in notifications |
 | `CO_FORWARDED_ALLOW_IPS` | `127.0.0.1` | Reverse-proxy IP(s) trusted for `X-Forwarded-For` (read by `start.sh` from the shell or `backend/.env`; not by the app) |
 | `CO_CORS_ORIGINS` | localhost dev origins (`start.sh` sets it from `CO_FRONTEND_PORT` if unset) | JSON list; CORS **and** WebSocket Origin allowlist |
 | `CO_SESSION_TTL_DAYS` | `7` | Login session lifetime |
@@ -163,6 +189,57 @@ the default is `bypassPermissions`. Governance comes from the **approval inbox**
 (critical tasks are auto-gated) and **MCP tool policies** (e.g. `merge_pull_request`
 = Block for review-only). Tighten to `default`/`acceptEdits` for more CLI-level
 guardrails.
+
+---
+
+## Agent guard (co-guard)
+
+Every task runs with **co-guard**, a Claude Code plugin the server generates
+(`workspaces/_system/co-guard`, read-only) and loads first. Its `PreToolUse`
+hook checks **every tool call** before it runs, with the task's policy:
+
+| Decision | What |
+|---|---|
+| **Allowed** | Everyday work: reads, edits inside the project, builds, tests, `git` on feature branches, `rm -rf` inside the project or strictly inside a temp dir (`/tmp/…`, `$TMPDIR/…`, `/private/var/folders/…` — never the temp root itself) |
+| **Needs approval** (a person, once) | `rm -rf` outside the project (or of the project / its `.git`), force-push to `main`/`master`, `git reset --hard`, `git clean -fdx`, `git stash drop`, secret files (`.env`, keys), wide `chmod`, `curl … \| sh`, `.git/config` / hooks, Claude Code settings / hooks / agents / `.mcp.json`, commands too unclear to check, MCP tools set to *Require approval*, **unknown tools** |
+| **Denied** (never approvable) | `rm -rf ~` / `/`, anything touching the orchestrator itself (its code, `.env`, DB, venv, the guard, other tasks' data, the Claude config dir) — **self-protection**, commands too complex to parse, MCP tools set to *Block*, the PowerShell tool |
+
+**Approvals.** The call pauses and shows up under **Approvals → Actions** with the
+full command; it waits up to the project's **approval wait** (Project → Guard,
+default 300 s, 60–900) and is denied if nobody answers. Two-person rule: another
+maintainer of the project (or an admin) decides — the task's owner cannot approve
+their own task's actions unless they are an admin. A scheduled run with a Slack
+webhook also posts "Agent action waiting for approval: *task* — *rule*" (first
+line of the redacted command, link via `CO_PUBLIC_URL`). Each approval is
+one-shot: it lets exactly that call run.
+
+**What else changes per task.** Inline `` !`cmd` `` in skills / slash commands /
+skill packs is disabled (`disableSkillShellExecution`: it would run unchecked);
+the PowerShell tool is disallowed; if a project's `.claude/settings*.json` would
+switch hooks off, the run uses `--setting-sources user` (project settings and
+`CLAUDE.md` are skipped for that run, and the run log says so) — user-level
+settings that switch hooks off fail the task. A watchdog stops a task if a tool
+runs without co-guard having checked it.
+
+**Approval address.** The hook calls the server at `CO_BIND_HOST:CO_BACKEND_PORT`
+(a literal IP; the startup log prints it and warns loudly about a hostname). The
+worker proves the address is this server before each task; if it cannot, the
+task does not start.
+
+**After a Claude Code CLI update.** A tool co-guard does not know yet (a new
+built-in tool) needs approval each time (`unknown-tool`), so new shell-capable
+tools fail closed. Approve it, or wait for a co-guard update that knows it.
+
+**A seatbelt, not a sandbox.** Accepted limits (documented in
+`backend/app/guard/rules.py`): `sed`'s `e` command, scripts already on disk,
+obfuscated interpreter code, `ssh host bash -s < file`; `rg | xargs rm`
+(non-recursive), `git branch -D` / `update-ref`, `umask` / `setfacl`,
+`python -c` writing `.env`, copying/syncing/unpacking into the project
+(`cp -r src/. .`, `rsync`, `tar`, `git apply`, `stash pop`) that lands in agent
+config; while the server is down a same-user process could listen on the
+approval address; agent definitions and `.mcp.json` committed to the repo can
+start processes outside the hook (repo content is trusted, like repo hooks).
+Real isolation (OS-level sandboxing) is a later phase.
 
 ---
 
@@ -330,10 +407,9 @@ the frontend build on every push/PR.
 
 ## Scope notes & limitations
 
-- **Approval granularity** is at the **task level** (approve before the run
-  starts). True per-tool-call approval (pause at each `merge`) needs the Claude
-  **Agent SDK**'s `canUseTool`, which the `claude --print` CLI doesn't expose — so
-  for per-action safety, gate write tools via MCP policy (e.g. block merge).
+- **Approval granularity**: tasks can be gated before they start (task
+  approvals), and co-guard pauses individual risky tool calls mid-run for a
+  person ([Agent guard](#agent-guard-co-guard)) — a seatbelt, not a sandbox.
 - **MCP** is injected per task (stateless), not run as long-lived shared daemons;
   HTTP-transport health checks aren't validated yet.
 - **Deferred:** Team & Auth (login/roles/audit), `docker-compose`, `decisions.md`,

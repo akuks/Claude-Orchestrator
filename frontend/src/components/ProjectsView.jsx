@@ -27,6 +27,7 @@ import {
   ReloadOutlined,
   BookOutlined,
   RadarChartOutlined,
+  SafetyOutlined,
   TeamOutlined,
 } from '@ant-design/icons'
 import dayjs from 'dayjs'
@@ -35,6 +36,8 @@ import relativeTime from 'dayjs/plugin/relativeTime'
 import { api } from '../api'
 import ProjectMembers from './ProjectMembers'
 import ProjectCards from '../projects/ProjectCards'
+import GuardSettings from '../guard/GuardSettings'
+import { canEditGuard } from '../guard/guard'
 
 dayjs.extend(relativeTime)
 
@@ -319,9 +322,10 @@ function MemoryPane({ project, canEdit, onSaved }) {
   )
 }
 
-// Per-project drawer: Members and Memory tabs.
+// Per-project drawer: Members, Memory and Guard tabs.
 function ProjectDrawer({ project, tab, onTab, currentUser, onClose, onSaved }) {
   const canEdit = project?.my_role === 'maintainer'
+
   return (
     <Drawer open={!!project} onClose={onClose} width={680} title={project?.name || ''} destroyOnHidden>
       {project && (
@@ -346,6 +350,15 @@ function ProjectDrawer({ project, tab, onTab, currentUser, onClose, onSaved }) {
                 </span>
               ),
               children: <MemoryPane project={project} canEdit={canEdit} onSaved={onSaved} />,
+            },
+            {
+              key: 'guard',
+              label: (
+                <span>
+                  <SafetyOutlined /> Guard
+                </span>
+              ),
+              children: <GuardSettings project={project} canEdit={canEditGuard(project, currentUser)} onSaved={onSaved} />,
             },
           ]}
         />
@@ -550,6 +563,7 @@ export default function ProjectsView({ currentUser, onProjectsChanged }) {
             <Tag color={row.my_role === 'maintainer' ? 'gold' : 'default'}>{row.my_role}</Tag>
           )}
           {!row.memory_enabled && <Tag color="default">memory off</Tag>}
+          {row.guard_enabled === false && <Tag color="warning">guard off</Tag>}
         </Space>
       ),
     },
@@ -570,7 +584,7 @@ export default function ProjectsView({ currentUser, onProjectsChanged }) {
     {
       title: 'Actions',
       key: 'actions',
-      width: 300,
+      width: 380,
       render: (_, row) => (
         <Space size="small">
           <Button size="small" icon={<TeamOutlined />} onClick={() => setDrawer({ id: row.id, tab: 'members' })}>
@@ -578,6 +592,9 @@ export default function ProjectsView({ currentUser, onProjectsChanged }) {
           </Button>
           <Button size="small" icon={<BookOutlined />} onClick={() => setDrawer({ id: row.id, tab: 'memory' })}>
             Memory
+          </Button>
+          <Button size="small" icon={<SafetyOutlined />} onClick={() => setDrawer({ id: row.id, tab: 'guard' })}>
+            Guard
           </Button>
           {row.my_role === 'maintainer' && (
             <Button

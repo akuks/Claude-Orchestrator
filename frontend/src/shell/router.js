@@ -18,7 +18,8 @@ export const PAGES = [
 ]
 
 // Pages addressed by id. `runs` only exists with one.
-const ID_PAGES = new Set(['tasks', 'runs'])
+// approvals/<id>: an action approval card.
+const ID_PAGES = new Set(['tasks', 'runs', 'approvals'])
 const ID_REQUIRED = new Set(['runs'])
 
 export const DEFAULT_ROUTE = Object.freeze({ page: 'home' })
