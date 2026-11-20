@@ -32,10 +32,13 @@ from ..config import settings
 from .co_hook import APPROVAL_WAIT_MAX
 
 # Help text for the project's guard settings (shown by the UI in Task 5).
+# frontend/src/guard/guard.js mirrors this text; keep the two in step.
 GUARD_SETTINGS_HELP = (
     "co-guard checks every tool call before it runs: dangerous commands are blocked or need a person's "
-    "approval, and MCP tools follow their policies. Inline !`cmd` in skills, slash commands and skill "
-    "packs is disabled for every task, because it would run without that check."
+    "approval, and MCP tools follow their policies. Turning the guard off switches off the built-in command "
+    "rules only: MCP approvals and blocks, and self-protection of the orchestrator's own files, always apply. "
+    "Inline !`cmd` in skills, slash commands and skill packs is disabled for every task, because it would run "
+    "without that check."
 )
 
 APPROVAL_WAIT_MIN = 60

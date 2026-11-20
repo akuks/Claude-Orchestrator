@@ -698,3 +698,17 @@ def test_seen_lines_never_cut_decisions(monkeypatch, tmp_path):
 
 def test_guard_settings_help_mentions_inline_shell():
     assert "!`cmd`" in runtime.GUARD_SETTINGS_HELP and "disabled" in runtime.GUARD_SETTINGS_HELP
+
+
+def test_guard_settings_help_says_what_always_applies_and_the_ui_mirrors_it():
+    import re
+    from pathlib import Path
+
+    help_ = runtime.GUARD_SETTINGS_HELP
+    assert "built-in command rules" in help_ and "MCP approvals" in help_ and "self-protection" in help_
+    assert "always apply" in help_
+    js = (Path(__file__).resolve().parents[2] / "frontend/src/guard/guard.js").read_text(encoding="utf-8")
+    block = js.split("export const GUARD_SETTINGS_HELP =", 1)[1].split("\n\n", 1)[0]
+    parts = re.findall(r"\"((?:[^\"\\]|\\.)*)\"|'((?:[^'\\]|\\.)*)'", block)
+    mirrored = "".join(re.sub(r"\\(.)", r"\1", a or b) for a, b in parts)
+    assert mirrored == help_
