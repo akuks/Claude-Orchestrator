@@ -20,6 +20,7 @@ commands with ``"${CLAUDE_PLUGIN_ROOT}"`` (exec-form arrays were not proven).
 
 from __future__ import annotations
 
+import fcntl
 import hashlib
 import json
 import os
@@ -27,6 +28,7 @@ import shlex
 import shutil
 import stat
 import sys
+import threading
 import uuid
 from pathlib import Path
 
@@ -37,10 +39,19 @@ _SRC = Path(__file__).resolve().parent
 _FILE_MODE = 0o444
 _DIR_MODE = 0o555
 _OTHER_TIMEOUT = 15  # spool-only events
+_LOCK = threading.Lock()
+
+
+def _interpreter() -> str:
+    exe = sys.executable
+    if not exe or not os.path.isabs(exe) or not os.path.isfile(exe):
+        raise RuntimeError(f"co-guard: the server's Python ({exe!r}) is not an absolute path to a file")
+    return exe
 
 
 def _command(event: str) -> str:
-    return f'{shlex.quote(sys.executable)} -I "${{CLAUDE_PLUGIN_ROOT}}/hooks/co_hook.py" {event}'
+    # -I: isolated (no env vars, no script dir on sys.path); -S: no site (.pth files never run)
+    return f'{shlex.quote(_interpreter())} -I -S "${{CLAUDE_PLUGIN_ROOT}}/hooks/co_hook.py" {event}'
 
 
 def hooks_json() -> dict:
@@ -56,6 +67,8 @@ def hooks_json() -> dict:
     }
     for ev in ("SessionStart", "Stop", "SessionEnd", "SubagentStart", "SubagentStop"):
         hooks[ev] = entry(ev, _OTHER_TIMEOUT)
+    # Ruling R19b (unverified): exit 2 blocks a settings change that switches our hooks off
+    hooks["ConfigChange"] = entry("ConfigChange", _OTHER_TIMEOUT, co_hook.CONFIG_MATCHER)
     return {"hooks": hooks}
 
 
@@ -105,21 +118,49 @@ def _write_tree(dest: Path, files: dict[str, bytes]) -> None:
 
 
 def _matches(version_dir: Path, files: dict[str, bytes]) -> bool:
+    """Exactly ``files`` (no extra entries, no symlinks), files 0444, dirs 0555."""
+    want_dirs = {str(Path(rel).parent) for rel in files} - {"."}
+    want_dirs |= {str(p) for d in list(want_dirs) for p in Path(d).parents if str(p) != "."}
     try:
-        for rel, data in files.items():
-            p = version_dir / rel
-            if p.read_bytes() != data or stat.S_IMODE(p.stat().st_mode) != _FILE_MODE:
-                return False
-        return stat.S_IMODE(version_dir.stat().st_mode) == _DIR_MODE
+        if version_dir.is_symlink() or not version_dir.is_dir():
+            return False
+        seen_files, seen_dirs = set(), set()
+        for d, dirs, names in os.walk(version_dir):
+            for n in dirs:
+                p = Path(d) / n
+                rel = str(p.relative_to(version_dir))
+                if p.is_symlink() or stat.S_IMODE(p.lstat().st_mode) != _DIR_MODE:
+                    return False
+                seen_dirs.add(rel)
+            for n in names:
+                p = Path(d) / n
+                rel = str(p.relative_to(version_dir))
+                if p.is_symlink() or rel not in files or stat.S_IMODE(p.lstat().st_mode) != _FILE_MODE \
+                        or p.read_bytes() != files[rel]:
+                    return False
+                seen_files.add(rel)
+        return (seen_files == set(files) and seen_dirs == want_dirs
+                and stat.S_IMODE(version_dir.stat().st_mode) == _DIR_MODE)
     except OSError:
         return False
 
 
 def ensure_plugin(root: Path) -> Path:
-    """Make ``root`` the current co-guard plugin; return ``root``. Idempotent."""
+    """Make ``root`` the current co-guard plugin; return ``root``. Idempotent and
+    cheap when nothing changed; safe to call per task (thread + file lock)."""
     root = Path(root).absolute()
     parent = root.parent
     parent.mkdir(parents=True, exist_ok=True)
+    with _LOCK:
+        fd = os.open(parent / f".{root.name}.lock", os.O_RDWR | os.O_CREAT, 0o600)
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX)
+            return _ensure(root, parent)
+        finally:
+            os.close(fd)
+
+
+def _ensure(root: Path, parent: Path) -> Path:
     files = plugin_files()
     digest = content_hash(files)[:20]
     version = parent / f".{root.name}-{digest}"
@@ -142,4 +183,6 @@ def ensure_plugin(root: Path) -> Path:
     for old in parent.glob(f".{root.name}-*"):
         if old != version:
             _rmtree(old)
+    if not _matches(root.resolve(), files):
+        raise RuntimeError("co-guard: the plugin could not be installed read-only")
     return root

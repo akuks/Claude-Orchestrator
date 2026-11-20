@@ -87,7 +87,14 @@ HARD (never approvable):
 * ``unparseable``: the parser gave up (``too_complex``, Ruling R3), a malformed
   ``tool_input``, or write-then-run/ssh re-checks deeper than 6 levels or more
   than 64 per call;
-* ``mcp-block`` (marked hard: never approvable).
+* ``mcp-block`` (marked hard: never approvable);
+* ``unsupported-shell``: the ``PowerShell`` tool (co-guard parses Bash only).
+
+Tools (Ruling R17, fail closed by name): ``Bash`` and ``Monitor``
+(``tool_input.command``) get the Bash rules; Edit/Write/NotebookEdit/MultiEdit
+the file rules; ``mcp__*`` the MCP policy; the read-only/meta tools in
+``SAFE_TOOLS`` are allowed; ANY other tool is ``unknown-tool`` (confirmable,
+always on), so a new shell-capable tool fails closed without blocking work.
 
 CONFIRMABLE (a person may approve once): ``rm-rf-outside`` (recursive delete
 outside the project, of the project itself or its ``.git``, or of a target we
@@ -97,7 +104,7 @@ cannot resolve), ``git-force-push-main``, ``git-reset-hard``,
 ``.git/hooks``, ``.git/info/attributes``, ``.gitmodules`` with an
 ``update = !cmd`` key), ``agent-config`` (Rulings R6/R7: writes to a
 ``.claude/settings*.json``, ``.claude/hooks/**`` or ``.mcp.json``),
-``uncertain-command``, ``mcp-require-approval``.
+``uncertain-command``, ``mcp-require-approval``, ``unknown-tool``.
 
 Paths: write targets, file-tool paths, ``cd`` targets, glob folders and
 delete targets ending in ``/`` or ``/.`` are resolved through every symlink
@@ -229,8 +236,24 @@ RULES = {
     "unparseable": (None, "this command is too complex for co-guard to check; split it into simpler commands"),
     "mcp-require-approval": ("this MCP tool needs a person to approve each call", None),
     "mcp-block": (None, "this MCP tool is blocked for this task"),
+    "unsupported-shell": (None, "co-guard cannot check this shell (only Bash is supported); use the Bash tool"),
+    "unknown-tool": ("co-guard does not know this tool, so a person must approve each call", None),
 }
-_ALWAYS_ON = frozenset({"self-protect", "unparseable", "mcp-block", "mcp-require-approval"})
+_ALWAYS_ON = frozenset({"self-protect", "unparseable", "mcp-block", "mcp-require-approval", "unsupported-shell",
+                        "unknown-tool"})
+
+# Ruling R17: tools are checked fail closed, by name.
+_BASH_TOOLS = frozenset({"Bash", "Monitor"})  # tool_input.command is a Bash command line
+_UNSUPPORTED_SHELLS = frozenset({"PowerShell"})
+_FILE_TOOLS = frozenset({"Edit", "Write", "NotebookEdit", "MultiEdit"})
+# Read-only or meta tools (names checked against the CLI 2.1.329 binary): always allowed.
+SAFE_TOOLS = frozenset({
+    "Read", "Glob", "Grep", "LS", "NotebookRead", "WebFetch", "WebSearch", "TodoWrite", "Task", "Agent",
+    "BashOutput", "KillShell", "KillBash", "ExitPlanMode", "EnterPlanMode", "ListMcpResourcesTool",
+    "ReadMcpResourceTool", "SlashCommand", "Skill", "AskUserQuestion", "TaskCreate", "TaskGet", "TaskList",
+    "TaskUpdate", "TaskStop", "TaskOutput", "ToolSearch", "LSP", "Cd", "SendMessage", "SendUserMessage",
+    "StructuredOutput", "Sleep",
+})
 
 _SUMMARY_MAX = 300
 _MAX_DEPTH = 6  # write-then-run / ssh re-evaluation depth
@@ -1654,11 +1677,18 @@ class _Bash:
                 text = _literal_output(prev[0], pargv, pdyn)
                 if isinstance(text, str):
                     self.check_code(stdin_kind, text)
+            for op, t in st.redirects:
+                if op == "<" and t.startswith("<("):  # python3 < <(echo ..)
+                    self.procsub_stdin(stdin_kind, t, cwd)
             if not st.heredocs and not any(op in ("<", "<<<", "<>") for op, _t in st.redirects):
                 # Task 3 carry: stdin inherited from a compound command
                 # ({ python3; } <<E, if ..; then python3; fi <<E, ...; done <<E):
                 # the heredoc / here-string sits on the closing word's stage
-                self.compound_stdin(st, stdin_kind)
+                self.compound_stdin(st, stdin_kind, cwd)
+        elif _sh.shell_name(name) and _reads_stdin(name, args) and not st.heredocs and not any(
+                op in ("<", "<<<", "<>") for op, _t in st.redirects):
+            # { bash; } <<'E' rm -rf ~ E: the body runs as commands (hard rules stay hard)
+            self.compound_stdin(st, "shell", cwd)
         if name == "sed":
             scripts = [c for c, _d in _short_opt_value(args, dargs, "e", ("--expression",))]
             if not scripts:
@@ -1712,23 +1742,63 @@ class _Bash:
             if _dangerous(toks) or (first_unknown and any(_DANGEROUS_ARGS.fullmatch(a) for a in argv[1:])):
                 ctx.hit("uncertain-command", False, raw)
 
-    def compound_stdin(self, st, kind):
+    def compound_stdin(self, st, kind, cwd):
+        """Input redirected onto the compound commands around ``st``: only
+        the closers of the groups that contain it (Stage.depth falls below
+        ``st``'s level), innermost first."""
         res = self.res_stack[-1] if self.res_stack else []
+        floor = st.depth
         after = False
         for s2 in res:
             if s2 is st:
                 after = True
                 continue
-            if not after:
+            if not after or s2.low >= floor:
                 continue
             a2 = _sh.expand_wrappers(s2)
-            if a2 and _sh.command_name(a2[0]) not in _COMPOUND_CLOSERS:
-                continue
-            for _dl, _q, body in s2.heredocs:
-                self.check_code(kind, body)
-            for op, t in s2.redirects:
-                if op == "<<<":
-                    self.check_code(kind, t, "$" in t or "`" in t)
+            if s2.depth > s2.low or (a2 and _sh.command_name(a2[0]) not in _COMPOUND_CLOSERS):
+                break  # st's group closed earlier (and maybe another one opened): nothing reaches st
+            self.feed(kind, s2, cwd)
+            floor = s2.low
+            if floor <= 0:
+                break
+
+    def feed(self, kind, s2, cwd):
+        """Check the stdin text a closer stage redirects in, as ``kind``
+        (an interpreter's code, or "shell": commands)."""
+        for _dl, _q, body in s2.heredocs:
+            self.code_or_commands(kind, body, cwd)
+        for op, t in s2.redirects:
+            if op == "<<<":
+                self.code_or_commands(kind, t, cwd, "$" in t or "`" in t)
+            elif op == "<" and t.startswith("<("):
+                self.procsub_stdin(kind, t, cwd)
+
+    def code_or_commands(self, kind, text, cwd, dynamic=False):
+        if kind == "shell":
+            if dynamic:
+                self.ctx.hit("uncertain-command", False, self.raw)
+            self.nested_eval(text, cwd)
+        else:
+            self.check_code(kind, text, dynamic)
+
+    def procsub_stdin(self, kind, target, cwd):
+        """``< <(cmd)`` into an interpreter or shell: the literal text cmd
+        prints is checked, a download is pipe-to-shell, anything else is
+        uncertain-command."""
+        inner = target[2:-1] if target.endswith(")") else target[2:]
+        res = _sh.parse(inner)
+        text = None
+        if len(res) == 1:
+            a = _sh.expand_wrappers(res[0]) or []
+            d = res[0].dynamic[len(res[0].argv) - len(a):]
+            text = _literal_output(res[0], a, d)
+        if text is _FETCHED:
+            self.ctx.hit("pipe-to-shell", False, self.raw)
+        elif isinstance(text, str):
+            self.code_or_commands(kind, text, cwd)
+        else:
+            self.ctx.hit("uncertain-command", False, self.raw)
 
     def pipe_to_shell(self, st, argv, dyn, name, args, pipeline):
         ctx, raw = self.ctx, self.raw
@@ -2321,12 +2391,16 @@ def evaluate(tool_name, tool_input, policy, cwd):
     start = _real(os.path.abspath(str(cwd))) if cwd else ctx.project
     if not isinstance(tool_input, dict):
         ctx.hit("unparseable", True, f"{tool_name}: malformed tool input")
-    elif tool_name == "Bash":
+    elif tool_name in _BASH_TOOLS:
         command = tool_input.get("command")
         command = command if isinstance(command, str) else ("" if command is None else str(command))
         _Bash(ctx, command).run(command, start)
-    elif tool_name in ("Edit", "Write", "NotebookEdit", "MultiEdit"):
+    elif tool_name in _UNSUPPORTED_SHELLS:
+        ctx.hit("unsupported-shell", True, f"{tool_name}: {_short(str(tool_input.get('command', '')))}")
+    elif tool_name in _FILE_TOOLS:
         _file_tool(ctx, tool_name, tool_input, start)
+    elif tool_name in SAFE_TOOLS:
+        pass
     elif tool_name.strip().lower().startswith("mcp__"):
         action = _mcp_action(ctx, tool_name)
         try:
@@ -2338,6 +2412,12 @@ def evaluate(tool_name, tool_input, policy, cwd):
             ctx.hit("mcp-block", True, summary)
         elif action == "require_approval":
             ctx.hit("mcp-require-approval", False, summary)
+    else:  # Ruling R17: a tool co-guard does not know (maybe a new shell) - a person decides
+        try:
+            text = json.dumps(tool_input, sort_keys=True, default=str)
+        except (TypeError, ValueError, RecursionError):
+            text = "<input>"
+        ctx.hit("unknown-tool", False, f"{tool_name} {text}")
     hits = _order(ctx.hits)
     if any(h.hard or h.rule_id == "mcp-block" for h in hits):
         decision = "deny"

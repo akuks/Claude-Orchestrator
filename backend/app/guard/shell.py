@@ -273,6 +273,8 @@ class Stage:
     reasons: list = field(default_factory=list)
     pipeline: int = 0
     index: int = 0
+    depth: int = 0  # open compound commands (if/while/for/case/{ ...) after this stage's words
+    low: int = 0  # fewest open compound commands since the previous stage (a group closed in between)
 
     def mark(self, reason):
         self.uncertain = True
@@ -791,6 +793,7 @@ class _Level:
         self.heredocs = []
         self.case_depth = 0
         self.compound = 0  # open if/while/for/case/{ ... (assignments there are not straight-line)
+        self.low = 0  # min(compound) since the last emitted stage
         self.prev_sep = None  # the operator before the current pipeline
         self.pending_writes = []  # candidate safe writers of the current pipeline
         self.redir_fd = None  # fd digits before the pending redirect
@@ -879,6 +882,7 @@ class _Level:
                     self.compound += 1
                 elif cmdpos and text in _COMPOUND_CLOSE and self.compound:
                     self.compound -= 1
+                    self.low = min(self.low, self.compound)
                 elif text == "{" and len(words) == 2 and words[0][0] == "function":
                     self.compound += 1
             words.append((text, dyn))
@@ -929,6 +933,9 @@ class _Level:
                 return  # only brace-group words
             st.pipeline = self.pipeline_no
             st.index = len(self.pipeline)
+            st.depth = self.compound
+            st.low = min(self.low, self.compound)
+            self.low = self.compound
             self.pipeline.append(st)
             self.result.append(st)
         self.stage = self._new_stage()

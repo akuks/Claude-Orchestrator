@@ -24,6 +24,15 @@ PreToolUse
     safety", and a watchdog denies ``EXIT_MARGIN`` seconds before the hook's
     configured timeout.
 
+The approval API must be ``http://<literal IP>:<port>``, the POST must answer
+``status: "pending"`` with an id, and every GET must carry that id; anything
+else (and any 4xx, or no ``CO_API_TOKEN``) denies at once. The decision is
+printed BEFORE the best-effort report.
+
+ConfigChange (unverified with a real CLI): exit 2 blocks a settings change
+that sets ``disableAllHooks`` / ``allowManagedHooksOnly`` or disables the
+co-guard plugin.
+
 Every non-allow decision is appended to ``$CO_TASK_DIR/spool.jsonl`` (decision,
 rule ids, tool, a redacted summary of at most 300 chars - never raw secrets)
 and best-effort POSTed to ``/guard/report`` (0.5 s timeout). Other events
@@ -33,6 +42,7 @@ an approved call) are spooled only.
 
 import hashlib
 import importlib.util
+import ipaddress
 import json
 import os
 import re
@@ -40,6 +50,7 @@ import sys
 import threading
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 
 # hooks.json PreToolUse timeout = APPROVAL_WAIT_MAX + 30 (Global Constraints).
@@ -47,11 +58,19 @@ APPROVAL_WAIT_MAX = 900
 HOOK_TIMEOUT = APPROVAL_WAIT_MAX + 30
 EXIT_MARGIN = 10  # always answer this long before HOOK_TIMEOUT (>= 5 s)
 POLL_SECONDS = 2.0
+POLL_MIN = 0.5
 REPORT_TIMEOUT = 0.5
 SUMMARY_MAX = 300
 ERROR_REASON = "co-guard error — action blocked for safety"
-EVENTS = ("PreToolUse", "PostToolUse", "SessionStart", "Stop", "SessionEnd", "SubagentStart", "SubagentStop")
-TOOL_MATCHER = "Bash|Edit|Write|NotebookEdit|MultiEdit|mcp__.*"
+EVENTS = ("PreToolUse", "PostToolUse", "SessionStart", "Stop", "SessionEnd", "SubagentStart", "SubagentStop",
+          "ConfigChange")
+# Ruling R17: every tool goes through the hook; rules.evaluate decides by tool name.
+TOOL_MATCHER = ".*"
+CONFIG_MATCHER = "user_settings|project_settings|local_settings"
+
+
+class Refused(Exception):
+    """The approval API cannot be trusted or used: deny now, do not wait."""
 
 # Local copy of app.redaction's token shapes (the hook cannot import the app).
 _URLSAFE = r"A-Za-z0-9_\-"
@@ -157,24 +176,42 @@ def _spool(record):
 
 
 def _api(policy):
-    base = str(policy.get("api_base") or os.environ.get("CO_API_BASE") or "").rstrip("/")
-    if not base:
-        raise RuntimeError("no api_base")
+    """The approval API: http://<literal IP>:<port> only (C2: a hostname such as
+    localhost may resolve to an address an agent can listen on)."""
+    base = str(policy.get("api_base") or "").rstrip("/")
+    u = urllib.parse.urlsplit(base)
+    try:
+        ipaddress.ip_address(u.hostname or "")
+        ok = u.scheme == "http" and u.port is not None and u.path in ("", "/") and not u.username
+    except ValueError:
+        ok = False
+    if not ok:
+        raise Refused("the approval API address is not a literal IP and port")
     return base
 
 
-def _request(method, url, body=None, timeout=5.0):
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, *a, **k):
+        return None  # never follow a redirect away from the approval API
+
+
+_OPENER = urllib.request.build_opener(urllib.request.ProxyHandler({}), _NoRedirect)
+
+
+def _request(method, url, body=None, timeout=5.0, headers=None):
     data = json.dumps(body).encode() if body is not None else None
     req = urllib.request.Request(url, data=data, method=method)
     req.add_header("Authorization", "Bearer " + os.environ.get("CO_API_TOKEN", ""))
+    for k, v in (headers or {}).items():
+        req.add_header(k, v)
     if data is not None:
         req.add_header("Content-Type", "application/json")
-    with urllib.request.urlopen(req, timeout=max(0.1, timeout)) as resp:
+    with _OPENER.open(req, timeout=max(0.1, timeout)) as resp:
         return json.loads(resp.read().decode() or "null")
 
 
-def report(policy, record):
-    _spool(record)
+def post_report(policy, record):
+    """Best effort, AFTER the decision is printed."""
     try:
         _request("POST", _api(policy) + "/guard/report", dict(record, task_id=policy.get("task_id")),
                  timeout=REPORT_TIMEOUT)
@@ -183,6 +220,14 @@ def report(policy, record):
 
 
 # -- approvals --------------------------------------------------------------
+def poll_seconds(policy):
+    try:
+        v = float(policy.get("approval_poll_seconds") or POLL_SECONDS)
+    except (TypeError, ValueError):
+        v = POLL_SECONDS
+    return max(POLL_MIN, v)
+
+
 def wait_seconds(policy):
     try:
         w = float(policy.get("approval_wait_seconds", 300))
@@ -192,10 +237,22 @@ def wait_seconds(policy):
 
 
 def request_approval(policy, payload, verdict, summary, deadline):
-    """'approved' | 'rejected' | 'expired' | 'timeout' plus the request id."""
-    base = _api(policy)
+    """('approved' | 'rejected' | 'expired' | 'timeout' | 'refused', request id, detail).
+
+    Only an approval this hook filed counts: the POST must answer
+    ``{"id": ..., "status": "pending"}`` (Ruling R2) and every GET must carry
+    that same id. 4xx answers, a missing token or an untrusted API address
+    refuse at once; network errors and 5xx are retried until the deadline."""
+    token = os.environ.get("CO_API_TOKEN")
+    if not token:
+        return "refused", None, "no CO_API_TOKEN for this task"
+    try:
+        base = _api(policy)
+    except Refused as e:
+        return "refused", None, str(e)
     tool = str(payload.get("tool_name") or "")
     canon = json.dumps({"tool_name": tool, "tool_input": payload.get("tool_input")}, sort_keys=True, default=str)
+    command_hash = hashlib.sha256(canon.encode()).hexdigest()
     body = {
         "task_id": policy.get("task_id") or os.environ.get("CO_TASK_ID"),
         "rule_ids": [h.rule_id for h in verdict.hits],
@@ -203,26 +260,39 @@ def request_approval(policy, payload, verdict, summary, deadline):
         "summary": redact(summary, 2000),
         "cwd": str(payload.get("cwd") or policy.get("cwd") or ""),
         "reason": redact("; ".join(h.reason for h in verdict.hits), 2000),
-        "command_hash": hashlib.sha256(canon.encode()).hexdigest(),
+        "command_hash": command_hash,
     }
-    poll = float(policy.get("approval_poll_seconds") or POLL_SECONDS)
+    idem = hashlib.sha256((command_hash + ":" + str(payload.get("tool_use_id") or "")).encode()).hexdigest()
+    poll = poll_seconds(policy)
     req_id = None
     while time.monotonic() < deadline:
         left = deadline - time.monotonic()
         try:
             if req_id is None:
-                res = _request("POST", base + "/guard/approvals", body, timeout=min(5.0, left))
-                req_id = res.get("id") if isinstance(res, dict) else None
-                status = res.get("status") if isinstance(res, dict) else None
+                res = _request("POST", base + "/guard/approvals", body, timeout=min(5.0, left),
+                               headers={"Idempotency-Key": idem})
+                rid = res.get("id") if isinstance(res, dict) else None
+                if not isinstance(rid, (str, int)) or isinstance(rid, bool) or str(rid) == "" \
+                        or res.get("status") != "pending":
+                    return "refused", None, "the approval API gave an unexpected answer"
+                req_id = str(rid)
             else:
-                res = _request("GET", f"{base}/guard/approvals/{req_id}", timeout=min(5.0, left))
-                status = res.get("status") if isinstance(res, dict) else None
-            if req_id is not None and status in ("approved", "rejected", "expired"):
-                return status, req_id
-        except Exception:  # noqa: BLE001 - API down / bad answer: keep trying until the deadline
+                res = _request("GET", f"{base}/guard/approvals/{urllib.parse.quote(req_id, safe='')}",
+                               timeout=min(5.0, left))
+                if not isinstance(res, dict) or str(res.get("id")) != req_id:
+                    return "refused", req_id, "the approval API answered for another request"
+                status = res.get("status")
+                if status in ("approved", "rejected", "expired"):
+                    return status, req_id, ""
+                if status != "pending":
+                    return "refused", req_id, "the approval API gave an unknown status"
+        except urllib.error.HTTPError as e:
+            if 400 <= e.code < 500:
+                return "refused", req_id, f"the approval API refused the request (HTTP {e.code})"
+        except Exception:  # noqa: BLE001 - API down / 5xx / bad JSON: keep trying until the deadline
             pass
         time.sleep(max(0.0, min(poll, deadline - time.monotonic())))
-    return "timeout", req_id
+    return "timeout", req_id, ""
 
 
 # -- events -----------------------------------------------------------------
@@ -241,20 +311,26 @@ def pre_tool_use(payload, policy, started):
     base = {"event": "PreToolUse", "tool": tool, "rule_ids": ids, "summary": redact(summary),
             "tool_use_id": payload.get("tool_use_id"), "agent_id": payload.get("agent_id")}
     if verdict.decision != "approve":
-        report(policy, dict(base, decision="deny", reason=redact(reason)))
-        return deny("CO-GUARD: blocked — " + redact(reason, 1000))
+        rec = dict(base, decision="deny", reason=redact(reason))
+        _spool(rec)
+        deny("CO-GUARD: blocked — " + redact(reason, 1000))
+        return post_report(policy, rec)
     hard_deadline = started + HOOK_TIMEOUT - EXIT_MARGIN
     deadline = min(time.monotonic() + wait_seconds(policy), hard_deadline - 2)
-    status, req_id = request_approval(policy, payload, verdict, summary, deadline)
+    status, req_id, detail = request_approval(policy, payload, verdict, summary, deadline)
     rec = dict(base, decision="approved" if status == "approved" else "deny", status=status, request_id=req_id,
                reason=redact(reason))
-    report(policy, rec)
+    if detail:
+        rec["detail"] = detail
+    _spool(rec)
     if status == "approved":
-        return context_only(f"co-guard: a person approved this action (request {req_id}).")
-    why = {"rejected": "a person rejected it", "expired": "the request expired",
-           "timeout": "no decision in time"}[status]
-    return deny(f"CO-GUARD: blocked — needs approval and {why} (request {req_id or 'not filed'}): "
-                + redact(reason, 1000) + ". Do not retry the same action; explain what you needed instead.")
+        context_only(f"co-guard: a person approved this action (request {req_id}).")
+    else:
+        why = {"rejected": "a person rejected it", "expired": "the request expired",
+               "timeout": "no decision in time", "refused": f"co-guard could not ask a person ({detail})"}[status]
+        deny(f"CO-GUARD: blocked — needs approval and {why} (request {req_id or 'not filed'}): "
+             + redact(reason, 1000) + ". Do not retry the same action; explain what you needed instead.")
+    return post_report(policy, rec)
 
 
 def _approved_ids():
@@ -287,6 +363,37 @@ def other_event(event, payload):
     _spool(rec)
 
 
+def _disables_guard(data):
+    if not isinstance(data, dict):
+        return False
+    if data.get("disableAllHooks") is True or data.get("allowManagedHooksOnly") is True:
+        return True
+    plugins = data.get("enabledPlugins")
+    return isinstance(plugins, dict) and any(
+        str(k).split("@", 1)[0] == "co-guard" and v is False for k, v in plugins.items())
+
+
+def config_change(payload):
+    """ConfigChange (UNVERIFIED with a real CLI, Ruling R19b): exit 2 blocks a
+    settings change that would switch co-guard's hooks off."""
+    path = payload.get("file_path")
+    if not isinstance(path, str) or not path:
+        return None
+    try:
+        with open(path, encoding="utf-8") as f:
+            raw = f.read()
+    except OSError:
+        return None  # deleted / unreadable: nothing in it can switch us off
+    try:
+        data = json.loads(raw)
+    except ValueError:
+        keys = ("disableAllHooks", "co-guard", "allowManagedHooksOnly")
+        return "co-guard: unreadable settings change blocked" if any(k in raw for k in keys) else None
+    if _disables_guard(data):
+        return "co-guard: settings that switch off co-guard's hooks are not allowed during a task"
+    return None
+
+
 def main(argv):
     started = time.monotonic()
     event = argv[1] if len(argv) > 1 else ""
@@ -303,6 +410,14 @@ def main(argv):
             if payload.get("hook_event_name") not in (None, "PreToolUse"):
                 raise ValueError("event mismatch")
             pre_tool_use(payload, load_policy(), started)
+        elif event == "ConfigChange":
+            why = config_change(payload)
+            _spool({"event": event, "source": redact(payload.get("source"), 50),
+                    "decision": "blocked" if why else "allowed"})
+            if why:
+                sys.stderr.write(why + "\n")
+                return 2
+            _emit(None)
         else:
             other_event(event, payload)
             _emit(None)

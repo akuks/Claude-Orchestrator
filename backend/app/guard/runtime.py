@@ -13,11 +13,16 @@
 
 from __future__ import annotations
 
+import ipaddress
 import json
 import os
 import pwd
 import shutil
+import socket
+import sys
+import sysconfig
 from pathlib import Path
+from urllib.parse import urlsplit
 
 from ..config import settings
 from .co_hook import APPROVAL_WAIT_MAX
@@ -33,6 +38,86 @@ HOOK_DISABLING_ENV = ("CLAUDE_CODE_SIMPLE", "CLAUDE_CODE_SAFE_MODE", "CLAUDE_COD
 
 # The orchestrator's own code and data (app/__init__ -> backend/).
 BACKEND_DIR = Path(__file__).resolve().parent.parent.parent
+
+# Prefixes / bin dirs shared with the whole system: protect only what we run from them.
+_GENERIC_DIRS = frozenset({"/", "/usr", "/usr/local", "/opt/homebrew", "/opt/local", "/usr/bin", "/bin",
+                           "/usr/local/bin", "/opt/homebrew/bin", "/opt/local/bin", "/usr/sbin", "/sbin"})
+
+
+class GuardConfigError(Exception):
+    """co-guard cannot be set up safely; the task must not start."""
+
+
+_API_BASE_CACHE: dict[tuple, str] = {}
+
+
+def guard_api_base() -> str:
+    """http://<literal IP>:<port> of this server (Ruling C2/R18): the bind
+    address (a wildcard bind means loopback) and the backend port. A hostname
+    is resolved once and refused unless it has exactly one address - an agent
+    could otherwise listen on another address the name resolves to (e.g. ::1
+    for localhost) and answer the hook's approval polls itself."""
+    host = (settings.bind_host or "127.0.0.1").strip().strip("[]")
+    port = settings.backend_port or urlsplit(settings.api_base).port or 8200
+    key = (host, port)
+    if key in _API_BASE_CACHE:
+        return _API_BASE_CACHE[key]
+    if host in ("0.0.0.0", ""):
+        host = "127.0.0.1"
+    elif host == "::":
+        host = "::1"
+    try:
+        ip = ipaddress.ip_address(host)
+    except ValueError:
+        try:
+            infos = socket.getaddrinfo(host, port, type=socket.SOCK_STREAM)
+        except OSError as e:
+            raise GuardConfigError(f"co-guard: cannot resolve the server address {host!r}") from e
+        addrs = {i[4][0] for i in infos}
+        if len(addrs) != 1:
+            raise GuardConfigError(
+                f"co-guard: the server address {host!r} resolves to {len(addrs)} addresses; "
+                "set CO_BIND_HOST to a literal IP")
+        ip = ipaddress.ip_address(addrs.pop().split("%", 1)[0])
+    if ip.is_unspecified:
+        ip = ipaddress.ip_address("::1" if ip.version == 6 else "127.0.0.1")
+    url = f"http://[{ip}]:{port}" if ip.version == 6 else f"http://{ip}:{port}"
+    _API_BASE_CACHE[key] = url
+    return url
+
+
+def _code_path(path: str | None, keep: list[Path]) -> list[str]:
+    """``path`` (a dir or file the hook / claude runs from) to protect: the
+    whole dir unless it is shared with the system or holds the data dirs."""
+    if not path:
+        return []
+    p = Path(path)
+    if str(p) in _GENERIC_DIRS or any(k == p or _is_within(k, p) for k in keep):
+        return []
+    return [str(p)]
+
+
+def trusted_code_paths(keep: list[Path]) -> list[str]:
+    """The hook's interpreter and stdlib, the server venv, and the claude
+    binary's install dir (I1): rewriting any of them runs code as the guard."""
+    out: list[str] = []
+    exe = Path(sys.executable)
+    out += [str(exe), str(exe.resolve())]
+    for prefix in {sys.prefix, sys.base_prefix, sys.exec_prefix, sys.base_exec_prefix}:
+        rp = str(Path(prefix).resolve())
+        if rp in _GENERIC_DIRS or prefix in _GENERIC_DIRS:
+            # system python: the stdlib and its site dirs only
+            for name in ("stdlib", "platstdlib", "purelib", "platlib"):
+                v = sysconfig.get_paths(vars={"base": prefix, "platbase": prefix}).get(name)
+                out += _code_path(v, keep)
+        else:
+            out += _code_path(prefix, keep) + _code_path(rp, keep)
+    claude = shutil.which(settings.claude_bin)
+    if claude:
+        real = Path(claude).resolve()
+        out += [claude, str(real)]
+        out += _code_path(str(real.parent), keep)
+    return out
 
 
 def plugin_root() -> Path:
@@ -151,13 +236,16 @@ def build_policy(*, task_id: str, project, workspace: Path, cwd: Path, claude_co
     if claude_config_dir:
         protected.append(str(claude_config_dir))
     protected += orchestrator_paths(project_dir, cwd_s)
+    keep = [Path(x).resolve() for x in (settings.workspaces_dir, settings.projects_dir, settings.skillpacks_dir,
+                                        project_dir, cwd_s)]
+    protected += trusted_code_paths(keep)
     env_paths = {"CO_POLICY_FILE": str(policy_file), "CO_TASK_DIR": str(tdir),
                  "CLAUDE_PLUGIN_ROOT": str(proot.resolve() if proot.exists() else proot)}
     if claude_config_dir:
         env_paths["CLAUDE_CONFIG_DIR"] = str(claude_config_dir)
     return {
         "task_id": task_id,
-        "api_base": settings.api_base.rstrip("/"),
+        "api_base": guard_api_base(),
         "project_dir": project_dir,
         "cwd": cwd_s,
         "home": home,
