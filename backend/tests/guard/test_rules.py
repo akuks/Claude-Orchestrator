@@ -1767,11 +1767,12 @@ def test_r20_negative(env, cmd):
 # Final fix wave 3 (Ruling R29): deletes strictly inside temp dirs are free
 # ===========================================================================
 @pytest.fixture
-def tenv(tmp_path):
+def tenv(tmp_path, monkeypatch):
     e = Env(tmp_path)
     e.X = tmp_path / "tmpd"  # this run's $TMPDIR (outside home and the project)
     (e.X / "foo").mkdir(parents=True)
-    e.policy["tmpdir"] = str(e.X)
+    # the hook reads TMPDIR from its own environment (Claude Code's, = the agent's shell's)
+    monkeypatch.setenv("TMPDIR", str(e.X))
     return e
 
 
@@ -1841,11 +1842,12 @@ def test_temp_symlink_escape_is_caught(tenv):
         link.unlink(missing_ok=True)
 
 
-def test_temp_dir_that_holds_home_or_the_project_is_no_temp_root(tenv):
+def test_temp_dir_that_holds_home_or_the_project_is_no_temp_root(tenv, monkeypatch):
     # a TMPDIR above home would make every home path "temp"
-    v = bash(tenv, "rm -rf {H}/Downloads", tmpdir=str(tenv.H.parent))
+    monkeypatch.setenv("TMPDIR", str(tenv.H.parent))
+    v = bash(tenv, "rm -rf {H}/Downloads")
     assert v.decision == "approve"
-    v = bash(tenv, "rm -rf $TMPDIR/home/Downloads", tmpdir=str(tenv.H.parent))
+    v = bash(tenv, "rm -rf $TMPDIR/home/Downloads")
     assert v.decision == "approve"
     # the project (or its .git) inside a temp dir is still judged as the project
     pol = dict(project_dir="/tmp/co-proj-x")
@@ -1856,3 +1858,62 @@ def test_temp_dir_that_holds_home_or_the_project_is_no_temp_root(tenv):
 def test_temp_deletes_still_respect_self_protect(tenv):
     v = bash(tenv, "rm -rf /tmp/guard/x", protected_paths=["/tmp/guard"])
     assert "self-protect" in hard_ids(v)
+
+
+# Re-review B: only the per-user temp dir itself (.../<a>/<b>/T), never the
+# whole /private/var/folders tree (it also holds caches: <a>/<b>/C).
+MAC_TMPDIR = "/var/folders/ab/cd/T/"  # macOS shape: a link path with a trailing slash
+
+
+@pytest.fixture
+def macenv(tmp_path, monkeypatch):
+    e = Env(tmp_path)
+    monkeypatch.setenv("TMPDIR", MAC_TMPDIR)
+    return e
+
+
+@pytest.mark.parametrize("cmd", [
+    "rm -rf $TMPDIR",
+    'rm -rf "$TMPDIR"',
+    "rm -rf $TMPDIR/",
+    "rm -rf $TMPDIR/..",
+    'rm -rf "${{TMPDIR}}/.."',
+    "rm -rf /private/var/folders/ab/cd",
+    "rm -rf /private/var/folders/ab/cd/",
+    "rm -rf /private/var/folders/ab",
+    "rm -rf /private/var/folders/ab/cd/C/x",
+    "rm -rf /var/folders/ab/cd/C/x",
+    "rm -rf /private/var/folders/ab/cd/T",
+    "rm -rf /private/var/folders/ab/cd/T/",
+    "rm -rf /private/var/folders/ab/cd/T/*",
+    "rm -rf /private/var/folders/ab/cd/T/../C",
+    "rm -rf /private/var/folders/zz/yy/X/x",
+])
+def test_mac_temp_roots_and_caches_need_approval(macenv, cmd):
+    v = bash(macenv, cmd)
+    assert "rm-rf-outside" in ids(v), v
+    assert v.decision == "approve", v
+
+
+@pytest.mark.parametrize("cmd", [
+    "rm -rf /private/var/folders/ab/cd/T/x",
+    "rm -rf /var/folders/ab/cd/T/x",
+    "rm -rf $TMPDIR/x",
+    'rm -rf "$TMPDIR/x/y"',
+    "rm -rf /private/var/folders/zz/yy/T/build-1",
+    "rm -rf /private/var/folders/ab/cd/T/build-*",
+])
+def test_mac_temp_dir_contents_are_free(macenv, cmd):
+    v = bash(macenv, cmd)
+    assert "rm-rf-outside" not in ids(v), v
+    assert v.decision == "allow", v
+
+
+def test_tmpdir_comes_from_the_hooks_environment(tmp_path, monkeypatch):
+    e = Env(tmp_path)
+    x = tmp_path / "envtmp"
+    x.mkdir()
+    monkeypatch.setenv("TMPDIR", str(x))
+    assert bash(e, "rm -rf $TMPDIR/x").decision == "allow"
+    monkeypatch.delenv("TMPDIR")
+    assert bash(e, "rm -rf $TMPDIR/x").decision == "approve"
