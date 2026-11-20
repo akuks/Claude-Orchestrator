@@ -524,6 +524,7 @@ class WorkflowRunOut(BaseModel):
     current_stage: int
     stages: list
     project_ids: list[str] = []
+    created_by: Optional[str] = None  # who started the run (run page header)
     created_at: datetime
     updated_at: datetime
 

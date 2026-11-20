@@ -385,3 +385,14 @@ def test_scheduler_skips_missing_owner(client, caplog):
     assert n == 0
     assert nxt.replace(tzinfo=None) > datetime.datetime(2001, 1, 1)
     assert any("owner no longer exists" in m for m in caplog.messages)
+
+
+def test_run_out_exposes_created_by(client):
+    """Run detail shows who started the run (read-only convenience)."""
+    p = _mk_project(client)
+    wf = _workflow(client, [_agent(client, p["id"])["id"]])
+    runner = _user(client, [(p["id"], "contributor")])
+    run = runner.post(f"/workflows/{wf['id']}/run", json={"input": "i"}).json()
+    assert run["created_by"] == runner.user_id
+    assert runner.get(f"/workflows/runs/{run['id']}").json()["run"]["created_by"] == runner.user_id
+    assert next(r for r in runner.get("/workflows/runs").json() if r["id"] == run["id"])["created_by"] == runner.user_id
