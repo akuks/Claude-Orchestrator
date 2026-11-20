@@ -42,6 +42,17 @@ async def visible_project_ids(s, p: Principal):
     return set(rows.scalars())
 
 
+async def maintained_project_ids(s, p: Principal):
+    """Projects where the principal is maintainer (ALL for an active admin)."""
+    if not p.user.active:
+        return set()
+    if p.is_admin:
+        return ALL
+    sub = _grants(p.user.id).subquery()
+    rows = await s.execute(select(sub.c.project_id).where(sub.c.role == "maintainer"))
+    return set(rows.scalars())
+
+
 async def project_role(s, p: Principal, project_id: str) -> str | None:
     if not p.user.active:
         return None

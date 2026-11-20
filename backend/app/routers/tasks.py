@@ -9,6 +9,7 @@ from fastapi import APIRouter, HTTPException, Query, Request
 from fastapi.responses import FileResponse, Response
 from sqlalchemy import func, select
 
+from ..access import require_project_role, require_task, task_role, task_visibility_clause
 from ..config import settings
 from ..constants import VALID_MODELS, Priority, Status
 from ..database import SessionLocal
@@ -57,8 +58,10 @@ async def create_task(payload: TaskCreate, request: Request):
         raise HTTPException(400, f"Invalid model. Use one of {sorted(VALID_MODELS)}")
 
     async with SessionLocal() as s:
-        if payload.project_id and (await s.get(Project, payload.project_id)) is None:
-            raise HTTPException(404, "Project not found")
+        if payload.project_id:
+            await require_project_role(s, request.state.principal, payload.project_id)
+            if (await s.get(Project, payload.project_id)) is None:
+                raise HTTPException(404, "Project not found")
         task = await build_task(
             s,
             prompt=payload.prompt,
@@ -84,13 +87,13 @@ async def create_task(payload: TaskCreate, request: Request):
     return out
 
 
-async def _thread_counts(s, root_ids: list[str]) -> dict[str, int]:
+async def _thread_counts(s, root_ids: list[str], visible) -> dict[str, int]:
     if not root_ids:
         return {}
     rows = (
         await s.execute(
             select(Task.root_id, func.count())
-            .where(Task.root_id.in_(root_ids))
+            .where(Task.root_id.in_(root_ids), visible)
             .group_by(Task.root_id)
         )
     ).all()
@@ -99,6 +102,7 @@ async def _thread_counts(s, root_ids: list[str]) -> dict[str, int]:
 
 @router.get("", response_model=list[TaskOut])
 async def list_tasks(
+    request: Request,
     project: str | None = None,
     project_id: str | None = None,
     status: str | None = None,
@@ -116,10 +120,11 @@ async def list_tasks(
         stmt = stmt.where(Task.project == project)
     if status:
         stmt = stmt.where(Task.status == status)
-    stmt = stmt.limit(limit).offset(offset)
     async with SessionLocal() as s:
+        visible = await task_visibility_clause(s, request.state.principal)
+        stmt = stmt.where(visible).limit(limit).offset(offset)
         rows = (await s.execute(stmt)).scalars().all()
-        counts = await _thread_counts(s, [t.root_id or t.id for t in rows])
+        counts = await _thread_counts(s, [t.root_id or t.id for t in rows], visible)
     out = []
     for t in rows:
         o = TaskOut.model_validate(t)
@@ -129,25 +134,29 @@ async def list_tasks(
 
 
 @router.get("/stats", response_model=StatsOut)
-async def stats():
+async def stats(request: Request):
     start_of_day = datetime.now(timezone.utc).replace(
         hour=0, minute=0, second=0, microsecond=0
     )
     async with SessionLocal() as s:
+        visible = await task_visibility_clause(s, request.state.principal)
         by_status_rows = (
-            await s.execute(select(Task.status, func.count()).group_by(Task.status))
+            await s.execute(
+                select(Task.status, func.count()).where(visible).group_by(Task.status)
+            )
         ).all()
         by_status = {k: v for k, v in by_status_rows}
 
         tasks_today = (
             await s.execute(
-                select(func.count()).where(Task.created_at >= start_of_day)
+                select(func.count()).where(visible, Task.created_at >= start_of_day)
             )
         ).scalar_one()
 
         completed_today = (
             await s.execute(
                 select(func.count()).where(
+                    visible,
                     Task.completed_at >= start_of_day,
                     Task.status == Status.COMPLETED,
                 )
@@ -157,6 +166,7 @@ async def stats():
         finished_today = (
             await s.execute(
                 select(func.count()).where(
+                    visible,
                     Task.completed_at >= start_of_day,
                     Task.status.in_([Status.COMPLETED, Status.FAILED]),
                 )
@@ -166,7 +176,7 @@ async def stats():
         avg_duration = (
             await s.execute(
                 select(func.avg(Task.duration_ms)).where(
-                    Task.status == Status.COMPLETED
+                    visible, Task.status == Status.COMPLETED
                 )
             )
         ).scalar_one()
@@ -185,33 +195,42 @@ async def stats():
     )
 
 
-async def _get_task_or_404(s, task_id: str) -> Task:
-    task = await s.get(Task, task_id)
-    if task is None:
-        raise HTTPException(404, "Task not found")
-    return task
+async def _require_manage(s, p, task: Task, *, need_contributor: bool = False) -> None:
+    """Creator, maintainer on the task, or admin may act on it (else 403).
+    Follow-up/duplicate also need contributor on the task's project."""
+    if not (
+        p.is_admin
+        or (task.created_by is not None and task.created_by == p.user.id)
+        or await task_role(s, p, task) == "maintainer"
+    ):
+        raise HTTPException(403, "Not allowed to modify this task")
+    if need_contributor and task.project_id is not None:
+        await require_project_role(s, p, task.project_id)
 
 
 @router.get("/{task_id}", response_model=TaskOut)
-async def get_task(task_id: str):
+async def get_task(task_id: str, request: Request):
     async with SessionLocal() as s:
-        task = await _get_task_or_404(s, task_id)
-        counts = await _thread_counts(s, [task.root_id or task.id])
+        p = request.state.principal
+        task = await require_task(s, p, task_id)
+        visible = await task_visibility_clause(s, p)
+        counts = await _thread_counts(s, [task.root_id or task.id], visible)
         out = TaskOut.model_validate(task)
         out.thread_count = counts.get(task.root_id or task.id, 1)
         return out
 
 
 @router.get("/{task_id}/thread", response_model=list[TaskOut])
-async def get_thread(task_id: str):
+async def get_thread(task_id: str, request: Request):
     """All steps in this task's thread (root + follow-ups), oldest first."""
     async with SessionLocal() as s:
-        task = await _get_task_or_404(s, task_id)
+        p = request.state.principal
+        task = await require_task(s, p, task_id)
         root = task.root_id or task.id
         rows = (
             await s.execute(
                 select(Task)
-                .where(Task.root_id == root)
+                .where(Task.root_id == root, await task_visibility_clause(s, p))
                 .order_by(Task.created_at.asc())
             )
         ).scalars().all()
@@ -219,9 +238,9 @@ async def get_thread(task_id: str):
 
 
 @router.get("/{task_id}/events", response_model=list[EventOut])
-async def get_events(task_id: str, after_seq: int = 0):
+async def get_events(task_id: str, request: Request, after_seq: int = 0):
     async with SessionLocal() as s:
-        await _get_task_or_404(s, task_id)
+        await require_task(s, request.state.principal, task_id)
         rows = (
             await s.execute(
                 select(TaskEvent)
@@ -234,20 +253,24 @@ async def get_events(task_id: str, after_seq: int = 0):
 
 @router.post("/{task_id}/cancel", response_model=TaskOut)
 async def cancel_task(task_id: str, request: Request):
+    p = request.state.principal
     async with SessionLocal() as s:
-        task = await _get_task_or_404(s, task_id)
+        task = await require_task(s, p, task_id)
+        await _require_manage(s, p, task)
         if task.status in Status.TERMINAL:
             raise HTTPException(409, f"Task already {task.status}")
     await request.app.state.worker.cancel(task_id)
     async with SessionLocal() as s:
-        task = await _get_task_or_404(s, task_id)
+        task = await require_task(s, p, task_id)
         return TaskOut.model_validate(task)
 
 
 @router.post("/{task_id}/retry", response_model=TaskOut)
 async def retry_task(task_id: str, request: Request):
     async with SessionLocal() as s:
-        task = await _get_task_or_404(s, task_id)
+        p = request.state.principal
+        task = await require_task(s, p, task_id)
+        await _require_manage(s, p, task)
         if task.status not in Status.TERMINAL:
             raise HTTPException(409, "Only finished tasks can be retried")
         task.status = Status.QUEUED
@@ -269,7 +292,9 @@ async def retry_task(task_id: str, request: Request):
 @router.post("/{task_id}/duplicate", response_model=TaskOut, status_code=201)
 async def duplicate_task(task_id: str, request: Request):
     async with SessionLocal() as s:
-        src = await _get_task_or_404(s, task_id)
+        p = request.state.principal
+        src = await require_task(s, p, task_id)
+        await _require_manage(s, p, src, need_contributor=True)
         new = Task(
             title=f"{src.title} (copy)",
             prompt=src.prompt,
@@ -305,7 +330,9 @@ async def duplicate_task(task_id: str, request: Request):
 async def followup_task(task_id: str, payload: FollowupCreate, request: Request):
     """Continue a task's Claude session with a new prompt (a resumable thread)."""
     async with SessionLocal() as s:
-        parent = await _get_task_or_404(s, task_id)
+        p = request.state.principal
+        parent = await require_task(s, p, task_id)
+        await _require_manage(s, p, parent, need_contributor=True)
         if not parent.session_id:
             raise HTTPException(
                 409, "Parent has no resumable session yet (must finish a run first)"
@@ -334,11 +361,13 @@ async def followup_task(task_id: str, payload: FollowupCreate, request: Request)
 
 
 @router.delete("/{task_id}", status_code=204)
-async def delete_task(task_id: str):
+async def delete_task(task_id: str, request: Request):
     """Delete a task (and its events/artifacts). Deleting a thread root removes
     the whole thread. Sandbox workspaces are removed; project repos are not."""
     async with SessionLocal() as s:
-        task = await _get_task_or_404(s, task_id)
+        p = request.state.principal
+        task = await require_task(s, p, task_id)
+        await _require_manage(s, p, task)
         if task.status in Status.ACTIVE:
             raise HTTPException(409, "Cancel the task before deleting it")
         if task.root_id and task.root_id == task.id:
@@ -368,10 +397,10 @@ def _safe_filename(task: Task, ext: str) -> str:
 
 
 @router.get("/{task_id}/report")
-async def download_report(task_id: str, format: str = "pdf"):
+async def download_report(task_id: str, request: Request, format: str = "pdf"):
     """Download the task's result as a PDF or DOCX report."""
     async with SessionLocal() as s:
-        task = await _get_task_or_404(s, task_id)
+        task = await require_task(s, request.state.principal, task_id)
     if format == "pdf":
         data = reports.build_pdf(task)
         media = "application/pdf"
@@ -394,9 +423,9 @@ async def download_report(task_id: str, format: str = "pdf"):
 
 
 @router.get("/{task_id}/artifacts", response_model=list[ArtifactOut])
-async def list_artifacts(task_id: str):
+async def list_artifacts(task_id: str, request: Request):
     async with SessionLocal() as s:
-        await _get_task_or_404(s, task_id)
+        await require_task(s, request.state.principal, task_id)
         rows = (
             await s.execute(select(Artifact).where(Artifact.task_id == task_id))
         ).scalars().all()
@@ -404,9 +433,9 @@ async def list_artifacts(task_id: str):
 
 
 @router.get("/{task_id}/artifacts/{filename:path}")
-async def download_artifact(task_id: str, filename: str):
+async def download_artifact(task_id: str, filename: str, request: Request):
     async with SessionLocal() as s:
-        task = await _get_task_or_404(s, task_id)
+        task = await require_task(s, request.state.principal, task_id)
         workspace = task.workspace_dir
     if not workspace:
         raise HTTPException(404, "No workspace for task")
