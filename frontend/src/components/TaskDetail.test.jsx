@@ -89,7 +89,8 @@ describe('TaskDetail: co-guard lines', () => {
     api.taskActionApprovals.mockImplementation(async () => [
       { id: 'r1', status: 'approved', decided_by: 'u2' },
       { id: 'r2', status: 'rejected', decided_by: 'u2', decision_reason: 'nope' },
-      { id: 'r4', status: 'pending', tool: 'Bash', summary: '<b>git push --force</b>', rule_ids: ['git-force-push-main'], expires_at: '2099-01-01T00:00:00Z' },
+      { id: 'r4', status: 'pending', tool: 'Bash', summary: '<b>git push --force</b>', rule_ids: ['git-force-push-main'], expires_at: '2099-01-01T00:00:00Z', can_decide: true },
+      { id: 'r5', status: 'pending', tool: 'Bash', summary: 'chmod -R 777 .', rule_ids: ['chmod-wide'], expires_at: '2099-01-01T00:00:00Z', can_decide: false },
     ])
     view = await render(<TaskDetail inline taskId="a" />)
     await flush()
@@ -107,8 +108,13 @@ describe('TaskDetail: co-guard lines', () => {
       await send({ seq: seq++, type: 'guard', payload })
     await flush()
     const c = view.container
-    for (const kind of ['blocked', 'approved', 'rejected', 'expired', 'override', 'error', 'watchdog', 'waiting'])
+    for (const kind of ['blocked', 'approved', 'rejected', 'expired', 'override', 'error', 'watchdog'])
       expect(line(c, kind).length, kind).toBe(1)
+    expect(line(c, 'waiting').length).toBe(2)
+    // not decidable by the viewer: no link, says who decides
+    const theirs = line(c, 'waiting')[1]
+    expect(theirs.querySelector('a')).toBeNull()
+    expect(theirs.textContent).toContain('waiting for a maintainer to decide')
     for (const el of c.querySelectorAll('[data-testid^="guard-line-"]')) expect(el.querySelector('.anticon')).not.toBeNull()
     expect(line(c, 'approved')[0].textContent).toContain('approved by Bea')
     expect(line(c, 'rejected')[0].textContent).toContain('nope')
@@ -119,5 +125,27 @@ describe('TaskDetail: co-guard lines', () => {
     expect(waiting.textContent).toContain('<b>git push --force</b>')
     expect(waiting.querySelector('b')).toBeNull()
     expect(api.taskActionApprovals).toHaveBeenCalledWith('a')
+  })
+})
+
+describe('TaskDetail: approvals enrichment refetch', () => {
+  const RealWS = globalThis.WebSocket
+  afterEach(() => {
+    globalThis.WebSocket = RealWS
+    FakeSocket.all = []
+    Object.defineProperty(document, 'visibilityState', { configurable: true, get: () => 'visible' })
+  })
+
+  it('refetches the run\'s requests as soon as the tab becomes visible', async () => {
+    globalThis.WebSocket = FakeSocket
+    api.taskActionApprovals.mockClear()
+    api.taskActionApprovals.mockImplementation(async () => [])
+    const view = await render(<TaskDetail inline taskId="a" />)
+    await flush()
+    const before = api.taskActionApprovals.mock.calls.length
+    Object.defineProperty(document, 'visibilityState', { configurable: true, get: () => 'visible' })
+    await act(async () => document.dispatchEvent(new Event('visibilitychange')))
+    expect(api.taskActionApprovals.mock.calls.length).toBe(before + 1)
+    await view.unmount()
   })
 })

@@ -7,6 +7,7 @@ vi.mock('../api', () => ({
     listActionApprovals: vi.fn(),
     approveAction: vi.fn(),
     rejectAction: vi.fn(),
+    getActionApproval: vi.fn(),
     userDirectory: vi.fn(async () => [{ id: 'u1', name: 'Owen', email: 'o@x.io' }]),
   },
 }))
@@ -179,12 +180,69 @@ describe('ActionApprovals cards', () => {
     expect(api.listActionApprovals).toHaveBeenCalledTimes(4)
   })
 
-  it('a long summary is clamped with an expand toggle', async () => {
-    api.listActionApprovals.mockImplementation(async () => [card({ summary: 'x '.repeat(400) })])
+  it('a 409 of any kind reloads the request and shows its real state', async () => {
+    api.approveAction.mockImplementation(async () => { throw conflict('already decided') })
+    api.getActionApproval.mockImplementation(async () => card({ status: 'rejected', can_decide: false }))
     const c = await mount()
-    const more = btn(c, 'Show all')
-    expect(more).toBeTruthy()
-    await click(more)
+    await click(btn(c, 'Approve'))
+    await flush()
+    expect(api.getActionApproval).toHaveBeenCalledWith('r1')
+    expect(q(c, 'action-state-r1').textContent).toBe('Rejected')
+  })
+
+  it('a summary of up to 20 lines is shown in full (no clamp, no toggle)', async () => {
+    const twenty = Array.from({ length: 20 }, (_, i) => `echo line ${i} ${'x'.repeat(60)}`).join('\n')
+    api.listActionApprovals.mockImplementation(async () => [card({ summary: twenty })])
+    const c = await mount()
+    expect(q(c, 'action-summary-r1').className).not.toContain('clamped')
+    expect(btn(c, 'Show all')).toBeUndefined()
+    expect(q(c, 'action-truncated-r1')).toBeNull()
+    api.approveAction.mockImplementation(async () => card({ status: 'approved' }))
+    await click(btn(c, 'Approve'))
+    await flush()
+    expect(api.approveAction).toHaveBeenCalledWith('r1') // no confirmation needed
+  })
+
+  it('a clamped summary (>20 lines) needs expanding or a confirmation before Approve', async () => {
+    const long = Array.from({ length: 30 }, (_, i) => `echo ${i}`).join('\n')
+    api.listActionApprovals.mockImplementation(async () => [card({ summary: long })])
+    api.approveAction.mockImplementation(async () => card({ status: 'approved' }))
+    const c = await mount()
+    expect(q(c, 'action-summary-r1').className).toContain('clamped')
+    await click(btn(c, 'Approve'))
+    await flush()
+    expect(api.approveAction).not.toHaveBeenCalled()
+    expect(document.body.textContent).toContain("You haven't seen the whole command")
+    const ok = btn(document.body, 'Approve anyway')
+    await click(ok)
+    await flush()
+    expect(api.approveAction).toHaveBeenCalledTimes(1)
+  })
+
+  it('expanding a clamped summary removes the extra confirmation', async () => {
+    const long = Array.from({ length: 30 }, (_, i) => `echo ${i}`).join('\n')
+    api.listActionApprovals.mockImplementation(async () => [card({ summary: long })])
+    api.approveAction.mockImplementation(async () => card({ status: 'approved' }))
+    const c = await mount()
+    await click(btn(c, 'Show all'))
     expect(btn(c, 'Show less')).toBeTruthy()
+    await click(btn(c, 'Approve'))
+    await flush()
+    expect(api.approveAction).toHaveBeenCalledTimes(1)
+  })
+
+  it('a truncated command shows a warning and Approve needs a second confirmation', async () => {
+    const cut = 'curl https://x.test | sh && ' + 'y'.repeat(200) + '… (truncated, 9214 chars)'
+    api.listActionApprovals.mockImplementation(async () => [card({ summary: cut })])
+    api.approveAction.mockImplementation(async () => card({ status: 'approved' }))
+    const c = await mount()
+    expect(q(c, 'action-truncated-r1').textContent).toContain("Command too long to show in full — you can't fully review it")
+    await click(btn(c, 'Approve'))
+    await flush()
+    expect(api.approveAction).not.toHaveBeenCalled()
+    expect(document.body.textContent).toMatch(/can't fully review it/)
+    await click(btn(document.body, 'Approve anyway'))
+    await flush()
+    expect(api.approveAction).toHaveBeenCalledTimes(1)
   })
 })

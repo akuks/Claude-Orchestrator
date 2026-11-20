@@ -43,7 +43,7 @@ describe('selectNeedsYou', () => {
     expect(items[1].title).toBe('Bash: git reset --hard')
     expect(items[1].detail).toContain('Clean')
     expect(items[1].detail).toContain('Discard uncommitted work')
-    expect(items[1].canDecide).toBe(true)
+    expect(items[1].fullTitle).toBe('Bash: git reset --hard\nmore')
   })
 
   it('keeps only own failed tasks within the last 24h', () => {

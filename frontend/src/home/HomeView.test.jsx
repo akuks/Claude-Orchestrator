@@ -107,10 +107,11 @@ describe('HomeView empty vs error states', () => {
 })
 
 describe('HomeView: action approvals', () => {
-  const action = { id: 'r1', task_id: 't1', task_title: 'Clean', tool: 'Bash', summary: '<b>git reset --hard</b>',
+  const full = '<b>git reset --hard</b>\nsecond line ' + 'z'.repeat(300)
+  const action = { id: 'r1', task_id: 't1', task_title: 'Clean', tool: 'Bash', summary: full,
     rule_ids: ['git-reset-hard'], created_at: '2026-11-20T10:00:00', can_decide: true }
 
-  it('lists a pending action with Approve and Open, as plain text', async () => {
+  it('never approves from Home (Ruling R27): Review opens the full card; plain text; full command in the tooltip', async () => {
     api.listActionApprovals.mockImplementation(async () => [action])
     const navigate = vi.fn()
     view = await render(<HomeView user={me} navigate={navigate} />)
@@ -119,22 +120,20 @@ describe('HomeView: action approvals', () => {
     const row = view.container.querySelector('[data-testid="needs-action"]')
     expect(row.textContent).toContain('<b>git reset --hard</b>')
     expect(row.querySelector('b')).toBeNull()
-    const buttons = [...row.querySelectorAll('button')]
-    const open = buttons.find((b) => b.textContent.includes('Open'))
-    open.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+    expect(row.querySelector('[title]').getAttribute('title')).toBe(`Bash: ${full}`)
+    const labels = [...row.querySelectorAll('button')].map((b) => b.textContent.trim())
+    expect(labels).toEqual(['Review'])
+    await act(async () => row.querySelector('button').dispatchEvent(new MouseEvent('click', { bubbles: true })))
     expect(navigate).toHaveBeenCalledWith({ page: 'approvals', id: 'r1' })
-    api.approveAction.mockImplementation(async () => ({ ...action, status: 'approved' }))
-    const approve = buttons.find((b) => b.textContent.includes('Approve'))
-    await act(async () => approve.dispatchEvent(new MouseEvent('click', { bubbles: true })))
-    expect(api.approveAction).toHaveBeenCalledWith('r1')
+    expect(api.approveAction).not.toHaveBeenCalled()
   })
 
-  it('no Approve button when the viewer cannot decide', async () => {
-    api.listActionApprovals.mockImplementation(async () => [{ ...action, can_decide: false }])
+  it('task approvals on Home keep Approve', async () => {
+    api.listApprovals.mockImplementation(async () => [{ id: 'a1', title: 'Deploy', created_at: '2026-11-20T10:00:00' }])
     view = await render(<HomeView user={me} navigate={() => {}} />)
     await flush()
     await flush()
-    const row = view.container.querySelector('[data-testid="needs-action"]')
-    expect([...row.querySelectorAll('button')].map((b) => b.textContent.trim())).toEqual(['Open'])
+    const row = view.container.querySelector('[data-testid="needs-approval"]')
+    expect([...row.querySelectorAll('button')].map((b) => b.textContent.trim())).toEqual(['Approve', 'Open'])
   })
 })
