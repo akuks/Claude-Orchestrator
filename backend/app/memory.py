@@ -22,6 +22,7 @@ from .config import settings
 from .database import SessionLocal
 from .events import broker
 from .models import Project, Task, TaskSummary
+from .redaction import redact, secrets_from_env
 
 _WORD = re.compile(r"[a-z0-9]+")
 
@@ -171,7 +172,10 @@ async def update_after_task(task_id: str, user_id: str | None) -> None:
         "factual. Output only the summary.\n\n"
         f"Task: {prompt}\n\nResult: {result_text[:4000]}"
     )
-    summary = (await _run_claude(summary_prompt, model, cwd, env)).strip()
+    # Claude's output can echo credentials (it runs with the owner's env):
+    # redact before the cut and before storing or broadcasting.
+    secrets = secrets_from_env(env)
+    summary = redact((await _run_claude(summary_prompt, model, cwd, env)).strip(), secrets)
     summary = summary[:600] or (result_text[:300] or prompt[:200])
 
     mem_prompt = (
@@ -182,7 +186,7 @@ async def update_after_task(task_id: str, user_id: str | None) -> None:
         f"=== CURRENT MEMORY ===\n{old_memory or '(empty)'}\n\n"
         f"=== JUST COMPLETED ===\n{summary}\n\n=== UPDATED MEMORY ==="
     )
-    new_memory = (await _run_claude(mem_prompt, model, cwd, env)).strip()
+    new_memory = redact((await _run_claude(mem_prompt, model, cwd, env)).strip(), secrets)
 
     async with SessionLocal() as s:
         project = await s.get(Project, pid)
@@ -226,7 +230,10 @@ async def rebuild_memory(project_id: str, user_id: str) -> str | None:
         "durable facts, key decisions, and known issues. Output ONLY the memory.\n\n"
         f"=== TASK HISTORY ===\n{history}"
     )
-    new_memory = (await _run_claude(prompt, settings.memory_model, cwd, env)).strip()
+    new_memory = redact(
+        (await _run_claude(prompt, settings.memory_model, cwd, env)).strip(),
+        secrets_from_env(env),
+    )
 
     async with SessionLocal() as s:
         project = await s.get(Project, project_id)
