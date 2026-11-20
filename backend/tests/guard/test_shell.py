@@ -1035,3 +1035,66 @@ def test_dangling_heredoc_reason_wording():
     reasons += parse("cat <<'E' |\nbash\nrm -rf ~\nE").errors
     assert "heredoc body feeds a later pipeline stage; treated as uncertain" in reasons
     assert not any("syntax error" in r for r in reasons)
+
+
+# ===========================================================================
+# Task 2 review, fix round 1: parser changes (C6 transformed stdin, I8 wrappers)
+# ===========================================================================
+from app.guard.shell import shell_mode, shell_name  # noqa: E402
+
+
+@pytest.mark.parametrize("cmd", [
+    "base64 -d <<< cm0gLXJmIH4K | bash",
+    "xxd -r -p <<< 726d202d7266207e | sh",
+    'sed s/X/rm/ <<< "X -rf ~" | bash',
+    'tr a-z a-z <<< "rm -rf ~" | sh',
+    'rev <<< "~ fr- mr" | bash',
+    "sed s/X/rm/ <<EOF | bash\nX -rf ~\nEOF",
+    "cat <<EOF | sed s/X/rm/ | bash\nX -rf ~\nEOF",
+])
+def test_transformed_stdin_into_shell_is_uncertain(cmd):
+    assert parse(cmd).uncertain
+
+
+@pytest.mark.parametrize("cmd", [
+    "cat <<< 'rm -rf ~' | bash",
+    "cat - <<< 'rm -rf ~' | bash",
+    "cat <<EOF | bash\nrm -rf ~\nEOF",
+])
+def test_cat_passes_stdin_through_to_shell(cmd):
+    assert runs(cmd, "rm", "-rf", "~")
+
+
+@pytest.mark.parametrize("cmd", [
+    "at now <<< 'rm -rf ~'",
+    "echo 'rm -rf ~' | at now",
+    "at now + 1 minute <<EOF\nrm -rf ~\nEOF",
+    "batch <<< 'rm -rf ~'",
+    "tmux new -d 'rm -rf ~'",
+    "tmux new-session -d -s x 'rm -rf ~'",
+    "tmux split-window -h 'rm -rf ~'",
+    "tmux run-shell 'rm -rf ~'",
+    "screen -dm sh -c 'rm -rf ~'",
+    "screen -dmS name rm -rf ~",
+    "systemd-run rm -rf ~",
+    "systemd-run --user -p X=1 --unit u rm -rf ~",
+])
+def test_scheduler_and_terminal_wrappers_are_followed(cmd):
+    assert runs(cmd, "rm", "-rf", "~")
+
+
+@pytest.mark.parametrize("cmd", ["at -f job.sh now", "cat f | at now", "tmux send-keys 'rm -rf ~' Enter",
+                                 "at now"])
+def test_unknown_at_jobs_and_send_keys_are_uncertain(cmd):
+    assert parse(cmd).uncertain
+
+
+@pytest.mark.parametrize("cmd", ["at -l", "atq", "tmux ls", "tmux attach -t x", "screen -ls"])
+def test_at_and_tmux_listing_is_certain(cmd):
+    assert not parse(cmd).uncertain
+
+
+def test_shell_helpers_are_public():
+    assert shell_name("bash5") == "bash" and shell_name("python") is None
+    assert shell_mode(["-c", "ls"]) == ("c", "ls")
+    assert shell_mode([]) == ("stdin", None)
