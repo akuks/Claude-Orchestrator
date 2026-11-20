@@ -29,9 +29,14 @@ class Stub:
     """POST /guard/approvals -> 201 pending; GET /guard/approvals/{id} -> the
     scripted statuses in order (the last repeats); records every request."""
 
-    def __init__(self, statuses=("approved",), post_status=201, get_status=200):
+    def __init__(self, statuses=("approved",), post_status=201, get_status=200, post_body=None, get_id="req-1",
+                 report_delay=0.0):
         self.statuses = list(statuses)
         self.post_status = post_status
+        self.post_body = post_body or {"id": "req-1", "status": "pending", "expires_at": "x"}
+        self.get_id = get_id
+        self.report_delay = report_delay
+        self.headers = []
         self.get_status = get_status
         self.requests = []
         stub = self
@@ -52,15 +57,17 @@ class Stub:
                 n = int(self.headers.get("Content-Length") or 0)
                 body = json.loads(self.rfile.read(n) or b"null")
                 stub.requests.append(("POST", self.path, self.headers.get("Authorization"), body))
+                stub.headers.append(dict(self.headers))
                 if self.path == "/guard/approvals":
-                    self._reply(stub.post_status, {"id": "req-1", "status": "pending", "expires_at": "x"})
+                    self._reply(stub.post_status, stub.post_body)
                 else:
+                    time.sleep(stub.report_delay)
                     self._reply(200, {})
 
             def do_GET(self):
                 stub.requests.append(("GET", self.path, self.headers.get("Authorization"), None))
                 st = stub.statuses.pop(0) if len(stub.statuses) > 1 else stub.statuses[0]
-                self._reply(stub.get_status, {"id": "req-1", "status": st})
+                self._reply(stub.get_status, {"id": stub.get_id, "status": st})
 
         self.server = ThreadingHTTPServer(("127.0.0.1", 0), H)
         self.base = f"http://127.0.0.1:{self.server.server_address[1]}"
@@ -106,7 +113,7 @@ class Run:
     def __call__(self, payload, event="PreToolUse", raw=None, env=None, timeout=60):
         stdin = raw if raw is not None else json.dumps(payload)
         t0 = time.monotonic()
-        p = subprocess.run([sys.executable, "-I", str(self.plugin / "hooks" / "co_hook.py"), event],
+        p = subprocess.run([sys.executable, "-I", "-S", str(self.plugin / "hooks" / "co_hook.py"), event],
                            input=stdin, capture_output=True, text=True, timeout=timeout,
                            env=dict(self.env, **(env or {})), cwd=str(self.project))
         self.elapsed = time.monotonic() - t0
@@ -369,3 +376,175 @@ def test_spool_and_report_are_redacted_and_short(run, stub):
 def test_env_secret_values_are_redacted(run):
     run(bash("rm -rf ~ " + run.env["GH_TOKEN"]))
     assert run.env["GH_TOKEN"] not in json.dumps(run.spool())
+
+
+
+# ---- fix round 1: C2 (only approvals this hook filed, at a literal IP) and minors ----
+
+
+def _approve_cmd():
+    return bash("git reset --hard")
+
+
+@pytest.mark.parametrize("base", ["http://localhost:{port}", "http://[::1]", "https://127.0.0.1:{port}",
+                                  "http://u:p@127.0.0.1:{port}", "http://127.0.0.1:{port}/x", ""])
+def test_api_base_must_be_a_literal_ip_and_port(plugin, tmp_path, stub, base):
+    run = Run(plugin, tmp_path, base.format(port=stub.server.server_address[1]), approval_wait_seconds=5)
+    out = run(_approve_cmd())
+    assert decision(out) == "deny" and "literal IP" in reason(out)
+    assert run.elapsed < 3 and stub.requests == []
+
+
+@pytest.mark.parametrize("post_body", [
+    {"id": "FAKE", "status": "approved"},  # a fake listener's shortcut (the reviewer's fake6.py)
+    {"id": "req-1", "status": "rejected"},
+    {"status": "pending"},
+    {"id": "", "status": "pending"},
+    {"id": True, "status": "pending"},
+    ["not", "an", "object"],
+])
+def test_post_must_answer_pending_with_an_id(plugin, tmp_path, post_body):
+    stub = Stub(post_body=post_body)
+    try:
+        run = Run(plugin, tmp_path, stub.base)
+        out = run(_approve_cmd())
+        assert decision(out) == "deny" and "unexpected answer" in reason(out)
+        assert stub.paths("GET") == [] and run.elapsed < 3
+    finally:
+        stub.close()
+
+
+def test_get_for_another_request_is_refused(plugin, tmp_path):
+    stub = Stub(statuses=("approved",), get_id="someone-elses")
+    try:
+        run = Run(plugin, tmp_path, stub.base)
+        out = run(_approve_cmd())
+        assert decision(out) == "deny" and "another request" in reason(out)
+    finally:
+        stub.close()
+
+
+def test_unknown_status_is_refused(plugin, tmp_path):
+    stub = Stub(statuses=("granted",))
+    try:
+        out = Run(plugin, tmp_path, stub.base)(_approve_cmd())
+        assert decision(out) == "deny" and "unknown status" in reason(out)
+    finally:
+        stub.close()
+
+
+@pytest.mark.parametrize("code", [400, 401, 403, 404, 409, 422])
+def test_4xx_fails_fast(plugin, tmp_path, code):
+    stub = Stub(post_status=code)
+    try:
+        run = Run(plugin, tmp_path, stub.base, approval_wait_seconds=30)
+        out = run(_approve_cmd())
+        assert decision(out) == "deny" and f"HTTP {code}" in reason(out)
+        assert run.elapsed < 3 and stub.paths("POST").count("/guard/approvals") == 1
+    finally:
+        stub.close()
+
+
+def test_get_4xx_fails_fast(plugin, tmp_path):
+    stub = Stub(statuses=("pending",), get_status=403)
+    try:
+        run = Run(plugin, tmp_path, stub.base, approval_wait_seconds=30)
+        out = run(_approve_cmd())
+        assert decision(out) == "deny" and "HTTP 403" in reason(out) and run.elapsed < 3
+    finally:
+        stub.close()
+
+
+def test_missing_token_denies_at_once(run, stub):
+    env = dict(run.env)
+    env.pop("CO_API_TOKEN")
+    run.env = env
+    out = run(_approve_cmd())
+    assert decision(out) == "deny" and "no CO_API_TOKEN" in reason(out)
+    assert run.elapsed < 3 and "/guard/approvals" not in stub.paths()
+
+
+def test_idempotency_key_is_sent(plugin, tmp_path):
+    stub = Stub(statuses=("approved",))
+    try:
+        run = Run(plugin, tmp_path, stub.base)
+        run(_approve_cmd())
+        keys = [h.get("Idempotency-Key") for h in stub.headers if h.get("Idempotency-Key")]
+        assert len(keys) == 1 and len(keys[0]) == 64
+        body = [r[3] for r in stub.requests if r[1] == "/guard/approvals"][0]
+        import hashlib
+
+        assert keys[0] == hashlib.sha256((body["command_hash"] + ":tu1").encode()).hexdigest()
+    finally:
+        stub.close()
+
+
+def test_poll_interval_is_clamped():
+    assert co_hook.poll_seconds({"approval_poll_seconds": 0.01}) == 0.5
+    assert co_hook.poll_seconds({"approval_poll_seconds": "x"}) == 2.0
+    assert co_hook.poll_seconds({}) == 2.0
+
+
+def test_decision_is_printed_before_the_report(plugin, tmp_path):
+    stub = Stub(report_delay=3)
+    try:
+        run = Run(plugin, tmp_path, stub.base)
+        p = subprocess.Popen([sys.executable, "-I", "-S", str(plugin / "hooks" / "co_hook.py"), "PreToolUse"],
+                             stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True, env=run.env)
+        t0 = time.monotonic()
+        p.stdin.write(json.dumps(bash("rm -rf ~")))
+        p.stdin.close()
+        line = p.stdout.readline()
+        t_line = time.monotonic() - t0
+        p.wait(timeout=30)
+        t_exit = time.monotonic() - t0
+        assert json.loads(line)["hookSpecificOutput"]["permissionDecision"] == "deny"
+        assert t_exit - t_line >= 0.3  # the report (0.5 s timeout) came after the answer
+    finally:
+        stub.close()
+
+
+def test_unknown_tool_goes_to_approval(plugin, tmp_path):
+    stub = Stub(statuses=("rejected",))
+    try:
+        run = Run(plugin, tmp_path, stub.base)
+        out = run({"tool_name": "REPL", "tool_input": {"code": "x"}})
+        assert decision(out) == "deny" and "rejected" in reason(out)
+        body = [r[3] for r in stub.requests if r[1] == "/guard/approvals"][0]
+        assert body["rule_ids"] == ["unknown-tool"] and body["tool"] == "REPL"
+    finally:
+        stub.close()
+
+
+def test_monitor_and_powershell(run):
+    assert decision(run({"tool_name": "Monitor", "tool_input": {"command": "rm -rf ~"}})) == "deny"
+    out = run({"tool_name": "PowerShell", "tool_input": {"command": "dir"}})
+    assert decision(out) == "deny" and "unsupported-shell" in reason(out)
+    assert run({"tool_name": "Read", "tool_input": {"file_path": "/etc/hosts"}}) is None
+
+
+# ---- Ruling R19b: ConfigChange (unverified with a real CLI) ----------------------------
+
+
+def _config(run, tmp_path, content, source="project_settings"):
+    f = tmp_path / "settings.json"
+    f.write_text(content if isinstance(content, str) else json.dumps(content))
+    p = subprocess.run([sys.executable, "-I", "-S", str(run.plugin / "hooks" / "co_hook.py"), "ConfigChange"],
+                       input=json.dumps({"hook_event_name": "ConfigChange", "source": source, "file_path": str(f)}),
+                       capture_output=True, text=True, env=run.env, timeout=30)
+    return p.returncode, p.stderr
+
+
+@pytest.mark.parametrize("content", [{"disableAllHooks": True}, {"enabledPlugins": {"co-guard@inline": False}},
+                                     {"allowManagedHooksOnly": True}, '{"disableAllHooks": true,'])
+def test_config_change_switching_hooks_off_is_blocked(run, tmp_path, content):
+    code, err = _config(run, tmp_path, content)
+    assert code == 2 and "co-guard" in err
+    assert run.spool()[-1]["decision"] == "blocked"
+
+
+@pytest.mark.parametrize("content", [{"disableAllHooks": False}, {"model": "sonnet"},
+                                     {"enabledPlugins": {"other@x": False}}, "{broken"])
+def test_config_change_other_edits_are_allowed(run, tmp_path, content):
+    code, _err = _config(run, tmp_path, content)
+    assert code == 0

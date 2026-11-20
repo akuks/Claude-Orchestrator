@@ -32,6 +32,27 @@ _GUARD_SPOOL = r"""
     printf 'not json\n' >>"$CO_TASK_DIR/spool.jsonl"
     printf '{"event":"SessionEnd","reason":"other","junk_key":"dropped"}\n' >>"$CO_TASK_DIR/spool.jsonl"
   fi"""
+# Test seam (co-guard watchdog, Ruling R19a): [guard-tool:MODE] makes the mock
+# emit a Bash tool_use + tool_result with: hooked (a co-guard PreToolUse
+# hook_started first), nohook (none), other (another plugin's hook only),
+# early (the hook_started BEFORE the assistant message), cancelled (the hook
+# times out), slow (no hook, then 4 s of silence before the result).
+_GUARD_TOOL = r"""
+  mode="${BASH_REMATCH[1]}"
+  printf '{"type":"system","subtype":"init","session_id":"test-session"}\n'
+  hs='{"type":"system","subtype":"hook_started","hook_id":"h1","hook_name":"PreToolUse:Bash","hook_event":"PreToolUse"}'
+  tu='{"type":"assistant","message":{"model":"claude-test","content":[{"type":"tool_use","id":"tuA","name":"Bash","input":{"command":"ls"}}]}}'
+  tr='{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"tuA","content":"ok"}]}}'
+  case "$mode" in
+    hooked) printf '%s\n%s\n%s\n' "$tu" "$hs" "$tr" ;;
+    early) printf '%s\n%s\n%s\n' "$hs" "$tu" "$tr" ;;
+    nohook) printf '%s\n%s\n' "$tu" "$tr" ;;
+    other) printf '%s\n%s\n%s\n' "$tu" '{"type":"system","subtype":"hook_started","hook_id":"h9","hook_name":"PreToolUse:Bash","hook_event":"PreToolUse","plugin_name":"other-pack"}' "$tr" ;;
+    cancelled) printf '%s\n%s\n%s\n%s\n' "$tu" "$hs" '{"type":"system","subtype":"hook_response","hook_id":"h1","hook_name":"PreToolUse:Bash","hook_event":"PreToolUse","output":"","stdout":"","stderr":"","exit_code":1,"outcome":"cancelled"}' "$tr" ;;
+    slow) printf '%s\n' "$tu"; sleep 4; printf '%s\n' "$tr" ;;
+  esac
+  printf '{"type":"result","subtype":"success","result":"done","num_turns":1,"total_cost_usd":0.01,"duration_ms":100,"is_error":false,"usage":{"input_tokens":1,"output_tokens":1}}\n'
+  exit 0"""
 # Test seam: a task prompt carrying [env-echo] makes the mock behave like an
 # agent that prints its env: "NAME=value " for each of _ECHO_VARS that is set
 # goes into its assistant text, a tool_use input, a tool_result, a raw
@@ -50,6 +71,7 @@ _ENV_ECHO = r"""
   j=$(jesc "$dump")
   printf '{"type":"system","subtype":"init","session_id":"test-session"}\n'
   printf '{"type":"assistant","message":{"model":"claude-test","content":[{"type":"text","text":"env: %s"},{"type":"tool_use","id":"tu1","name":"Bash","input":{"command":"echo %s"}}]}}\n' "$j" "$j"
+  printf '{"type":"system","subtype":"hook_started","hook_id":"h1","hook_name":"PreToolUse:Bash","hook_event":"PreToolUse"}\n'
   printf '{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"tu1","content":"%s"}]}}\n' "$j"
   printf 'raw stdout %s\n' "$dump"
   printf 'stderr %s\n' "$dump" >&2
@@ -108,6 +130,9 @@ fi
 if [[ "$args" == *"stream-json"* && "$prompt" == *"[env-echo"* ]]; then
   __ENV_ECHO__
 fi
+if [[ "$args" == *"stream-json"* && "$prompt" =~ \\[guard-tool:([a-z]+)\\] ]]; then
+  __GUARD_TOOL__
+fi
 if [[ "$args" == *"stream-json"* ]]; then
   printf '{"type":"system","subtype":"init","session_id":"test-session"}\\n'
   printf '{"type":"assistant","message":{"model":"claude-test","content":[{"type":"text","text":"working"}]}}\\n'
@@ -128,6 +153,7 @@ fi
     .replace("__PROBE_VARS__", _PROBE_VARS)
     .replace("__ENV_ECHO__", _ENV_ECHO)
     .replace("__GUARD_SPOOL__", _GUARD_SPOOL)
+    .replace("__GUARD_TOOL__", _GUARD_TOOL)
     .replace("__ECHO_VARS__", _ECHO_VARS)
 )
 _MOCK.chmod(0o755)

@@ -93,7 +93,7 @@ def test_plugin_dir_first_hook_events_env_and_policy(client, tmp_path):
     pairs, names = read_env_probe(key)
     tdir = runtime.task_dir(tid).resolve()
     assert pairs["CO_TASK_ID"] == tid
-    assert pairs["CO_API_BASE"] == settings.api_base.rstrip("/")
+    assert pairs["CO_API_BASE"] == runtime.guard_api_base()
     assert pairs["CO_TASK_DIR"] == str(tdir)
     assert pairs["CO_POLICY_FILE"] == str(tdir / "policy.json")
     # project env cannot switch plugin hooks off
@@ -104,7 +104,7 @@ def test_plugin_dir_first_hook_events_env_and_policy(client, tmp_path):
     pol = json.loads(read_probe_file(key, "policy"))
     cfg = pairs["CLAUDE_CONFIG_DIR"]
     assert pol["task_id"] == tid
-    assert pol["api_base"] == settings.api_base.rstrip("/")
+    assert pol["api_base"] == runtime.guard_api_base()
     assert pol["project_dir"] == str(Path(proj["directory"]).resolve())
     assert pol["cwd"] == str(Path(proj["directory"]).resolve())
     assert pol["home"] == runtime.real_home()
@@ -254,3 +254,153 @@ def test_spool_is_ingested_as_redacted_guard_events(client):
     types_ = [e.type for e in _events(done["id"])]
     assert types_.index("guard") < types_.index("completed")
     assert "co_" not in blob.replace("co-guard", "")
+
+
+# ---- Ruling R19a: the stream watchdog stops a run whose tools escape co-guard ----
+
+
+def _guard_tool(client, mode, monkeypatch=None):
+    done = _run(client, f"tool [guard-tool:{mode}]")
+    return done, [e.payload for e in _events(done["id"]) if e.type == "guard"]
+
+
+def test_tool_with_co_guard_hook_runs(client):
+    for mode in ("hooked", "early"):
+        done, guard = _guard_tool(client, mode)
+        assert done["status"] == "completed", (mode, done.get("error"))
+        assert not any(p.get("event") == "watchdog" for p in guard)
+
+
+def test_tool_without_hook_kills_the_task(client):
+    for mode in ("nohook", "other", "cancelled"):
+        done, guard = _guard_tool(client, mode)
+        assert done["status"] == "failed", mode
+        assert "co-guard was not running" in done["error"], mode
+        assert any(p.get("event") == "watchdog" and p.get("decision") == "killed" for p in guard), mode
+
+
+def test_tool_left_unchecked_past_grace_kills_the_task(client, monkeypatch):
+    monkeypatch.setattr(settings, "guard_hook_grace_seconds", 1.0)
+    t0 = __import__("time").monotonic()
+    done, guard = _guard_tool(client, "slow")
+    assert done["status"] == "failed" and "co-guard was not running" in done["error"]
+    assert "no co-guard check" in done["error"]
+    assert __import__("time").monotonic() - t0 < 4.0  # killed before the tool "finished"
+
+
+def test_watchdog_failure_is_not_retried(client, monkeypatch):
+    monkeypatch.setattr(settings, "retry_max_attempts", 3)
+    done, _guard = _guard_tool(client, "nohook")
+    assert done["status"] == "failed" and done.get("attempt", 0) == 0
+
+
+# ---- Ruling R17 / C2 / I1 / I3 ------------------------------------------------------
+
+
+def test_powershell_is_disallowed_and_api_base_is_literal(client):
+    key = env_probe_key()
+    done = _run(client, f"x [env-probe:{key}]")
+    assert done["status"] == "completed", done.get("error")
+    args = read_probe_args(key)
+    i = args.index("--disallowedTools")
+    assert "PowerShell" in args[i + 1:]
+    pairs, _names = read_env_probe(key)
+    pol = json.loads(read_probe_file(key, "policy"))
+    assert pairs["CO_API_BASE"] == pol["api_base"] == "http://127.0.0.1:8200"
+
+
+def test_guard_api_base_literal_only(monkeypatch):
+    import socket
+
+    runtime._API_BASE_CACHE.clear()
+    try:
+        for host, want in (("127.0.0.1", "http://127.0.0.1:8200"), ("0.0.0.0", "http://127.0.0.1:8200"),
+                           ("::", "http://[::1]:8200"), ("::1", "http://[::1]:8200"), ("[::1]", "http://[::1]:8200"),
+                           ("10.1.2.3", "http://10.1.2.3:8200")):
+            monkeypatch.setattr(settings, "bind_host", host)
+            assert runtime.guard_api_base() == want, host
+        monkeypatch.setattr(settings, "backend_port", 9123)
+        monkeypatch.setattr(settings, "bind_host", "127.0.0.1")
+        assert runtime.guard_api_base() == "http://127.0.0.1:9123"
+        monkeypatch.setattr(settings, "backend_port", None)
+
+        def fake(host, port, *a, **k):
+            table = {"one.example": ["10.0.0.7"], "two.example": ["127.0.0.1", "::1"]}
+            return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", (ip, port)) for ip in table[host]]
+
+        monkeypatch.setattr(socket, "getaddrinfo", fake)
+        monkeypatch.setattr(settings, "bind_host", "one.example")
+        assert runtime.guard_api_base() == "http://10.0.0.7:8200"
+        monkeypatch.setattr(settings, "bind_host", "two.example")
+        import pytest
+
+        with pytest.raises(runtime.GuardConfigError):
+            runtime.guard_api_base()
+    finally:
+        runtime._API_BASE_CACHE.clear()
+
+
+def test_hostname_with_two_addresses_fails_the_task(client, monkeypatch):
+    runtime._API_BASE_CACHE.clear()
+    monkeypatch.setattr(settings, "bind_host", "localhost-two.invalid")
+    import socket
+
+    real = socket.getaddrinfo
+    monkeypatch.setattr(socket, "getaddrinfo", lambda h, p, *a, **k: (
+        [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("127.0.0.1", p)),
+         (socket.AF_INET6, socket.SOCK_STREAM, 6, "", ("::1", p, 0, 0))]
+        if h == "localhost-two.invalid" else real(h, p, *a, **k)))
+    try:
+        key = env_probe_key()
+        done = _run(client, f"x [env-probe:{key}]")
+        assert done["status"] == "failed" and "co-guard could not be set up" in done["error"]
+        assert read_probe_args(key) is None
+    finally:
+        runtime._API_BASE_CACHE.clear()
+
+
+def test_trusted_code_is_protected(tmp_path):
+    import site
+    import sys
+
+    from app.guard import rules
+
+    pol = runtime.build_policy(task_id="T9", project=None, workspace=tmp_path, cwd=tmp_path,
+                               claude_config_dir=None, mcp_tools=None)
+    prot = pol["protected_paths"]
+    assert sys.executable in prot and str(Path(sys.executable).resolve()) in prot
+    stdlib_json = Path(json.__file__)
+    v = rules.evaluate("Write", {"file_path": str(stdlib_json), "content": "x"}, pol, str(tmp_path))
+    assert v.decision == "deny" and any(h.rule_id == "self-protect" and h.hard for h in v.hits)
+    sp = Path(site.getsitepackages()[0]) / "evil.pth"
+    v = rules.evaluate("Bash", {"command": f"echo 'import os' > {sp}"}, pol, str(tmp_path))
+    assert v.decision == "deny" and any(h.rule_id == "self-protect" and h.hard for h in v.hits)
+    # ordinary project work stays allowed
+    assert rules.evaluate("Bash", {"command": "echo x > out.txt"}, pol, str(tmp_path)).decision == "allow"
+
+
+def test_mcp_names_normalised_like_claude_code(client):
+    from app import mcp_manager
+
+    assert mcp_manager.mcp_server_prefix("github.com") == "github_com"
+    assert mcp_manager.mcp_server_prefix("my server") == "my_server"
+    assert mcp_manager.mcp_server_prefix("ok-name_1") == "ok-name_1"
+    proj = _project(client)
+    rows = []
+    for name in (f"github.com{_uid()}", f"my server{_uid()}"):
+        srv = McpServer(name=name, transport="stdio", scope="project", project=proj["name"], command="echo",
+                        enabled=True)
+        _add_rows(srv)
+        rows.append(srv)
+        _add_rows(McpToolPolicy(server_id=srv.id, tool_name="drop", action="block"),
+                  McpToolPolicy(server_id=srv.id, tool_name="q", action="require_approval"))
+    key = env_probe_key()
+    done = _run(client, f"x [env-probe:{key}]", project_id=proj["id"])
+    assert done["status"] == "completed", done.get("error")
+    args = read_probe_args(key)
+    pol = json.loads(read_probe_file(key, "policy"))
+    for srv in rows:
+        pre = "mcp__" + srv.name.replace(".", "_").replace(" ", "_")
+        assert f"{pre}__drop" in args
+        assert pol["mcp_tools"][f"{pre}__q"] == "require_approval"
+        assert not any(srv.name in k for k in pol["mcp_tools"])

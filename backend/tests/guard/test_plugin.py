@@ -34,16 +34,18 @@ def test_layout_and_hooks_json(tmp_path):
     assert json.loads((root / ".claude-plugin/plugin.json").read_text())["name"] == "co-guard"
     hooks = json.loads((root / "hooks/hooks.json").read_text())["hooks"]
     assert set(hooks) == {"PreToolUse", "PostToolUse", "SessionStart", "Stop", "SessionEnd", "SubagentStart",
-                          "SubagentStop"}
+                          "SubagentStop", "ConfigChange"}
     pre = hooks["PreToolUse"][0]
-    assert pre["matcher"] == "Bash|Edit|Write|NotebookEdit|MultiEdit|mcp__.*"
+    assert pre["matcher"] == ".*"  # Ruling R17: every tool
+    assert hooks["ConfigChange"][0]["matcher"] == "user_settings|project_settings|local_settings"
     h = pre["hooks"][0]
     assert h["type"] == "command" and h["timeout"] == 900 + 30
     # spike format: a string command, "${CLAUDE_PLUGIN_ROOT}" expanded by Claude Code
-    assert h["command"] == f'{shlex.quote(sys.executable)} -I "${{CLAUDE_PLUGIN_ROOT}}/hooks/co_hook.py" PreToolUse'
+    assert h["command"] == (f'{shlex.quote(sys.executable)} -I -S "${{CLAUDE_PLUGIN_ROOT}}/hooks/co_hook.py" '
+                            "PreToolUse")
     for ev, entries in hooks.items():
         cmd = entries[0]["hooks"][0]["command"]
-        assert cmd.endswith(f" {ev}") and " -I " in cmd
+        assert cmd.endswith(f" {ev}") and " -I -S " in cmd
         if ev != "PreToolUse":
             assert entries[0]["hooks"][0]["timeout"] < co_hook.HOOK_TIMEOUT
     assert "matcher" not in hooks["SessionStart"][0]
@@ -68,7 +70,7 @@ def test_idempotent(tmp_path):
     assert root.resolve() == real
     assert {p: os.stat(real / p).st_mtime_ns for p in FILES} == before
     assert os.lstat(root).st_ino == link_ino  # the symlink was not even replaced
-    assert sorted(p.name for p in tmp_path.iterdir()) == sorted(["co-guard", real.name])
+    assert sorted(p.name for p in tmp_path.iterdir()) == sorted(["co-guard", real.name, ".co-guard.lock"])
 
 
 def test_content_change_swaps_atomically(tmp_path, monkeypatch):
@@ -135,3 +137,60 @@ def test_plugin_lib_runs_standalone_isolated(tmp_path):
                        capture_output=True, text=True, cwd=str(tmp_path), timeout=30)
     assert p.returncode == 0, p.stderr
     assert json.loads(p.stdout)["decision"] == "deny"
+
+
+
+def test_extra_files_and_wrong_dir_modes_are_repaired(tmp_path):
+    root = ensure_plugin(tmp_path / "co-guard")
+    real = root.resolve()
+    os.chmod(real, 0o755)
+    os.chmod(real / "hooks", 0o755)
+    (real / "hooks" / "extra.py").write_text("print('planted')")
+    os.chmod(real / "hooks", 0o555)
+    os.chmod(real, 0o555)
+    ensure_plugin(root)
+    assert not (root / "hooks" / "extra.py").exists()
+    os.chmod(root.resolve() / "lib", 0o755)  # a writable subdir alone is enough to rebuild
+    ensure_plugin(root)
+    assert _mode(root.resolve() / "lib") == 0o555
+
+
+def test_planted_symlink_is_repaired(tmp_path):
+    root = ensure_plugin(tmp_path / "co-guard")
+    real = root.resolve()
+    os.chmod(real / "lib", 0o755)
+    (real / "lib" / "rules.py").chmod(0o644)
+    (real / "lib" / "rules.py").unlink()
+    (real / "lib" / "rules.py").symlink_to(tmp_path / "evil.py")
+    (tmp_path / "evil.py").write_text("x")
+    os.chmod(real / "lib", 0o555)
+    ensure_plugin(root)
+    assert not (root.resolve() / "lib" / "rules.py").is_symlink()
+
+
+def test_interpreter_must_be_an_absolute_file(monkeypatch, tmp_path):
+    import pytest
+
+    monkeypatch.setattr(plugin_mod.sys, "executable", "python3")
+    with pytest.raises(RuntimeError):
+        ensure_plugin(tmp_path / "co-guard")
+    monkeypatch.setattr(plugin_mod.sys, "executable", str(tmp_path / "missing"))
+    with pytest.raises(RuntimeError):
+        ensure_plugin(tmp_path / "co-guard")
+
+
+def test_concurrent_calls_are_safe(tmp_path):
+    import threading
+
+    errs = []
+
+    def go():
+        try:
+            ensure_plugin(tmp_path / "co-guard")
+        except Exception as e:  # noqa: BLE001
+            errs.append(e)
+
+    ts = [threading.Thread(target=go) for _ in range(8)]
+    [t.start() for t in ts]
+    [t.join() for t in ts]
+    assert not errs and (tmp_path / "co-guard" / "hooks" / "co_hook.py").is_file()
