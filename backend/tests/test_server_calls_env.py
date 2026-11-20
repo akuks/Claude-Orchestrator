@@ -153,7 +153,8 @@ def test_findings_extraction_uses_owner_env(client, monkeypatch):
     owner = login_as(f"sc-sec-{_uid()}@test.local")
     _grant(client, pid, owner.user_id, "contributor")
     tok = _fake("apikey")
-    owner.put("/me/credentials", json={"claude_token": tok, "claude_kind": "api_key"})
+    r = owner.put("/me/credentials", json={"claude_token": tok, "claude_kind": "api_key"})
+    assert r.status_code == 200, r.status_code
     key = _key()
 
     async def mk(s):
@@ -190,7 +191,8 @@ def test_manual_regenerate_uses_clicker(client, monkeypatch):
     clicker = login_as(f"sc-regen-{_uid()}@test.local")
     _grant(client, pid, clicker.user_id, "maintainer")
     tok = _fake("oauth")
-    clicker.put("/me/credentials", json={"claude_token": tok, "claude_kind": "oauth_token"})
+    r = clicker.put("/me/credentials", json={"claude_token": tok, "claude_kind": "oauth_token"})
+    assert r.status_code == 200, r.status_code
     key = _key()
     _seed_summary(pid, f"did a thing [call-probe:{key}]")
 

@@ -232,6 +232,9 @@ def test_project_env_still_applied(client):
     payload = ev[0].payload
     assert "PROBE_PROJECT_VAR" in payload["applied"] and "PATH_PREPEND" in payload["applied"]
     assert payload["credentials"] == ["claude (org fallback)"]
+    # Dropped project-env keys are named (never their values).
+    assert payload["blocked"] == ["ANTHROPIC_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN"]
     blob = json.dumps(payload)
+    assert "project-env-key" not in blob and "project-env-oauth" not in blob
     assert "from-project" not in blob and "/opt/fake-toolchain" not in blob
     assert FALLBACK not in blob
