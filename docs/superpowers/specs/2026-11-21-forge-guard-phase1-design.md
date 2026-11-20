@@ -30,7 +30,7 @@ turns "require approval" into a real, live human approval in the Approvals UI.
 - Hooks can only *request* approval with `CO_API_TOKEN`; only a human UI session can
   decide. Agent-token allowlist gains exactly: `POST /guard/report`,
   `POST /guard/approvals`, `GET /guard/approvals/{id}` (own task only).
-- Worker adds `--include-hook-events` (spike g) so guard activity reaches the run log.
+- ~~Worker adds `--include-hook-events` (spike g) so guard activity reaches the run log.~~ Dropped in the final fix wave (Ruling R29): the watchdog and the run log use the hook's spool and live `/guard/report`; stray `hook_*` system events are skipped.
 
 ## Goals (Phase 1 scope)
 1. co-guard plugin generation at startup; policy file + env (`CO_TASK_ID`,
