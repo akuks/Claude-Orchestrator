@@ -56,6 +56,8 @@ async def require_project_role(
     s, p: Principal, project_id: str | None, min_role: str = "contributor"
 ) -> str:
     if project_id is None:
+        if not p.user.active:
+            raise HTTPException(404, "Not found")
         if p.is_admin:
             return "maintainer"
         if min_role == "maintainer":
@@ -64,41 +66,50 @@ async def require_project_role(
     role = await project_role(s, p, project_id)
     if role is None:
         raise HTTPException(404, "Not found")
-    if _RANK[role] < _RANK[min_role]:
+    if _RANK.get(role, 0) < _RANK.get(min_role, 0):
         raise HTTPException(403, "Insufficient role")
     return role
 
 
 async def task_visibility_clause(s, p: Principal):
+    if not p.user.active:
+        return false()
     visible = await visible_project_ids(s, p)
     if visible is ALL:
         return true()
-    if not visible:
-        return and_(Task.project_id.is_(None), Task.created_by == p.user.id) if p.user.active else false()
-    root_visible = select(Task.id).where(Task.project_id.in_(visible))
+    me = p.user.id
+    # A root is visible by its own rule: in a visible project, or an ad-hoc root I created.
+    root_ok = or_(
+        Task.project_id.in_(visible),
+        and_(Task.project_id.is_(None), Task.created_by == me),
+    )
+    root_ids = select(Task.id).where(root_ok)
     return or_(
         Task.project_id.in_(visible),
-        and_(
-            Task.project_id.is_(None),
-            or_(Task.created_by == p.user.id, Task.root_id.in_(root_visible)),
-        ),
+        and_(Task.project_id.is_(None), or_(Task.created_by == me, Task.root_id.in_(root_ids))),
     )
 
 
 async def can_see_task(s, p: Principal, task: Task) -> bool:
+    if not p.user.active:
+        return False
     visible = await visible_project_ids(s, p)
     if visible is ALL:
         return True
     if task.project_id is not None:
         return task.project_id in visible
-    if not p.user.active:
-        return False
     if task.created_by == p.user.id:
         return True
-    if not task.root_id or task.root_id == task.id or not visible:
+    if not task.root_id or task.root_id == task.id:
         return False
-    root_project = await s.scalar(select(Task.project_id).where(Task.id == task.root_id))
-    return root_project is not None and root_project in visible
+    root = (
+        await s.execute(select(Task.project_id, Task.created_by).where(Task.id == task.root_id))
+    ).first()
+    if root is None:
+        return False
+    if root.project_id is not None:
+        return root.project_id in visible
+    return root.created_by == p.user.id
 
 
 async def require_task(s, p: Principal, task_id: str) -> Task:
