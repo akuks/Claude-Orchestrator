@@ -21,6 +21,7 @@ from .constants import Priority, Status
 from .database import SessionLocal
 from .events import broker
 from .models import Agent, Artifact, McpCall, Project, SkillPack, Task, TaskEvent, User
+from .redaction import redact, redact_obj, secrets_from_env
 
 _MAX_TOOL_RESULT_CHARS = 2000
 
@@ -101,7 +102,7 @@ def _is_transient(stderr: str) -> bool:
     return any(m in text for m in _TRANSIENT_MARKERS)
 
 
-def _short(value) -> str:
+def _short(value, secrets: list[str] | None = None) -> str:
     if isinstance(value, list):
         parts = []
         for b in value:
@@ -111,6 +112,8 @@ def _short(value) -> str:
                 parts.append(str(b))
         value = " ".join(str(p) for p in parts)
     text = str(value)
+    if secrets is not None:  # before the cut, so no secret prefix survives it
+        text = redact(text, secrets)
     return text[:_MAX_TOOL_RESULT_CHARS]
 
 
@@ -176,6 +179,8 @@ class WorkerManager:
         self._sem = asyncio.Semaphore(settings.worker_concurrency)
         self._running: dict[str, asyncio.subprocess.Process] = {}
         self._cancelled: set[str] = set()
+        # task_id -> the current run's secret values (see _run_job's emit).
+        self._run_secrets: dict[str, list[str]] = {}
         self._dispatcher: asyncio.Task | None = None
 
     # ---- lifecycle -------------------------------------------------------
@@ -244,8 +249,14 @@ class WorkerManager:
         try:
             await self._run_job(task_id)
         except Exception as exc:  # noqa: BLE001 - never let the pool die
-            await self._finish(task_id, Status.FAILED, error=f"worker error: {exc}")
+            await self._finish(
+                task_id,
+                Status.FAILED,
+                error=f"worker error: {exc}",
+                secrets=self._run_secrets.get(task_id),
+            )
         finally:
+            self._run_secrets.pop(task_id, None)
             self._sem.release()
 
     # ---- execution -------------------------------------------------------
@@ -259,9 +270,19 @@ class WorkerManager:
                 )
             ).scalar() or 0
 
+        # Values of this run's sensitive env (filled once the env is built, and
+        # again once CO_API_TOKEN is minted). Every event payload is redacted
+        # against it (plus known token shapes) before it is stored or streamed:
+        # an agent can print its env and run logs are readable by project members.
+        # Kept per task on the worker so _run_guarded's exception path can
+        # redact by exact value too.
+        run_secrets: list[str] = []
+        self._run_secrets[task_id] = run_secrets
+
         async def emit(etype: str, payload: dict) -> None:
             nonlocal seq
             seq += 1
+            payload = redact_obj(payload, run_secrets)
             async with SessionLocal() as s:
                 s.add(TaskEvent(task_id=task_id, seq=seq, type=etype, payload=payload))
                 await s.commit()
@@ -344,6 +365,7 @@ class WorkerManager:
         try:
             async with SessionLocal() as s:
                 sub_env = await build_agent_env(s, task_owner, project_env=project_env)
+            run_secrets[:] = secrets_from_env(sub_env)
         except MissingCredential as e:
             await emit("error", {"message": str(e)})
             await self._finish(task_id, Status.FAILED, error=str(e))
@@ -491,6 +513,7 @@ class WorkerManager:
                     ttl_seconds=min(settings.task_timeout_seconds, 86400),
                 )
                 await s.commit()
+            run_secrets[:] = secrets_from_env(sub_env)
 
         try:
             proc = await asyncio.create_subprocess_exec(
@@ -529,7 +552,7 @@ class WorkerManager:
 
         stderr_task = asyncio.create_task(read_stderr())
 
-        ctx = {"task_id": task_id, "mcp_ids": {}}
+        ctx = {"task_id": task_id, "mcp_ids": {}, "secrets": run_secrets}
         try:
             await asyncio.wait_for(
                 self._consume_stdout(proc, emit, result, ctx),
@@ -606,6 +629,7 @@ class WorkerManager:
             output_tokens=result["output_tokens"],
             error=("".join(stderr_buf).strip() or None) if failed else None,
             artifacts=artifacts,
+            secrets=run_secrets,
         )
 
         # Fold the completed work into the project's living memory (background,
@@ -647,7 +671,8 @@ class WorkerManager:
         try:
             obj = json.loads(line)
         except json.JSONDecodeError:
-            await emit("log", {"text": line[:2000]})
+            # Redact before the cut, so no secret prefix survives it.
+            await emit("log", {"text": redact(line, ctx.get("secrets") or [])[:2000]})
             return
         await self._handle_stream_event(obj, emit, result, ctx)
 
@@ -678,7 +703,10 @@ class WorkerManager:
             if isinstance(content, list):
                 for block in content:
                     if isinstance(block, dict) and block.get("type") == "tool_result":
-                        await emit("tool_result", {"content": _short(block.get("content"))})
+                        await emit(
+                            "tool_result",
+                            {"content": _short(block.get("content"), ctx.get("secrets") or [])},
+                        )
                         if block.get("is_error"):
                             call_id = ctx["mcp_ids"].get(block.get("tool_use_id"))
                             if call_id is not None:
@@ -747,7 +775,19 @@ class WorkerManager:
         output_tokens: int | None = None,
         error: str | None = None,
         artifacts: list[dict] | None = None,
+        secrets: list[str] | None = None,
     ) -> None:
+        # Agent output (and stderr) can carry the run's credentials: redact
+        # before saving (error before its cut). Known token shapes are always
+        # scrubbed, even without the run's secret list.
+        if result_text is not None and not isinstance(result_text, str):
+            # stream-json "result" is normally a string; never store (or skip
+            # redacting) anything else raw.
+            result_text = json.dumps(result_text, default=str)
+        if result_text is not None:
+            result_text = redact(result_text, secrets or [])
+        if error:
+            error = redact(error, secrets or [])
         context_store.cleanup(task_id)  # drop this task's knowledge snapshot
         async with SessionLocal() as s:
             await auth.revoke_task_tokens(s, task_id)

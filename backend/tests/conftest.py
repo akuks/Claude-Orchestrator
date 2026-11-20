@@ -21,6 +21,33 @@ _PROBE_VARS = (
     "CLAUDE_CONFIG_DIR GH_CONFIG_DIR GIT_CONFIG_GLOBAL RANDOM_SERVER_VAR "
     "PATH PROBE_PROJECT_VAR"
 )
+# Test seam: a task prompt carrying [env-echo] makes the mock behave like an
+# agent that prints its env: "NAME=value " for each of _ECHO_VARS that is set
+# goes into its assistant text, a tool_use input, a tool_result, a raw
+# (non-JSON) stdout line, stderr and the final result. [env-echo-fail] does the
+# same, then reports is_error and exits 1 (so stderr becomes task.error).
+_ECHO_VARS = (
+    "CLAUDE_CODE_OAUTH_TOKEN ANTHROPIC_API_KEY GH_TOKEN GITHUB_TOKEN CO_API_TOKEN "
+    "PATH PROBE_PROJECT_VAR PROBE_DB_PASSWORD PROBE_SHORT_TOKEN PROBE_SHAPED"
+)
+_ENV_ECHO = r"""
+  jesc() { local s=$1; s=${s//\\/\\\\}; s=${s//\"/\\\"}; printf '%s' "$s"; }
+  dump=""
+  for n in __ECHO_VARS__; do
+    if [[ -n "${!n+x}" ]]; then dump+="$n=${!n} "; fi
+  done
+  j=$(jesc "$dump")
+  printf '{"type":"system","subtype":"init","session_id":"test-session"}\n'
+  printf '{"type":"assistant","message":{"model":"claude-test","content":[{"type":"text","text":"env: %s"},{"type":"tool_use","id":"tu1","name":"Bash","input":{"command":"echo %s"}}]}}\n' "$j" "$j"
+  printf '{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"tu1","content":"%s"}]}}\n' "$j"
+  printf 'raw stdout %s\n' "$dump"
+  printf 'stderr %s\n' "$dump" >&2
+  if [[ "$prompt" == *"[env-echo-fail]"* ]]; then
+    printf '{"type":"result","subtype":"error","result":"env: %s","num_turns":1,"total_cost_usd":0.01,"duration_ms":100,"is_error":true,"usage":{"input_tokens":1,"output_tokens":1}}\n' "$j"
+    exit 1
+  fi
+  printf '{"type":"result","subtype":"success","result":"env: %s","num_turns":1,"total_cost_usd":0.01,"duration_ms":100,"is_error":false,"usage":{"input_tokens":1,"output_tokens":1}}\n' "$j"
+  exit 0""".replace("__ECHO_VARS__", _ECHO_VARS)
 _MOCK.write_text(
     """#!/usr/bin/env bash
 args="$*"
@@ -58,16 +85,29 @@ if [[ "$args" != *"stream-json"* && "$prompt" =~ \\[call-probe:([A-Za-z0-9_-]+)\
   mv "$f.names.tmp.$$" "$f.names"
   mv "$f.vars.tmp.$$" "$f.vars"
 fi
+if [[ "$args" == *"stream-json"* && "$prompt" == *"[env-echo"* ]]; then
+  __ENV_ECHO__
+fi
 if [[ "$args" == *"stream-json"* ]]; then
   printf '{"type":"system","subtype":"init","session_id":"test-session"}\\n'
   printf '{"type":"assistant","message":{"model":"claude-test","content":[{"type":"text","text":"working"}]}}\\n'
   printf '{"type":"result","subtype":"success","result":"done","num_turns":1,"total_cost_usd":0.01,"duration_ms":100,"is_error":false,"usage":{"input_tokens":100,"output_tokens":50}}\\n'
 elif [[ "$args" == *"json-schema"* ]]; then
   printf '{"findings":[]}\\n'
+elif [[ "$prompt" == *"[env-echo"* ]]; then
+  # Memory calls quoting an [env-echo] task also echo the env (summary/memory).
+  dump=""
+  for n in __ECHO_VARS__; do
+    if [[ -n "${!n+x}" ]]; then dump+="$n=${!n} "; fi
+  done
+  printf 'summary %s\\n' "$dump"
 else
   printf 'summary\\n'
 fi
-""".replace("__PROBES__", str(_PROBES)).replace("__PROBE_VARS__", _PROBE_VARS)
+""".replace("__PROBES__", str(_PROBES))
+    .replace("__PROBE_VARS__", _PROBE_VARS)
+    .replace("__ENV_ECHO__", _ENV_ECHO)
+    .replace("__ECHO_VARS__", _ECHO_VARS)
 )
 _MOCK.chmod(0o755)
 
