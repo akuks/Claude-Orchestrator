@@ -94,12 +94,20 @@ if [[ "$args" == *"stream-json"* ]]; then
   printf '{"type":"result","subtype":"success","result":"done","num_turns":1,"total_cost_usd":0.01,"duration_ms":100,"is_error":false,"usage":{"input_tokens":100,"output_tokens":50}}\\n'
 elif [[ "$args" == *"json-schema"* ]]; then
   printf '{"findings":[]}\\n'
+elif [[ "$prompt" == *"[env-echo"* ]]; then
+  # Memory calls quoting an [env-echo] task also echo the env (summary/memory).
+  dump=""
+  for n in __ECHO_VARS__; do
+    if [[ -n "${!n+x}" ]]; then dump+="$n=${!n} "; fi
+  done
+  printf 'summary %s\\n' "$dump"
 else
   printf 'summary\\n'
 fi
 """.replace("__PROBES__", str(_PROBES))
     .replace("__PROBE_VARS__", _PROBE_VARS)
     .replace("__ENV_ECHO__", _ENV_ECHO)
+    .replace("__ECHO_VARS__", _ECHO_VARS)
 )
 _MOCK.chmod(0o755)
 
