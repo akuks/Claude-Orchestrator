@@ -55,7 +55,8 @@ export function selectNeedsYou({ approvals, actionApprovals, failedTasks, schedu
       title: actionTitle(a),
       detail: [a.task_title, (a.rule_ids || []).map(ruleName).join(', ')].filter(Boolean).join(' · ') || null,
       at: a.created_at,
-      canDecide: Boolean(a.can_decide),
+      // the whole request, for the row's tooltip (Home never approves it: R27)
+      fullTitle: a.tool ? `${a.tool}: ${a.summary || ''}` : a.summary || '',
     })
   for (const t of failedTasks || []) {
     if (!meId || t.created_by !== meId) continue

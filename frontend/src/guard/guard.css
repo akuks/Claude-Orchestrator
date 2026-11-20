@@ -85,6 +85,9 @@
   -webkit-mask-image: linear-gradient(180deg, black 70%, transparent);
   mask-image: linear-gradient(180deg, black 70%, transparent);
 }
+.co-guard-truncated {
+  margin-bottom: 8px;
+}
 .co-guard-more {
   padding-left: 0 !important;
 }

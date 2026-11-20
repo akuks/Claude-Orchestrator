@@ -64,7 +64,7 @@ function GuardLine({ line }) {
       {GUARD_ICON[line.kind] || GUARD_ICON.info}
       <span className="co-guard-line-text">
         {line.text}
-        {line.kind === 'waiting' && line.requestId && (
+        {line.kind === 'waiting' && line.canDecide && line.requestId && (
           <>
             {' '}
             <a href={`#/approvals/${encodeURIComponent(line.requestId)}`}>open the request</a>
@@ -328,9 +328,13 @@ export default function TaskDetail({ taskId, onClose, onChanged, onOpenTask, onO
         .catch(() => {})
     load()
     const id = running ? setInterval(() => document.visibilityState !== 'hidden' && load(), GUARD_POLL_MS) : null
+    // back on the tab: catch up at once
+    const onVisible = () => document.visibilityState !== 'hidden' && load()
+    document.addEventListener('visibilitychange', onVisible)
     return () => {
       live = false
       if (id) clearInterval(id)
+      document.removeEventListener('visibilitychange', onVisible)
     }
   }, [taskId, running, guardEvents])
   const needNames = requests.some((a) => a.decided_by)

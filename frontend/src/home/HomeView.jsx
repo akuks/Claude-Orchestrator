@@ -1,6 +1,6 @@
 import { useMemo, useState } from 'react'
 import { Alert, Button, Skeleton, Tag, Tooltip, message } from 'antd'
-import { CheckOutlined, KeyOutlined, PlusOutlined } from '@ant-design/icons'
+import { CheckOutlined, EyeOutlined, KeyOutlined, PlusOutlined } from '@ant-design/icons'
 import dayjs from 'dayjs'
 import relativeTime from 'dayjs/plugin/relativeTime'
 import { api } from '../api'
@@ -70,21 +70,18 @@ export default function HomeView({ user, navigate, onOpenCredentials, onApproval
   const [approving, setApproving] = useState(null)
   const { comets, overflow } = useMemo(() => layoutComets(live), [live])
 
+  // Task approvals only: action requests are reviewed on their full card
+  // (Ruling R27), never approved from a one-line row.
   const approve = async (item) => {
     setApproving(item.id)
     try {
-      if (item.kind === 'action') {
-        await api.approveAction(item.id)
-        message.success('Approved — the call runs once')
-      } else {
-        await api.approveTask(item.id)
-        message.success(`Approved “${item.title}”`)
-      }
+      await api.approveTask(item.id)
+      message.success(`Approved “${item.title}”`)
       onApprovalsChanged?.()
       await reload()
     } catch (e) {
-      // 409 "expired": the action's request closed before the decision
-      message.error(e.status === 409 && e.message === 'expired' ? 'This request expired' : e.message)
+      message.error(e.message)
+      // 409 (already decided / expired): show the real state
       if (e.status === 409) reload()
     } finally {
       setApproving(null)
@@ -138,7 +135,7 @@ export default function HomeView({ user, navigate, onOpenCredentials, onApproval
                         {KIND_TAG[item.kind].text}
                       </Tag>
                       <div className="co-home-row-text">
-                        <div className="co-home-row-title" title={item.title}>
+                        <div className="co-home-row-title" title={item.fullTitle || item.title}>
                           {item.title}
                         </div>
                         {(item.detail || item.at) && (
@@ -149,7 +146,7 @@ export default function HomeView({ user, navigate, onOpenCredentials, onApproval
                       </div>
                     </div>
                     <div className="co-home-row-actions">
-                      {(item.kind === 'approval' || (item.kind === 'action' && item.canDecide)) && (
+                      {item.kind === 'approval' && (
                         <Button
                           size="small"
                           type="primary"
@@ -164,6 +161,10 @@ export default function HomeView({ user, navigate, onOpenCredentials, onApproval
                       {item.kind === 'credential' ? (
                         <Button size="small" type="primary" icon={<KeyOutlined />} onClick={() => openItem(item)}>
                           My credentials
+                        </Button>
+                      ) : item.kind === 'action' ? (
+                        <Button size="small" type="primary" icon={<EyeOutlined />} onClick={() => openItem(item)}>
+                          Review
                         </Button>
                       ) : (
                         <Button size="small" onClick={() => openItem(item)}>

@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { Button, Empty, Input, Space, Tag, Tooltip, Typography, message } from 'antd'
+import { Alert, Button, Empty, Input, Popconfirm, Space, Tag, Tooltip, Typography, message } from 'antd'
 import {
   CheckOutlined,
   ClockCircleOutlined,
@@ -23,7 +23,12 @@ dayjs.extend(relativeTime)
 // request field is rendered as plain text — never HTML.
 
 export const POLL_MS = 3000
-const LONG_SUMMARY = 300 // chars (or 8 lines) before the block is clamped
+// Up to this many lines a command is shown in full; longer ones are clamped
+// and Approve asks for a confirmation until the person expands them.
+export const MAX_FULL_LINES = 20
+// The server's cut marker (routers/guard.py _cut): the stored text is not the whole command.
+const TRUNCATED = /… \(truncated, \d+ chars\)/
+export const TRUNCATED_WARNING = "Command too long to show in full — you can't fully review it"
 
 const isHidden = () => typeof document !== 'undefined' && document.visibilityState === 'hidden'
 
@@ -42,16 +47,14 @@ function conflictState(e) {
   return m ? m[1] : null
 }
 
-function Summary({ id, text }) {
-  const [open, setOpen] = useState(false)
-  const long = text.length > LONG_SUMMARY || text.split('\n').length > 8
+function Summary({ id, text, clamped, open, onToggle }) {
   return (
     <div>
-      <pre className={`co-guard-cmd${long && !open ? ' co-guard-cmd-clamped' : ''}`} data-testid={`action-summary-${id}`}>
+      <pre className={`co-guard-cmd${clamped && !open ? ' co-guard-cmd-clamped' : ''}`} data-testid={`action-summary-${id}`}>
         {text}
       </pre>
-      {long && (
-        <Button type="link" size="small" className="co-guard-more" onClick={() => setOpen((o) => !o)}>
+      {clamped && (
+        <Button type="link" size="small" className="co-guard-more" onClick={onToggle}>
           {open ? 'Show less' : 'Show all'}
         </Button>
       )}
@@ -62,7 +65,17 @@ function Summary({ id, text }) {
 function ActionCard({ card, state, now, busy, names, focused, onApprove, onReject }) {
   const [rejecting, setRejecting] = useState(false)
   const [reason, setReason] = useState('')
+  const [expanded, setExpanded] = useState(false)
   const id = card.id
+  const text = card.summary || ''
+  const truncated = TRUNCATED.test(text)
+  const clamped = text.split('\n').length > MAX_FULL_LINES
+  // "See what you approve": a cut command, or one not expanded, needs a second yes.
+  const confirmText = truncated
+    ? `${TRUNCATED_WARNING}. Approve anyway?`
+    : clamped && !expanded
+      ? "You haven't seen the whole command (it is collapsed). Approve anyway?"
+      : null
   const left = closesIn(card, now)
   const pending = state === 'pending'
   const requester = names.get(card.requested_by) || (card.requested_by ? 'a project member' : 'unknown')
@@ -109,7 +122,17 @@ function ActionCard({ card, state, now, busy, names, focused, onApprove, onRejec
         ))}
       </div>
 
-      <Summary id={id} text={card.summary || ''} />
+      {truncated && (
+        <Alert
+          className="co-guard-truncated"
+          data-testid={`action-truncated-${id}`}
+          type="warning"
+          showIcon
+          message={TRUNCATED_WARNING}
+          description="The stored request was cut; what runs may differ from what you can read here."
+        />
+      )}
+      <Summary id={id} text={text} clamped={clamped} open={expanded} onToggle={() => setExpanded((o) => !o)} />
 
       {card.reason && <div className="co-guard-reason">{card.reason}</div>}
       <dl className="co-guard-meta">
@@ -149,9 +172,23 @@ function ActionCard({ card, state, now, busy, names, focused, onApprove, onRejec
             </Space>
           ) : (
             <Space>
-              <Button type="primary" icon={<CheckOutlined />} loading={busy} disabled={busy} onClick={() => onApprove(card)}>
-                Approve
-              </Button>
+              <Popconfirm
+                disabled={!confirmText || busy}
+                title={confirmText}
+                okText="Approve anyway"
+                okButtonProps={{ danger: Boolean(truncated) }}
+                onConfirm={() => onApprove(card)}
+              >
+                <Button
+                  type="primary"
+                  icon={<CheckOutlined />}
+                  loading={busy}
+                  disabled={busy}
+                  onClick={confirmText ? undefined : () => onApprove(card)}
+                >
+                  Approve
+                </Button>
+              </Popconfirm>
               <Button danger icon={<CloseOutlined />} disabled={busy} onClick={() => setRejecting(true)}>
                 Reject
               </Button>
@@ -253,10 +290,17 @@ export default function ActionApprovals({ onChanged, focusId, pollMs = POLL_MS }
       setOutcomes((o) => ({ ...o, [card.id]: { card: { ...card, ...(out || {}) }, state } }))
       message.success(state === 'approved' ? 'Approved — the call runs once' : 'Rejected')
     } catch (e) {
-      const st = conflictState(e)
-      if (st) {
-        setOutcomes((o) => ({ ...o, [card.id]: { card, state: st } }))
-        message.warning(st === 'expired' ? 'This request expired before the decision' : `Already ${st}`)
+      if (e?.status === 409) {
+        // Any conflict: reload the request and show its real state.
+        let fresh = null
+        try {
+          fresh = await api.getActionApproval(card.id)
+        } catch (_) {}
+        const st = fresh?.status && fresh.status !== 'pending' ? fresh.status : conflictState(e)
+        if (st) {
+          setOutcomes((o) => ({ ...o, [card.id]: { card: { ...card, ...(fresh || {}) }, state: st } }))
+          message.warning(st === 'expired' ? 'This request expired before the decision' : `Already ${st}`)
+        } else message.error(e.message)
       } else message.error(e.message)
     } finally {
       if (alive.current) setBusy(null)

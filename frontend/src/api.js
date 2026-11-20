@@ -202,6 +202,7 @@ export const api = {
   listActionApprovals: () => req('GET', '/guard/approvals?status=pending'),
   // Every request of one task (run log enrichment).
   taskActionApprovals: (taskId) => req('GET', `/guard/approvals${qs({ task_id: taskId, status: 'all' })}`),
+  getActionApproval: (id) => req('GET', `/guard/approvals/${encodeURIComponent(id)}`),
   approveAction: (id) => req('POST', `/guard/approvals/${encodeURIComponent(id)}/approve`),
   rejectAction: (id, reason) => req('POST', `/guard/approvals/${encodeURIComponent(id)}/reject`, { reason: reason || null }),
 

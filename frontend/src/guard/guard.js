@@ -135,7 +135,10 @@ export function waitingLine(card) {
   return {
     kind: 'waiting',
     requestId: card.id,
-    text: `${actionTitle(card)}${rulesText(card.rule_ids)} — waiting for approval`,
+    canDecide: Boolean(card.can_decide),
+    text: `${actionTitle(card)}${rulesText(card.rule_ids)} — ${
+      card.can_decide ? 'waiting for approval' : 'waiting for a maintainer to decide'
+    }`,
   }
 }
 
