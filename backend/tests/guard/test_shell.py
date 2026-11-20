@@ -535,3 +535,204 @@ def test_find_exec_chain_is_capped():
     res = parse("find . -exec " * 600 + "rm -rf ~")
     assert res.too_complex
     assert time.monotonic() - t < 1.0
+
+
+# ===========================================================================
+# Fix round 1 (task review): regression tests with the reviewer's exact inputs
+# ===========================================================================
+from app.guard.shell import all_words  # noqa: E402
+
+
+def seen_or_uncertain(cmd):
+    res = parse(cmd)
+    return runs(cmd, "rm") or res.uncertain
+
+
+# 1. Variable resolution must be sound: never a wrong value with confidence.
+UNSOUND_VARS = [
+    "x=rm; (x=ls); $x -rf ~",
+    "x=rm; f() { x=ls; }; $x -rf ~",
+    "x=rm; export x=ls & $x -rf ~",
+    "x=rm; x=ls | true; $x -rf ~",
+    "x=rm; f(){ local x=ls; }; f; $x -rf ~",
+    "x=ls; if true; then x=rm; fi; $x -rf ~",
+    "x=ls; while x=rm; do break; done; $x -rf ~",
+    "x=ls; for x in rm; do $x -rf ~; done",
+    "x=ls; printf -v x rm; $x -rf ~",
+    "x=ls; : ${x:=rm}; $x -rf ~",
+    # more from the reviewer's harness
+    "x=ls; true && x=rm; $x -rf ~",
+    "x=ls; false || x=rm; $x -rf ~",
+    "x=ls; [ -e f ] && x=rm; $x -rf ~",
+    "x=ls; case a in a) x=rm;; esac; $x -rf ~",
+    "x=ls; { x=rm; }; $x -rf ~",
+    "x=ls; echo $(x=rm); $x -rf ~",
+    "x=ls; read x; $x -rf ~",
+    "x=ls; getopts a x; $x -rf ~",
+    "x=ls; mapfile x <<< rm; $x -rf ~",
+    "x=ls; declare -n y=x; y=rm; $x -rf ~",
+    "x=ls; eval x=rm; $x -rf ~",
+    "x=ls; source f; $x -rf ~",
+    "x=ls; x=rm & $x -rf ~",
+    "x=ls; echo | x=rm; $x -rf ~",
+    "f(){ x=rm; }; x=ls; f; $x -rf ~",
+    "if true; then x=rm; else x=ls; fi; $x -rf ~",
+]
+
+
+@pytest.mark.parametrize("cmd", UNSOUND_VARS)
+def test_variable_resolution_is_sound(cmd):
+    assert seen_or_uncertain(cmd), [(s.argv, s.reasons) for s in walk(parse(cmd))]
+    # and never resolved to `ls` with confidence
+    last = [s for s in parse(cmd) if s.argv][-1]
+    assert not (last.argv[:1] == ["ls"] and not last.uncertain)
+
+
+def test_sound_resolution_still_resolves_straight_line():
+    assert parse("x=ls; cd /; $x -rf *")[-1].argv == ["ls", "-rf", "*"]
+    assert not parse("x=ls; cd /; $x -rf *").uncertain
+    assert parse("x=rm; y=$x; $y -rf ~")[-1].argv == ["rm", "-rf", "~"]
+
+
+# 2. A brace group after a keyword or wrapper.
+@pytest.mark.parametrize("cmd", [
+    "time { rm -rf ~; }",
+    "if { rm -rf ~; }; then :; fi",
+    "while { rm -rf ~; }; do :; done",
+    "! { rm -rf ~; }",
+    "true && { rm -rf ~; }",
+    "echo | { rm -rf ~; }",
+])
+def test_brace_group_after_keyword(cmd):
+    assert runs(cmd, "rm", "-rf", "~"), effective(cmd)
+
+
+# 3. Script input that is not a literal string.
+@pytest.mark.parametrize("cmd", [
+    "source <(echo rm -rf ~)",
+    ". <(echo 'rm -rf ~')",
+    "bash <(echo 'rm -rf ~')",
+    "bash < <(echo 'rm -rf ~')",
+    "bash /dev/stdin <<< 'rm -rf ~'",
+    "bash /dev/fd/0 <<< 'rm -rf ~'",
+    "sh /proc/self/fd/0 <<< 'rm -rf ~'",
+    "source /dev/fd/0 <<< 'rm -rf ~'",
+    "bash 0<<< 'rm -rf ~'",
+    "cat <<< 'rm -rf ~' | bash",
+])
+def test_script_input_is_visible(cmd):
+    assert runs(cmd, "rm", "-rf", "~"), effective(cmd)
+
+
+@pytest.mark.parametrize("cmd", [
+    "exec 3<<<'rm -rf ~'; bash <&3",
+    "bash < script.sh",
+    "printf '%s\\n' 'rm -rf ~' | bash",
+    "curl x | bash",
+    "echo 'rm -rf ~' | tee | bash",
+    "bash /dev/fd/3",
+    "source <(curl x)",
+    "bash <(cat x)",
+    "tee >(bash) <<< 'rm -rf ~'",
+    "x=$(cat f); bash <<< \"$x\"",
+])
+def test_invisible_script_input_is_uncertain(cmd):
+    assert parse(cmd).uncertain, [(s.argv, s.redirects, s.reasons) for s in walk(parse(cmd))]
+
+
+@pytest.mark.parametrize("cmd", [
+    "bash script.sh",
+    "source venv/bin/activate",
+    ". ~/.nvm/nvm.sh && nvm use",
+    "bash -c 'echo hi'",
+    "cat <<EOF | bash\necho hi\nEOF",
+])
+def test_ordinary_script_runs_are_certain(cmd):
+    assert not parse(cmd).uncertain, [(s.argv, s.reasons) for s in walk(parse(cmd))]
+
+
+# 4. `--` before eval / trap text.
+@pytest.mark.parametrize("cmd", ["eval -- 'rm -rf ~'", "trap -- 'rm -rf ~' EXIT"])
+def test_double_dash_eval_trap(cmd):
+    assert runs(cmd, "rm", "-rf", "~"), effective(cmd)
+
+
+# 5/6/7. Wrappers, flag clusters, more shells.
+@pytest.mark.parametrize("cmd", [
+    "chroot / rm -rf ~",
+    "unshare -r rm -rf ~",
+    "nsenter -t 1 rm -rf ~",
+    "flock /tmp/l rm -rf ~",
+    "flock /tmp/l -c 'rm -rf ~'",
+    "strace rm -rf ~",
+    "strace -o log -f rm -rf ~",
+    "pkexec rm -rf ~",
+    "unbuffer rm -rf ~",
+    "caffeinate rm -rf ~",
+    "arch -x86_64 rm -rf ~",
+    "runuser -u x -- rm -rf ~",
+    "runuser -l x -c 'rm -rf ~'",
+    "sg grp -c 'rm -rf ~'",
+    "script -c 'rm -rf ~'",
+    "script -qc 'rm -rf ~' /dev/null",
+    "coproc rm -rf ~",
+    "coproc X { rm -rf ~; }",
+    "timeout 5s -- rm -rf ~",
+    "sudo -iu root rm -rf ~",
+    "env -iS 'rm -rf ~'",
+    "su -c'rm -rf ~'",
+    "su --command='rm -rf ~'",
+    "sudo -s -- 'rm -rf ~'",
+    "xargs -0I{} rm -rf {}",
+    "nice -n5 -- rm -rf ~",
+    "tcsh -c 'rm -rf ~'",
+    "csh -c 'rm -rf ~'",
+    "bash5 -c 'rm -rf ~'",
+])
+def test_more_wrappers(cmd):
+    assert runs(cmd, "rm", "-rf"), effective(cmd)
+
+
+def test_parallel_wrapper():
+    assert runs("echo ~ | parallel rm -rf", "rm", "-rf")
+    assert parse("echo ~ | parallel rm -rf")[1].wrappers == ["parallel"]
+
+
+def test_all_words_reaches_every_depth():
+    words = all_words(parse("echo $(bash -c 'git reset --hard') | cat"))
+    assert {"echo", "bash", "git", "reset", "--hard", "cat"} <= set(words)
+
+
+# 8. Aliases.
+def test_alias_value_is_parsed_and_use_is_uncertain():
+    cmd = "alias x='rm -rf ~'\nx"
+    assert runs(cmd, "rm", "-rf", "~")
+    assert parse(cmd)[-1].uncertain
+
+
+# 9. Git aliases.
+@pytest.mark.parametrize("cmd,argv", [
+    ("git -c alias.x='!rm -rf ~' x", ("rm", "-rf", "~")),
+    ("git config alias.x '!rm -rf ~'; git x", ("rm", "-rf", "~")),
+    ("git config --global alias.x '!rm -rf ~'", ("rm", "-rf", "~")),
+    ("git -c alias.p='push --force origin main' p", ("git", "push", "--force", "origin", "main")),
+])
+def test_git_aliases(cmd, argv):
+    assert runs(cmd, *argv), effective(cmd)
+
+
+# 10. Minor: mark uncertain.
+@pytest.mark.parametrize("cmd", [
+    "echo ${x@P}",
+    "x='$(rm -rf ~)'; echo ${x@P}",
+    "x='a[$(rm -rf ~)]'; echo $((x))",
+    "printf -v 'a[$(rm -rf ~)]' x",
+    "read 'a[$(rm -rf ~)]' <<< x",
+    "test -v 'a[$(rm -rf ~)]'",
+    "PS4='$(rm -rf ~)' bash -xc :",
+    "PROMPT_COMMAND='rm -rf ~' bash -i",
+    "BASH_ENV=<(echo rm -rf ~) bash -c :",
+    "ENV=x sh -c :",
+])
+def test_minor_injections_uncertain(cmd):
+    assert parse(cmd).uncertain, [(s.argv, s.reasons) for s in walk(parse(cmd))]
