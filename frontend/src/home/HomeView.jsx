@@ -91,7 +91,11 @@ export default function HomeView({ user, navigate, onOpenCredentials, onApproval
   const openComet = (c) => navigate(c.kind === 'run' ? { page: 'runs', id: c.id } : { page: 'tasks', id: c.id })
 
   const summary = [
-    needsYou.length ? `${plural(needsYou.length, 'thing needs', 'things need')} you` : 'Nothing needs you',
+    needsYou.length
+      ? `${plural(needsYou.length, 'thing needs', 'things need')} you`
+      : errors.needsYou
+        ? null
+        : 'Nothing needs you',
     stats.liveCount != null ? `${stats.liveCount} live` : null,
     stats.costToday != null ? `$${stats.costToday.toFixed(2)} today` : null,
   ].filter(Boolean)
@@ -114,7 +118,8 @@ export default function HomeView({ user, navigate, onOpenCredentials, onApproval
             {loading ? (
               <Skeleton active paragraph={{ rows: 3 }} title={false} />
             ) : needsYou.length === 0 ? (
-              <Empty title="You're all caught up" text="Approvals, failed tasks and paused schedules will show up here." />
+              // An all-clear only when every source behind it loaded.
+              errors.needsYou ? null : <Empty title="You're all caught up" text="Approvals, failed tasks and paused schedules will show up here." />
             ) : (
               <ul className="co-home-rows">
                 {needsYou.map((item) => (
@@ -168,7 +173,7 @@ export default function HomeView({ user, navigate, onOpenCredentials, onApproval
             {loading ? (
               <Skeleton active paragraph={{ rows: 3 }} title={false} />
             ) : recent.length === 0 ? (
-              <Empty title="Nothing finished yet" text="Your last finished tasks will appear here." />
+              errors.recent ? null : <Empty title="Nothing finished yet" text="Your last finished tasks will appear here." />
             ) : (
               <ul className="co-home-rows">
                 {recent.map((t) => {
@@ -206,7 +211,7 @@ export default function HomeView({ user, navigate, onOpenCredentials, onApproval
           {loading ? (
             <Skeleton active paragraph={{ rows: 7 }} title={false} />
           ) : comets.length === 0 ? (
-            <Empty title="No workflows running right now" text="Start a workflow and watch it move through its stages here.">
+            errors.live ? null : <Empty title="No workflows running right now" text="Start a workflow and watch it move through its stages here.">
               <Button icon={<PlusOutlined />} onClick={() => navigate({ page: 'automation' })}>
                 Start a workflow
               </Button>

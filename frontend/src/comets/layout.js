@@ -55,9 +55,29 @@ function starsFor(item) {
   return stages.map((s) => ({ name: s.name, state: s.state, task_count: s.task_count ?? 0 }))
 }
 
+// Over the cap, items needing attention win the visible slots: any failed
+// stage, then waiting for approval, then in progress, then the rest.
+function attention(item) {
+  const states = new Set((item.stages || []).map((s) => s.state))
+  if (states.has('failed')) return 0
+  if (states.has('waiting_approval')) return 1
+  if (states.has('current') || !states.size) return 2
+  return 3
+}
+
+function pick(list, max) {
+  if (list.length <= max) return list
+  // Array.prototype.sort is stable, so input order holds within a group.
+  return list
+    .map((item, i) => ({ item, i, rank: attention(item) }))
+    .sort((a, b) => a.rank - b.rank || a.i - b.i)
+    .slice(0, max)
+    .map((x) => x.item)
+}
+
 export function layoutComets(items, { max = MAX_COMETS } = {}) {
   const list = Array.isArray(items) ? items : []
-  const shown = list.slice(0, Math.max(0, max))
+  const shown = pick(list, Math.max(0, max))
   const n = shown.length
   // Fewer comets get a steeper climb; many keep to their lanes so they don't cross.
   const spread = n ? Math.min(1, 3 / n) : 1

@@ -87,3 +87,29 @@ describe('headIndex', () => {
     expect(headIndexOf(stars('next', 'next'))).toBe(0)
   })
 })
+
+describe('layoutComets priority when over the cap', () => {
+  const plain = (i) => item(i, ['done', 'next'])
+  it('keeps failed, then waiting_approval, then current items first; stable within a group', () => {
+    const items = [
+      ...Array.from({ length: 10 }, (_, i) => plain(i)),
+      item('cur-a', ['done', 'current']),
+      item('wait-a', ['done', 'waiting_approval']),
+      ...Array.from({ length: 6 }, (_, i) => plain(10 + i)),
+      item('fail-a', ['failed', 'next']),
+      item('cur-b', ['current']),
+      item('wait-b', ['waiting_approval']),
+      item('fail-b', ['done', 'failed']),
+    ]
+    const { comets, overflow } = layoutComets(items, { max: 7 })
+    expect(overflow).toBe(items.length - 7)
+    const ids = comets.map((c) => c.id)
+    expect(new Set(ids)).toEqual(new Set(['run-fail-a', 'run-fail-b', 'run-wait-a', 'run-wait-b', 'run-cur-a', 'run-cur-b', 'run-0']))
+    // shown in priority order, input order within a group
+    expect(ids).toEqual(['run-fail-a', 'run-fail-b', 'run-wait-a', 'run-wait-b', 'run-cur-a', 'run-cur-b', 'run-0'])
+  })
+  it('does not reorder when everything fits', () => {
+    const items = [plain(1), item('f', ['failed']), plain(2)]
+    expect(layoutComets(items).comets.map((c) => c.id)).toEqual(['run-1', 'run-f', 'run-2'])
+  })
+})
