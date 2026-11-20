@@ -41,6 +41,21 @@ if [[ "$args" == *"stream-json"* && "$prompt" =~ \\[env-probe:([A-Za-z0-9_-]+)\\
   env | cut -d= -f1 >"$f.names"
   mv "$f.vars.tmp" "$f.vars"
 fi
+# Server-side one-shot calls (memory: --print; findings: --print --json-schema)
+# whose stdin carries [call-probe:KEY] record to PROBES/KEY-print or KEY-schema.
+if [[ "$args" != *"stream-json"* && "$prompt" =~ \\[call-probe:([A-Za-z0-9_-]+)\\] ]]; then
+  kind=print
+  if [[ "$args" == *"json-schema"* ]]; then kind=schema; fi
+  f="__PROBES__/${BASH_REMATCH[1]}-$kind"
+  {
+    for n in __PROBE_VARS__; do
+      if [[ -n "${!n+x}" ]]; then printf '%s=%s\\n' "$n" "${!n}"; fi
+    done
+  } >"$f.vars.tmp.$$"
+  env | cut -d= -f1 >"$f.names.tmp.$$"
+  mv "$f.names.tmp.$$" "$f.names"
+  mv "$f.vars.tmp.$$" "$f.vars"
+fi
 if [[ "$args" == *"stream-json"* ]]; then
   printf '{"type":"system","subtype":"init","session_id":"test-session"}\\n'
   printf '{"type":"assistant","message":{"model":"claude-test","content":[{"type":"text","text":"working"}]}}\\n'
