@@ -1491,3 +1491,101 @@ def test_minor_more_interpreters(env, cmd):
                                  "curl x | osascript notify.scpt"])
 def test_minor_more_interpreters_negative(env, cmd):
     assert "pipe-to-shell" not in ids(bash(env, cmd))
+
+
+# ===========================================================================
+# Task 2 review, fix round 3
+# ===========================================================================
+# R1. Interpreter code on stdin, piped in, or written then run ------------------------
+R1_HARD = [
+    "python3 - <<'E'\nopen('{T}/policy.json','w')\nE",
+    "python3 <<'E'\nimport os;open(os.environ['CO_POLICY_FILE'],'w')\nE",
+    "node <<'E'\nrequire('fs').writeFileSync(process.env.CO_POLICY_FILE,'{{}}')\nE",
+    "echo \"import os;open(os.environ['CO_POLICY_FILE'],'w')\" | python3",
+    "cat > /tmp/a.py <<'E'\nimport os;open(os.environ['CO_POLICY_FILE'],'w')\nE\npython3 /tmp/a.py",
+    "python3 <<< \"open('{T}/policy.json','w')\"",
+    "perl - <<'E'\nopen(F, '>', $ENV{{CO_POLICY_FILE}});\nE",
+]
+
+
+@pytest.mark.parametrize("cmd", R1_HARD)
+def test_r1_interpreter_stdin_code(env, cmd):
+    assert deny_hard(bash(env, cmd), "self-protect")
+
+
+@pytest.mark.parametrize("cmd", [
+    "python3 - <<'E'\nopen('.claude/settings.json','w')\nE",
+    "echo \"open('.mcp.json','w').write('{{}}')\" | python3",
+    "python3 -c \"open('.claude/settings.json','w')\"",
+    "printf \"require('fs').writeFileSync('.claude/hooks/x.sh','')\" > a.js; node a.js",
+])
+def test_r1_interpreter_agent_config(env, cmd):
+    assert "agent-config" in ids(bash(env, cmd))
+
+
+@pytest.mark.parametrize("cmd", [
+    "python3 - <<'E'\nprint('hello')\nE",
+    "python3 - <<'EOF'\nimport json\nd = json.load(open('data.json'))\nprint(len(d['items']))\nEOF",
+    "echo 'print(1+1)' | python3",
+    "node <<'E'\nconsole.log(JSON.parse('{{}}'))\nE",
+    "cat > t.py <<'E'\nprint('ok')\nE\npython3 t.py",
+    "python3 -c \"import json; print(json.load(open('.claude/settings.json')))\"",
+])
+def test_r1_negative(env, cmd):
+    assert bash(env, cmd).decision == "allow"
+
+
+def test_r1_code_execution_on_stdin_is_uncertain(env):
+    assert "uncertain-command" in ids(bash(env, "python3 - <<'E'\nimport os\nos.system('make')\nE"))
+
+
+# R2. Environment dumps and ls/find producers feeding writers -------------------------
+R2_CMDS = [
+    "cp evil $(env | grep POLICY_FILE | cut -d= -f2)",
+    "cp evil \"$(export -p | grep CO_POL | cut -d'\"' -f2)\"",
+    "cp evil $(env | awk -F= '/^CO_POL/{{print $2}}')",
+    "cp evil \"$(cat /proc/self/environ | tr '\\0' '\\n' | grep POLICY_F | cut -d= -f2)\"",
+    "env | grep POLICY | cut -d= -f2 | xargs -I{{}} cp evil {{}}",
+    "cp evil \"$(ls {TASKS}/*/p*.json)\"",
+    "cp evil $(find {TASKS} -name policy.json)",
+    "find {SRV} -name 'pol*' | xargs -I{{}} cp evil {{}}",
+    "cp evil $(printenv | grep POL | cut -d= -f2)",
+    "cp evil $(set | grep POL | cut -d= -f2)",
+]
+
+
+@pytest.mark.parametrize("cmd", R2_CMDS)
+def test_r2_env_dump_and_producers(env, cmd):
+    cmd = cmd.replace("{TASKS}", str(env.T.parent)).replace("{SRV}", str(env.T.parent.parent))
+    assert deny_hard(bash(env, cmd), "self-protect")
+
+
+@pytest.mark.parametrize("cmd", ["env | grep PATH", "printenv HOME", "export -p | grep NODE",
+                                 "cp \"$(ls -t *.log | head -1)\" latest.log", "cp $(find . -name '*.py') /tmp/x",
+                                 "find . -name '*.tmp' | xargs -I{{}} cp {{}} /tmp/", "env > env.txt"])
+def test_r2_negative(env, cmd):
+    assert "self-protect" not in ids(bash(env, cmd))
+
+
+# R3. Repo-root allowance stays inside the project --------------------------------------
+@pytest.mark.parametrize("cmd", ["$(git rev-parse --show-toplevel)/../x.sh",
+                                 "$(git rev-parse --show-toplevel)/../../x.sh"])
+def test_r3_repo_root_escape_not_allowed(env, cmd):
+    assert "uncertain-command" in ids(bash(env, cmd))
+
+
+def test_r3_repo_root_inside_allowed(env):
+    assert bash(env, "$(git rev-parse --show-toplevel)/scripts/../scripts/t.sh").decision == "allow"
+
+
+# Ruling R13: protected DIRECTORY entries cover everything under them, case-folded ------
+def test_r13_protected_directory_entries(env):
+    pol = {"protected_paths": [str(env.H / ".claude"), str(env.H / ".claude.json")], "claude_config_dir": None}
+    for cmd in ["echo x > ~/.claude/settings.json", "echo x > ~/.claude/projects/p/memory.md",
+                "echo x > ~/.CLAUDE/Settings.json", "echo '{{}}' > ~/.claude.json", "echo x > ~/.Claude.JSON",
+                "rm -rf ~/.claude", "cp evil ~/.claude/"]:
+        assert deny_hard(bash(env, cmd, **pol), "self-protect"), cmd
+    assert deny_hard(tool(env, "Write", {"file_path": "{H}/.claude/agents/a.md", "content": "x"}, **pol),
+                     "self-protect")
+    for cmd in ["cat ~/.claude/settings.json", "ls ~/.claude", "echo x > ~/.claude-notes.md"]:
+        assert "self-protect" not in ids(bash(env, cmd, **pol)), cmd
