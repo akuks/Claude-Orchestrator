@@ -494,11 +494,11 @@ class WorkerManager:
             # Let the agent Read the snapshot even outside bypassPermissions mode.
             cmd += ["--add-dir", kb_log["dir"]]
         if mcp:
+            # Ruling R23: strict only when the orchestrator supplies MCP servers, so
+            # tasks keep the MCP servers of admin-installed skill packs. Subagent
+            # frontmatter mcpServers stay closed by R20b: writes to .claude/agents/**
+            # need approval (agent-config) and the per-user config dir is hard-protected.
             cmd += ["--mcp-config", mcp["config_path"], "--strict-mcp-config"]
-        else:
-            # Ruling R20a: always strict - no project .mcp.json and no subagent
-            # frontmatter mcpServers (those start processes outside PreToolUse).
-            cmd += ["--mcp-config", self._empty_mcp_config(mcp_config_dir), "--strict-mcp-config"]
         # Ruling R20c: skills' / slash commands' inline !`cmd` would run outside PreToolUse.
         cmd += ["--settings", json.dumps({"disableSkillShellExecution": True})]
         if mcp:
@@ -598,7 +598,8 @@ class WorkerManager:
             "mcp_ids": {},
             "secrets": run_secrets,
             # co-guard watchdog (Ruling R21): tool_use ids checked through the spool
-            "guard": {"pending": {}, "seen": set(), "offset": 0, "violation": None, "proc": proc, "emit": emit,
+            "guard": {"calls": {}, "lanes": {}, "done": set(), "seen": set(), "offset": 0, "violation": None,
+                      "proc": proc, "emit": emit,
                       "spool": guard_runtime.task_dir(task_id) / guard_runtime.SPOOL_NAME},
         }
         watch = asyncio.create_task(self._guard_watch(ctx))
@@ -711,13 +712,6 @@ class WorkerManager:
         "tool_use_id", "agent_id", "agent_type", "source", "ts",
     )
 
-    @staticmethod
-    def _empty_mcp_config(config_dir: Path) -> str:
-        config_dir.mkdir(parents=True, exist_ok=True)
-        path = (config_dir / ".mcp-config.json").resolve()
-        path.write_text(json.dumps({"mcpServers": {}}))
-        return str(path)
-
     async def _prepare_guard(self, task_id, guard_project, workspace, sub_env, mcp, emit):
         """Write the task's policy (0600) into a fresh CO_TASK_DIR, add the
         guard env and return (plugin dir, --setting-sources value or None);
@@ -787,6 +781,9 @@ class WorkerManager:
     # rejections never reach hooks) is only logged. A call with no result and
     # no spool record after the grace window is killed too. Hook stream events
     # carry no tool_use id or plugin name (phase 1 spike), so they are not used.
+    # Limit (same OS user, like R18): the spool proves the hook ran only while
+    # hooks are on - once they are off, an agent could append forged `seen`
+    # lines itself (CO_TASK_DIR is protected only by the hooks).
 
     async def _guard_violation(self, ctx, reason: str) -> None:
         g = ctx.get("guard")
@@ -829,18 +826,42 @@ class WorkerManager:
             self._guard_read_spool(g)
         return tid in g["seen"]
 
+    # Ruling R24: calls that cannot run in parallel run one at a time, and their
+    # hook (so the `seen` record) starts only when they start. A lane is one
+    # assistant message (message.id) in one thread (parent_tool_use_id); a call's
+    # grace timer starts only once every EARLIER call in its lane has a result.
+    # The tool_result check stays definitive.
+
+    @staticmethod
+    def _guard_earlier_open(g, tid: str) -> bool:
+        c = g["calls"].get(tid)
+        lane = g["lanes"].get(c["lane"], []) if c else []
+        return any(t not in g["done"] for t in lane[: lane.index(tid)]) if tid in lane else False
+
+    @staticmethod
+    def _guard_start_next(g, lane_key) -> None:
+        for t in g["lanes"].get(lane_key, []):
+            if t in g["done"]:
+                continue
+            c = g["calls"].get(t)
+            if c is not None and c["start"] is None:
+                c["start"] = time.monotonic()
+            return  # only the first unfinished call can be running now
+
     async def _guard_watch(self, ctx) -> None:
         g = ctx["guard"]
         while not g["violation"]:
             await asyncio.sleep(min(1.0, settings.guard_hook_grace_seconds / 2))
             now = time.monotonic()
-            for tid, (name, seen_at) in list(g["pending"].items()):
-                if now - seen_at <= settings.guard_hook_grace_seconds:
+            for tid, c in list(g["calls"].items()):
+                if c["start"] is None or c["checked"] or now - c["start"] <= settings.guard_hook_grace_seconds:
                     continue
                 if self._guard_checked(g, tid):
-                    g["pending"].pop(tid, None)  # checked; maybe waiting for a person
+                    c["checked"] = True  # seen; may be running long or waiting for a person
                     continue
-                await self._guard_violation(ctx, f"no co-guard check for {name} call {tid}")
+                if self._guard_earlier_open(g, tid):
+                    continue  # still waiting its turn
+                await self._guard_violation(ctx, f"no co-guard check for {c['name']} call {tid}")
                 return
 
     async def _guard_on_event(self, obj: dict, ctx) -> None:
@@ -848,21 +869,29 @@ class WorkerManager:
         if not g:
             return
         etype = obj.get("type")
-        content = (obj.get("message") or {}).get("content") if isinstance(obj.get("message"), dict) else None
+        msg = obj.get("message") if isinstance(obj.get("message"), dict) else {}
+        content = msg.get("content")
         blocks = [b for b in content if isinstance(b, dict)] if isinstance(content, list) else []
         if etype == "assistant":
             for block in blocks:
                 if block.get("type") == "tool_use" and block.get("id"):
                     tid = str(block["id"])
-                    if tid not in g["seen"]:
-                        g["pending"][tid] = (str(block.get("name") or ""), time.monotonic())
+                    key = (str(msg.get("id") or tid), str(obj.get("parent_tool_use_id") or ""))
+                    g["lanes"].setdefault(key, []).append(tid)
+                    g["calls"][tid] = {"name": str(block.get("name") or ""), "lane": key, "start": None,
+                                       "checked": tid in g["seen"]}
+                    if not self._guard_earlier_open(g, tid):
+                        g["calls"][tid]["start"] = time.monotonic()
         elif etype == "user":
             for block in blocks:
                 if block.get("type") != "tool_result":
                     continue
                 tid = str(block.get("tool_use_id") or "")
-                entry = g["pending"].pop(tid, None)
-                name = entry[0] if entry else "a tool"
+                g["done"].add(tid)
+                c = g["calls"].pop(tid, None)
+                name = c["name"] if c else "a tool"
+                if c is not None:
+                    self._guard_start_next(g, c["lane"])
                 if self._guard_checked(g, tid):
                     continue
                 if block.get("is_error"):
