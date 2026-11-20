@@ -24,6 +24,9 @@ async function req(method, path, body) {
     try {
       detail = (await res.json()).detail || detail
     } catch (_) {}
+    // Validation errors (422) come as [{loc, msg}]: show "field: message".
+    if (Array.isArray(detail) && detail.every((d) => d && d.msg))
+      detail = detail.map((d) => `${(d.loc || []).filter((x) => x !== 'body').join('.') || 'request'}: ${d.msg}`).join('; ')
     const err = new Error(typeof detail === 'string' ? detail : JSON.stringify(detail))
     err.status = res.status
     throw err
@@ -53,6 +56,17 @@ export const api = {
   updateUser: (id, payload) => req('PATCH', `/users/${id}`, payload),
   resetUserPassword: (id, password) => req('POST', `/users/${id}/reset-password`, { password }),
   userDirectory: () => req('GET', '/users/directory'),
+
+  // ---- Personal credentials (write-only: responses carry presence/kind only) ----
+  myCredentials: () => req('GET', '/me/credentials'),
+  saveMyCredentials: (payload) => req('PUT', '/me/credentials', payload),
+  removeMyClaude: () => req('DELETE', '/me/credentials/claude'),
+  removeMyGithub: () => req('DELETE', '/me/credentials/github'),
+  testMyCredential: (which) => req('POST', '/me/credentials/test', { which }),
+  // ---- Org fallback Claude API key (admin) ----
+  orgFallback: () => req('GET', '/admin/org-fallback'),
+  setOrgFallback: (api_key) => req('PUT', '/admin/org-fallback', { api_key }),
+  removeOrgFallback: () => req('DELETE', '/admin/org-fallback'),
 
   // ---- Teams (writes are admin-only) ----
   listTeams: () => req('GET', '/teams'),

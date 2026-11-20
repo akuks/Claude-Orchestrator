@@ -8,17 +8,22 @@ auto_review_prs enabled, a read-only VAPT security review runs on the PR branch.
 
 import hashlib
 import hmac
+import logging
 
 from fastapi import APIRouter, Header, HTTPException, Request
 from sqlalchemy import select
 
+from ..access import project_role, user_is_maintainer
+from ..auth import Principal
 from ..config import settings
+from ..credentials import credential_status
 from ..database import SessionLocal
-from ..models import Project
+from ..models import Project, User
 from ..security import build_security_prompt
 from ..task_service import build_task
 
 router = APIRouter(prefix="/webhooks", tags=["webhooks"])
+log = logging.getLogger(__name__)
 
 _PR_ACTIONS = {"opened", "reopened", "synchronize", "ready_for_review"}
 
@@ -32,6 +37,21 @@ def _verify(body: bytes, signature: str | None) -> bool:
         settings.github_webhook_secret.encode(), body, hashlib.sha256
     ).hexdigest()
     return hmac.compare_digest(f"sha256={digest}", signature)
+
+
+async def _automation_owner(s, project: Project) -> str | None:
+    """Who the review runs as: the project's automation owner while they are
+    still an active admin or maintainer of it, else the project creator while
+    they are active and still have a role on it; None when neither is usable."""
+    if project.automation_owner_id and await user_is_maintainer(
+        s, project.automation_owner_id, project.id
+    ):
+        return project.automation_owner_id
+    if project.created_by:
+        user = await s.get(User, project.created_by)
+        if user is not None and await project_role(s, Principal(user), project.id):
+            return project.created_by
+    return None
 
 
 @router.post("/github")
@@ -74,6 +94,16 @@ async def github_webhook(
         ).scalar_one_or_none()
         if project is None:
             return {"ok": True, "ignored": f"no auto-review project for {repo}"}
+        owner_id = await _automation_owner(s, project)
+        if owner_id is None:
+            log.warning("Webhook ignored for project %s: no automation owner", project.id)
+            return {"ok": True, "ignored": "no automation owner"}
+        if (await credential_status(s, owner_id))["claude"] == "none":
+            log.warning(
+                "Webhook ignored for project %s: automation owner has no Claude credential",
+                project.id,
+            )
+            return {"ok": True, "ignored": "automation owner has no Claude credential"}
 
         task = await build_task(
             s,
@@ -83,7 +113,7 @@ async def github_webhook(
             model="opus",
             max_turns=60,
             tags=["security", "vapt", "code-review", "auto"],
-            created_by=project.created_by,
+            created_by=owner_id,
         )
         info = (task.id, task.priority, task.created_at, task.status)
         await s.commit()

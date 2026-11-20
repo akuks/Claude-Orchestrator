@@ -11,19 +11,53 @@ import pytest
 
 _TMP = tempfile.mkdtemp(prefix="co-tests-")
 _MOCK = pathlib.Path(_TMP) / "mock_claude.sh"
+_PROBES = pathlib.Path(_TMP) / "env-probes"
+_PROBES.mkdir()
+# Env vars the mock records for a probed task run (names AND values: tests only
+# use obviously fake credentials). CO_API_TOKEN is recorded as presence only.
+_PROBE_VARS = (
+    "CLAUDE_CODE_OAUTH_TOKEN ANTHROPIC_API_KEY GH_TOKEN GITHUB_TOKEN "
+    "GIT_AUTHOR_NAME GIT_AUTHOR_EMAIL GIT_COMMITTER_NAME GIT_COMMITTER_EMAIL "
+    "CLAUDE_CONFIG_DIR GH_CONFIG_DIR GIT_CONFIG_GLOBAL RANDOM_SERVER_VAR "
+    "PATH PROBE_PROJECT_VAR"
+)
 _MOCK.write_text(
     """#!/usr/bin/env bash
 args="$*"
-cat >/dev/null
-# Test seam: report whether the scoped agent token reached the subprocess env
-# (presence only, never the value).
-# Probe vars deliberately lack the CO_ prefix: the worker strips CO_* from the
-# agent env, so a CO_-named probe would never arrive.
-if [[ -n "$TEST_ENV_PROBE" ]]; then
-  if [[ -n "$CO_API_TOKEN" ]]; then echo present >"$TEST_ENV_PROBE"; else echo absent >"$TEST_ENV_PROBE"; fi
+prompt="$(cat)"
+# Test seam: the agent env is allowlisted, so a probe path set in the test's
+# os.environ can never reach this script. Instead a task prompt carrying the
+# marker [env-probe:KEY] makes the task run (stream-json only, so memory and
+# findings calls quoting the prompt don't overwrite it) record its env to
+# PROBES/KEY.vars (selected names=values), PROBES/KEY.names (every name) and
+# PROBES/KEY.args (argv, one per line).
+if [[ "$args" == *"stream-json"* && "$prompt" =~ \\[env-probe:([A-Za-z0-9_-]+)\\] ]]; then
+  f="__PROBES__/${BASH_REMATCH[1]}"
+  {
+    for n in __PROBE_VARS__; do
+      if [[ -n "${!n+x}" ]]; then printf '%s=%s\\n' "$n" "${!n}"; fi
+    done
+    if [[ -n "$CO_API_TOKEN" ]]; then echo "CO_API_TOKEN=present"; fi
+  } >"$f.vars.tmp"
+  env | cut -d= -f1 >"$f.names"
+  printf '%s\\n' "$@" >"$f.args"
+  mv "$f.vars.tmp" "$f.vars"
 fi
-# Names (never values) of every env var the agent received.
-if [[ -n "$TEST_ENV_NAMES" ]]; then env | cut -d= -f1 >"$TEST_ENV_NAMES"; fi
+# Server-side one-shot calls (memory: --print; findings: --print --json-schema)
+# whose stdin carries [call-probe:KEY] record to PROBES/KEY-print or KEY-schema.
+if [[ "$args" != *"stream-json"* && "$prompt" =~ \\[call-probe:([A-Za-z0-9_-]+)\\] ]]; then
+  kind=print
+  if [[ "$args" == *"json-schema"* ]]; then kind=schema; fi
+  f="__PROBES__/${BASH_REMATCH[1]}-$kind"
+  {
+    for n in __PROBE_VARS__; do
+      if [[ -n "${!n+x}" ]]; then printf '%s=%s\\n' "$n" "${!n}"; fi
+    done
+  } >"$f.vars.tmp.$$"
+  env | cut -d= -f1 >"$f.names.tmp.$$"
+  mv "$f.names.tmp.$$" "$f.names"
+  mv "$f.vars.tmp.$$" "$f.vars"
+fi
 if [[ "$args" == *"stream-json"* ]]; then
   printf '{"type":"system","subtype":"init","session_id":"test-session"}\\n'
   printf '{"type":"assistant","message":{"model":"claude-test","content":[{"type":"text","text":"working"}]}}\\n'
@@ -33,7 +67,7 @@ elif [[ "$args" == *"json-schema"* ]]; then
 else
   printf 'summary\\n'
 fi
-"""
+""".replace("__PROBES__", str(_PROBES)).replace("__PROBE_VARS__", _PROBE_VARS)
 )
 _MOCK.chmod(0o755)
 
@@ -75,6 +109,10 @@ def client():
         r = c.post("/auth/login", json={"email": ADMIN_EMAIL, "password": ADMIN_PASSWORD})
         assert r.status_code == 200, r.text
         c.headers["X-Requested-With"] = "co"
+        # Tasks need a Claude credential; an org fallback lets every test run
+        # without one. Tests that need "no fallback" delete and restore it.
+        r = c.put("/admin/org-fallback", json={"api_key": "sk-test-fallback"})
+        assert r.status_code == 200, r.status_code
         global _ADMIN_CLIENT
         _ADMIN_CLIENT = c
         yield c
@@ -133,6 +171,37 @@ def wait_task(client, task_id: str, timeout: float = 20.0) -> dict:
             return t
         time.sleep(0.3)
     return client.get(f"/tasks/{task_id}").json()
+
+
+def env_probe_key() -> str:
+    """A fresh key; put f"[env-probe:{key}]" in a task prompt to record its env."""
+    import uuid
+
+    return "p" + uuid.uuid4().hex
+
+
+def read_env_probe(key: str) -> tuple[dict[str, str], set[str]] | None:
+    """(selected name=value pairs, every env name) of the probed run, or None
+    if the mock never ran for that key."""
+    vars_f = _PROBES / f"{key}.vars"
+    if not vars_f.exists():
+        return None
+    pairs = dict(
+        line.split("=", 1) for line in vars_f.read_text().splitlines() if "=" in line
+    )
+    names = set((_PROBES / f"{key}.names").read_text().split())
+    return pairs, names
+
+
+def read_probe_args(key: str) -> list[str] | None:
+    """argv (one per line) of the probed task run, or None if it never ran."""
+    f = _PROBES / f"{key}.args"
+    return f.read_text().splitlines() if f.exists() else None
+
+
+def clear_env_probe(key: str) -> None:
+    for suffix in ("vars", "names", "args"):
+        (_PROBES / f"{key}.{suffix}").unlink(missing_ok=True)
 
 
 def login_as(email: str, role: str = "member"):

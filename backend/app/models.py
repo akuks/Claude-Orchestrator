@@ -168,6 +168,8 @@ class Project(Base):
     memory_updated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
     archived: Mapped[bool] = mapped_column(default=False)
+    # Whose credentials webhook-triggered work runs on; None = the project creator.
+    automation_owner_id: Mapped[str | None] = mapped_column(String(32), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
 
 
@@ -516,3 +518,32 @@ class ProjectMember(Base):
     subject_type: Mapped[str] = mapped_column(String(8))  # "user" | "team"
     subject_id: Mapped[str] = mapped_column(String(32), index=True)
     role: Mapped[str] = mapped_column(String(16))  # "contributor" | "maintainer"
+
+
+class UserCredential(Base):
+    """A user's personal credentials. Secrets live only in the *_enc vault blobs
+    (app.crypto); the API never returns them."""
+
+    __tablename__ = "user_credentials"
+
+    user_id: Mapped[str] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), primary_key=True
+    )
+    claude_kind: Mapped[str | None] = mapped_column(String(16), nullable=True)  # "oauth_token" | "api_key"
+    claude_enc: Mapped[str | None] = mapped_column(Text, nullable=True)
+    github_enc: Mapped[str | None] = mapped_column(Text, nullable=True)
+    git_name: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    git_email: Mapped[str | None] = mapped_column(String(320), nullable=True)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now, onupdate=_now)
+
+
+class OrgSetting(Base):
+    """Admin-managed org-wide secret settings (e.g. "fallback_anthropic_api_key"),
+    stored encrypted."""
+
+    __tablename__ = "org_settings"
+
+    key: Mapped[str] = mapped_column(String(64), primary_key=True)
+    value_enc: Mapped[str] = mapped_column(Text)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now, onupdate=_now)
+    updated_by: Mapped[str | None] = mapped_column(String(32), nullable=True)

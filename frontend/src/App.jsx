@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import {
+  Alert,
   Badge,
   Button,
   Dropdown,
@@ -20,6 +21,7 @@ import {
   DeleteOutlined,
   DollarOutlined,
   FolderOutlined,
+  KeyOutlined,
   LockOutlined,
   LogoutOutlined,
   TeamOutlined,
@@ -48,6 +50,7 @@ import TeamsView from './components/TeamsView'
 import LoginPage from './auth/LoginPage'
 import SetupPage from './auth/SetupPage'
 import ChangePasswordModal from './auth/ChangePasswordModal'
+import MyCredentials from './components/MyCredentials'
 
 dayjs.extend(relativeTime)
 
@@ -126,6 +129,7 @@ export default function App() {
 function AppInner({ user, onLogout }) {
   const isAdmin = user.role === 'admin'
   const [pwOpen, setPwOpen] = useState(false)
+  const [credsOpen, setCredsOpen] = useState(false)
   const [tasks, setTasks] = useState([])
   const [stats, setStats] = useState(null)
   const [loading, setLoading] = useState(false)
@@ -139,9 +143,18 @@ function AppInner({ user, onLogout }) {
   const [approvalCount, setApprovalCount] = useState(0)
   const [claudeInfo, setClaudeInfo] = useState(null)
 
-  useEffect(() => {
+  const loadClaudeInfo = useCallback(() => {
     api.claudeStatus().then(setClaudeInfo).catch(() => setClaudeInfo(null))
   }, [])
+  useEffect(() => {
+    loadClaudeInfo()
+  }, [loadClaudeInfo])
+  // Credential changes made in "My credentials" update the header tag/banner
+  // without re-running the server's CLI check.
+  const onCredsChanged = useCallback((you) => {
+    setClaudeInfo((ci) => (ci ? { ...ci, you, authenticated: you.claude !== 'none' } : ci))
+  }, [])
+  const noCredential = claudeInfo?.you?.claude === 'none'
 
   const loadApprovalCount = useCallback(async () => {
     try {
@@ -312,16 +325,7 @@ function AppInner({ user, onLogout }) {
           >
             🪄 CO
           </Typography.Title>
-          {claudeInfo &&
-            (claudeInfo.found && claudeInfo.authenticated ? (
-              <Tag color="green" title={`auth: ${claudeInfo.auth_method}`}>
-                claude {claudeInfo.version?.split(' ')[0] || 'ok'}
-              </Tag>
-            ) : (
-              <Tag color="red" title="Set ANTHROPIC_API_KEY or run 'claude auth login'">
-                claude {!claudeInfo.found ? 'not found' : 'not authed'}
-              </Tag>
-            ))}
+          {claudeInfo && <ClaudeTag info={claudeInfo} isAdmin={isAdmin} onClick={() => setCredsOpen(true)} />}
           <Segmented
             value={view}
             onChange={setView}
@@ -391,6 +395,7 @@ function AppInner({ user, onLogout }) {
                   ),
                 },
                 { type: 'divider' },
+                { key: 'creds', icon: <KeyOutlined />, label: 'My credentials', onClick: () => setCredsOpen(true) },
                 { key: 'pw', icon: <LockOutlined />, label: 'Change password', onClick: () => setPwOpen(true) },
                 { key: 'out', icon: <LogoutOutlined />, label: 'Log out', onClick: onLogout },
               ],
@@ -402,8 +407,34 @@ function AppInner({ user, onLogout }) {
       </Header>
 
       <Content style={{ padding: 24 }}>
+        {noCredential && (
+          <Alert
+            data-testid="no-credential-banner"
+            type="warning"
+            showIcon
+            style={{ marginBottom: 16 }}
+            message="Claude isn't set up for you"
+            description={
+              isAdmin
+                ? 'Tasks you start will fail until you add your own Claude token or API key, or set an org fallback key for everyone on the Users page. Your schedules and PR auto-reviews are paused until then.'
+                : 'Tasks you start will fail until you add your own Claude token or API key (or an admin sets an org fallback key). Your schedules and PR auto-reviews are paused until then.'
+            }
+            action={
+              <Space direction="vertical">
+                <Button size="small" type="primary" icon={<KeyOutlined />} onClick={() => setCredsOpen(true)}>
+                  My credentials
+                </Button>
+                {isAdmin && (
+                  <Button size="small" onClick={() => setView('users')}>
+                    Org fallback key
+                  </Button>
+                )}
+              </Space>
+            }
+          />
+        )}
         {view === 'mcp' && <McpRegistry />}
-        {view === 'users' && isAdmin && <UsersView currentUser={user} />}
+        {view === 'users' && isAdmin && <UsersView currentUser={user} onFallbackChanged={loadClaudeInfo} />}
         {view === 'teams' && isAdmin && <TeamsView />}
         {view === 'projects' && <ProjectsView currentUser={user} onProjectsChanged={loadProjects} />}
         {view === 'automation' && <AutomationView projects={projects} isAdmin={isAdmin} />}
@@ -461,12 +492,55 @@ function AppInner({ user, onLogout }) {
         onCreated={refresh}
       />
       <ChangePasswordModal open={pwOpen} onClose={() => setPwOpen(false)} />
+      <MyCredentials open={credsOpen} onClose={() => setCredsOpen(false)} onChanged={onCredsChanged} />
       <TaskDetail
         taskId={selected}
         onClose={() => setSelected(null)}
         onChanged={refresh}
         onOpenTask={(id) => setSelected(id)}
+        onOpenCredentials={() => setCredsOpen(true)}
       />
     </Layout>
+  )
+}
+
+// Header tag: whether *you* can run tasks (your own Claude credential, the org
+// fallback, or none), plus a server-side note if the CLI binary is missing.
+function ClaudeTag({ info, isAdmin, onClick }) {
+  if (!info.found)
+    return (
+      <Tag color="red" title="The claude CLI isn't installed on the server (check CO_CLAUDE_BIN).">
+        claude CLI not found
+      </Tag>
+    )
+  const you = info.you?.claude
+  const version = info.version?.split(' ')[0]
+  const title = version ? `claude ${version} on the server` : undefined
+  if (you === 'own')
+    return (
+      <Tag color="green" title={title} style={{ cursor: 'pointer' }} onClick={onClick}>
+        Claude: {info.you.claude_kind === 'api_key' ? 'your API key' : 'your token'}
+      </Tag>
+    )
+  if (you === 'fallback')
+    return (
+      <Tag color="blue" title={title} style={{ cursor: 'pointer' }} onClick={onClick}>
+        Claude: org fallback
+      </Tag>
+    )
+  return (
+    <Tag
+      color="red"
+      data-testid="claude-not-set-up"
+      style={{ cursor: 'pointer' }}
+      onClick={onClick}
+      title={
+        isAdmin
+          ? 'Add your own credential under My credentials, or set an org fallback key on the Users page'
+          : 'Add your own credential under My credentials (or ask an admin to set an org fallback key)'
+      }
+    >
+      Claude: not set up
+    </Tag>
   )
 }

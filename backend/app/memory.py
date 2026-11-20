@@ -6,6 +6,9 @@ Two responsibilities:
     budget, prepended to a project task's prompt.
   * update_after_task() — after a project task finishes, run a cheap Claude call
     to write a one-paragraph task summary and fold it into the project's memory.
+
+Every Claude call here runs with an explicit agent env (app.agent_env) of the
+person it is done for — never the server's own environment or login.
 """
 
 import asyncio
@@ -14,6 +17,7 @@ from datetime import datetime, timezone
 
 from sqlalchemy import select
 
+from .agent_env import agent_env_or_none, build_agent_env
 from .config import settings
 from .database import SessionLocal
 from .events import broker
@@ -30,8 +34,9 @@ def _words(text: str) -> set[str]:
     return set(_WORD.findall((text or "").lower()))
 
 
-async def _run_claude(prompt: str, model: str, cwd: str | None) -> str:
-    """Run a one-shot non-streaming Claude call and return its text output."""
+async def _run_claude(prompt: str, model: str, cwd: str | None, env: dict) -> str:
+    """Run a one-shot non-streaming Claude call with exactly `env` (from
+    app.agent_env) and return its text output."""
     try:
         proc = await asyncio.create_subprocess_exec(
             settings.claude_bin,
@@ -42,6 +47,7 @@ async def _run_claude(prompt: str, model: str, cwd: str | None) -> str:
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.DEVNULL,
             cwd=cwd,
+            env=env,
         )
     except (FileNotFoundError, OSError):
         return ""
@@ -139,8 +145,10 @@ async def assemble_context(project_id: str, prompt: str) -> tuple[str | None, di
     return preamble, log
 
 
-async def update_after_task(task_id: str) -> None:
-    """Post-task: write a summary and fold it into the project's living memory."""
+async def update_after_task(task_id: str, user_id: str | None) -> None:
+    """Post-task: write a summary and fold it into the project's living memory.
+    Runs as `user_id` (the task's owner); skipped quietly if they have no
+    Claude credential and there is no org fallback."""
     async with SessionLocal() as s:
         task = await s.get(Task, task_id)
         if task is None or not task.project_id:
@@ -150,6 +158,11 @@ async def update_after_task(task_id: str) -> None:
             return
         prompt, result_text, title = task.prompt, task.result_text or "", task.title
         pid, cwd, old_memory = project.id, project.directory, project.memory or ""
+        env = await agent_env_or_none(
+            s, user_id, project_env=project.env, purpose="memory update"
+        )
+    if env is None:
+        return
 
     model = settings.memory_model
 
@@ -158,7 +171,7 @@ async def update_after_task(task_id: str) -> None:
         "factual. Output only the summary.\n\n"
         f"Task: {prompt}\n\nResult: {result_text[:4000]}"
     )
-    summary = (await _run_claude(summary_prompt, model, cwd)).strip()
+    summary = (await _run_claude(summary_prompt, model, cwd, env)).strip()
     summary = summary[:600] or (result_text[:300] or prompt[:200])
 
     mem_prompt = (
@@ -169,7 +182,7 @@ async def update_after_task(task_id: str) -> None:
         f"=== CURRENT MEMORY ===\n{old_memory or '(empty)'}\n\n"
         f"=== JUST COMPLETED ===\n{summary}\n\n=== UPDATED MEMORY ==="
     )
-    new_memory = (await _run_claude(mem_prompt, model, cwd)).strip()
+    new_memory = (await _run_claude(mem_prompt, model, cwd, env)).strip()
 
     async with SessionLocal() as s:
         project = await s.get(Project, pid)
@@ -189,13 +202,15 @@ async def update_after_task(task_id: str) -> None:
     )
 
 
-async def rebuild_memory(project_id: str) -> str | None:
-    """Regenerate a project's memory from scratch out of its task summaries."""
+async def rebuild_memory(project_id: str, user_id: str) -> str | None:
+    """Regenerate a project's memory from scratch out of its task summaries,
+    running Claude as `user_id`. Raises MissingCredential if they can't."""
     async with SessionLocal() as s:
         project = await s.get(Project, project_id)
         if project is None:
             return None
         cwd = project.directory
+        env = await build_agent_env(s, user_id, project_env=project.env)
         rows = (
             await s.execute(
                 select(TaskSummary)
@@ -211,7 +226,7 @@ async def rebuild_memory(project_id: str) -> str | None:
         "durable facts, key decisions, and known issues. Output ONLY the memory.\n\n"
         f"=== TASK HISTORY ===\n{history}"
     )
-    new_memory = (await _run_claude(prompt, settings.memory_model, cwd)).strip()
+    new_memory = (await _run_claude(prompt, settings.memory_model, cwd, env)).strip()
 
     async with SessionLocal() as s:
         project = await s.get(Project, project_id)

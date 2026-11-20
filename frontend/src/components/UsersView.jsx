@@ -3,6 +3,7 @@ import { Button, Form, Input, Modal, Popconfirm, Select, Space, Switch, Table, T
 import { KeyOutlined, PlusOutlined, ReloadOutlined } from '@ant-design/icons'
 import dayjs from 'dayjs'
 import { api } from '../api'
+import OrgFallbackCard from './OrgFallbackCard'
 
 const ROLES = [
   { value: 'admin', label: 'admin' },
@@ -81,7 +82,7 @@ function ResetModal({ user, onClose }) {
   )
 }
 
-export default function UsersView({ currentUser }) {
+export default function UsersView({ currentUser, onFallbackChanged }) {
   const [users, setUsers] = useState([])
   const [loading, setLoading] = useState(false)
   const [createOpen, setCreateOpen] = useState(false)
@@ -160,6 +161,7 @@ export default function UsersView({ currentUser }) {
 
   return (
     <>
+      <OrgFallbackCard onChanged={onFallbackChanged} />
       <Space style={{ marginBottom: 12 }}>
         <Button type="primary" icon={<PlusOutlined />} onClick={() => setCreateOpen(true)}>
           Add user

@@ -15,7 +15,14 @@ from app.config import settings
 from app.database import SessionLocal
 from app.models import AuthSession, Schedule, Task, TaskEvent, User
 
-from conftest import ADMIN_EMAIL, ADMIN_PASSWORD, MEMBER_EMAIL, wait_task
+from conftest import (
+    ADMIN_EMAIL,
+    ADMIN_PASSWORD,
+    MEMBER_EMAIL,
+    env_probe_key,
+    read_env_probe,
+    wait_task,
+)
 
 
 # ---- 1. webhook secret required --------------------------------------------
@@ -36,20 +43,21 @@ def test_webhook_rejects_when_secret_unset(client, monkeypatch):
 
 
 # ---- 3. agent env scrubbing -------------------------------------------------
-def test_agent_env_has_no_co_server_secrets(client, monkeypatch, tmp_path):
-    names = tmp_path / "names"
-    monkeypatch.setenv("TEST_ENV_NAMES", str(names))
+def test_agent_env_has_no_co_server_secrets(client, monkeypatch):
+    key = env_probe_key()
     monkeypatch.setenv("CO_DATABASE_URL_LEAKCHECK", "postgresql://u:pw@h/db")
     monkeypatch.setenv("CO_SECRET_KEY", "k")
     monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test")
-    t = client.post("/tasks", json={"prompt": "print env"}).json()
+    t = client.post("/tasks", json={"prompt": f"print env [env-probe:{key}]"}).json()
     assert wait_task(client, t["id"])["status"] == "completed"
-    got = set(names.read_text().split())
+    pairs, got = read_env_probe(key)
     leaked = {n for n in got if n.startswith("CO_") and n != "CO_API_TOKEN"}
     assert not leaked, leaked
     assert "CO_ADMIN_PASSWORD" not in got and "CO_DATABASE_URL" not in got
     assert "CO_API_TOKEN" in got  # still minted for the task
     assert {"PATH", "ANTHROPIC_API_KEY"} <= got
+    # ...and that ANTHROPIC_API_KEY is the org fallback, not the server's own.
+    assert pairs["ANTHROPIC_API_KEY"] == "sk-test-fallback"
 
 
 # ---- 4. sliding session -----------------------------------------------------
@@ -139,11 +147,12 @@ def _set_active(email, active):
     return asyncio.run(go())
 
 
-def test_worker_fails_task_of_disabled_owner(client, member_client, tmp_path, monkeypatch):
-    names = tmp_path / "names"
-    monkeypatch.setenv("TEST_ENV_NAMES", str(names))
+def test_worker_fails_task_of_disabled_owner(client, member_client):
+    key = env_probe_key()
     # Disable before the worker reaches it: create approval-gated, then approve as admin.
-    t = member_client.post("/tasks", json={"prompt": "hello", "requires_approval": True}).json()
+    t = member_client.post(
+        "/tasks", json={"prompt": f"hello [env-probe:{key}]", "requires_approval": True}
+    ).json()
     _set_active(MEMBER_EMAIL, False)
     try:
         assert client.post(f"/approvals/{t['id']}/approve").status_code == 200
@@ -152,7 +161,7 @@ def test_worker_fails_task_of_disabled_owner(client, member_client, tmp_path, mo
         _set_active(MEMBER_EMAIL, True)
     assert done["status"] == "failed"
     assert done["error"] == "Task owner is disabled"
-    assert not names.exists()  # claude was never spawned
+    assert read_env_probe(key) is None  # claude was never spawned
 
     async def evs():
         async with SessionLocal() as s:

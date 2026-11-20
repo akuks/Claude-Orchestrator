@@ -10,7 +10,7 @@ from app.database import SessionLocal
 from app.main import app
 from app.models import ApiToken, Task, User
 from app.routers.auth import assign_orphans_to
-from conftest import ADMIN_EMAIL, wait_task
+from conftest import ADMIN_EMAIL, env_probe_key, read_env_probe, wait_task
 
 
 def _admin_id() -> str:
@@ -120,14 +120,14 @@ def test_agent_token_scope(client):
     assert c.post("/skills", json={"name": "x"}).status_code == 403
 
 
-def test_agent_token_revoked_after_task(client, monkeypatch, tmp_path):
-    probe = tmp_path / "probe"
-    monkeypatch.setenv("TEST_ENV_PROBE", str(probe))
-    t = client.post("/tasks", json={"prompt": "say hi"}).json()
+def test_agent_token_revoked_after_task(client):
+    key = env_probe_key()
+    t = client.post("/tasks", json={"prompt": f"say hi [env-probe:{key}]"}).json()
     done = wait_task(client, t["id"])
     assert done["status"] == "completed"
     # The token reached the subprocess env (presence only)...
-    assert probe.read_text().strip() == "present"
+    probed = read_env_probe(key)
+    assert probed is not None and probed[0].get("CO_API_TOKEN") == "present"
 
     async def rows():
         async with SessionLocal() as s:
