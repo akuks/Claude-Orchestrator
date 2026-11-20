@@ -178,7 +178,7 @@ export default function ContextStoreView({ projects = [], isAdmin = false }) {
       render: (path, row) => (
         <div>
           <Typography.Text code>{path}</Typography.Text> <b>{row.title}</b>
-          {row.abstract && <div style={{ fontSize: 12, color: '#8a7a6d' }}>{row.abstract}</div>}
+          {row.abstract && <div style={{ fontSize: 12, color: 'var(--co-text-secondary)' }}>{row.abstract}</div>}
         </div>
       ),
     },

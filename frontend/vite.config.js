@@ -32,4 +32,8 @@ export default defineConfig({
       '/health': { target, changeOrigin: true },
     },
   },
+  test: {
+    environment: 'jsdom',
+    include: ['src/**/*.test.{js,jsx}'],
+  },
 })

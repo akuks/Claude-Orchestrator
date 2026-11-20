@@ -10,6 +10,7 @@ import {
   Segmented,
   Select,
   Space,
+  Switch,
   Table,
   Tag,
   Typography,
@@ -17,9 +18,11 @@ import {
 } from 'antd'
 import {
   ApiOutlined,
+  BulbOutlined,
   ClockCircleOutlined,
   DeleteOutlined,
   DollarOutlined,
+  PauseCircleOutlined,
   FolderOutlined,
   KeyOutlined,
   LockOutlined,
@@ -51,6 +54,7 @@ import LoginPage from './auth/LoginPage'
 import SetupPage from './auth/SetupPage'
 import ChangePasswordModal from './auth/ChangePasswordModal'
 import MyCredentials from './components/MyCredentials'
+import { useThemeMode } from './theme/ThemeModeContext.jsx'
 
 dayjs.extend(relativeTime)
 
@@ -138,6 +142,7 @@ function AppInner({ user, onLogout }) {
   const [selected, setSelected] = useState(null)
   const [statusFilter, setStatusFilter] = useState()
   const [view, setView] = useState('tasks')
+  const { mode, setMode, reduceMotion, setReduceMotion } = useThemeMode()
   const [projects, setProjects] = useState([])
   const [activeProjectId, setActiveProjectId] = useState(null)
   const [approvalCount, setApprovalCount] = useState(0)
@@ -320,10 +325,11 @@ function AppInner({ user, onLogout }) {
         <Space size="large" wrap>
           <Typography.Title
             level={4}
-            style={{ color: '#fff', margin: 0, whiteSpace: 'nowrap' }}
+            style={{ margin: 0, whiteSpace: 'nowrap' }}
             title="Claude Orchestrator"
           >
-            🪄 CO
+            <span className="co-logo" style={{ marginRight: 8 }} />
+            CO
           </Typography.Title>
           {claudeInfo && <ClaudeTag info={claudeInfo} isAdmin={isAdmin} onClick={() => setCredsOpen(true)} />}
           <Segmented
@@ -392,6 +398,29 @@ function AppInner({ user, onLogout }) {
                         {user.role}
                       </Tag>
                     </span>
+                  ),
+                },
+                { type: 'divider' },
+                {
+                  key: 'night',
+                  icon: <BulbOutlined />,
+                  onClick: () => setMode(mode === 'night' ? 'light' : 'night'),
+                  label: (
+                    <Space style={{ width: '100%', justifyContent: 'space-between' }}>
+                      Night mode
+                      <Switch size="small" checked={mode === 'night'} data-testid="toggle-night" />
+                    </Space>
+                  ),
+                },
+                {
+                  key: 'motion',
+                  icon: <PauseCircleOutlined />,
+                  onClick: () => setReduceMotion(!reduceMotion),
+                  label: (
+                    <Space style={{ width: '100%', justifyContent: 'space-between' }}>
+                      Reduce motion
+                      <Switch size="small" checked={reduceMotion} data-testid="toggle-reduce-motion" />
+                    </Space>
                   ),
                 },
                 { type: 'divider' },

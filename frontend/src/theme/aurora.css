@@ -1,0 +1,128 @@
+/* Aurora Sunset shell styles. Every colour comes from the --co-* variables
+   that ThemeModeProvider writes onto <html> (see tokens.js cssVars). */
+
+html {
+  background: var(--co-bg-solid);
+  color-scheme: light;
+}
+html[data-mode='night'] {
+  color-scheme: dark;
+}
+
+body {
+  margin: 0;
+  min-height: 100vh;
+  background: var(--co-bg);
+  background-attachment: fixed;
+  color: var(--co-text);
+  font-family: var(--co-font);
+  font-size: 14px;
+  -webkit-font-smoothing: antialiased;
+}
+
+/* Numbers line up in stats and tables. */
+.ant-statistic-content,
+.ant-table,
+.co-num {
+  font-variant-numeric: tabular-nums;
+}
+
+/* Drifting aurora haze across the top of the shell. Sits behind content
+   (z-index -1 under transparent layout backgrounds). */
+.co-aurora {
+  position: fixed;
+  top: -70px;
+  left: -15%;
+  right: -15%;
+  height: 230px;
+  background: var(--co-haze);
+  filter: blur(30px);
+  opacity: var(--co-haze-opacity);
+  z-index: -1;
+  pointer-events: none;
+  animation: co-aurora-drift 26s ease-in-out infinite alternate;
+}
+html[data-mode='night'] .co-aurora {
+  height: 300px;
+  filter: blur(36px) saturate(1.35);
+}
+@keyframes co-aurora-drift {
+  0% {
+    transform: translateX(-6%) scaleY(1);
+  }
+  50% {
+    transform: translateX(2%) scaleY(1.12);
+  }
+  100% {
+    transform: translateX(6%) scaleY(0.94);
+  }
+}
+html[data-reduce-motion='true'] .co-aurora {
+  animation: none;
+}
+@media (prefers-reduced-motion: reduce) {
+  .co-aurora {
+    animation: none;
+  }
+}
+
+/* Glass surface utility. */
+.co-surface {
+  background: var(--co-surface);
+  border: 1px solid var(--co-border);
+  border-radius: var(--co-radius);
+  box-shadow: var(--co-shadow);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+}
+
+/* antd cards and the header pick up the glass look. */
+.ant-card {
+  box-shadow: var(--co-shadow);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+}
+.ant-layout-header {
+  backdrop-filter: blur(14px);
+  -webkit-backdrop-filter: blur(14px);
+  border-bottom: 1px solid var(--co-border);
+}
+
+/* Primary buttons carry the brand gradient. "html body" outranks antd's
+   zero-specificity :where() hover rules injected after this sheet. */
+html body .ant-btn.ant-btn-primary:not(:disabled):not(.ant-btn-dangerous),
+html body .ant-btn.ant-btn-primary:not(:disabled):not(.ant-btn-dangerous):hover,
+html body .ant-btn.ant-btn-primary:not(:disabled):not(.ant-btn-dangerous):active {
+  background: var(--co-gradient);
+  border-color: transparent;
+}
+html body .ant-btn.ant-btn-primary:not(:disabled):not(.ant-btn-dangerous):hover {
+  filter: brightness(1.07);
+}
+
+/* The live-output terminal and code blocks stay dark in both modes. */
+.co-terminal,
+pre {
+  background: var(--co-terminal-bg);
+  border: 1px solid var(--co-terminal-border);
+  border-radius: 10px;
+  color: var(--co-terminal-text);
+  font-family: var(--co-mono);
+}
+pre {
+  padding: 10px 12px;
+}
+.co-terminal .co-terminal-muted {
+  color: var(--co-terminal-muted);
+}
+
+/* Brand mark (conic amber → orange → rose). */
+.co-logo {
+  display: inline-block;
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  background: var(--co-logo);
+  box-shadow: 0 0 14px var(--co-glow);
+  vertical-align: middle;
+}

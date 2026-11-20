@@ -145,7 +145,7 @@ export default function SkillsView({ projects = [], isAdmin = false }) {
       render: (n, row) => (
         <div>
           <b>{n}</b> {row.version && <Tag>{`v${row.version}`}</Tag>}
-          {row.description && <div style={{ fontSize: 12, color: '#8a7a6d' }}>{row.description}</div>}
+          {row.description && <div style={{ fontSize: 12, color: 'var(--co-text-secondary)' }}>{row.description}</div>}
         </div>
       ),
     },

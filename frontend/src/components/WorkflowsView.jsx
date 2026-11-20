@@ -27,14 +27,15 @@ import {
   ReloadOutlined,
 } from '@ant-design/icons'
 import { api } from '../api'
+import { statusVar } from '../theme/tokens'
 
 const TASK_ICON = {
-  completed: { icon: <CheckCircleFilled />, color: '#52c41a' },
-  failed: { icon: <CloseCircleFilled />, color: '#ff4d4f' },
-  running: { icon: <LoadingOutlined spin />, color: '#1677ff' },
-  queued: { icon: <ClockCircleFilled />, color: '#8c8c8c' },
-  awaiting_approval: { icon: <ExclamationCircleFilled />, color: '#faad14' },
-  cancelled: { icon: <MinusCircleFilled />, color: '#8c8c8c' },
+  completed: { icon: <CheckCircleFilled />, color: statusVar('completed') },
+  failed: { icon: <CloseCircleFilled />, color: statusVar('failed') },
+  running: { icon: <LoadingOutlined spin />, color: statusVar('running') },
+  queued: { icon: <ClockCircleFilled />, color: statusVar('queued') },
+  awaiting_approval: { icon: <ExclamationCircleFilled />, color: statusVar('awaiting_approval') },
+  cancelled: { icon: <MinusCircleFilled />, color: statusVar('cancelled') },
 }
 const RUN_COLOR = {
   pending: 'default',
@@ -321,7 +322,7 @@ function RunDialog({ workflow, onClose, onRan }) {
         What should this pipeline run on? (A PR number/URL, an issue, or a description — it fills{' '}
         <code>{'{{input}}'}</code> in every stage.)
       </Typography.Paragraph>
-      <Input.TextArea rows={3} value={input} onChange={(e) => setInput(e.target.value)} placeholder="e.g. PR #1417 / issue #1807 / 'add a dark-mode toggle'" />
+      <Input.TextArea rows={3} value={input} onChange={(e) => setInput(e.target.value)} placeholder="e.g. PR 1417 / issue 1807 / 'add a dark-mode toggle'" />
     </Modal>
   )
 }
@@ -431,7 +432,7 @@ export default function WorkflowsView({ agents = [], isAdmin = false }) {
                     {st.name}
                     {st.items.length > 1 ? ` ×${st.items.length}` : ''}
                   </Tag>
-                  {i < w.stages.length - 1 && <CaretRightOutlined style={{ color: '#8c8c8c', fontSize: 10 }} />}
+                  {i < w.stages.length - 1 && <CaretRightOutlined style={{ color: 'var(--co-text-muted)', fontSize: 10 }} />}
                 </span>
               ))}
             </div>
@@ -447,7 +448,7 @@ export default function WorkflowsView({ agents = [], isAdmin = false }) {
               <div
                 key={r.id}
                 onClick={() => setBoardRun(r.id)}
-                style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '6px 10px', border: '1px solid rgba(150,130,110,0.2)', borderRadius: 6, cursor: 'pointer' }}
+                style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '6px 10px', border: '1px solid var(--co-border)', borderRadius: 6, cursor: 'pointer' }}
               >
                 <Tag color={RUN_COLOR[r.status]} style={{ margin: 0, minWidth: 86, textAlign: 'center' }}>{r.status}</Tag>
                 <b>{r.name}</b>
