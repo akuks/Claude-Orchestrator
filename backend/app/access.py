@@ -130,6 +130,17 @@ async def require_task(s, p: Principal, task_id: str) -> Task:
     return task
 
 
+async def effective_project_id(s, task: Task) -> str | None:
+    """The task's project, or for an ad-hoc task its thread root's project."""
+    if task.project_id is not None:
+        return task.project_id
+    if not task.root_id or task.root_id == task.id:
+        return None
+    return (
+        await s.execute(select(Task.project_id).where(Task.id == task.root_id))
+    ).scalar_one_or_none()
+
+
 async def task_role(s, p: Principal, task: Task) -> str | None:
     if task.project_id is not None:
         return await project_role(s, p, task.project_id)
@@ -137,4 +148,8 @@ async def task_role(s, p: Principal, task: Task) -> str | None:
         return None
     if p.is_admin or task.created_by == p.user.id:
         return "maintainer"
+    # An ad-hoc step in a project thread takes the viewer's role on that project.
+    pid = await effective_project_id(s, task)
+    if pid is not None:
+        return await project_role(s, p, pid)
     return "contributor" if await can_see_task(s, p, task) else None

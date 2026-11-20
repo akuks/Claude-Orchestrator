@@ -9,7 +9,14 @@ from fastapi import APIRouter, HTTPException, Query, Request
 from fastapi.responses import FileResponse, Response
 from sqlalchemy import func, select
 
-from ..access import require_project_role, require_task, task_role, task_visibility_clause
+from ..access import (
+    effective_project_id,
+    project_role,
+    require_project_role,
+    require_task,
+    task_role,
+    task_visibility_clause,
+)
 from ..config import settings
 from ..constants import VALID_MODELS, Priority, Status
 from ..database import SessionLocal
@@ -195,17 +202,23 @@ async def stats(request: Request):
     )
 
 
-async def _require_manage(s, p, task: Task, *, need_contributor: bool = False) -> None:
+async def _require_manage(s, p, task: Task, *, need_contributor: bool = False) -> str | None:
     """Creator, maintainer on the task, or admin may act on it (else 403).
-    Follow-up/duplicate also need contributor on the task's project."""
+
+    Follow-up/duplicate also need contributor on the effective project (the
+    task's own, or its thread root's for an ad-hoc step) since they run in that
+    project's repo/session. The task is already visible, so a missing role is 403.
+    Returns the effective project id."""
     if not (
         p.is_admin
         or (task.created_by is not None and task.created_by == p.user.id)
         or await task_role(s, p, task) == "maintainer"
     ):
         raise HTTPException(403, "Not allowed to modify this task")
-    if need_contributor and task.project_id is not None:
-        await require_project_role(s, p, task.project_id)
+    pid = await effective_project_id(s, task)
+    if need_contributor and pid is not None and await project_role(s, p, pid) is None:
+        raise HTTPException(403, "Contributor role required on the task's project")
+    return pid
 
 
 @router.get("/{task_id}", response_model=TaskOut)
@@ -294,11 +307,12 @@ async def duplicate_task(task_id: str, request: Request):
     async with SessionLocal() as s:
         p = request.state.principal
         src = await require_task(s, p, task_id)
-        await _require_manage(s, p, src, need_contributor=True)
+        pid = await _require_manage(s, p, src, need_contributor=True)
         new = Task(
             title=f"{src.title} (copy)",
             prompt=src.prompt,
             project=src.project,
+            project_id=pid,
             priority=src.priority,
             tags=list(src.tags or []),
             model=src.model,
@@ -332,7 +346,7 @@ async def followup_task(task_id: str, payload: FollowupCreate, request: Request)
     async with SessionLocal() as s:
         p = request.state.principal
         parent = await require_task(s, p, task_id)
-        await _require_manage(s, p, parent, need_contributor=True)
+        pid = await _require_manage(s, p, parent, need_contributor=True)
         if not parent.session_id:
             raise HTTPException(
                 409, "Parent has no resumable session yet (must finish a run first)"
@@ -341,6 +355,7 @@ async def followup_task(task_id: str, payload: FollowupCreate, request: Request)
             title=_default_title(payload.prompt),
             prompt=payload.prompt,
             project=parent.project,
+            project_id=pid,
             priority=parent.priority,
             tags=list(parent.tags or []),
             model=parent.model,
