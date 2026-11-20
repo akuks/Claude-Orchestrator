@@ -26,8 +26,9 @@ export const POLL_MS = 3000
 // Up to this many lines a command is shown in full; longer ones are clamped
 // and Approve asks for a confirmation until the person expands them.
 export const MAX_FULL_LINES = 20
-// The server's cut marker (routers/guard.py _cut): the stored text is not the whole command.
-const TRUNCATED = /… \(truncated, \d+ chars\)/
+// The server's cut marker (routers/guard.py _cut), or a trailing "…" (a cut made
+// elsewhere): the stored text is not the whole command.
+const TRUNCATED = /(… \(truncated, \d+ chars\)|…)\s*$/
 export const TRUNCATED_WARNING = "Command too long to show in full — you can't fully review it"
 
 const isHidden = () => typeof document !== 'undefined' && document.visibilityState === 'hidden'

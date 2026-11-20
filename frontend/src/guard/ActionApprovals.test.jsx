@@ -13,7 +13,7 @@ vi.mock('../api', () => ({
 }))
 
 import { api } from '../api'
-import ActionApprovals from './ActionApprovals'
+import ActionApprovals, { TRUNCATED_WARNING } from './ActionApprovals'
 
 const NOW = Date.parse('2026-11-21T10:00:00Z')
 const card = (over = {}) => ({
@@ -229,6 +229,31 @@ describe('ActionApprovals cards', () => {
     await click(btn(c, 'Approve'))
     await flush()
     expect(api.approveAction).toHaveBeenCalledTimes(1)
+  })
+
+  it('a summary ending in "…" (cut elsewhere) also counts as truncated', async () => {
+    const cut = 'git reset --hard && echo ' + 'y'.repeat(280) + '…'
+    api.listActionApprovals.mockImplementation(async () => [card({ summary: cut })])
+    api.approveAction.mockImplementation(async () => card({ status: 'approved' }))
+    const c = await mount()
+    expect(q(c, 'action-truncated-r1')).toBeTruthy()
+    await click(btn(c, 'Approve'))
+    await flush()
+    expect(api.approveAction).not.toHaveBeenCalled()
+    await click(btn(document.body, 'Approve anyway'))
+    await flush()
+    expect(api.approveAction).toHaveBeenCalledTimes(1)
+  })
+
+  it('a >8000-char command cut by the server shows the warning and needs a confirmation', async () => {
+    const cut = 'git reset --hard && echo ' + 'y'.repeat(7950) + '… (truncated, 9037 chars)'
+    api.listActionApprovals.mockImplementation(async () => [card({ summary: cut })])
+    api.approveAction.mockImplementation(async () => card({ status: 'approved' }))
+    const c = await mount()
+    expect(q(c, 'action-truncated-r1').textContent).toContain(TRUNCATED_WARNING)
+    await click(btn(c, 'Approve'))
+    await flush()
+    expect(api.approveAction).not.toHaveBeenCalled()
   })
 
   it('a truncated command shows a warning and Approve needs a second confirmation', async () => {
