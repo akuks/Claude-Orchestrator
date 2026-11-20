@@ -515,6 +515,7 @@ class WorkflowRunOut(BaseModel):
     status: str
     current_stage: int
     stages: list
+    project_ids: list[str] = []
     created_at: datetime
     updated_at: datetime
 

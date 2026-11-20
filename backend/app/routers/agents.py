@@ -1,7 +1,7 @@
 from fastapi import APIRouter, HTTPException, Request
 from sqlalchemy import select
 
-from ..access import project_role, require_project_role
+from ..access import project_role, require_project_role, require_task
 from ..auth import ensure_admin
 from ..constants import VALID_MODELS
 from ..database import SessionLocal
@@ -19,6 +19,14 @@ from ..models import Task
 from ..task_service import build_task
 
 router = APIRouter(prefix="/agents", tags=["agents"])
+
+
+async def _require_parent(s, request: Request, parent_task_id: str | None) -> None:
+    """A human caller may only link children under a task they can see (404
+    otherwise). Agent tokens are confined to their own task by dispatch."""
+    p = request.state.principal
+    if parent_task_id and not p.is_agent:
+        await require_task(s, p, parent_task_id)
 
 
 async def _creator(s, request: Request, parent_task_id: str | None) -> str:
@@ -314,6 +322,7 @@ async def run_agent(agent_id: str, payload: AgentRun, request: Request):
             raise HTTPException(400, "This agent has no default prompt; provide one")
         project_id = payload.project_id or agent.project_id
         await require_project_role(s, request.state.principal, project_id)
+        await _require_parent(s, request, payload.parent_task_id)
         task = await build_task(
             s,
             prompt=prompt,
@@ -364,6 +373,7 @@ async def dispatch(payload: DispatchRequest, request: Request):
         raise HTTPException(403, "Token may only dispatch under its own task")
 
     async with SessionLocal() as s:
+        await _require_parent(s, request, payload.parent_task_id)
         # Resolve each target agent by id or exact name.
         all_agents = (await s.execute(select(Agent))).scalars().all()
         by_id = {a.id: a for a in all_agents}

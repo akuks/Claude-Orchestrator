@@ -12,7 +12,7 @@ from ..constants import VALID_MODELS
 from ..database import SessionLocal
 from ..models import Agent, Schedule, Task
 from ..schemas import ScheduleCreate, ScheduleOut, ScheduleUpdate, TaskOut
-from ..scheduler import is_valid_cron, next_run
+from ..scheduler import is_valid_cron, next_run, owner_block_reason
 
 router = APIRouter(prefix="/schedules", tags=["schedules"])
 
@@ -170,6 +170,10 @@ async def run_schedule_now(schedule_id: str, request: Request):
     async with SessionLocal() as s:
         sch = await _get_or_404(s, p, schedule_id)
         await _require_targets(s, p, sch.project_id, sch.agent_id, strict=False)
+        # Same owner rules as the scheduler: the run is created as the owner.
+        reason = await owner_block_reason(s, sch)
+        if reason is not None:
+            raise HTTPException(409, f"Schedule {reason}")
     task_id = await request.app.state.scheduler.run_now(schedule_id)
     if task_id is None:
         raise HTTPException(404, "Schedule not found")

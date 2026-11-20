@@ -74,15 +74,24 @@ def next_run(expr: str, after: datetime | None = None) -> datetime:
     return croniter(expr, base).get_next(datetime)
 
 
-async def _owner_may_fire(s, owner: User, sch: Schedule) -> bool:
-    """The owner still contributes to every project the run would land in
-    (the schedule's and its agent's). Admin owners always pass."""
+async def owner_block_reason(s, sch: Schedule) -> str | None:
+    """Why the schedule's owner may not fire it now, or None. Blocked when the
+    owner row is gone, disabled, or no longer contributes to every project the
+    run would land in (the schedule's and its agent's); admins always pass.
+    Legacy schedules without an owner are not blocked."""
+    if not sch.created_by:
+        return None
+    owner = await s.get(User, sch.created_by)
+    if owner is None:
+        return "owner no longer exists"
+    if not owner.active:
+        return "owner is disabled"
     agent = await s.get(Agent, sch.agent_id) if sch.agent_id else None
     principal = Principal(owner)
     for pid in {sch.project_id, agent and agent.project_id} - {None}:
         if await project_role(s, principal, pid) is None:
-            return False
-    return True
+            return "owner lost access to project"
+    return None
 
 
 class Scheduler:
@@ -125,22 +134,11 @@ class Scheduler:
             for sch in due:
                 if not is_valid_cron(sch.cron):
                     continue
-                if sch.created_by:
-                    owner = await s.get(User, sch.created_by)
-                    if owner is not None and not owner.active:
-                        log.warning(
-                            "Skipping schedule %s (%s): owner is disabled", sch.id, sch.name
-                        )
-                        sch.next_run_at = next_run(sch.cron, now)
-                        continue
-                    if owner is not None and not await _owner_may_fire(s, owner, sch):
-                        log.warning(
-                            "Skipping schedule %s (%s): owner lost access to project",
-                            sch.id,
-                            sch.name,
-                        )
-                        sch.next_run_at = next_run(sch.cron, now)
-                        continue
+                reason = await owner_block_reason(s, sch)
+                if reason is not None:
+                    log.warning("Skipping schedule %s (%s): %s", sch.id, sch.name, reason)
+                    sch.next_run_at = next_run(sch.cron, now)
+                    continue
                 # Don't stack runs: if this schedule's previous run is still
                 # unresolved (waiting on approval, queued, or running), skip this
                 # firing and just advance the clock. Otherwise gated schedules pile

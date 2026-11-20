@@ -1,5 +1,5 @@
-from fastapi import APIRouter, HTTPException, Request
-from sqlalchemy import and_, select
+from fastapi import APIRouter, HTTPException, Query, Request
+from sqlalchemy import and_, or_, select
 
 from ..access import (
     ALL,
@@ -220,9 +220,9 @@ async def run_workflow(workflow_id: str, payload: WorkflowRunCreate, request: Re
 
 
 @router.get("/runs", response_model=list[WorkflowRunOut])
-async def list_runs(request: Request, limit: int = 50):
+async def list_runs(request: Request, limit: int = Query(50, ge=1, le=500)):
     p = request.state.principal
-    query = select(WorkflowRun).order_by(WorkflowRun.created_at.desc(), WorkflowRun.id)
+    query = select(WorkflowRun).order_by(WorkflowRun.created_at.desc(), WorkflowRun.id.desc())
     async with SessionLocal() as s:
         visible = await visible_project_ids(s, p)
         if visible is ALL:
@@ -230,15 +230,22 @@ async def list_runs(request: Request, limit: int = 50):
             return [WorkflowRunOut.model_validate(r) for r in rows]
         # Visibility is an overlap test on the JSON `project_ids` column, which
         # has no portable SQL form (SQLite vs Postgres JSON). So walk the runs
-        # newest-first in batches and keep visible ones until `limit` is
-        # reached — never filter after a LIMIT, which would drop rows.
-        out, offset, batch = [], 0, max(limit, 200)
+        # newest-first in keyset batches on (created_at, id) and keep visible
+        # ones until `limit` is reached — never filter after a LIMIT, which
+        # would drop rows.
+        out, batch, page = [], max(limit, 200), query
         while len(out) < limit:
-            rows = (await s.execute(query.offset(offset).limit(batch))).scalars().all()
+            rows = (await s.execute(page.limit(batch))).scalars().all()
             out += [r for r in rows if _run_visible(p, r, visible)]
             if len(rows) < batch:
                 break
-            offset += batch
+            last = rows[-1]
+            page = query.where(
+                or_(
+                    WorkflowRun.created_at < last.created_at,
+                    and_(WorkflowRun.created_at == last.created_at, WorkflowRun.id < last.id),
+                )
+            )
     return [WorkflowRunOut.model_validate(r) for r in out[:limit]]
 
 
