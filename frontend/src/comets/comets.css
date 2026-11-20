@@ -181,3 +181,66 @@ html[data-reduce-motion='true'] .co-star-halo {
     animation: none;
   }
 }
+
+/* Run timeline stage buttons (SVG fallback and the 3D overlay). */
+.co-tl-stages {
+  position: relative;
+  height: 44px;
+}
+.co-tl-stage {
+  position: absolute;
+  top: 0;
+  transform: translateX(-50%);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 1px;
+  padding: 3px 8px;
+  border-radius: 10px;
+  border: 1px solid transparent;
+  background: transparent;
+  color: var(--co-text);
+  font: inherit;
+  font-size: 12px;
+  line-height: 1.25;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.co-tl-stage:disabled,
+.co-tl-stage:not([aria-pressed]) {
+  cursor: default;
+}
+.co-tl-stage:hover,
+.co-tl-stage-hover {
+  background: var(--co-hover);
+}
+.co-tl-stage:focus-visible {
+  outline: 2px solid var(--co-primary);
+  outline-offset: 1px;
+}
+.co-tl-stage-selected {
+  border-color: var(--co-active-border);
+  background: var(--co-active-bg);
+}
+.co-tl-stage-name,
+.co-tl-stage-state {
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.co-tl-stage-name {
+  font-weight: 600;
+}
+.co-tl-stage-state {
+  font-size: 11px;
+  color: var(--co-text-secondary);
+}
+.co-tl-stage-current .co-tl-stage-state {
+  color: var(--co-comet-label-current);
+}
+.co-tl-stage-failed .co-tl-stage-state {
+  color: var(--co-comet-label-failed);
+}
+.co-tl-stage-waiting_approval .co-tl-stage-state {
+  color: var(--co-comet-label-wait);
+}

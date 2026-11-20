@@ -51,7 +51,7 @@ function heightFor(n, compact) {
   return Math.max(240, Math.min(n, 12) * 54 + 60)
 }
 
-function Star({ star, cx, cy, isHead, compact }) {
+export function Star({ star, cx, cy, isHead, compact }) {
   const k = compact ? 0.7 : 1
   const depth = 1 + star.z * 0.12 // nearer stars are a touch larger
   const title = `${star.name}: ${stateLabel(star.state)}${star.taskCount ? ` · ${star.taskCount} task${star.taskCount === 1 ? '' : 's'}` : ''}`
@@ -201,38 +201,54 @@ export default function CometSvg({ comets = [], overflow = 0, onOpen, onMore, co
         })}
       </svg>
 
-      {!compact && (comets.length > 0 || overflow > 0) && (
-        <ul className="co-comet-list" aria-label="Live workflows">
-          {comets.map((c) => {
-            const head = c.stars[c.headIndex]
-            return (
-              <li key={c.id}>
-                <button type="button" className="co-comet-item" onClick={() => onOpen?.(c)} data-testid="comet-item">
-                  <span className={`co-comet-dot co-comet-dot-${head.state}`} aria-hidden="true" />
-                  <span className="co-comet-item-title">{c.title}</span>
-                  <span className="co-comet-item-stage">
-                    {c.kind === 'thread' ? 'thread · ' : ''}
-                    {head.name} · {stateLabel(head.state)}
-                  </span>
-                </button>
-              </li>
-            )
-          })}
-          {overflow > 0 && (
-            <li>
-              {onMore ? (
-                <button type="button" className="co-comet-item co-comet-more" onClick={onMore} data-testid="comet-more">
-                  +{overflow} more
-                </button>
-              ) : (
-                <span className="co-comet-more" data-testid="comet-more">
-                  +{overflow} more
-                </span>
-              )}
-            </li>
-          )}
-        </ul>
-      )}
+      {!compact && <CometList comets={comets} overflow={overflow} onOpen={onOpen} onMore={onMore} />}
     </div>
+  )
+}
+
+// Keyboard-reachable list of the comets (and the "+N more") shown under the
+// SVG scene and under the 3D canvas: the accessible way to open a run.
+export function CometList({ comets = [], overflow = 0, onOpen, onMore, onHighlight }) {
+  if (!comets.length && !overflow) return null
+  return (
+    <ul className="co-comet-list" aria-label="Live workflows">
+      {comets.map((c) => {
+        const head = c.stars[c.headIndex]
+        return (
+          <li key={c.id}>
+            <button
+              type="button"
+              className="co-comet-item"
+              onClick={() => onOpen?.(c)}
+              onMouseEnter={onHighlight ? () => onHighlight(c.id) : undefined}
+              onMouseLeave={onHighlight ? () => onHighlight(null) : undefined}
+              onFocus={onHighlight ? () => onHighlight(c.id) : undefined}
+              onBlur={onHighlight ? () => onHighlight(null) : undefined}
+              data-testid="comet-item"
+            >
+              <span className={`co-comet-dot co-comet-dot-${head.state}`} aria-hidden="true" />
+              <span className="co-comet-item-title">{c.title}</span>
+              <span className="co-comet-item-stage">
+                {c.kind === 'thread' ? 'thread · ' : ''}
+                {head.name} · {stateLabel(head.state)}
+              </span>
+            </button>
+          </li>
+        )
+      })}
+      {overflow > 0 && (
+        <li>
+          {onMore ? (
+            <button type="button" className="co-comet-item co-comet-more" onClick={onMore} data-testid="comet-more">
+              +{overflow} more
+            </button>
+          ) : (
+            <span className="co-comet-more" data-testid="comet-more">
+              +{overflow} more
+            </span>
+          )}
+        </li>
+      )}
+    </ul>
   )
 }

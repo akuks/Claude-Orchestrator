@@ -1,0 +1,101 @@
+/* 3D comet scene + run timeline: canvas with HTML labels on top. Colours
+   come from theme variables so light/night follow automatically. */
+.co-c3d {
+  position: relative;
+}
+.co-c3d-stage {
+  position: relative;
+  width: 100%;
+  overflow: hidden;
+  border-radius: 12px;
+  touch-action: pan-y;
+}
+.co-c3d-stage.is-hover .co-c3d-canvas {
+  cursor: pointer;
+}
+.co-c3d-canvas {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  display: block;
+}
+.co-c3d-labels {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+}
+.co-c3d-label,
+.co-c3d-stagename,
+.co-c3d-labels .co-tl-stage {
+  position: absolute;
+  left: 0;
+  top: 0;
+  visibility: hidden;
+  will-change: transform;
+}
+.co-c3d-label {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  max-width: var(--co-c3d-label-w, 200px);
+  padding: 2px 9px 3px;
+  border-radius: 10px;
+  border: 1px solid var(--co-border);
+  background: var(--co-surface-solid);
+  box-shadow: var(--co-shadow);
+  color: var(--co-text);
+  font-size: 12px;
+  line-height: 1.25;
+  text-align: right;
+  white-space: nowrap;
+  cursor: pointer;
+  pointer-events: auto;
+  transition: border-color 0.15s, box-shadow 0.15s;
+}
+.co-c3d-label.is-hover {
+  border-color: var(--co-active-border);
+  box-shadow: 0 0 0 3px var(--co-active-bg), var(--co-shadow);
+}
+.co-c3d-label-title,
+.co-c3d-label-stage {
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.co-c3d-label-title {
+  font-weight: 600;
+}
+.co-c3d-label-stage {
+  font-size: 11px;
+  color: var(--co-text-secondary);
+}
+.co-c3d-label-current .co-c3d-label-stage {
+  color: var(--co-comet-label-current);
+}
+.co-c3d-label-failed .co-c3d-label-stage {
+  color: var(--co-comet-label-failed);
+}
+.co-c3d-label-waiting_approval .co-c3d-label-stage {
+  color: var(--co-comet-label-wait);
+}
+.co-c3d-stagename {
+  font-size: 10.5px;
+  color: var(--co-text-secondary);
+  white-space: nowrap;
+  pointer-events: none;
+}
+.co-c3d-labels .co-tl-stage {
+  pointer-events: auto;
+  background: var(--co-surface);
+}
+.co-c3d-labels .co-tl-stage:hover,
+.co-c3d-labels .co-tl-stage-hover {
+  background: var(--co-hover);
+}
+.co-c3d-labels .co-tl-stage-selected {
+  background: var(--co-active-bg);
+}
+.co-c3d .co-comet-list {
+  margin-top: 8px;
+}

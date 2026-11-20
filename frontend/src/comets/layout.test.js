@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { headIndexOf, layoutComets } from './layout'
+import { headIndexOf, laneY, layoutComets } from './layout'
 
 const item = (i, states = ['done', 'current', 'next'], extra = {}) => ({
   kind: 'run',
@@ -111,5 +111,16 @@ describe('layoutComets priority when over the cap', () => {
   it('does not reorder when everything fits', () => {
     const items = [plain(1), item('f', ['failed']), plain(2)]
     expect(layoutComets(items).comets.map((c) => c.id)).toEqual(['run-1', 'run-f', 'run-2'])
+  })
+})
+
+describe('laneY', () => {
+  it('spaces lanes evenly inside the vertical band, in comet order', () => {
+    const ys = [0, 1, 2, 3].map((i) => laneY(i, 4))
+    const gaps = ys.slice(1).map((y, i) => y - ys[i])
+    for (const g of gaps) expect(g).toBeCloseTo(gaps[0])
+    expect(ys[0]).toBeGreaterThan(0)
+    expect(ys[3]).toBeLessThan(1)
+    expect(laneY(0, 1)).toBeCloseTo(0.5)
   })
 })

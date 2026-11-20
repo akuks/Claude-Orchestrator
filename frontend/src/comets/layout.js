@@ -36,6 +36,11 @@ function seeded(seed) {
   }
 }
 
+// Centre line (y) of comet i of n: the lanes split the vertical band evenly.
+export function laneY(i, n) {
+  return Y_TOP + ((Y_BOTTOM - Y_TOP) * (i + 0.5)) / Math.max(1, n)
+}
+
 const clamp = (v, lo, hi) => Math.min(hi, Math.max(lo, v))
 const round = (v) => Math.round(v * 10000) / 10000
 
@@ -84,7 +89,7 @@ export function layoutComets(items, { max = MAX_COMETS } = {}) {
 
   const comets = shown.map((item, i) => {
     const rand = seeded(hashString(String(item.id)))
-    const lane = Y_TOP + ((Y_BOTTOM - Y_TOP) * (i + 0.5)) / n
+    const lane = laneY(i, n)
     const rise = (0.12 + 0.14 * rand()) * spread
     const wobble = (0.02 + 0.04 * rand()) * spread
     const phase = rand() * Math.PI * 2
