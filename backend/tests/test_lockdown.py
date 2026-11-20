@@ -196,13 +196,13 @@ def test_member_cannot_write_mcp_or_skills(member_client, client):
 
 def test_member_context_docs_global_writes_are_admin_only(member_client, client):
     m = member_client
-    # Projects are admin-created; the member gets a contributor grant.
+    # Projects are admin-created; project docs need a maintainer grant.
     assert m.post("/projects", json={"name": "MemberCtx"}).status_code == 403
     proj = client.post("/projects", json={"name": "MemberCtx"}).json()
     me = next(u for u in client.get("/users").json() if u["email"] == "member@test.local")
     assert client.put(
         f"/projects/{proj['id']}/members",
-        json=[{"subject_type": "user", "subject_id": me["id"], "role": "contributor"}],
+        json=[{"subject_type": "user", "subject_id": me["id"], "role": "maintainer"}],
     ).status_code == 200
     assert m.post("/context-docs", json={"path": "g/one"}).status_code == 403  # default scope global
     assert m.post("/context-docs", json={"path": "g/one", "scope": "global"}).status_code == 403
