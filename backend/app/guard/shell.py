@@ -39,8 +39,12 @@ API
                    ``export``), a ``parallel`` command word with spaces, and a
                    shell's script when it is visible: a
                    heredoc or here-string (``bash <<EOF``, ``bash 0<<< ..``,
-                   ``bash /dev/stdin <<< ..``), a heredoc or here-string piped
-                   into a later shell stage (``cat <<EOF | bash``), literal
+                   ``bash /dev/stdin <<< ..``), a heredoc or here-string fed
+                   to ``cat`` (no other argument) piped straight into a shell
+                   (``cat <<EOF | bash``; any other producer such as
+                   ``base64 -d``, ``sed`` or ``rev`` may transform it, so the
+                   shell is uncertain), ``at``/``batch`` jobs given on stdin,
+                   ``tmux new|new-window|split-window|run-shell 'cmd'``, literal
                    ``echo``/``printf`` output piped into one (``echo 'cmd' |
                    sh``), or ``<(echo ...)`` as the script file or ``<``
                    source (``source <(echo ..)``, ``bash < <(echo ..)``).
@@ -154,6 +158,8 @@ __all__ = [
     "command_name",
     "expand_wrappers",
     "parse",
+    "shell_mode",
+    "shell_name",
     "unfold",
     "walk",
 ]
@@ -173,7 +179,7 @@ _PREFIX = frozenset({
     "sudo", "doas", "env", "command", "builtin", "nohup", "time", "exec", "xargs", "nice",
     "ionice", "timeout", "stdbuf", "busybox", "winpty", "setsid", "chronic", "chroot", "unshare",
     "nsenter", "flock", "strace", "pkexec", "unbuffer", "caffeinate", "arch", "parallel", "runuser",
-    "coproc", "taskset", "numactl", "if", "then", "else", "elif", "do", "while", "until", "!",
+    "coproc", "taskset", "numactl", "screen", "systemd-run", "if", "then", "else", "elif", "do", "while", "until", "!",
 })
 _WITH_VALUE = {
     "sudo": {"-u", "-g", "-h", "-p", "-C", "-U", "-r", "-t", "-D", "-T", "--user", "--group",
@@ -200,6 +206,11 @@ _WITH_VALUE = {
                  "--timeout", "--delay"},
     "runuser": {"-u", "-g", "-G", "--user", "--group", "--supp-group"},
     "taskset": {"-c", "--cpu-list"},
+    "screen": {"-S", "-c", "-e", "-h", "-p", "-t", "-T", "-s", "-X"},
+    "systemd-run": {"-u", "--unit", "-p", "--property", "--description", "--slice", "--uid", "--gid", "-E",
+                    "--setenv", "--working-directory", "-M", "--machine", "-H", "--host", "--on-active",
+                    "--on-boot", "--on-startup", "--on-unit-active", "--on-unit-inactive", "--on-calendar",
+                    "--timer-property", "--path-property", "--socket-property", "--nice", "--service-type"},
     "numactl": {"-N", "-m", "-C", "-i", "-p", "--cpunodebind", "--membind", "--physcpubind",
                 "--interleave", "--preferred"},
 }
@@ -942,13 +953,14 @@ class _Level:
                 continue
             prev = self.pipeline[k - 1]
             val = _echo_value(_single(prev, self.ctx))
-            texts = [val] if val else [t for op, t in prev.redirects if op == "<<<"]
+            passthrough = _passthrough(prev)
+            texts = [val] if val else ([t for op, t in prev.redirects if op == "<<<"] if passthrough else [])
             if texts:  # echo 'cmd' | bash, cat <<< 'cmd' | bash: the shell runs the text
                 for text in texts:
                     res = _parse_script(text, self.ctx, self.vars)
                     if res is not None:
                         sh.nested.append(res)
-            elif not any(op == "<<" for op, _ in prev.redirects):  # heredoc bodies: _attach_body
+            elif not (passthrough and any(op == "<<" for op, _ in prev.redirects)):  # bodies: _attach_body
                 sh.mark("shell reads a script from a pipe that is not a literal")
         if self.pipeline:
             self.pipeline_no += 1
@@ -1160,7 +1172,8 @@ class _Level:
 def _attach_body(h, body, ctx, vars_):
     st = h.stage
     st.heredocs.append((h.delim, h.quoted, body))
-    if _stdin_shell(st) or any(_stdin_shell(x) for x in h.pipeline if x is not st and x.index > st.index):
+    if _stdin_shell(st) or (_passthrough(st) and any(_stdin_shell(x) for x in h.pipeline
+                                                       if x.index == st.index + 1)):
         res = _parse_script(body, ctx, vars_)  # the shell runs its stdin
         if res is not None:
             st.nested.append(res)
@@ -1168,13 +1181,13 @@ def _attach_body(h, body, ctx, vars_):
         st.nested.extend(_body_subs(body, ctx, vars_))
 
 
-def _shell_name(name):
+def shell_name(name):
     """bash5, zsh-5.9, sh.exe -> the shell, or None."""
     base = re.sub(r"[-.]?[0-9][0-9.]*\Z", "", name)
     return base if base in SHELLS else None
 
 
-def _shell_mode(args):
+def shell_mode(args):
     """('c', script|None) | ('stdin', None) | ('file', path) for a shell's args."""
     i, c_flag, s_flag = 0, False, False
     while i < len(args):
@@ -1228,18 +1241,38 @@ def _sudo_shell(argv):
                                                  and ("s" in t[1:] or "i" in t[1:])) for t in argv)
 
 
+def _passthrough(st):
+    """`cat` / `cat -` with no other argument: its stdin (a heredoc or
+    here-string) reaches the next pipeline stage unchanged. Any other command
+    (base64 -d, sed, tr, rev, xxd ...) may transform it."""
+    idx, _, _ = _strip(st.argv)
+    return idx is not None and command_name(st.argv[idx]) == "cat" and st.argv[idx + 1:] in ([], ["-"])
+
+
+def _at_mode(args):
+    """'stdin' (at/batch reads its job from stdin), 'file' (-f FILE) or None (list/remove)."""
+    for a in args:
+        if a == "-f" or (a.startswith("-") and not a.startswith("--") and "f" in a[1:]):
+            return "file"
+        if a in ("-l", "-r", "-d", "-c") or (a.startswith("-") and set(a[1:]) & set("lrdc")):
+            return None
+    return "stdin"
+
+
 def _stdin_shell(st):
     idx, wrappers, _ = _strip(st.argv)
     if idx is None:
         return "sudo" in wrappers and _sudo_shell(st.argv)
     name, args = command_name(st.argv[idx]), st.argv[idx + 1:]
-    if _shell_name(name):
-        return _shell_mode(args)[0] == "stdin"
+    if shell_name(name):
+        return shell_mode(args)[0] == "stdin"
     if name in ("su", "sg") or (name == "runuser" and "runuser" not in wrappers):
         return _opt_value(args, "c") is None  # su [-] [user]: a shell on stdin
     if name in ("source", "."):
         args = _source_args(args)
         return bool(args) and _is_stdin_path(args[0])
+    if name in ("at", "batch"):
+        return _at_mode(args) == "stdin"
     return False
 
 
@@ -1256,8 +1289,8 @@ def _script_file(st):
         return False
     name, args = command_name(st.argv[idx]), st.argv[idx + 1:]
     procsub = st.__dict__.get("_procsub", {})
-    if _shell_name(name):
-        mode, path = _shell_mode(args)
+    if shell_name(name):
+        mode, path = shell_mode(args)
     elif name in ("source", "."):
         sargs = _source_args(args)
         if not sargs or _is_stdin_path(sargs[0]):
@@ -1416,12 +1449,12 @@ def _finish(st, ctx, vars_):
     name, args = command_name(argv[idx]), argv[idx + 1:]
     if name in ctx.aliases:
         st.mark(f"command word is an alias: {argv[idx]!r}")
-    if _shell_name(name):
+    if shell_name(name):
         hooks = set(st.env) | {m.group(1) for w in argv[:idx] for m in [_ASSIGN.match(w)] if m}
         hooks |= set(ctx.writes)
         if hooks & _SHELL_HOOK_VARS:
             st.mark("a shell hook variable (PS4, PROMPT_COMMAND, BASH_ENV, ENV ...) is set")
-        mode, script = _shell_mode(args)
+        mode, script = shell_mode(args)
         if {"xargs", "parallel"} & set(wrappers):
             holders = _placeholders(argv[:idx])
             if (mode != "c" or script is None or script.startswith(":::")
@@ -1448,6 +1481,14 @@ def _finish(st, ctx, vars_):
             j += 2 if args[j] in ("-n", "--interval", "-q", "--equexit") else 1
         if args[j:]:
             scripts.append(" ".join(args[j:]))
+    elif name in ("at", "batch"):
+        mode = _at_mode(args)
+        if mode == "stdin":
+            _stdin_inputs(st, scripts, name)  # at now <<< 'cmd'; pipes: end_pipeline
+        elif mode == "file":
+            st.mark(f"{name} runs a job file we cannot see")
+    elif name == "tmux":
+        _tmux_scripts(st, args, scripts)
     elif name in ("su", "runuser", "sg", "script"):
         val = _opt_value(args, "c")
         if val is not None:
@@ -1498,6 +1539,41 @@ def _finish(st, ctx, vars_):
         st.mark("a script file runs while stdin is redirected (the file may be stdin)")
     _nest(st, scripts, ctx, vars_)
     return writes
+
+
+_TMUX_SHELL_SUBS = {  # subcommand -> its options that take a value
+    "new-session": "cefFnstxy", "new": "cefFnstxy", "new-window": "cefFnt", "neww": "cefFnt",
+    "split-window": "ceFlt", "splitw": "ceFlt", "respawn-pane": "cet", "respawnp": "cet",
+    "respawn-window": "cet", "respawnw": "cet", "run-shell": "dt", "run": "dt", "if-shell": "t", "if": "t",
+}
+
+
+def _tmux_scripts(st, args, scripts):
+    """tmux [-L s] [-S p] [-f f] new[-session] [-d] ... 'cmd': the shell command runs."""
+    i = 0
+    while i < len(args) and args[i].startswith("-"):
+        a = args[i]
+        if a == "-c" and i + 1 < len(args):  # tmux -c shell-command
+            scripts.append(args[i + 1])
+            return
+        i += 2 if a in ("-L", "-S", "-f", "-T") else 1
+    if i >= len(args):
+        return
+    sub, rest = args[i], args[i + 1:]
+    if sub in ("send-keys", "send", "send-prefix", "pipe-pane", "pipep", "display-popup", "popup"):
+        st.mark(f"tmux {sub} runs or types commands we cannot follow")
+        return
+    vals = _TMUX_SHELL_SUBS.get(sub)
+    if vals is None:
+        return
+    j = 0
+    while j < len(rest) and rest[j].startswith("-") and rest[j] != "--":
+        flag = rest[j]
+        j += 2 if len(flag) == 2 and flag[1] in vals else 1
+    if j < len(rest) and rest[j] == "--":
+        j += 1
+    if j < len(rest):
+        scripts.append(rest[j] if sub in ("if-shell", "if") else " ".join(rest[j:]))
 
 
 def _nest(st, scripts, ctx, vars_):
@@ -1833,3 +1909,8 @@ def parse(command):
         safe, written = new_safe, new_written
     res, _ = _pass(s, frozenset(), frozenset(written))
     return res
+
+
+# Private aliases kept for older callers.
+_shell_name = shell_name
+_shell_mode = shell_mode
