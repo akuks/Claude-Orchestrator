@@ -36,6 +36,10 @@ def upgrade() -> None:
     op.create_index("ix_action_approvals_task_id", "action_approvals", ["task_id"])
     op.create_index("ix_action_approvals_project_id", "action_approvals", ["project_id"])
     op.create_index("ix_action_approvals_status", "action_approvals", ["status"])
+    op.create_index(
+        "uq_action_approvals_pending_key", "action_approvals", ["task_id", "idempotency_key"], unique=True,
+        sqlite_where=sa.text("status = 'pending'"), postgresql_where=sa.text("status = 'pending'"),
+    )
     with op.batch_alter_table("projects") as b:
         b.add_column(sa.Column("guard_enabled", sa.Boolean(), nullable=False, server_default=sa.true()))
         b.add_column(sa.Column("approval_wait_seconds", sa.Integer(), nullable=False, server_default="300"))
@@ -45,6 +49,7 @@ def downgrade() -> None:
     with op.batch_alter_table("projects") as b:
         b.drop_column("approval_wait_seconds")
         b.drop_column("guard_enabled")
+    op.drop_index("uq_action_approvals_pending_key", "action_approvals")
     op.drop_index("ix_action_approvals_status", "action_approvals")
     op.drop_index("ix_action_approvals_project_id", "action_approvals")
     op.drop_index("ix_action_approvals_task_id", "action_approvals")
