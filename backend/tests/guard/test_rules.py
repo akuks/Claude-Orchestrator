@@ -1589,3 +1589,46 @@ def test_r13_protected_directory_entries(env):
                      "self-protect")
     for cmd in ["cat ~/.claude/settings.json", "ls ~/.claude", "echo x > ~/.claude-notes.md"]:
         assert "self-protect" not in ids(bash(env, cmd, **pol)), cmd
+
+
+# Task 3 carry: a heredoc / here-string on a compound command feeds a bare stdin interpreter;
+# `uv run -` gets the same code checks as other stdin interpreters ------------------------
+COMPOUND_STDIN_CODE = [
+    "{{ python3; }} <<'E'\nimport os; os.system('make')\nE",
+    "if true; then python3; fi <<E\nimport os; os.system('make')\nE",
+    "while true; do node; done <<E\nrequire('child_process').execSync('make')\nE",
+    "for i in 1; do perl; done <<'E'\nsystem('make');\nE",
+    "{{ python3; }} <<< \"import os; os.system('make')\"",
+    "case x in x) ruby;; esac <<'E'\nsystem('make')\nE",
+    "uv run - <<'E'\nimport os; os.system('make')\nE",
+    "uv run - <<< \"import subprocess; subprocess.run('make')\"",
+    "echo \"import os; os.system('make')\" | uv run -",
+    "uv run /dev/stdin <<'E'\nimport os; os.system('make')\nE",
+]
+
+
+@pytest.mark.parametrize("cmd", COMPOUND_STDIN_CODE)
+def test_compound_heredoc_and_uv_code_is_checked(env, cmd):
+    assert "uncertain-command" in ids(bash(env, cmd))
+
+
+@pytest.mark.parametrize("cmd", [
+    "{{ python3; }} <<'E'\nopen('{C}/settings.json', 'w').write('x')\nE",
+    "if true; then python3; fi <<'E'\nimport os; print(os.environ['CO_POLICY_FILE'])\nE",
+    "uv run - <<'E'\nopen('{T}/policy.json', 'w').write('{{}}')\nE",
+])
+def test_compound_heredoc_and_uv_self_protect(env, cmd):
+    assert deny_hard(bash(env, cmd), "self-protect")
+
+
+@pytest.mark.parametrize("cmd", [
+    "{{ python3; }} <<'E'\nprint(1)\nE",
+    "if true; then python3; fi <<E\nprint(1)\nE",
+    "uv run - <<'E'\nprint('hello')\nE",
+    "echo 'print(1)' | uv run -",
+    "{{ cat; }} <<'E'\nimport os; os.system('make')\nE",
+    "uv run pytest <<'E'\nimport os; os.system('make')\nE",
+    "{{ python3 app.py; }} <<'E'\nimport os; os.system('make')\nE",
+])
+def test_compound_heredoc_and_uv_negative(env, cmd):
+    assert bash(env, cmd).decision == "allow"
