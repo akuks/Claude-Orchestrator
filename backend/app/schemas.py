@@ -230,7 +230,7 @@ class ProjectCreate(BaseModel):
 
 
 class ProjectUpdate(BaseModel):
-    name: Optional[str] = None
+    name: Optional[str] = Field(None, min_length=1, max_length=200)
     directory: Optional[str] = None
     instructions: Optional[str] = None
     default_model: Optional[str] = None

@@ -409,6 +409,11 @@ async def delete_task(task_id: str, request: Request):
                 else:
                     kept.append(m)
 
+        # A finished coordinator root can still have dispatched steps running;
+        # deleting them would leave live workers writing to vanished rows.
+        if any(m.status in Status.ACTIVE for m in members):
+            raise HTTPException(409, "A step in this thread is still running; cancel it first")
+
         deleted = {m.id for m in members}
         for k in kept:
             k.root_id = k.id

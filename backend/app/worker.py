@@ -29,6 +29,18 @@ def _now() -> datetime:
     return datetime.now(timezone.utc)
 
 
+async def project_name_for(s, task: Task) -> str | None:
+    """The CURRENT name of the task's project, used to match project-scoped MCP
+    servers (which are keyed by project name). Task.project is a snapshot taken
+    at creation and goes stale on rename; trusting it would hand a renamed
+    project's old tasks to whichever project later takes the freed name. No
+    project link → no project-scoped servers."""
+    if not task.project_id:
+        return None
+    proj = await s.get(Project, task.project_id)
+    return proj.name if proj is not None else None
+
+
 def _snapshot(root: Path) -> dict[str, float]:
     snap: dict[str, float] = {}
     if not root.exists():
@@ -273,7 +285,7 @@ class WorkerManager:
             model = task.model
             max_turns = task.max_turns
             max_budget_usd = task.max_budget_usd
-            project = task.project
+            project = await project_name_for(s, task)
             project_id = task.project_id
             resume_session_id = task.resume_session_id
             attempt = task.attempt
