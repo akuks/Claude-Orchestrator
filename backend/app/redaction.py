@@ -6,7 +6,8 @@ broadcasts (events, result_text, error) passes through here:
 
 * exact values of the run's sensitive env vars (owner credentials, the minted
   CO_API_TOKEN, secret-looking project env) -> "***";
-* plus, defence in depth, well-known token shapes even when not in the env.
+* plus, defence in depth, well-known token shapes and URL user:password
+  credentials even when not in the env.
 
 Redaction is per string: a secret split across two stdout chunks/events would
 not be caught (stream-json delivers whole lines, so this is rare)."""
@@ -24,8 +25,12 @@ SENSITIVE_ENV_NAMES = frozenset({
     "GITHUB_TOKEN",
     "CO_API_TOKEN",
 })
+# AUTH only as a whole name segment (BASIC_AUTH, NPM_AUTH_HEADER), so
+# GIT_AUTHOR_NAME / GIT_AUTHOR_EMAIL (injected into every run) stay readable.
 _SENSITIVE_NAME_RE = re.compile(
-    r"TOKEN|SECRET|PASSWORD|PASSWD|API_KEY|PRIVATE_KEY|ACCESS_KEY", re.IGNORECASE
+    r"TOKEN|SECRET|PASSWORD|PASSWD|API_KEY|PRIVATE_KEY|ACCESS_KEY|CREDENTIAL|DSN"
+    r"|DATABASE_URL|(?<![A-Z])AUTH(?![A-Z])|_KEY$",
+    re.IGNORECASE,
 )
 
 # Known token shapes. co_ matches auth.mint_token exactly: "co_" +
@@ -35,12 +40,14 @@ TOKEN_SHAPES = re.compile(
     "|".join(
         (
             r"sk-ant-[A-Za-z0-9_\-]{20,}",
-            r"ghp_[A-Za-z0-9]{30,}",
+            r"gh[pousr]_[A-Za-z0-9]{30,}",
             r"github_pat_[A-Za-z0-9_]{30,}",
             rf"(?<![{_URLSAFE}])co_[{_URLSAFE}]{{43}}(?![{_URLSAFE}])",
         )
     )
 )
+# user:password in URL-style values (postgres://u:p@host, https://x:tok@github.com).
+URL_USERINFO = re.compile(r"://[^/\s:@]+:[^/\s@]+@")
 
 
 def is_sensitive_name(name: str) -> bool:
@@ -61,7 +68,8 @@ def redact(text: str, secrets: list[str]) -> str:
     # Longest first, so a secret containing another is scrubbed whole.
     for sec in sorted((x for x in secrets if x), key=len, reverse=True):
         text = text.replace(sec, MASK)
-    return TOKEN_SHAPES.sub(MASK, text)
+    text = TOKEN_SHAPES.sub(MASK, text)
+    return URL_USERINFO.sub("://***:***@", text)
 
 
 def redact_obj(obj: Any, secrets: list[str]) -> Any:

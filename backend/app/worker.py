@@ -179,6 +179,8 @@ class WorkerManager:
         self._sem = asyncio.Semaphore(settings.worker_concurrency)
         self._running: dict[str, asyncio.subprocess.Process] = {}
         self._cancelled: set[str] = set()
+        # task_id -> the current run's secret values (see _run_job's emit).
+        self._run_secrets: dict[str, list[str]] = {}
         self._dispatcher: asyncio.Task | None = None
 
     # ---- lifecycle -------------------------------------------------------
@@ -247,8 +249,14 @@ class WorkerManager:
         try:
             await self._run_job(task_id)
         except Exception as exc:  # noqa: BLE001 - never let the pool die
-            await self._finish(task_id, Status.FAILED, error=f"worker error: {exc}")
+            await self._finish(
+                task_id,
+                Status.FAILED,
+                error=f"worker error: {exc}",
+                secrets=self._run_secrets.get(task_id),
+            )
         finally:
+            self._run_secrets.pop(task_id, None)
             self._sem.release()
 
     # ---- execution -------------------------------------------------------
@@ -266,7 +274,10 @@ class WorkerManager:
         # again once CO_API_TOKEN is minted). Every event payload is redacted
         # against it (plus known token shapes) before it is stored or streamed:
         # an agent can print its env and run logs are readable by project members.
+        # Kept per task on the worker so _run_guarded's exception path can
+        # redact by exact value too.
         run_secrets: list[str] = []
+        self._run_secrets[task_id] = run_secrets
 
         async def emit(etype: str, payload: dict) -> None:
             nonlocal seq
@@ -769,6 +780,10 @@ class WorkerManager:
         # Agent output (and stderr) can carry the run's credentials: redact
         # before saving (error before its cut). Known token shapes are always
         # scrubbed, even without the run's secret list.
+        if result_text is not None and not isinstance(result_text, str):
+            # stream-json "result" is normally a string; never store (or skip
+            # redacting) anything else raw.
+            result_text = json.dumps(result_text, default=str)
         if result_text is not None:
             result_text = redact(result_text, secrets or [])
         if error:
