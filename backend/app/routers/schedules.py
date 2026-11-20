@@ -1,4 +1,4 @@
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, HTTPException, Query, Request
 from sqlalchemy import and_, false, or_, select, true
 
 from ..access import (
@@ -17,6 +17,9 @@ from ..scheduler import is_valid_cron, next_run, owner_block_reason
 router = APIRouter(prefix="/schedules", tags=["schedules"])
 
 _VALID_NOTIFY = {"never", "on_failure", "always"}
+# Fields that decide what a run does; a non-creator changing one takes ownership
+# so the run is created (and approved, billed) as the editor.
+_CONTENT_FIELDS = {"prompt", "agent_id", "project_id", "model"}
 
 
 @router.get("/preview")
@@ -143,6 +146,10 @@ async def update_schedule(schedule_id: str, payload: ScheduleUpdate, request: Re
             await _require_targets(
                 s, p, data.get("project_id", sch.project_id), data.get("agent_id", sch.agent_id)
             )
+        if sch.created_by != p.user.id and any(
+            k in data and data[k] != getattr(sch, k) for k in _CONTENT_FIELDS
+        ):
+            sch.created_by = p.user.id
         for k, v in data.items():
             setattr(sch, k, v)
         # Recompute the next run when cadence or enabled state changes.
@@ -183,7 +190,9 @@ async def run_schedule_now(schedule_id: str, request: Request):
 
 
 @router.get("/{schedule_id}/runs", response_model=list[TaskOut])
-async def schedule_runs(schedule_id: str, request: Request, limit: int = 50):
+async def schedule_runs(
+    schedule_id: str, request: Request, limit: int = Query(50, ge=1, le=500)
+):
     p = request.state.principal
     async with SessionLocal() as s:
         await _get_or_404(s, p, schedule_id)

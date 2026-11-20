@@ -10,6 +10,7 @@ from fastapi.responses import FileResponse, Response
 from sqlalchemy import func, select
 
 from ..access import (
+    can_see_task,
     effective_project_id,
     project_role,
     require_project_role,
@@ -202,23 +203,26 @@ async def stats(request: Request):
     )
 
 
-async def _require_manage(s, p, task: Task, *, need_contributor: bool = False) -> str | None:
+async def _may_manage(s, p, task: Task) -> bool:
+    """Creator, maintainer on the task, or admin (visibility checked separately)."""
+    return (
+        p.is_admin
+        or (task.created_by is not None and task.created_by == p.user.id)
+        or await task_role(s, p, task) == "maintainer"
+    )
+
+
+async def _require_manage(s, p, task: Task, *, need_contributor: bool = False) -> None:
     """Creator, maintainer on the task, or admin may act on it (else 403).
 
     Follow-up/duplicate also need contributor on the effective project (the
     task's own, or its thread root's for an ad-hoc step) since they run in that
-    project's repo/session. The task is already visible, so a missing role is 403.
-    Returns the effective project id."""
-    if not (
-        p.is_admin
-        or (task.created_by is not None and task.created_by == p.user.id)
-        or await task_role(s, p, task) == "maintainer"
-    ):
+    project's repo/session. The task is already visible, so a missing role is 403."""
+    if not await _may_manage(s, p, task):
         raise HTTPException(403, "Not allowed to modify this task")
     pid = await effective_project_id(s, task)
     if need_contributor and pid is not None and await project_role(s, p, pid) is None:
         raise HTTPException(403, "Contributor role required on the task's project")
-    return pid
 
 
 @router.get("/{task_id}", response_model=TaskOut)
@@ -307,12 +311,17 @@ async def duplicate_task(task_id: str, request: Request):
     async with SessionLocal() as s:
         p = request.state.principal
         src = await require_task(s, p, task_id)
-        pid = await _require_manage(s, p, src, need_contributor=True)
+        await _require_manage(s, p, src, need_contributor=True)
+        project = None
+        if src.project_id is not None:
+            project = await s.get(Project, src.project_id)
+            if project is None:
+                raise HTTPException(404, "Project not found")
         new = Task(
             title=f"{src.title} (copy)",
             prompt=src.prompt,
             project=src.project,
-            project_id=pid,
+            project_id=src.project_id,
             priority=src.priority,
             tags=list(src.tags or []),
             model=src.model,
@@ -324,15 +333,17 @@ async def duplicate_task(task_id: str, request: Request):
         s.add(new)
         await s.flush()
         new.root_id = new.id  # a duplicate is an independent new thread
-        ws = settings.workspaces_dir / new.id
-        ws.mkdir(parents=True, exist_ok=True)
-        # Carry over CLAUDE.md and input files from the source workspace.
-        if src.workspace_dir:
-            src_ws = Path(src.workspace_dir)
-            src_claude = src_ws / "CLAUDE.md"
-            if src_claude.exists():
-                (ws / "CLAUDE.md").write_text(src_claude.read_text(errors="replace"))
-        new.workspace_dir = str(ws)
+        if project is not None:
+            new.workspace_dir = project.directory  # run in the repo, like build_task
+        else:
+            ws = settings.workspaces_dir / new.id
+            ws.mkdir(parents=True, exist_ok=True)
+            # Carry over CLAUDE.md from the source sandbox.
+            if src.workspace_dir:
+                src_claude = Path(src.workspace_dir) / "CLAUDE.md"
+                if src_claude.exists():
+                    (ws / "CLAUDE.md").write_text(src_claude.read_text(errors="replace"))
+            new.workspace_dir = str(ws)
         await s.commit()
         await s.refresh(new)
         out = TaskOut.model_validate(new)
@@ -346,7 +357,7 @@ async def followup_task(task_id: str, payload: FollowupCreate, request: Request)
     async with SessionLocal() as s:
         p = request.state.principal
         parent = await require_task(s, p, task_id)
-        pid = await _require_manage(s, p, parent, need_contributor=True)
+        await _require_manage(s, p, parent, need_contributor=True)
         if not parent.session_id:
             raise HTTPException(
                 409, "Parent has no resumable session yet (must finish a run first)"
@@ -355,7 +366,7 @@ async def followup_task(task_id: str, payload: FollowupCreate, request: Request)
             title=_default_title(payload.prompt),
             prompt=payload.prompt,
             project=parent.project,
-            project_id=pid,
+            project_id=parent.project_id,  # an ad-hoc step stays ad-hoc (root rule)
             priority=parent.priority,
             tags=list(parent.tags or []),
             model=parent.model,
@@ -378,27 +389,45 @@ async def followup_task(task_id: str, payload: FollowupCreate, request: Request)
 @router.delete("/{task_id}", status_code=204)
 async def delete_task(task_id: str, request: Request):
     """Delete a task (and its events/artifacts). Deleting a thread root removes
-    the whole thread. Sandbox workspaces are removed; project repos are not."""
+    the thread steps the caller may manage; the others (e.g. steps in projects
+    the caller can't see) are detached into threads of their own. Sandbox
+    workspaces are removed; project repos are not."""
     async with SessionLocal() as s:
         p = request.state.principal
         task = await require_task(s, p, task_id)
         await _require_manage(s, p, task)
         if task.status in Status.ACTIVE:
             raise HTTPException(409, "Cancel the task before deleting it")
+        members, kept = [task], []
         if task.root_id and task.root_id == task.id:
-            members = (
-                await s.execute(select(Task).where(Task.root_id == task.id))
+            others = (
+                await s.execute(select(Task).where(Task.root_id == task.id, Task.id != task.id))
             ).scalars().all()
-        else:
-            members = [task]
+            for m in others:
+                if await can_see_task(s, p, m) and await _may_manage(s, p, m):
+                    members.append(m)
+                else:
+                    kept.append(m)
+
+        deleted = {m.id for m in members}
+        for k in kept:
+            k.root_id = k.id
+            if k.parent_task_id in deleted:
+                k.parent_task_id = None
 
         ws_root = str(settings.workspaces_dir.resolve())
+        pids = {m.project_id for m in members} - {None}
+        repos = set()
+        if pids:
+            rows = await s.execute(select(Project.directory).where(Project.id.in_(pids)))
+            repos = {str(Path(d).resolve()) for d in rows.scalars() if d}
         for m in members:
-            # Remove the isolated sandbox workspace only — never a project repo.
-            if m.project_id is None and m.workspace_dir:
+            # Remove the isolated sandbox workspace only (a path inside
+            # workspaces_dir) — never a project repo.
+            if m.workspace_dir:
                 try:
                     wsp = Path(m.workspace_dir).resolve()
-                    if str(wsp).startswith(ws_root + os.sep):
+                    if str(wsp).startswith(ws_root + os.sep) and str(wsp) not in repos:
                         shutil.rmtree(wsp, ignore_errors=True)
                 except OSError:
                     pass

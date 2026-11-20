@@ -50,6 +50,16 @@ def _require_admin(request: Request) -> None:
         raise HTTPException(403, "Admin only")
 
 
+async def _require_unique_name(s, name: str, exclude_id: str | None = None) -> None:
+    """Project names are unique (incl. archived): project-scoped MCP servers
+    and budgets are matched by name, so a shared name would share them."""
+    stmt = select(Project.id).where(Project.name == name)
+    if exclude_id is not None:
+        stmt = stmt.where(Project.id != exclude_id)
+    if (await s.execute(stmt.limit(1))).first() is not None:
+        raise HTTPException(409, f"A project named '{name}' already exists")
+
+
 def _slugify(name: str) -> str:
     slug = re.sub(r"[^a-z0-9]+", "-", name.lower()).strip("-")
     return slug or "project"
@@ -78,7 +88,7 @@ def _to_out(
     cost: float = 0.0,
     *,
     role: str | None = None,
-    admin: bool = True,
+    admin: bool,
 ) -> ProjectOut:
     out = ProjectOut.model_validate(project)
     out.my_role = role
@@ -101,6 +111,7 @@ async def create_project(payload: ProjectCreate, request: Request):
         else settings.projects_dir / slug
     )
     async with SessionLocal() as s:
+        await _require_unique_name(s, payload.name)
         dup = (
             await s.execute(select(Project).where(Project.slug == slug))
         ).scalar_one_or_none()
@@ -126,7 +137,7 @@ async def create_project(payload: ProjectCreate, request: Request):
         s.add(project)
         await s.commit()
         await s.refresh(project)
-        return _to_out(project, role="maintainer")
+        return _to_out(project, role="maintainer", admin=True)
 
 
 @router.get("", response_model=list[ProjectOut])
@@ -264,11 +275,14 @@ async def import_projects(payload: ImportRequest, request: Request):
         rows = (await s.execute(select(Project))).scalars().all()
         existing_dirs = {os.path.normpath(p.directory) for p in rows}
         existing_slugs = {p.slug for p in rows}
+        existing_names = {p.name for p in rows}
         for raw in payload.directories:
             d = os.path.normpath(str(Path(raw).expanduser()))
             if d in existing_dirs:
                 continue
             name = Path(d).name or d
+            if name in existing_names:
+                raise HTTPException(409, f"A project named '{name}' already exists")
             slug = base = _slugify(name)
             i = 2
             while slug in existing_slugs:
@@ -285,11 +299,12 @@ async def import_projects(payload: ImportRequest, request: Request):
             s.add(project)
             existing_dirs.add(d)
             existing_slugs.add(slug)
+            existing_names.add(name)
             created.append(project)
         await s.commit()
         for p in created:
             await s.refresh(p)
-    return [_to_out(p, role="maintainer") for p in created]
+    return [_to_out(p, role="maintainer", admin=True) for p in created]
 
 
 async def _get_or_404(s, project_id: str) -> Project:
@@ -316,11 +331,14 @@ async def update_project(project_id: str, payload: ProjectUpdate, request: Reque
     async with SessionLocal() as s:
         # Visibility (404) and role (403) are checked before any validation or write.
         role = await require_project_role(s, principal, project_id, "maintainer")
-        if ADMIN_FIELDS & data.keys() and not principal.is_admin:
+        # Allowlist: a non-admin may send maintainer fields only.
+        if not principal.is_admin and data.keys() - MAINTAINER_FIELDS:
             raise HTTPException(403, "Admin only")
         if "default_model" in data and data["default_model"] not in VALID_MODELS:
             raise HTTPException(400, "Invalid model")
         project = await _get_or_404(s, project_id)
+        if data.get("name") and data["name"] != project.name:
+            await _require_unique_name(s, data["name"], exclude_id=project_id)
         if "directory" in data and data["directory"]:
             d = Path(data.pop("directory")).expanduser()
             try:
@@ -331,6 +349,7 @@ async def update_project(project_id: str, payload: ProjectUpdate, request: Reque
         if data.get("name") and data["name"] != project.name:
             # Project-scoped MCP servers reference the project by name; carry
             # them along so runtime matching and visibility follow the rename.
+            # Names are unique, so every server on the old name is this project's.
             await s.execute(
                 update(McpServer)
                 .where(McpServer.scope == "project", McpServer.project == project.name)
@@ -349,6 +368,7 @@ async def delete_project(project_id: str, request: Request):
     _require_admin(request)
     async with SessionLocal() as s:
         project = await _get_or_404(s, project_id)
+        await s.execute(delete(ProjectMember).where(ProjectMember.project_id == project_id))
         await s.delete(project)
         await s.commit()
 
@@ -368,7 +388,7 @@ async def get_memory(project_id: str, request: Request):
 @router.post("/{project_id}/memory/regenerate", response_model=MemoryOut)
 async def regenerate_memory(project_id: str, request: Request):
     async with SessionLocal() as s:
-        await require_project_role(s, request.state.principal, project_id, "contributor")
+        await require_project_role(s, request.state.principal, project_id, "maintainer")
         await _get_or_404(s, project_id)
     await memory.rebuild_memory(project_id)
     async with SessionLocal() as s:

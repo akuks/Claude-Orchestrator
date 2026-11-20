@@ -2,10 +2,17 @@ from datetime import datetime, timezone
 
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel
-from sqlalchemy import func, or_, select
+from sqlalchemy import and_, func, or_, select
+from sqlalchemy.orm import aliased
 
 from .. import mcp_manager
-from ..access import ALL, can_see_task, maintained_project_ids, project_role
+from ..access import (
+    ALL,
+    can_see_task,
+    effective_project_id,
+    maintained_project_ids,
+    project_role,
+)
 from ..config import settings
 from ..constants import Status
 from ..database import SessionLocal
@@ -55,15 +62,17 @@ def _now() -> datetime:
 
 
 async def _may_decide(s, p, task: Task) -> bool:
-    """Admin; or a maintainer of the task's project, except on their own critical
-    request. Ad-hoc (no-project) tasks are admin-only."""
+    """Admin; or a maintainer of the task's effective project (its own, or its
+    thread root's for an ad-hoc step), except on their own critical request.
+    Ad-hoc tasks outside any project thread are admin-only."""
     if not p.user.active:
         return False
     if p.is_admin:
         return True
-    if task.project_id is None:
+    pid = await effective_project_id(s, task)
+    if pid is None:
         return False
-    if await project_role(s, p, task.project_id) != "maintainer":
+    if await project_role(s, p, pid) != "maintainer":
         return False
     return not (task.risk == "critical" and task.created_by == p.user.id)
 
@@ -101,8 +110,14 @@ async def list_pending(request: Request):
         )
         maintained = await maintained_project_ids(s, p)
         if maintained is not ALL:
+            root = aliased(Task)
+            in_root_project = select(root.id).where(root.project_id.in_(maintained))
             stmt = stmt.where(
-                Task.project_id.in_(maintained),
+                # Effective project: the task's own, or its root's for an ad-hoc step.
+                or_(
+                    Task.project_id.in_(maintained),
+                    and_(Task.project_id.is_(None), Task.root_id.in_(in_root_project)),
+                ),
                 # No self-approval of one's own critical request (NULL-safe).
                 or_(
                     func.coalesce(Task.risk, "") != "critical",

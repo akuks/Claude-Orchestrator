@@ -357,6 +357,10 @@ async def _require_dispatch_target(s, p, project_id: str) -> None:
     if project is None:
         raise HTTPException(404, "Project not found")
     if await project_role(s, p, project_id) is None:
+        # A human caller can't see the project: don't reveal it (404). An agent
+        # token gets the named refusal so its coordinator can explain it.
+        if not p.is_agent:
+            raise HTTPException(404, "Project not found")
         raise HTTPException(403, f"{p.user.email} is not a contributor on project {project.name}")
 
 
