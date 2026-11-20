@@ -68,9 +68,11 @@ def test_task_list_scoped(client):
     assert sum(by.values()) == len(u.get("/tasks?limit=500&roots_only=false").json())
 
 
-def test_task_get_events_artifacts_report_404_for_outsider(client):
+def test_task_get_events_artifacts_report_404_for_outsider(client, tmp_path):
     pid = _mk_project(client)
     t = _gated(client, pid)
+    (tmp_path / "x.txt").write_text("artifact")
+    _set(t["id"], workspace_dir=str(tmp_path))
     out = _user(client, tag="out")
     for path in ("", "/thread", "/events", "/artifacts", "/artifacts/x.txt", "/report"):
         assert out.get(f"/tasks/{t['id']}{path}").status_code == 404, path
@@ -81,6 +83,8 @@ def test_task_get_events_artifacts_report_404_for_outsider(client):
     inside = _user(client, pid, "contributor")
     assert inside.get(f"/tasks/{t['id']}").status_code == 200
     assert inside.get(f"/tasks/{t['id']}/events").status_code == 200
+    r = inside.get(f"/tasks/{t['id']}/artifacts/x.txt")
+    assert r.status_code == 200 and r.content == b"artifact"
 
 
 def test_create_in_project_needs_contributor(client):
@@ -118,23 +122,75 @@ def test_maintainer_can_cancel(client):
     assert m.delete(f"/tasks/{t2['id']}").status_code == 204
 
 
-def test_followup_needs_contributor_on_project(client):
-    pid = _mk_project(client)
-    c = _user(client, pid, "contributor")
-    t = _gated(c, pid)
-
-    async def setsess():
+def _set(task_id, **fields):
+    async def go():
         async with SessionLocal() as s:
-            (await s.get(Task, t["id"])).session_id = "sess-ts"
+            t = await s.get(Task, task_id)
+            for k, v in fields.items():
+                setattr(t, k, v)
             await s.commit()
 
-    asyncio.run(setsess())
-    # Creator but no longer a member of the project → task invisible → 404.
-    r = client.put(f"/projects/{pid}/members", json=[])
-    assert r.status_code == 200, r.text
-    assert c.post(f"/tasks/{t['id']}/followup", json={"prompt": "x"}).status_code == 404
-    _grant(client, pid, c.user_id, "contributor")
-    assert c.post(f"/tasks/{t['id']}/followup", json={"prompt": "x"}).status_code == 201
+    asyncio.run(go())
+
+
+def _adhoc_child(root_id, created_by, status="cancelled", **fields):
+    """An ad-hoc (project_id=None) step in a project task's thread."""
+    async def go():
+        async with SessionLocal() as s:
+            child = Task(
+                title="step", prompt="p", status=status, project_id=None,
+                root_id=root_id, parent_task_id=root_id, created_by=created_by, **fields,
+            )
+            s.add(child)
+            await s.commit()
+            return child.id
+
+    return asyncio.run(go())
+
+
+def test_followup_duplicate_need_contributor_on_root_project(client):
+    pid = _mk_project(client)
+    c = _user(client, pid, "contributor")
+    root = _gated(client, pid)
+    cid = _adhoc_child(root["id"], c.user_id, session_id="sess-ts")
+    r = c.post(f"/tasks/{cid}/followup", json={"prompt": "x"})
+    assert r.status_code == 201, r.text
+    assert r.json()["project_id"] == pid  # inherits the thread root's project
+    # Drop the grant: the creator still sees their own ad-hoc step, but may no
+    # longer follow up / duplicate into the project's repo and session.
+    assert client.put(f"/projects/{pid}/members", json=[]).status_code == 200
+    assert c.get(f"/tasks/{cid}").status_code == 200
+    assert c.post(f"/tasks/{cid}/followup", json={"prompt": "x"}).status_code == 403
+    assert c.post(f"/tasks/{cid}/duplicate").status_code == 403
+
+
+def test_duplicate_and_followup_carry_project(client):
+    pid = _mk_project(client)
+    c1 = _user(client, pid, "contributor")
+    c2 = _user(client, pid, "contributor")
+    t = _gated(c1, pid)
+    _set(t["id"], session_id="sess-carry")
+    d = c1.post(f"/tasks/{t['id']}/duplicate")
+    assert d.status_code == 201, d.text
+    f = c1.post(f"/tasks/{t['id']}/followup", json={"prompt": "more"})
+    assert f.status_code == 201, f.text
+    for new in (d.json(), f.json()):
+        assert new["project_id"] == pid
+        assert c2.get(f"/tasks/{new['id']}").status_code == 200
+
+
+def test_maintainer_manages_adhoc_steps_in_project_thread(client):
+    pid = _mk_project(client)
+    m = _user(client, pid, "maintainer")
+    c = _user(client, pid, "contributor")
+    other = _user(client, pid, "contributor")
+    root = _gated(client, pid)
+    done = _adhoc_child(root["id"], c.user_id)
+    assert other.delete(f"/tasks/{done}").status_code == 403
+    assert m.delete(f"/tasks/{done}").status_code == 204
+    pending = _adhoc_child(root["id"], c.user_id, status="awaiting_approval")
+    assert other.post(f"/tasks/{pending}/cancel").status_code == 403
+    assert m.post(f"/tasks/{pending}/cancel").status_code == 200
 
 
 def test_child_of_visible_root_visible(client):
