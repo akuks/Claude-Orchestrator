@@ -496,7 +496,7 @@ class WorkerManager:
             proc = await asyncio.create_subprocess_exec(
                 *cmd,
                 cwd=str(workspace),
-                env=sub_env,
+                env=dict(sub_env),  # uvloop only accepts a plain dict
                 stdin=asyncio.subprocess.PIPE,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,

@@ -47,7 +47,7 @@ async def _run_claude(prompt: str, model: str, cwd: str | None, env: dict) -> st
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.DEVNULL,
             cwd=cwd,
-            env=env,
+            env=dict(env),  # uvloop only accepts a plain dict
         )
     except (FileNotFoundError, OSError):
         return ""

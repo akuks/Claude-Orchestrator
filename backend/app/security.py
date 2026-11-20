@@ -61,7 +61,7 @@ async def _extract_json(prompt: str, model: str, env: dict) -> dict:
             stdin=asyncio.subprocess.PIPE,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.DEVNULL,
-            env=env,
+            env=dict(env),  # uvloop only accepts a plain dict
         )
     except (FileNotFoundError, OSError):
         return {}
