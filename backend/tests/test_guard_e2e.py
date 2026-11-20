@@ -73,6 +73,7 @@ class Hook:
             env=self.env, cwd=str(self.proj))
         self.proc.stdin.write(json.dumps(payload))
         self.proc.stdin.close()
+        self.proc.stdin = None  # communicate() must not flush a closed pipe (Python 3.12)
         return self
 
     def request_id(self, viewer, timeout=15):

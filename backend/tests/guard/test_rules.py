@@ -62,7 +62,10 @@ class Env:
 
 
 @pytest.fixture
-def env(tmp_path):
+def env(tmp_path, monkeypatch):
+    # $TMPDIR comes from the hook's environment: unset here, so "$TMPDIR/x" is
+    # unresolved whatever the runner's TMPDIR is (temp-dir tests set it)
+    monkeypatch.delenv("TMPDIR", raising=False)
     return Env(tmp_path)
 
 
@@ -1766,11 +1769,31 @@ def test_r20_negative(env, cmd):
 # ===========================================================================
 # Final fix wave 3 (Ruling R29): deletes strictly inside temp dirs are free
 # ===========================================================================
+class FakeEnv(Env):
+    """Home, project and guard paths that do not exist and are under no temp
+    root, wherever pytest's tmp_path lives (/tmp/pytest-of-* on Linux CI: a
+    temp root that holds home or the project is - rightly - no temp root)."""
+
+    def __init__(self, root: str):
+        self.H = pathlib.Path(root) / "home"
+        self.P = self.H / "work" / "proj"
+        self.M = self.H / "work" / "mainrepo"
+        self.G = pathlib.Path(root) / "srv" / "_system" / "co-guard"
+        self.T = pathlib.Path(root) / "srv" / "_tasks" / "T1"
+        self.C = self.H / ".claude"
+        self.policy = {"project_dir": str(self.P), "home": str(self.H), "guard_enabled": True, "mcp_tools": {},
+                       "protected_paths": [str(self.G), str(self.T)], "claude_config_dir": str(self.C)}
+
+
+FAKE_ROOT = f"/srv/co-guard-test-{os.getpid()}"  # never created
+
+
 @pytest.fixture
-def tenv(tmp_path, monkeypatch):
-    e = Env(tmp_path)
-    e.X = tmp_path / "tmpd"  # this run's $TMPDIR (outside home and the project)
-    (e.X / "foo").mkdir(parents=True)
+def tenv(monkeypatch):
+    e = FakeEnv(FAKE_ROOT)
+    # this run's $TMPDIR: fake too, so it is inside no other temp root (a real
+    # tmp_path dir would sit inside the runner's own /tmp or macOS T dir)
+    e.X = pathlib.Path(FAKE_ROOT) / "tmpd"
     # the hook reads TMPDIR from its own environment (Claude Code's, = the agent's shell's)
     monkeypatch.setenv("TMPDIR", str(e.X))
     return e
@@ -1829,17 +1852,19 @@ def test_temp_roots_and_escapes_still_need_approval(tenv, cmd):
     assert v.decision in ("approve", "deny"), v
 
 
-def test_temp_symlink_escape_is_caught(tenv):
-    (tenv.H / "Downloads").mkdir(parents=True)
-    link = pathlib.Path("/tmp") / f"co-guard-test-link-{os.getpid()}"
-    try:
-        link.unlink(missing_ok=True)
-        link.symlink_to(tenv.H)
-        assert bash(tenv, f"rm -rf {link}/Downloads").decision == "approve"  # resolves into home
-        assert bash(tenv, f"rm -rf {link}/").decision == "deny"  # home itself: hard
-        assert bash(tenv, f"rm -rf {link}").decision == "allow"  # the link only
-    finally:
-        link.unlink(missing_ok=True)
+def test_temp_symlink_escape_is_caught(tmp_path, monkeypatch):
+    # real dirs as siblings: tmp_path/tmproot ($TMPDIR), tmp_path/home, tmp_path/home/work/proj
+    e = Env(tmp_path)
+    root = tmp_path / "tmproot"
+    root.mkdir()
+    monkeypatch.setenv("TMPDIR", str(root))
+    (e.H / "Downloads").mkdir(parents=True)
+    link = root / "link"
+    link.symlink_to(e.H)
+    assert bash(e, "rm -rf $TMPDIR/build").decision == "allow"  # the root works
+    assert bash(e, f"rm -rf {link}/Downloads").decision == "approve"  # resolves into home
+    assert bash(e, f"rm -rf {link}/").decision == "deny"  # home itself: hard
+    assert bash(e, f"rm -rf {link}").decision == "allow"  # the link only
 
 
 def test_temp_dir_that_holds_home_or_the_project_is_no_temp_root(tenv, monkeypatch):
@@ -1866,8 +1891,8 @@ MAC_TMPDIR = "/var/folders/ab/cd/T/"  # macOS shape: a link path with a trailing
 
 
 @pytest.fixture
-def macenv(tmp_path, monkeypatch):
-    e = Env(tmp_path)
+def macenv(monkeypatch):
+    e = FakeEnv(FAKE_ROOT)  # home/project outside /private/var/folders wherever tmp_path is
     monkeypatch.setenv("TMPDIR", MAC_TMPDIR)
     return e
 
