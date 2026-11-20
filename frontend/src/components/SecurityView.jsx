@@ -156,7 +156,7 @@ export default function SecurityView({ projects = [] }) {
               <Statistic
                 title="Open high"
                 value={summary.open_high}
-                valueStyle={{ color: 'var(--co-warning)' }}
+                valueStyle={{ color: 'var(--co-warning-text)' }}
               />
             </Card>
           </Col>

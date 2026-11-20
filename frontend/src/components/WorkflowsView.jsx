@@ -201,6 +201,7 @@ export default function WorkflowsView({ agents = [], isAdmin = false, runWorkflo
   const [runWf, setRunWf] = useState(null)
   const [, navigate] = useRoute()
   const [loaded, setLoaded] = useState(false)
+  const [loadFailed, setLoadFailed] = useState(false)
 
   const refresh = useCallback(async () => {
     setLoading(true)
@@ -214,7 +215,9 @@ export default function WorkflowsView({ agents = [], isAdmin = false, runWorkflo
       setPresets(p)
       setRuns(r)
       setLoaded(true)
+      setLoadFailed(false)
     } catch (e) {
+      setLoadFailed(true)
       message.error(e.message)
     } finally {
       setLoading(false)
@@ -229,6 +232,12 @@ export default function WorkflowsView({ agents = [], isAdmin = false, runWorkflo
     else message.warning('That workflow is no longer available.')
     onRunHandled?.()
   }, [runWorkflowId, loaded, workflows, onRunHandled])
+
+  // The list never came in: drop the request rather than leave it pending to
+  // fire on a later, unrelated visit.
+  useEffect(() => {
+    if (runWorkflowId && !loaded && loadFailed) onRunHandled?.()
+  }, [runWorkflowId, loaded, loadFailed, onRunHandled])
 
   useEffect(() => {
     refresh()

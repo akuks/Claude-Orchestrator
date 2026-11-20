@@ -41,7 +41,7 @@ function ObservabilityPanel({ obs }) {
             title="Failure Rate"
             value={Math.round((obs.failure_rate || 0) * 100)}
             suffix="%"
-            valueStyle={{ color: obs.failure_rate > 0.1 ? 'var(--co-danger)' : 'var(--co-success)' }}
+            valueStyle={{ color: obs.failure_rate > 0.1 ? 'var(--co-danger)' : 'var(--co-success-text)' }}
           />
         </Col>
         <Col flex="auto">

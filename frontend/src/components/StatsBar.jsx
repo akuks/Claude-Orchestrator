@@ -1,6 +1,6 @@
 import { Card, Col, Row, Statistic } from 'antd'
 import ReactECharts from 'echarts-for-react'
-import { modeTokens, palette, statusColor } from '../theme/tokens'
+import { modeTokens, statusColor } from '../theme/tokens'
 import { useThemeMode } from '../theme/ThemeModeContext.jsx'
 
 export default function StatsBar({ stats }) {
@@ -40,7 +40,7 @@ export default function StatsBar({ stats }) {
       </Col>
       <Col flex="1">
         <Card size="small">
-          <Statistic title="Running" value={stats.running} valueStyle={{ color: palette.status.info }} />
+          <Statistic title="Running" value={stats.running} valueStyle={{ color: 'var(--co-info-text)' }} />
         </Card>
       </Col>
       <Col flex="1">
@@ -54,7 +54,7 @@ export default function StatsBar({ stats }) {
             title="Success Rate"
             value={Math.round((stats.success_rate || 0) * 100)}
             suffix="%"
-            valueStyle={{ color: palette.status.success }}
+            valueStyle={{ color: 'var(--co-success-text)' }}
           />
         </Card>
       </Col>

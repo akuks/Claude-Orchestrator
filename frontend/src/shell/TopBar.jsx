@@ -1,5 +1,6 @@
-import { Button, Dropdown, Space, Switch, Tag, Tooltip } from 'antd'
+import { Button, Dropdown, Space, Tag, Tooltip } from 'antd'
 import {
+  CheckOutlined,
   KeyOutlined,
   LockOutlined,
   LogoutOutlined,
@@ -13,9 +14,15 @@ import { IS_MAC } from './commands'
 
 export const SHORTCUT_LABEL = IS_MAC ? '⌘K' : 'Ctrl K'
 
+const MOTION_CHOICES = [
+  { value: 'system', label: 'System' },
+  { value: 'on', label: 'On' },
+  { value: 'off', label: 'Off' },
+]
+
 // Top bar: ⌘K trigger, Claude credential tag, night toggle, avatar menu.
 export default function TopBar({ user, claudeInfo, isAdmin, onOpenPalette, onOpenCredentials, onChangePassword, onLogout }) {
-  const { mode, setMode, reduceMotion, setReduceMotion } = useThemeMode()
+  const { mode, setMode, motionPref, setMotionPref } = useThemeMode()
   const night = mode === 'night'
   const initials = (user.name || user.email || '?')
     .split(/\s+/)
@@ -71,14 +78,26 @@ export default function TopBar({ user, claudeInfo, isAdmin, onOpenPalette, onOpe
               { type: 'divider' },
               {
                 key: 'motion',
-                icon: <PauseCircleOutlined />,
-                onClick: () => setReduceMotion(!reduceMotion),
+                type: 'group',
                 label: (
-                  <Space style={{ width: '100%', justifyContent: 'space-between' }}>
-                    Reduce motion
-                    <Switch size="small" checked={reduceMotion} data-testid="toggle-reduce-motion" tabIndex={-1} />
-                  </Space>
+                  <span>
+                    <PauseCircleOutlined /> Reduce motion
+                  </span>
                 ),
+                children: MOTION_CHOICES.map((c) => ({
+                  key: `motion:${c.value}`,
+                  onClick: () => setMotionPref(c.value),
+                  label: (
+                    <Space
+                      data-checked={motionPref === c.value}
+                      data-testid={`motion-${c.value}`}
+                      style={{ width: '100%', justifyContent: 'space-between' }}
+                    >
+                      {c.value === 'system' ? 'System (follow OS)' : c.label}
+                      {motionPref === c.value ? <CheckOutlined aria-label="selected" /> : null}
+                    </Space>
+                  ),
+                })),
               },
               { type: 'divider' },
               { key: 'creds', icon: <KeyOutlined />, label: 'My credentials', onClick: onOpenCredentials },

@@ -1,4 +1,6 @@
 import { describe, expect, it } from 'vitest'
+import { readFileSync } from 'node:fs'
+import { resolve } from 'node:path'
 import { antdTheme, cssVars, modeTokens, palette, statusColor, statusVar } from './tokens'
 
 // Relative luminance of a #rrggbb colour (0 = black, 1 = white).
@@ -165,5 +167,58 @@ describe('comet tokens', () => {
       for (const k of ['--co-comet-label-current', '--co-comet-label-failed', '--co-comet-label-wait'])
         expect(contrast(cssVars(m)[k], bg), `${m} ${k}`).toBeGreaterThanOrEqual(4.5)
     }
+  })
+})
+
+describe('final fix wave: light-mode text contrast', () => {
+  const ratio = (a, b) => {
+    const [hi, lo] = [luminance(a), luminance(b)].sort((x, y) => y - x)
+    return (hi + 0.05) / (lo + 0.05)
+  }
+
+  it('light links are dark orange (>= 4.5:1 on white); primary stays #f97316', () => {
+    const t = antdTheme('light').token
+    expect(t.colorPrimary).toBe('#f97316')
+    expect(t.colorLink).toBe('#c2410c')
+    expect(t.colorLinkHover).toBe('#9a3412')
+    expect(ratio(t.colorLink, '#ffffff')).toBeGreaterThanOrEqual(4.5)
+    expect(ratio(t.colorLinkHover, '#ffffff')).toBeGreaterThanOrEqual(4.5)
+  })
+
+  it('night links are unchanged', () => {
+    const t = antdTheme('night').token
+    expect(t.colorLink).toBe('#f97316')
+    expect(t.colorLinkHover).toBeUndefined()
+  })
+
+  it('light input placeholders (⌘K palette) reach 4.5:1 on white', () => {
+    const t = antdTheme('light').token
+    expect(t.colorTextPlaceholder).toBeTruthy()
+    expect(ratio(t.colorTextPlaceholder, '#ffffff')).toBeGreaterThanOrEqual(4.5)
+    expect(ratio(t.colorTextPlaceholder, palette.light.elevated)).toBeGreaterThanOrEqual(4.5)
+  })
+
+  it('light status text tokens reach 4.5:1 on white; night keeps the status colours', () => {
+    expect(palette.light.successText).toBe('#047857')
+    for (const k of ['successText', 'warningText', 'infoText']) {
+      expect(ratio(palette.light[k], '#ffffff'), k).toBeGreaterThanOrEqual(4.5)
+      expect(ratio(palette.light[k], '#fff7f0'), k).toBeGreaterThanOrEqual(4.5)
+    }
+    expect(palette.night.successText).toBe(palette.status.success)
+    expect(palette.night.warningText).toBe(palette.status.warning)
+    expect(palette.night.infoText).toBe(palette.status.info)
+    expect(cssVars('light')['--co-success-text']).toBe('#047857')
+    expect(cssVars('night')['--co-success-text']).toBe('#10b981')
+    expect(modeTokens('light').successText).toBe('#047857')
+  })
+})
+
+describe('final fix wave: gradient buttons', () => {
+  it('primary gradient button text is semibold', () => {
+    // vitest stubs CSS imports (even ?raw), so read the sheet from disk.
+    const css = readFileSync(resolve(process.cwd(), 'src/theme/aurora.css'), 'utf8')
+    const rule = css.match(/html body \.ant-btn\.ant-btn-primary[^{]*\{([^}]*)\}/)
+    expect(rule).toBeTruthy()
+    expect(rule[1]).toMatch(/font-weight:\s*600/)
   })
 })

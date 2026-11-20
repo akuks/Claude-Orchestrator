@@ -4,9 +4,13 @@ import { parseTime } from '../time'
 
 // Data behind Home: what needs the viewer, live workflows, their recent work
 // and today's cost. Every source is fetched independently (one failing never
-// blanks the page) and polled every 10s while the tab is visible.
+// blanks the page) and polled every 10s while the tab is visible — except the
+// usage summary (a heavier aggregate that changes slowly), refreshed every 60s.
 
 export const POLL_MS = 10_000
+export const USAGE_POLL_MS = 60_000
+// Interval ticks drift a little; a source due "now-ish" counts as due.
+const DUE_SLACK_MS = 1_000
 const DAY_MS = 24 * 3600 * 1000
 const FINISHED = new Set(['completed', 'failed', 'cancelled'])
 
@@ -104,6 +108,8 @@ const SOURCES = {
   tasks: () => api.listTasks({ limit: 100 }),
   usage: () => api.usageSummary(),
 }
+// Sources polled less often than POLL_MS.
+const SLOW = { usage: USAGE_POLL_MS }
 // Which panel a failing source belongs to.
 const SECTION = {
   approvals: 'needsYou',
@@ -126,10 +132,17 @@ export function useHomeData(user, { refreshSignal, intervalMs = POLL_MS } = {}) 
   const [now, setNow] = useState(() => Date.now())
   const alive = useRef(true)
   const inFlight = useRef(null)
+  const fetchedAt = useRef({}) // slow source → when it was last requested
 
   const load = useCallback(() => {
     if (inFlight.current) return inFlight.current
-    const keys = Object.keys(SOURCES)
+    const t0 = Date.now()
+    const keys = Object.keys(SOURCES).filter((k) => {
+      const last = fetchedAt.current[k]
+      return !SLOW[k] || last == null || t0 - last >= SLOW[k] - DUE_SLACK_MS
+    })
+    for (const k of keys) if (SLOW[k]) fetchedAt.current[k] = t0
+    const skipped = Object.keys(SOURCES).filter((k) => !keys.includes(k))
     const p = Promise.allSettled(keys.map((k) => SOURCES[k]())).then((results) => {
       inFlight.current = null
       if (!alive.current) return
@@ -140,9 +153,12 @@ export function useHomeData(user, { refreshSignal, intervalMs = POLL_MS } = {}) 
         if (r.status === 'fulfilled') next[k] = r.value
         else errs[SECTION[k]] = errs[SECTION[k]] || r.reason?.message || 'Request failed'
       })
-      // A failed source keeps its last good value.
+      // A failed source keeps its last good value; a skipped one its last error.
       setRaw((prev) => ({ ...prev, ...next }))
-      setErrors(errs)
+      setErrors((prev) => {
+        for (const k of skipped) if (prev[SECTION[k]] && !errs[SECTION[k]]) errs[SECTION[k]] = prev[SECTION[k]]
+        return errs
+      })
       setNow(Date.now())
       setLoading(false)
     })

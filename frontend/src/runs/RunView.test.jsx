@@ -66,6 +66,15 @@ describe('stageState (mirrors the backend LiveStageOut rules)', () => {
     expect(stageState([], 2, 1)).toBe('next')
     expect(stageState(['queued'], 2, 1)).toBe('next')
   })
+  it('an earlier stage with no visible tasks → done', () => {
+    expect(stageState([], 0, 2)).toBe('done')
+    expect(stageState(undefined, 1, 2)).toBe('done')
+    expect(runStages(run({ current_stage: 2 }), [t('c', 2, 'running')]).map((s) => s.state)).toEqual([
+      'done',
+      'done',
+      'current',
+    ])
+  })
 })
 
 describe('runStages', () => {

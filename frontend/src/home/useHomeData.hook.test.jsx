@@ -14,7 +14,7 @@ vi.mock('../api', () => ({
 }))
 
 import { api } from '../api'
-import { POLL_MS, useHomeData } from './useHomeData'
+import { POLL_MS, USAGE_POLL_MS, useHomeData } from './useHomeData'
 
 const me = { id: 'u1', name: 'Me' }
 function Probe() {
@@ -43,6 +43,23 @@ describe('useHomeData polling', () => {
     expect(api.liveRuns).toHaveBeenCalledTimes(2)
     await tick(POLL_MS)
     expect(api.liveRuns).toHaveBeenCalledTimes(3)
+    await r.unmount()
+  })
+
+  it('polls the usage summary only every 60s', async () => {
+    expect(USAGE_POLL_MS).toBe(60_000)
+    const r = await render(<Probe />)
+    await flush()
+    expect(api.usageSummary).toHaveBeenCalledTimes(1)
+    await tick(POLL_MS * 5)
+    expect(api.liveRuns).toHaveBeenCalledTimes(6)
+    expect(api.usageSummary).toHaveBeenCalledTimes(1)
+    await tick(POLL_MS)
+    expect(api.usageSummary).toHaveBeenCalledTimes(2)
+    await tick(POLL_MS * 5)
+    expect(api.usageSummary).toHaveBeenCalledTimes(2)
+    await tick(POLL_MS)
+    expect(api.usageSummary).toHaveBeenCalledTimes(3)
     await r.unmount()
   })
 

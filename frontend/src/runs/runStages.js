@@ -13,6 +13,9 @@ export function stageState(statuses, index, current) {
     if (list.every((s) => s === 'completed')) return 'done'
     if (list.some((s) => s === 'failed' || s === 'cancelled')) return 'failed'
     if (list.includes('awaiting_approval')) return 'waiting_approval'
+  } else if (index < current) {
+    // The run has moved past it; the viewer just can't see its tasks.
+    return 'done'
   }
   return index === current ? 'current' : 'next'
 }

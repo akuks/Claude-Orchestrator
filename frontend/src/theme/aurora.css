@@ -99,6 +99,7 @@ html body .ant-btn.ant-btn-primary:not(:disabled):not(.ant-btn-dangerous):hover,
 html body .ant-btn.ant-btn-primary:not(:disabled):not(.ant-btn-dangerous):active {
   background: var(--co-gradient);
   border-color: transparent;
+  font-weight: 600;
 }
 html body .ant-btn.ant-btn-primary:not(:disabled):not(.ant-btn-dangerous):hover {
   filter: brightness(1.07);

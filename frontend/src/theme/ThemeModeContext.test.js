@@ -1,5 +1,12 @@
 import { describe, expect, it } from 'vitest'
-import { applyThemeToDocument, initialMode, initialReduceMotion, persist } from './ThemeModeContext.jsx'
+import {
+  applyThemeToDocument,
+  initialMode,
+  initialMotionPref,
+  initialReduceMotion,
+  persist,
+  resolveReduceMotion,
+} from './ThemeModeContext.jsx'
 import { cssVars } from './tokens'
 
 const store = (init = {}) => {
@@ -43,6 +50,29 @@ describe('initialReduceMotion', () => {
     expect(initialReduceMotion(store(), mm(true))).toBe(true)
     expect(initialReduceMotion(throwing, mm(true))).toBe(true)
     expect(initialReduceMotion(store(), undefined)).toBe(false)
+  })
+})
+
+describe('motion preference (system / on / off)', () => {
+  it('defaults to system and reads the stored choice', () => {
+    expect(initialMotionPref(store())).toBe('system')
+    for (const v of ['system', 'on', 'off']) expect(initialMotionPref(store({ 'co.reduceMotion': v }))).toBe(v)
+    expect(initialMotionPref(store({ 'co.reduceMotion': 'bogus' }))).toBe('system')
+    expect(initialMotionPref(throwing)).toBe('system')
+  })
+  it('migrates the old stored boolean (true → on, false → off) and rewrites it', () => {
+    const on = store({ 'co.reduceMotion': 'true' })
+    expect(initialMotionPref(on)).toBe('on')
+    expect(on.data['co.reduceMotion']).toBe('on')
+    const off = store({ 'co.reduceMotion': 'false' })
+    expect(initialMotionPref(off)).toBe('off')
+    expect(off.data['co.reduceMotion']).toBe('off')
+  })
+  it('resolves the effective setting; system follows the OS', () => {
+    expect(resolveReduceMotion('on', false)).toBe(true)
+    expect(resolveReduceMotion('off', true)).toBe(false)
+    expect(resolveReduceMotion('system', true)).toBe(true)
+    expect(resolveReduceMotion('system', false)).toBe(false)
   })
 })
 
