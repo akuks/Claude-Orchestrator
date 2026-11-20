@@ -21,6 +21,7 @@ import {
   DeleteOutlined,
   DownloadOutlined,
   ExclamationCircleFilled,
+  KeyOutlined,
   LoadingOutlined,
   MinusCircleFilled,
   ReloadOutlined,
@@ -207,7 +208,7 @@ function DelegationTree({ thread, currentId, onOpenTask }) {
   )
 }
 
-export default function TaskDetail({ taskId, onClose, onChanged, onOpenTask }) {
+export default function TaskDetail({ taskId, onClose, onChanged, onOpenTask, onOpenCredentials }) {
   const [task, setTask] = useState(null)
   const [events, setEvents] = useState([])
   const [artifacts, setArtifacts] = useState([])
@@ -411,6 +412,13 @@ export default function TaskDetail({ taskId, onClose, onChanged, onOpenTask }) {
               <Typography.Text type="danger" style={{ whiteSpace: 'pre-wrap' }}>
                 {task.error}
               </Typography.Text>
+              {task.error.startsWith('No Claude credential') && onOpenCredentials && (
+                <div style={{ marginTop: 8 }}>
+                  <Button size="small" type="primary" icon={<KeyOutlined />} onClick={onOpenCredentials}>
+                    Add credentials
+                  </Button>
+                </div>
+              )}
             </Descriptions.Item>
           )}
         </Descriptions>

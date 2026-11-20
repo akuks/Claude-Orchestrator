@@ -40,10 +40,53 @@ const MODEL_OPTS = [
   { value: 'haiku', label: 'Haiku' },
 ]
 
-function ProjectModal({ open, project, isAdmin, onClose, onSaved }) {
+const CREATOR = '__creator__' // Select can't hold null: stands for "the project creator"
+
+// Who may own a project's automation (webhook-triggered reviews): maintainers,
+// directly or through a team, plus admins. We can only tell admins apart for
+// ourselves, so the list is maintainers + you (if admin) + the current value.
+async function loadOwnerOptions(project, currentUser) {
+  const [members, users, teams] = await Promise.all([
+    api.getProjectMembers(project.id),
+    api.userDirectory(),
+    api.listTeams().catch(() => []),
+  ])
+  const byId = new Map(users.map((u) => [u.id, u]))
+  const label = (id, fallback) => {
+    const u = byId.get(id)
+    return u ? (u.name ? `${u.name} (${u.email})` : u.email) : fallback || id
+  }
+  const opts = new Map()
+  for (const m of members) {
+    if (m.role !== 'maintainer') continue
+    if (m.subject_type === 'user') opts.set(m.subject_id, label(m.subject_id, m.label))
+    else
+      for (const u of teams.find((t) => t.id === m.subject_id)?.members || [])
+        if (!opts.has(u.id)) opts.set(u.id, `${label(u.id, u.name || u.email)} — via ${m.label || 'team'}`)
+  }
+  if (currentUser?.role === 'admin' && !opts.has(currentUser.id))
+    opts.set(currentUser.id, `${label(currentUser.id, currentUser.name)} — admin`)
+  const cur = project.automation_owner_id
+  if (cur && !opts.has(cur)) opts.set(cur, `${label(cur, 'Unknown user')} — no longer a maintainer`)
+  return [
+    { value: CREATOR, label: 'Project creator (default)' },
+    ...[...opts].map(([value, l]) => ({ value, label: l })),
+  ]
+}
+
+function ProjectModal({ open, project, isAdmin, currentUser, onClose, onSaved }) {
   const [form] = Form.useForm()
   const [saving, setSaving] = useState(false)
+  const [ownerOpts, setOwnerOpts] = useState([])
   const isEdit = !!project
+
+  useEffect(() => {
+    if (!open || !project) return
+    setOwnerOpts([{ value: CREATOR, label: 'Project creator (default)' }])
+    loadOwnerOptions(project, currentUser)
+      .then(setOwnerOpts)
+      .catch((e) => message.error(e.message))
+  }, [open, project?.id])
 
   useEffect(() => {
     if (!open) return
@@ -57,6 +100,7 @@ function ProjectModal({ open, project, isAdmin, onClose, onSaved }) {
         budget_usd: project.budget_usd,
         github_repo: project.github_repo,
         auto_review_prs: project.auto_review_prs,
+        automation_owner_id: project.automation_owner_id || CREATOR,
       })
     } else {
       form.resetFields()
@@ -76,6 +120,13 @@ function ProjectModal({ open, project, isAdmin, onClose, onSaved }) {
       delete v.directory
       delete v.archived
     }
+    if (isEdit) {
+      // Send the owner only when it changed, so an unrelated edit isn't refused
+      // because the saved owner has since stopped being a maintainer.
+      const owner = v.automation_owner_id === CREATOR ? null : v.automation_owner_id
+      if (owner === (project.automation_owner_id || null)) delete v.automation_owner_id
+      else v.automation_owner_id = owner
+    } else delete v.automation_owner_id
     setSaving(true)
     try {
       if (isEdit) await api.updateProject(project.id, v)
@@ -139,6 +190,15 @@ function ProjectModal({ open, project, isAdmin, onClose, onSaved }) {
         >
           <Input placeholder="akuks/Opsunity-Hydra" />
         </Form.Item>
+        {isEdit && (
+          <Form.Item
+            name="automation_owner_id"
+            label="Automation owner"
+            extra="Webhook-triggered PR reviews run as this person, on their Claude credential. Must be a maintainer."
+          >
+            <Select data-testid="automation-owner" showSearch optionFilterProp="label" options={ownerOpts} />
+          </Form.Item>
+        )}
         <Space size="large">
           <Form.Item name="memory_enabled" label="Living memory" valuePropName="checked">
             <Switch />
@@ -538,6 +598,7 @@ export default function ProjectsView({ currentUser, onProjectsChanged }) {
         open={modalOpen}
         project={editing}
         isAdmin={isAdmin}
+        currentUser={currentUser}
         onClose={() => setModalOpen(false)}
         onSaved={refresh}
       />
