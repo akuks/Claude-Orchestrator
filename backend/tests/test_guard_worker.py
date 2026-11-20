@@ -263,7 +263,9 @@ def test_spool_is_ingested_as_redacted_guard_events(client):
 
 def _guard_tool(client, mode, monkeypatch=None):
     done = _run(client, f"tool [guard-tool:{mode}]")
-    return done, [e.payload for e in _events(done["id"]) if e.type == "guard"]
+    evs = _events(done["id"])
+    assert any(e.type == "tool_use" for e in evs), f"mock seam {mode!r} did not run"
+    return done, [e.payload for e in evs if e.type == "guard"]
 
 
 def _killed(guard):
@@ -430,14 +432,18 @@ def test_mcp_names_normalised_like_claude_code(client):
 # ---- fix round 2 -----------------------------------------------------------------------
 
 
-def test_always_strict_mcp_and_no_skill_shell(client):
+def test_strict_mcp_only_with_orchestrator_servers_and_no_skill_shell(client):
+    """Ruling R23: no orchestrator MCP servers -> no --strict-mcp-config (skill
+    packs keep their MCP servers); R20c: inline skill shell is always off."""
     key = env_probe_key()
-    done = _run(client, f"x [env-probe:{key}]")
+    proj = _project(client)  # no MCP servers scoped to it (team-scoped ones may exist from other tests)
+    done = _run(client, f"x [env-probe:{key}]", project_id=proj["id"])
     assert done["status"] == "completed", done.get("error")
     args = read_probe_args(key)
-    assert "--strict-mcp-config" in args
-    cfg = Path(args[args.index("--mcp-config") + 1])
-    assert cfg.is_absolute() and "_mcp_configs" in str(cfg)
+    if "--mcp-config" in args:
+        assert "--strict-mcp-config" in args  # the orchestrator supplied servers
+    else:
+        assert "--strict-mcp-config" not in args
     i = args.index("--settings")
     assert json.loads(args[i + 1]) == {"disableSkillShellExecution": True}
     assert args.count("--settings") == 1
@@ -598,3 +604,97 @@ def test_scope_id_is_escaped(monkeypatch):
         assert runtime.guard_api_base() == "http://[fe80::1%25en0]:8200"
     finally:
         runtime._API_BASE_CACHE.clear()
+
+
+
+def test_strict_mcp_absent_without_servers(client, monkeypatch):
+    from app import mcp_manager
+
+    async def none(*a, **k):
+        return None
+
+    monkeypatch.setattr(mcp_manager, "prepare_for_task", none)
+    key = env_probe_key()
+    done = _run(client, f"x [env-probe:{key}]")
+    assert done["status"] == "completed", done.get("error")
+    args = read_probe_args(key)
+    assert "--strict-mcp-config" not in args and "--mcp-config" not in args
+
+
+def test_strict_mcp_with_servers(client):
+    proj = _project(client)
+    _add_rows(McpServer(name=f"st{_uid()}", transport="stdio", scope="project", project=proj["name"],
+                        command="echo", enabled=True))
+    key = env_probe_key()
+    done = _run(client, f"x [env-probe:{key}]", project_id=proj["id"])
+    args = read_probe_args(key)
+    assert "--strict-mcp-config" in args and "--mcp-config" in args
+
+
+# ---- Ruling R24: lanes ----------------------------------------------------------------
+
+
+@pytest.mark.parametrize("mode", ["queued", "queuedthree"])
+def test_queued_calls_in_a_lane_are_not_killed(client, monkeypatch, mode):
+    monkeypatch.setattr(settings, "guard_hook_grace_seconds", 1.0)
+    done, guard = _guard_tool(client, mode)
+    assert done["status"] == "completed", (mode, done.get("error"))
+    assert not _killed(guard)
+
+
+def test_other_lane_is_timed_on_its_own(client, monkeypatch):
+    monkeypatch.setattr(settings, "guard_hook_grace_seconds", 1.0)
+    t0 = __import__("time").monotonic()
+    done, guard = _guard_tool(client, "lanes")
+    assert done["status"] == "failed" and "tuB" in done["error"] and _killed(guard)
+    assert __import__("time").monotonic() - t0 < 4.0  # did not wait for lane 1's long call
+
+
+def test_lane_next_call_unseen_past_grace_is_killed(client, monkeypatch):
+    monkeypatch.setattr(settings, "guard_hook_grace_seconds", 1.0)
+    done, guard = _guard_tool(client, "laneexpire")
+    assert done["status"] == "failed" and "no co-guard check" in done["error"] and "tuB" in done["error"]
+
+
+# ---- round 3 minors -------------------------------------------------------------------------
+
+
+def test_verify_does_not_follow_redirects():
+    import threading
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+    server, th, port = _serve_real_app()
+
+    class H(BaseHTTPRequestHandler):
+        def log_message(self, *a):
+            pass
+
+        def do_GET(self):
+            self.send_response(302)
+            self.send_header("Location", f"http://127.0.0.1:{port}{self.path}")
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+
+    redir = ThreadingHTTPServer(("127.0.0.1", 0), H)
+    threading.Thread(target=redir.serve_forever, daemon=True).start()
+    try:
+        assert runtime.verify_api_base(f"http://127.0.0.1:{port}") is True
+        assert runtime.verify_api_base(f"http://127.0.0.1:{redir.server_address[1]}") is False
+    finally:
+        redir.shutdown()
+        redir.server_close()
+        server.should_exit = True
+        th.join(5)
+
+
+def test_seen_lines_never_cut_decisions(monkeypatch, tmp_path):
+    monkeypatch.setattr(runtime, "task_dir", lambda tid: tmp_path)
+    lines = [json.dumps({"event": "PreToolUse", "tool_use_id": f"t{i}", "seen": True}) for i in range(2500)]
+    lines.append(json.dumps({"event": "PreToolUse", "decision": "deny", "rule_ids": ["rm-rf-outside"]}))
+    (tmp_path / "spool.jsonl").write_text("\n".join(lines) + "\n")
+    recs = runtime.read_spool("T")
+    assert recs == [{"event": "PreToolUse", "decision": "deny", "rule_ids": ["rm-rf-outside"]}]
+
+
+def test_guard_settings_help_mentions_inline_shell():
+    assert "!`cmd`" in runtime.GUARD_SETTINGS_HELP and "disabled" in runtime.GUARD_SETTINGS_HELP

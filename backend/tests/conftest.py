@@ -39,12 +39,15 @@ _GUARD_SPOOL = r"""
 # hooked (seen A), nohook (none), errnohook (none, is_error result), parallel
 # (two calls, seen B then A, results B then A), subagent (a subagent's call,
 # parent_tool_use_id set, seen), waiting (seen A, result after 3 s: a call
-# waiting for a person), slow (no record, result after 4 s).
+# waiting for a person), slow (no record, result after 4 s). Lanes (R24):
+# queued/queuedthree (calls in one message run one at a time; each later call's
+# seen comes after the earlier result), lanes (B in another message, never
+# seen), laneexpire (A done, B in the same lane never seen).
 _GUARD_TOOL = r"""
   mode="${BASH_REMATCH[1]}"
   sp="$CO_TASK_DIR/spool.jsonl"
   seen() { printf '{"event":"PreToolUse","tool_use_id":"%s","seen":true}\n' "$1" >>"$sp"; }
-  tu() { printf '{"type":"assistant","message":{"model":"claude-test","content":[{"type":"tool_use","id":"%s","name":"Bash","input":{"command":"ls"}}]}}\n' "$1"; }
+  tu() { printf '{"type":"assistant","message":{"id":"%s","model":"claude-test","content":[{"type":"tool_use","id":"%s","name":"Bash","input":{"command":"ls"}}]}}\n' "${2:-msg-$1}" "$1"; }
   tr() { printf '{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"%s","content":"ok","is_error":%s}]}}\n' "$1" "${2:-false}"; }
   printf '{"type":"system","subtype":"init","session_id":"test-session"}\n'
   case "$mode" in
@@ -56,6 +59,10 @@ _GUARD_TOOL = r"""
       printf '{"type":"assistant","parent_tool_use_id":"tuAgent","agent_id":"a1","message":{"content":[{"type":"tool_use","id":"tuS","name":"Bash","input":{"command":"echo sub"}}]}}\n'
       printf '{"type":"user","parent_tool_use_id":"tuAgent","agent_id":"a1","message":{"content":[{"type":"tool_result","tool_use_id":"tuS","content":"sub"}]}}\n' ;;
     waiting) tu tuA; seen tuA; sleep 3; tr tuA ;;
+    queued) tu tuA m1; tu tuB m1; seen tuA; sleep 3; tr tuA; sleep 0.5; seen tuB; tr tuB ;;
+    queuedthree) tu tuA m1; tu tuB m1; tu tuC m1; seen tuA; sleep 2; tr tuA; seen tuB; sleep 2; tr tuB; seen tuC; tr tuC ;;
+    lanes) tu tuA m1; tu tuB m2; seen tuA; sleep 4; tr tuA; tr tuB ;;
+    laneexpire) tu tuA m1; tu tuB m1; seen tuA; tr tuA; sleep 4; tr tuB ;;
     slow) tu tuA; sleep 4; tr tuA ;;
   esac
   printf '{"type":"result","subtype":"success","result":"done","num_turns":1,"total_cost_usd":0.01,"duration_ms":100,"is_error":false,"usage":{"input_tokens":1,"output_tokens":1}}\n'
