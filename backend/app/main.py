@@ -28,6 +28,7 @@ from .routers import (
     skills,
     stream,
     tasks,
+    teams,
     templates,
     usage,
     users,
@@ -146,6 +147,8 @@ for _r in (
     skills.router,
     context_docs.router,
     users.router,
+    users.directory_router,
+    teams.router,
 ):
     app.include_router(_r, dependencies=_authed)
 

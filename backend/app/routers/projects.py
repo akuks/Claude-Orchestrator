@@ -6,14 +6,17 @@ from pathlib import Path
 
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel
-from sqlalchemy import func, select
+from sqlalchemy import delete, func, select
 
 from .. import memory
 from ..config import settings
 from ..constants import VALID_MODELS, Status
 from ..database import SessionLocal
-from ..models import Project, Task, TaskSummary
+from ..access import require_project_role
+from ..models import Project, ProjectMember, Task, TaskSummary, Team, User
 from ..schemas import (
+    MemberIn,
+    MemberOut,
     MemoryOut,
     ProjectCreate,
     ProjectOut,
@@ -421,3 +424,72 @@ async def replace_servers(project_id: str, servers: list[ServerEntry]):
     body = yaml.safe_dump(mapping, sort_keys=True, default_flow_style=False) if mapping else ""
     path.write_text(header + body)
     return _read_servers(project)
+
+
+MEMBER_ROLES = ("maintainer", "contributor")
+
+
+async def _members_out(s, project_id: str) -> list[MemberOut]:
+    rows = (
+        await s.execute(select(ProjectMember).where(ProjectMember.project_id == project_id))
+    ).scalars().all()
+    uids = [r.subject_id for r in rows if r.subject_type == "user"]
+    tids = [r.subject_id for r in rows if r.subject_type == "team"]
+    users = {}
+    teams = {}
+    if uids:
+        users = {u.id: u for u in (await s.execute(select(User).where(User.id.in_(uids)))).scalars()}
+    if tids:
+        teams = {t.id: t for t in (await s.execute(select(Team).where(Team.id.in_(tids)))).scalars()}
+    out = []
+    for r in rows:
+        if r.subject_type == "user":
+            u = users.get(r.subject_id)
+            label = (u.name or u.email) if u else r.subject_id
+        else:
+            t = teams.get(r.subject_id)
+            label = t.name if t else r.subject_id
+        out.append(
+            MemberOut(subject_type=r.subject_type, subject_id=r.subject_id, role=r.role, label=label)
+        )
+    return sorted(out, key=lambda m: (m.subject_type, m.label.lower()))
+
+
+@router.get("/{project_id}/members", response_model=list[MemberOut])
+async def list_members(project_id: str, request: Request):
+    async with SessionLocal() as s:
+        await require_project_role(s, request.state.principal, project_id)
+        return await _members_out(s, project_id)
+
+
+@router.put("/{project_id}/members", response_model=list[MemberOut])
+async def set_members(project_id: str, body: list[MemberIn], request: Request):
+    async with SessionLocal() as s:
+        await require_project_role(s, request.state.principal, project_id, "maintainer")
+        if not await s.get(Project, project_id):
+            raise HTTPException(404, "Not found")
+        seen = set()
+        for m in body:
+            if m.role not in MEMBER_ROLES:
+                raise HTTPException(400, f"role must be one of: {', '.join(MEMBER_ROLES)}")
+            if m.subject_type not in ("user", "team"):
+                raise HTTPException(400, "subject_type must be 'user' or 'team'")
+            key = (m.subject_type, m.subject_id)
+            if key in seen:
+                raise HTTPException(400, "Duplicate member")
+            seen.add(key)
+            model = User if m.subject_type == "user" else Team
+            if not await s.get(model, m.subject_id):
+                raise HTTPException(400, f"Unknown {m.subject_type}: {m.subject_id}")
+        await s.execute(delete(ProjectMember).where(ProjectMember.project_id == project_id))
+        for m in body:
+            s.add(
+                ProjectMember(
+                    project_id=project_id,
+                    subject_type=m.subject_type,
+                    subject_id=m.subject_id,
+                    role=m.role,
+                )
+            )
+        await s.commit()
+        return await _members_out(s, project_id)

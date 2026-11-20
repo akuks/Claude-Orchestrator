@@ -8,9 +8,12 @@ from sqlalchemy.exc import IntegrityError
 from .. import auth
 from ..database import SessionLocal
 from ..models import User
-from ..schemas import PasswordResetIn, UserCreate, UserOut, UserPatch
+from ..schemas import PasswordResetIn, UserBrief, UserCreate, UserOut, UserPatch
 
 router = APIRouter(prefix="/users", tags=["users"], dependencies=[Depends(auth.require_admin)])
+
+# Any logged-in user may read the directory (to pick team/project members).
+directory_router = APIRouter(prefix="/users", tags=["users"])
 
 ROLES = ("admin", "member")
 
@@ -106,3 +109,14 @@ async def reset_password(user_id: str, body: PasswordResetIn):
         u.password_hash = auth.hash_password(body.password)
         await auth.revoke_user_sessions(s, u.id)
         await s.commit()
+
+
+@directory_router.get("/directory", response_model=list[UserBrief])
+async def user_directory():
+    async with SessionLocal() as s:
+        rows = (
+            await s.execute(
+                select(User).where(User.active.is_(True)).order_by(User.name, User.email)
+            )
+        ).scalars().all()
+        return list(rows)

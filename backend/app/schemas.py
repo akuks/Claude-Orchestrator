@@ -631,3 +631,38 @@ class UserPatch(BaseModel):
 
 class PasswordResetIn(BaseModel):
     password: str
+
+
+class UserBrief(BaseModel):
+    id: str
+    name: str
+    email: str
+
+    model_config = {"from_attributes": True}
+
+
+class TeamIn(BaseModel):
+    name: str = Field(min_length=1, max_length=120)
+
+
+class TeamMembersIn(BaseModel):
+    user_ids: list[str]
+
+
+class TeamOut(BaseModel):
+    id: str
+    name: str
+    members: list[UserBrief] = Field(default_factory=list)
+
+
+class MemberIn(BaseModel):
+    subject_type: str
+    subject_id: str
+    role: str
+
+
+class MemberOut(BaseModel):
+    subject_type: str
+    subject_id: str
+    role: str
+    label: str
