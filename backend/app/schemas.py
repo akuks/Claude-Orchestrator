@@ -261,6 +261,7 @@ class ProjectOut(BaseModel):
     env: dict = {}
     task_count: int = 0
     total_cost_usd: float = 0.0
+    my_role: Optional[str] = None
 
     @field_validator("env", mode="before")
     @classmethod
