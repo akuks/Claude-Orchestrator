@@ -9,7 +9,9 @@ import {
   List,
   Modal,
   Popconfirm,
+  Segmented,
   Select,
+  Skeleton,
   Space,
   Switch,
   Table,
@@ -31,6 +33,7 @@ import dayjs from 'dayjs'
 import relativeTime from 'dayjs/plugin/relativeTime'
 import { api } from '../api'
 import ProjectMembers from './ProjectMembers'
+import ProjectCards from '../projects/ProjectCards'
 
 dayjs.extend(relativeTime)
 
@@ -463,10 +466,22 @@ export default function ProjectsView({ currentUser, onProjectsChanged }) {
   const [discoverOpen, setDiscoverOpen] = useState(false)
   const [editing, setEditing] = useState(null)
   const [drawer, setDrawer] = useState(null) // {id, tab}
+  const [view, setView] = useState('cards') // cards | list
+  const [live, setLive] = useState([])
+  const [schedules, setSchedules] = useState([])
+  const [loaded, setLoaded] = useState(false)
   const drawerProject = drawer ? projects.find((p) => p.id === drawer.id) || null : null
+
+  // Live work and paused schedules only decorate the cards: if either fails,
+  // the cards still show (as idle / without the paused tag).
+  const loadLive = useCallback(() => {
+    api.liveRuns().then(setLive).catch(() => {})
+  }, [])
 
   const refresh = useCallback(async () => {
     setLoading(true)
+    loadLive()
+    api.listSchedules().then(setSchedules).catch(() => {})
     try {
       setProjects(await api.listProjects(true))
       onProjectsChanged?.()
@@ -474,12 +489,43 @@ export default function ProjectsView({ currentUser, onProjectsChanged }) {
       message.error(e.message)
     } finally {
       setLoading(false)
+      setLoaded(true)
     }
-  }, [onProjectsChanged])
+  }, [onProjectsChanged, loadLive])
 
   useEffect(() => {
     refresh()
   }, [refresh])
+
+  // Keep the mini comets current while the page is open.
+  useEffect(() => {
+    const t = setInterval(() => {
+      if (document.visibilityState !== 'hidden') loadLive()
+    }, 10000)
+    return () => clearInterval(t)
+  }, [loadLive])
+
+  const editProject = (row) => {
+    setEditing(row)
+    setModalOpen(true)
+  }
+  const cardActions = (row) => (
+    <>
+      {row.my_role === 'maintainer' && (
+        <Button size="small" type="text" icon={<EditOutlined />} title="Edit" aria-label={`Edit ${row.name}`} onClick={() => editProject(row)} />
+      )}
+      {isAdmin && (
+        <Popconfirm
+          title="Delete this project? Task history is removed; the directory is left untouched."
+          onConfirm={() => remove(row.id)}
+        >
+          <Button size="small" type="text" danger icon={<DeleteOutlined />} title="Delete" aria-label={`Delete ${row.name}`} />
+        </Popconfirm>
+      )}
+    </>
+  )
+  const maintained = projects.filter((p) => p.my_role === 'maintainer').length
+  const emptyText = isAdmin ? 'No projects yet' : 'You are not a member of any project yet'
 
   const remove = async (id) => {
     try {
@@ -537,10 +583,7 @@ export default function ProjectsView({ currentUser, onProjectsChanged }) {
               size="small"
               icon={<EditOutlined />}
               title="Edit"
-              onClick={() => {
-                setEditing(row)
-                setModalOpen(true)
-              }}
+              onClick={() => editProject(row)}
             />
           )}
           {isAdmin && (
@@ -558,41 +601,79 @@ export default function ProjectsView({ currentUser, onProjectsChanged }) {
 
   return (
     <>
-      <Space style={{ marginBottom: 12 }}>
-        {isAdmin && (
-          <Button
-            type="primary"
-            icon={<PlusOutlined />}
-            onClick={() => {
-              setEditing(null)
-              setModalOpen(true)
-            }}
-          >
-            New Project
+      <div className="co-projects-head">
+        <div>
+          <h1>Projects</h1>
+          <div className="co-projects-sub co-num" data-testid="projects-summary">
+            {loaded
+              ? `${projects.length} project${projects.length === 1 ? '' : 's'}${
+                  !isAdmin && maintained ? ` · you maintain ${maintained}` : ''
+                }`
+              : ' '}
+          </div>
+        </div>
+        <Space wrap>
+          <Segmented
+            value={view}
+            onChange={setView}
+            options={[
+              { value: 'cards', label: 'Cards' },
+              { value: 'list', label: 'List' },
+            ]}
+            aria-label="Projects view"
+            data-testid="projects-view-toggle"
+          />
+          {isAdmin && (
+            <Button
+              type="primary"
+              icon={<PlusOutlined />}
+              onClick={() => {
+                setEditing(null)
+                setModalOpen(true)
+              }}
+            >
+              New Project
+            </Button>
+          )}
+          {isAdmin && (
+            <Button icon={<RadarChartOutlined />} onClick={() => setDiscoverOpen(true)}>
+              Discover
+            </Button>
+          )}
+          <Button icon={<ReloadOutlined />} onClick={refresh}>
+            Refresh
           </Button>
-        )}
-        {isAdmin && (
-          <Button icon={<RadarChartOutlined />} onClick={() => setDiscoverOpen(true)}>
-            Discover
-          </Button>
-        )}
-        <Button icon={<ReloadOutlined />} onClick={refresh}>
-          Refresh
-        </Button>
-      </Space>
+        </Space>
+      </div>
 
+      {view === 'cards' ? (
+        projects.length ? (
+          <ProjectCards
+            projects={projects}
+            live={live}
+            schedules={schedules}
+            onOpen={(p) => setDrawer({ id: p.id, tab: 'members' })}
+            renderActions={cardActions}
+          />
+        ) : loading && !loaded ? (
+          <div className="co-surface co-projects-empty">
+            <Skeleton active paragraph={{ rows: 3 }} />
+          </div>
+        ) : (
+          <div className="co-surface co-projects-empty">
+            <Empty description={emptyText} />
+          </div>
+        )
+      ) : (
       <Table
         rowKey="id"
         loading={loading}
         columns={columns}
         dataSource={projects}
         pagination={false}
-        locale={{
-          emptyText: (
-            <Empty description={isAdmin ? 'No projects yet' : 'You are not a member of any project yet'} />
-          ),
-        }}
+        locale={{ emptyText: <Empty description={emptyText} /> }}
       />
+      )}
 
       <ProjectModal
         open={modalOpen}

@@ -572,9 +572,16 @@ function TemplatesTab({ projects, isAdmin }) {
 
 // runWorkflowId (from ⌘K "Run <workflow>…") switches to the Workflows tab and
 // opens that workflow's run dialog; onRunHandled clears the request.
+// The open tab survives leaving the page (e.g. Workflows → a run page → Back).
+let lastTab = 'agents'
+
 export default function AutomationView({ projects = [], isAdmin = false, runWorkflowId = null, onRunHandled }) {
   const [allAgents, setAllAgents] = useState([])
-  const [tab, setTab] = useState(runWorkflowId ? 'workflows' : 'agents')
+  const [tab, setTabState] = useState(runWorkflowId ? 'workflows' : lastTab)
+  const setTab = (t) => {
+    lastTab = t
+    setTabState(t)
+  }
   useEffect(() => {
     api.listAgents().then(setAllAgents).catch(() => {})
   }, [])

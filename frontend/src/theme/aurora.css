@@ -271,11 +271,6 @@ html[data-mode='night'] .co-cmd {
 .co-content {
   padding: 12px 24px 24px;
 }
-.co-placeholder {
-  padding: 48px 24px;
-  text-align: center;
-}
-
 /* ⌘K palette */
 .co-palette .ant-modal-content {
   padding: 8px;

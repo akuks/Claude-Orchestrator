@@ -35,6 +35,7 @@ import SecurityView from './components/SecurityView'
 import UsersView from './components/UsersView'
 import TeamsView from './components/TeamsView'
 import HomeView from './home/HomeView'
+import RunView from './runs/RunView'
 import LoginPage from './auth/LoginPage'
 import SetupPage from './auth/SetupPage'
 import ChangePasswordModal from './auth/ChangePasswordModal'
@@ -419,9 +420,14 @@ function AppInner({ user, onLogout }) {
             />
           )}
           {page === 'runs' && (
-            <Placeholder title="Run detail is coming" text={`Workflow run ${route.id} — open it from Automation → Workflows for now.`}>
-              <Button onClick={() => navigate({ page: 'automation' })}>Go to Automation</Button>
-            </Placeholder>
+            <RunView
+              key={route.id}
+              id={route.id}
+              user={user}
+              projects={projects}
+              navigate={navigate}
+              onOpenCredentials={() => setCredsOpen(true)}
+            />
           )}
           {page === 'mcp' && <McpRegistry />}
           {page === 'users' && isAdmin && <UsersView currentUser={user} onFallbackChanged={loadClaudeInfo} />}
@@ -518,18 +524,6 @@ function AppInner({ user, onLogout }) {
         onOpenTask={openTask}
         onOpenCredentials={() => setCredsOpen(true)}
       />
-    </div>
-  )
-}
-
-function Placeholder({ title, text, children }) {
-  return (
-    <div className="co-surface co-placeholder">
-      <Typography.Title level={3} style={{ marginTop: 0 }}>
-        {title}
-      </Typography.Title>
-      <Typography.Paragraph type="secondary">{text}</Typography.Paragraph>
-      {children}
     </div>
   )
 }

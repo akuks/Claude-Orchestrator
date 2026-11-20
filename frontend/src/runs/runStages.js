@@ -1,0 +1,77 @@
+// Pure helpers for the run page. Stage states use the same rules as the
+// backend's LiveStageOut (_stage_state in backend/app/routers/workflows.py),
+// so a run's stars look the same on Home and on its own page.
+
+const ACTIVE_TASK = new Set(['queued', 'running', 'awaiting_approval'])
+const ATTENTION = ['awaiting_approval', 'failed', 'running', 'queued']
+
+// statuses: the stage's (visible) task statuses; index: the stage; current:
+// the run's current_stage.
+export function stageState(statuses, index, current) {
+  const list = Array.isArray(statuses) ? statuses : []
+  if (list.length) {
+    if (list.every((s) => s === 'completed')) return 'done'
+    if (list.some((s) => s === 'failed' || s === 'cancelled')) return 'failed'
+    if (list.includes('awaiting_approval')) return 'waiting_approval'
+  }
+  return index === current ? 'current' : 'next'
+}
+
+// [{name, state, task_count}] for the run's stages, from the board's tasks.
+// The live endpoint only covers active runs; a completed run's stages are all
+// done even when some of their tasks aren't visible to the viewer.
+export function runStages(run, tasks) {
+  if (!run || !Array.isArray(run.stages)) return []
+  const byStage = new Map()
+  for (const t of Array.isArray(tasks) ? tasks : []) {
+    if (t?.stage_index == null) continue
+    if (!byStage.has(t.stage_index)) byStage.set(t.stage_index, [])
+    byStage.get(t.stage_index).push(t.status)
+  }
+  return run.stages.map((st, i) => {
+    const statuses = byStage.get(i) || []
+    const state =
+      run.status === 'completed' && !statuses.length ? 'done' : stageState(statuses, i, run.current_stage)
+    return { name: (st && st.name) || `Stage ${i + 1}`, state, task_count: statuses.length }
+  })
+}
+
+export function tasksOfStage(tasks, index) {
+  return (Array.isArray(tasks) ? tasks : []).filter((t) => t.stage_index === index)
+}
+
+// The task to show when a stage is selected: one needing attention (approval,
+// failed, running, queued — in that order), else the newest.
+export function defaultTaskFor(stageTasks) {
+  const list = Array.isArray(stageTasks) ? stageTasks : []
+  if (!list.length) return null
+  for (const s of ATTENTION) {
+    const hit = list.find((t) => t.status === s)
+    if (hit) return hit.id
+  }
+  return list[list.length - 1].id
+}
+
+export function isRunActive(run) {
+  return ['pending', 'running', 'paused'].includes(run?.status)
+}
+
+export function isTaskActive(task) {
+  return ACTIVE_TASK.has(task?.status)
+}
+
+// Mirrors the backend's cancel/retry rule (_require_run with manage=True):
+// the run's creator, an admin, or a maintainer of any project it touches.
+export function canManageRun(run, user, projects) {
+  if (!run || !user) return false
+  if (user.role === 'admin' || (run.created_by && run.created_by === user.id)) return true
+  const touched = new Set(run.project_ids || [])
+  return (projects || []).some((p) => touched.has(p.id) && p.my_role === 'maintainer')
+}
+
+// "[Run name] Agent: what it does" → { agent, text }.
+export function splitStageTitle(title) {
+  const s = String(title ?? '')
+  const m = s.match(/^\[[^\]]*\]\s*([^:]+):\s*(.*)$/s)
+  return m ? { agent: m[1].trim(), text: m[2] } : { agent: null, text: s }
+}

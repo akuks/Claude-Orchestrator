@@ -1,0 +1,162 @@
+/* Projects page card grid. */
+.co-pcards {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
+  gap: 14px;
+}
+.co-pcard {
+  display: flex;
+  flex-direction: column;
+  padding: 14px 16px 12px;
+  min-width: 0;
+  cursor: pointer;
+  transition: border-color 0.15s ease, box-shadow 0.15s ease, transform 0.15s ease;
+}
+.co-pcard:hover {
+  border-color: var(--co-active-border);
+  box-shadow: var(--co-shadow), 0 0 0 1px var(--co-active-border);
+}
+html[data-reduce-motion='false'] .co-pcard:hover {
+  transform: translateY(-1px);
+}
+.co-pcard-archived {
+  opacity: 0.72;
+}
+.co-pcard-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+.co-pcard-name {
+  padding: 0;
+  border: 0;
+  background: none;
+  font: inherit;
+  font-size: 16px;
+  font-weight: 650;
+  color: var(--co-text);
+  text-align: left;
+  cursor: pointer;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
+}
+.co-pcard-name:hover {
+  color: var(--co-primary);
+}
+.co-pcard-name:focus-visible {
+  outline: 2px solid var(--co-primary);
+  outline-offset: 2px;
+  border-radius: 4px;
+}
+.co-pcard-sub {
+  margin-top: 2px;
+  font-size: 13px;
+  color: var(--co-text-secondary);
+}
+.co-pcard-work {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  min-height: 84px;
+  margin: 6px 0 8px;
+}
+.co-pcard-activity {
+  font-size: 12px;
+  color: var(--co-text-secondary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.co-pcard-activity-current {
+  color: var(--co-comet-label-current);
+}
+.co-pcard-activity-failed {
+  color: var(--co-comet-label-failed);
+}
+.co-pcard-activity-waiting_approval {
+  color: var(--co-comet-label-wait);
+}
+.co-pcard-quiet {
+  font-size: 13px;
+  color: var(--co-text-muted);
+  text-align: center;
+}
+.co-pcard-foot {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding-top: 8px;
+  border-top: 1px solid var(--co-border);
+}
+.co-pcard-chips {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+  min-width: 0;
+}
+.co-pcard-tag {
+  margin: 0;
+}
+.co-pcard-budget {
+  display: inline-flex;
+  flex-direction: column;
+  gap: 3px;
+  font-size: 12px;
+  color: var(--co-text-secondary);
+}
+.co-pcard-bar {
+  display: block;
+  width: 72px;
+  height: 4px;
+  border-radius: 2px;
+  background: var(--co-border);
+  overflow: hidden;
+}
+.co-pcard-bar span {
+  display: block;
+  height: 100%;
+  background: var(--co-gradient);
+}
+.co-pcard-budget-high .co-pcard-bar span {
+  background: var(--co-warning);
+}
+.co-pcard-budget-over {
+  color: var(--co-danger);
+}
+.co-pcard-budget-over .co-pcard-bar span {
+  background: var(--co-danger);
+}
+.co-pcard-actions {
+  display: flex;
+  gap: 4px;
+  flex: none;
+}
+.co-projects-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-end;
+  gap: 12px;
+  flex-wrap: wrap;
+  margin: 4px 0 14px;
+}
+.co-projects-head h1 {
+  margin: 0;
+  font-size: 26px;
+  font-weight: 700;
+  letter-spacing: -0.01em;
+  color: var(--co-text);
+}
+.co-projects-sub {
+  margin-top: 2px;
+  font-size: 14px;
+  color: var(--co-text-secondary);
+}
+.co-projects-empty {
+  padding: 36px 16px;
+}

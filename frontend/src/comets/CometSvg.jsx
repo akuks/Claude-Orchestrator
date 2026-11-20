@@ -9,6 +9,9 @@ import './comets.css'
 // Motion is CSS-only and switched off by the reduce-motion settings.
 
 const W = 640
+// Project cards are ~260-340px wide: a narrower box keeps the mini comet at
+// roughly 1:1 instead of shrinking a full-width scene to a hairline.
+const W_COMPACT = 300
 const PAD_X = 28
 
 const STATE_LABEL = {
@@ -100,14 +103,16 @@ export default function CometSvg({ comets = [], overflow = 0, onOpen, onMore, co
   const H = heightFor(comets.length, compact)
   const padTop = compact ? 12 : 30
   const padBottom = compact ? 12 : 26
-  const px = (x) => PAD_X + x * (W - 2 * PAD_X)
+  const w = compact ? W_COMPACT : W
+  const padX = compact ? 14 : PAD_X
+  const px = (x) => padX + x * (w - 2 * padX)
   const py = (y) => padTop + y * (H - padTop - padBottom)
   const showStageNames = !compact && comets.length <= 3
 
   return (
     <div className={`co-comets${compact ? ' co-comets-compact' : ''}`} data-testid="comet-svg">
       <svg
-        viewBox={`0 0 ${W} ${H}`}
+        viewBox={`0 0 ${w} ${H}`}
         width="100%"
         preserveAspectRatio="xMidYMid meet"
         role="img"
@@ -147,7 +152,7 @@ export default function CometSvg({ comets = [], overflow = 0, onOpen, onMore, co
         {comets.map((c, i) => {
           const pts = c.stars.map((s) => [px(s.x), py(s.y)])
           // A one-star comet gets a short tail leading into it.
-          const trail = pts.length > 1 ? pts : [[pts[0][0] - 60, pts[0][1] + 10], pts[0]]
+          const trail = pts.length > 1 ? pts : [[pts[0][0] - (compact ? 30 : 60), pts[0][1] + 10], pts[0]]
           const d = smoothPath(trail)
           const head = c.stars[c.headIndex]
           const [hx, hy] = pts[c.headIndex]

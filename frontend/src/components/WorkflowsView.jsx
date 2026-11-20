@@ -15,28 +15,14 @@ import {
 } from 'antd'
 import {
   CaretRightOutlined,
-  CheckCircleFilled,
-  ClockCircleFilled,
-  CloseCircleFilled,
   DeleteOutlined,
-  ExclamationCircleFilled,
-  LoadingOutlined,
-  MinusCircleFilled,
   PlayCircleOutlined,
   PlusOutlined,
   ReloadOutlined,
 } from '@ant-design/icons'
 import { api } from '../api'
-import { statusVar } from '../theme/tokens'
+import { useRoute } from '../shell/router'
 
-const TASK_ICON = {
-  completed: { icon: <CheckCircleFilled />, color: statusVar('completed') },
-  failed: { icon: <CloseCircleFilled />, color: statusVar('failed') },
-  running: { icon: <LoadingOutlined spin />, color: statusVar('running') },
-  queued: { icon: <ClockCircleFilled />, color: statusVar('queued') },
-  awaiting_approval: { icon: <ExclamationCircleFilled />, color: statusVar('awaiting_approval') },
-  cancelled: { icon: <MinusCircleFilled />, color: statusVar('cancelled') },
-}
 const RUN_COLOR = {
   pending: 'default',
   running: 'processing',
@@ -44,7 +30,6 @@ const RUN_COLOR = {
   completed: 'success',
   failed: 'error',
 }
-const fmtCost = (c) => (c == null ? null : `$${Number(c).toFixed(2)}`)
 
 // ---- Builder modal ---------------------------------------------------------
 function WorkflowModal({ open, workflow, agents, onClose, onSaved }) {
@@ -178,127 +163,6 @@ function WorkflowModal({ open, workflow, agents, onClose, onSaved }) {
   )
 }
 
-// ---- Run board (live) ------------------------------------------------------
-function RunBoard({ runId, onClose }) {
-  const [data, setData] = useState(null)
-
-  const refresh = useCallback(async () => {
-    try {
-      setData(await api.getWorkflowRun(runId))
-    } catch (e) {
-      message.error(e.message)
-    }
-  }, [runId])
-
-  useEffect(() => {
-    refresh()
-    const id = setInterval(refresh, 3000) // live
-    return () => clearInterval(id)
-  }, [refresh])
-
-  const act = async (fn, msg) => {
-    try {
-      await fn()
-      message.success(msg)
-      refresh()
-    } catch (e) {
-      message.error(e.message)
-    }
-  }
-
-  if (!data) return null
-  const { run, tasks } = data
-  const stages = run.stages || []
-  const active = ['pending', 'running', 'paused'].includes(run.status)
-
-  return (
-    <Modal open onCancel={onClose} onOk={onClose} width={720}
-      footer={
-        <Space>
-          {run.status === 'failed' && (
-            <Button type="primary" onClick={() => act(() => api.retryWorkflowRun(run.id), 'Retrying failed stage')}>
-              Retry failed stage
-            </Button>
-          )}
-          {active && (
-            <Popconfirm title="Cancel this run and stop its tasks?" onConfirm={() => act(() => api.cancelWorkflowRun(run.id), 'Run cancelled')}>
-              <Button danger>Cancel run</Button>
-            </Popconfirm>
-          )}
-          <Button onClick={onClose}>Close</Button>
-        </Space>
-      }
-      title={
-        <Space>
-          {run.name}
-          <Tag color={RUN_COLOR[run.status]}>{run.status}</Tag>
-          {run.status === 'paused' && (
-            <Typography.Text type="warning" style={{ fontSize: 12 }}>
-              waiting on approval — approve in the Approvals tab to continue
-            </Typography.Text>
-          )}
-        </Space>
-      }
-    >
-      {run.input && (
-        <Typography.Paragraph type="secondary" style={{ marginBottom: 12 }}>
-          Running on: {run.input}
-        </Typography.Paragraph>
-      )}
-      <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
-        {stages.map((st, si) => {
-          const stageTasks = tasks.filter((t) => t.stage_index === si)
-          const state =
-            si < run.current_stage || (run.status === 'completed')
-              ? 'done'
-              : si === run.current_stage
-                ? (run.status === 'failed' ? 'failed' : 'active')
-                : 'pending'
-          const stateTag = { done: ['success', 'done'], active: ['processing', 'active'], failed: ['error', 'failed'], pending: ['default', 'pending'] }[state]
-          return (
-            <Card
-              key={si}
-              size="small"
-              title={
-                <Space>
-                  <Tag color="blue">{`Stage ${si + 1}`}</Tag>
-                  <b>{st.name}</b>
-                  <Tag color={stateTag[0]}>{stateTag[1]}</Tag>
-                  {st.items.length > 1 && <Typography.Text type="secondary" style={{ fontSize: 12 }}>parallel</Typography.Text>}
-                </Space>
-              }
-              style={{ opacity: state === 'pending' ? 0.6 : 1 }}
-            >
-              {stageTasks.length === 0 ? (
-                <Typography.Text type="secondary">
-                  {st.items.map((it) => it.agent).join(', ')} — not started
-                </Typography.Text>
-              ) : (
-                stageTasks.map((t) => {
-                  const ic = TASK_ICON[t.status] || TASK_ICON.queued
-                  const agent = (t.title || '').match(/\]\s*([^:]+):/)?.[1] || ''
-                  return (
-                    <div key={t.id} style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '3px 0' }}>
-                      <span style={{ color: ic.color, display: 'inline-flex' }}>{ic.icon}</span>
-                      <Tag color="geekblue" style={{ margin: 0 }}>{agent.trim()}</Tag>
-                      <span style={{ flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', fontSize: 13 }}>
-                        {(t.title || '').replace(/^\[[^\]]+\]\s*[^:]+:\s*/, '')}
-                      </span>
-                      {fmtCost(t.total_cost_usd) && (
-                        <Typography.Text type="secondary" style={{ fontSize: 11 }}>{fmtCost(t.total_cost_usd)}</Typography.Text>
-                      )}
-                    </div>
-                  )
-                })
-              )}
-            </Card>
-          )
-        })}
-      </div>
-    </Modal>
-  )
-}
-
 // ---- Run dialog ------------------------------------------------------------
 function RunDialog({ workflow, onClose, onRan }) {
   const [input, setInput] = useState('')
@@ -335,7 +199,7 @@ export default function WorkflowsView({ agents = [], isAdmin = false, runWorkflo
   const [modalOpen, setModalOpen] = useState(false)
   const [editing, setEditing] = useState(null)
   const [runWf, setRunWf] = useState(null)
-  const [boardRun, setBoardRun] = useState(null)
+  const [, navigate] = useRoute()
   const [loaded, setLoaded] = useState(false)
 
   const refresh = useCallback(async () => {
@@ -456,10 +320,11 @@ export default function WorkflowsView({ agents = [], isAdmin = false, runWorkflo
           <Typography.Title level={5} style={{ marginTop: 20 }}>Recent runs</Typography.Title>
           <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
             {runs.slice(0, 10).map((r) => (
-              <div
+              <a
                 key={r.id}
-                onClick={() => setBoardRun(r.id)}
-                style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '6px 10px', border: '1px solid var(--co-border)', borderRadius: 6, cursor: 'pointer' }}
+                href={`#/runs/${encodeURIComponent(r.id)}`}
+                data-testid="workflow-run-link"
+                style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '6px 10px', border: '1px solid var(--co-border)', borderRadius: 6, color: 'inherit' }}
               >
                 <Tag color={RUN_COLOR[r.status]} style={{ margin: 0, minWidth: 86, textAlign: 'center' }}>{r.status}</Tag>
                 <b>{r.name}</b>
@@ -469,15 +334,14 @@ export default function WorkflowsView({ agents = [], isAdmin = false, runWorkflo
                 <Typography.Text type="secondary" style={{ fontSize: 12 }}>
                   stage {Math.min(r.current_stage + 1, r.stages.length)}/{r.stages.length}
                 </Typography.Text>
-              </div>
+              </a>
             ))}
           </div>
         </>
       )}
 
       <WorkflowModal open={modalOpen} workflow={editing} agents={agents} onClose={() => setModalOpen(false)} onSaved={refresh} />
-      {runWf && <RunDialog workflow={runWf} onClose={() => setRunWf(null)} onRan={(id) => { setBoardRun(id); refresh() }} />}
-      {boardRun && <RunBoard runId={boardRun} onClose={() => setBoardRun(null)} />}
+      {runWf && <RunDialog workflow={runWf} onClose={() => setRunWf(null)} onRan={(id) => navigate({ page: 'runs', id })} />}
     </>
   )
 }

@@ -208,7 +208,10 @@ function DelegationTree({ thread, currentId, onOpenTask }) {
   )
 }
 
-export default function TaskDetail({ taskId, onClose, onChanged, onOpenTask, onOpenCredentials }) {
+// The task drawer (Tasks page), or with `inline` the same content as a panel
+// (embedded on the run page). One component, so live output, follow-ups and
+// actions behave the same in both places.
+export default function TaskDetail({ taskId, onClose, onChanged, onOpenTask, onOpenCredentials, inline = false }) {
   const [task, setTask] = useState(null)
   const [events, setEvents] = useState([])
   const [artifacts, setArtifacts] = useState([])
@@ -223,6 +226,11 @@ export default function TaskDetail({ taskId, onClose, onChanged, onOpenTask, onO
   useEffect(() => {
     if (!taskId) return
     let closed = false
+    if (inline) {
+      // the panel stays mounted across tasks: don't show the previous one's header
+      setTask(null)
+      setThread([])
+    }
     setEvents([])
     setArtifacts([])
     setFollowup('')
@@ -295,51 +303,47 @@ export default function TaskDetail({ taskId, onClose, onChanged, onOpenTask, onO
   const isActive = task && ['queued', 'running', 'awaiting_approval'].includes(task.status)
   const canFollowUp = task && !isActive && task.session_id
 
-  return (
-    <Drawer
-      open={!!taskId}
-      onClose={onClose}
-      width={720}
-      title={task ? task.title : 'Task'}
-      extra={
-        <Space>
-          {isActive && (
-            <Button
-              danger
-              icon={<StopOutlined />}
-              onClick={() => act(api.cancelTask, 'Cancelled')}
-            >
-              Cancel
-            </Button>
-          )}
-          {task && !isActive && (
-            <Button icon={<ReloadOutlined />} onClick={() => act(api.retryTask, 'Retrying')}>
-              Retry
-            </Button>
-          )}
-          <Button icon={<CopyOutlined />} onClick={() => act(api.duplicateTask, 'Duplicated')}>
-            Duplicate
-          </Button>
-          {task && !isActive && (
-            <Popconfirm
-              title="Delete this task?"
-              onConfirm={async () => {
-                try {
-                  await api.deleteTask(taskId)
-                  message.success('Task deleted')
-                  onChanged?.()
-                  onClose()
-                } catch (e) {
-                  message.error(e.message)
-                }
-              }}
-            >
-              <Button danger icon={<DeleteOutlined />} />
-            </Popconfirm>
-          )}
-        </Space>
-      }
-    >
+  const actions = (
+    <Space wrap>
+      {isActive && (
+        <Button
+          danger
+          icon={<StopOutlined />}
+          onClick={() => act(api.cancelTask, 'Cancelled')}
+        >
+          Cancel
+        </Button>
+      )}
+      {task && !isActive && (
+        <Button icon={<ReloadOutlined />} onClick={() => act(api.retryTask, 'Retrying')}>
+          Retry
+        </Button>
+      )}
+      <Button icon={<CopyOutlined />} onClick={() => act(api.duplicateTask, 'Duplicated')}>
+        Duplicate
+      </Button>
+      {task && !isActive && (
+        <Popconfirm
+          title="Delete this task?"
+          onConfirm={async () => {
+            try {
+              await api.deleteTask(taskId)
+              message.success('Task deleted')
+              onChanged?.()
+              onClose?.()
+            } catch (e) {
+              message.error(e.message)
+            }
+          }}
+        >
+          <Button danger icon={<DeleteOutlined />} title="Delete" />
+        </Popconfirm>
+      )}
+    </Space>
+  )
+
+  const body = (
+    <>
       {thread.length > 1 &&
         (() => {
           const ids = new Set(thread.map((t) => t.id))
@@ -555,6 +559,25 @@ export default function TaskDetail({ taskId, onClose, onChanged, onOpenTask, onO
             : 'This task has no resumable session to continue.'}
         </Typography.Text>
       )}
+    </>
+  )
+
+  if (inline) {
+    if (!taskId) return null
+    return (
+      <section className="co-surface co-task-inline" data-testid="task-detail-inline" aria-label="Task detail">
+        <header className="co-task-inline-head">
+          <h3 className="co-task-inline-title">{task ? task.title : 'Task'}</h3>
+          {actions}
+        </header>
+        {body}
+      </section>
+    )
+  }
+
+  return (
+    <Drawer open={!!taskId} onClose={onClose} width={720} title={task ? task.title : 'Task'} extra={actions}>
+      {body}
     </Drawer>
   )
 }
