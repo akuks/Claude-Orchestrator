@@ -156,3 +156,104 @@ def test_planted_request_with_the_hooks_key_is_refused(live, tmp_path):
     out = hook.start(cmd, tool_use_id=tuid).result()
     assert out["permissionDecision"] == "deny" and "409" in out["permissionDecisionReason"]
     assert planted.json()["id"] not in out["permissionDecisionReason"]
+
+
+# ---- Task 6: a real worker run whose "claude" runs the plugin's own hooks.json ----
+
+_AGENT = r'''#!__PY__
+"""Stands in for claude: for each scripted call it prints the tool_use, runs
+the PreToolUse command from the FIRST --plugin-dir's hooks/hooks.json exactly
+as Claude Code does (shell string, CLAUDE_PLUGIN_ROOT set, hook JSON on stdin,
+the env the worker gave), honours a deny, then prints the tool_result."""
+import json, os, subprocess, sys, uuid
+here = os.path.dirname(os.path.abspath(__file__))
+args, _prompt = sys.argv[1:], sys.stdin.read()
+if "stream-json" not in " ".join(args):
+    print('{"findings":[]}' if "--json-schema" in args else "summary"); sys.exit(0)
+plugin = args[args.index("--plugin-dir") + 1]
+pre = json.load(open(os.path.join(plugin, "hooks", "hooks.json")))["hooks"]["PreToolUse"][0]["hooks"][0]
+def out(o): print(json.dumps(o), flush=True)
+out({"type": "system", "subtype": "init", "session_id": "s-real-hook"})
+for i, call in enumerate(json.load(open(os.path.join(here, "calls.json")))):
+    tid = "toolu_" + uuid.uuid4().hex[:16]
+    out({"type": "assistant", "message": {"id": f"m{i}", "model": "claude-test", "content": [
+        {"type": "tool_use", "id": tid, "name": call["tool_name"], "input": call["tool_input"]}]}})
+    payload = dict(call, hook_event_name="PreToolUse", tool_use_id=tid, session_id="s-real-hook",
+                   cwd=os.getcwd(), permission_mode="bypassPermissions")
+    p = subprocess.run(pre["command"], shell=True, executable="/bin/bash", input=json.dumps(payload),
+                       capture_output=True, text=True, env=dict(os.environ, CLAUDE_PLUGIN_ROOT=plugin),
+                       timeout=pre["timeout"])
+    hso = json.loads(p.stdout or "{}").get("hookSpecificOutput", {})
+    with open(os.path.join(here, "results.jsonl"), "a") as f:
+        f.write(json.dumps({"rc": p.returncode, "out": hso, "err": p.stderr[-300:]}) + "\n")
+    denied = hso.get("permissionDecision") == "deny"
+    out({"type": "user", "message": {"content": [{"type": "tool_result", "tool_use_id": tid,
+         "content": hso.get("permissionDecisionReason") if denied else "ok", "is_error": denied}]}})
+out({"type": "result", "subtype": "success", "result": "done", "num_turns": 1, "total_cost_usd": 0,
+     "duration_ms": 1, "is_error": False, "usage": {"input_tokens": 1, "output_tokens": 1}})
+'''
+
+
+def test_worker_run_drives_the_real_plugin_hooks(live, client, tmp_path, monkeypatch):
+    """The production path end to end, minus the model: the worker builds the
+    plugin, policy and env, verifies the approval address (R22), launches
+    "claude"; the stand-in runs the hooks.json PreToolUse command; a second
+    maintainer approves the force-push; the owner cannot (R25)."""
+    import threading
+
+    from app.config import settings
+    from app.guard import runtime
+    from conftest import wait_task
+    from test_guard_worker import _events
+
+    agent = tmp_path / "claude"
+    agent.write_text(_AGENT.replace("__PY__", sys.executable))
+    agent.chmod(0o755)
+    (tmp_path / "calls.json").write_text(json.dumps([
+        {"tool_name": "Bash", "tool_input": {"command": "ls -la"}},
+        {"tool_name": "Bash", "tool_input": {"command": "rm -rf ~"}},
+        {"tool_name": "Bash", "tool_input": {"command": "git push --force origin main"}},
+    ]))
+    runtime._API_BASE_CACHE.clear()
+    monkeypatch.setattr(settings, "claude_bin", str(agent))
+    monkeypatch.setattr(settings, "guard_verify_api", True)
+    monkeypatch.setattr(settings, "bind_host", "127.0.0.1")
+    monkeypatch.setattr(settings, "backend_port", live["port"])
+    owner, decider = live["owner"], live["decider"]
+    seen = {}
+
+    def decide(task_id):
+        deadline = time.time() + 30
+        while time.time() < deadline and "rid" not in seen:
+            for card in decider.get("/guard/approvals").json():
+                if card["task_id"] == task_id:
+                    seen["owner_list"] = [c["id"] for c in owner.get("/guard/approvals").json()]
+                    seen["owner_approve"] = owner.post(f"/guard/approvals/{card['id']}/approve").status_code
+                    seen["approve"] = decider.post(f"/guard/approvals/{card['id']}/approve").status_code
+                    seen["rid"] = card["id"]
+            time.sleep(0.2)
+
+    try:
+        r = owner.post("/tasks", json={"prompt": "push it", "project_id": live["p"]["id"]})
+        assert r.status_code == 201, r.text
+        tid = r.json()["id"]
+        th = threading.Thread(target=decide, args=(tid,), daemon=True)
+        th.start()
+        done = wait_task(client, tid, timeout=60)
+        th.join(5)
+    finally:
+        runtime._API_BASE_CACHE.clear()
+    assert done["status"] == "completed", done.get("error")
+    assert seen.get("approve") == 200 and seen["owner_approve"] == 403 and seen["rid"] not in seen["owner_list"]
+    res = [json.loads(x) for x in (tmp_path / "results.jsonl").read_text().splitlines()]
+    assert [r["rc"] for r in res] == [0, 0, 0], res
+    assert res[0]["out"] == {}  # allowed: no decision, Claude's own rules apply
+    assert res[1]["out"]["permissionDecision"] == "deny" and "rm-rf-outside" in res[1]["out"]["permissionDecisionReason"]
+    assert "permissionDecision" not in res[2]["out"] and seen["rid"] in res[2]["out"]["additionalContext"]
+    assert _get(ActionApproval, seen["rid"]).decided_by == decider.user_id
+    guard = [e.payload for e in _events(tid) if e.type == "guard"]
+    decisions = sorted((g.get("decision"), tuple(g.get("rule_ids") or ())) for g in guard if g.get("decision"))
+    # the hard deny filed no request; each decision shows once (live report + spool deduped).
+    # rm -rf ~ also hits self-protect: the home folder holds the protected ~/.claude (R13)
+    assert decisions == [("approved", ("git-force-push-main",)), ("deny", ("self-protect", "rm-rf-outside"))], guard
+    assert len(owner.get("/guard/approvals", params={"task_id": tid, "status": "all"}).json()) == 1
