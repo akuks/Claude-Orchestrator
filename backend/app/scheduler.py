@@ -16,6 +16,7 @@ from .access import project_role
 from .auth import Principal
 from .config import settings
 from .constants import Status
+from .credentials import credential_status
 from .database import SessionLocal
 from .models import Agent, Schedule, Task, User
 from .task_service import build_task
@@ -76,9 +77,10 @@ def next_run(expr: str, after: datetime | None = None) -> datetime:
 
 async def owner_block_reason(s, sch: Schedule) -> str | None:
     """Why the schedule's owner may not fire it now, or None. Blocked when the
-    owner row is gone, disabled, or no longer contributes to every project the
-    run would land in (the schedule's and its agent's); admins always pass.
-    Legacy schedules without an owner are not blocked."""
+    owner row is gone, disabled, no longer contributes to every project the
+    run would land in (the schedule's and its agent's; admins always pass), or
+    has no Claude credential and there is no org fallback. Legacy schedules
+    without an owner are not blocked."""
     if not sch.created_by:
         return None
     owner = await s.get(User, sch.created_by)
@@ -91,6 +93,8 @@ async def owner_block_reason(s, sch: Schedule) -> str | None:
     for pid in {sch.project_id, agent and agent.project_id} - {None}:
         if await project_role(s, principal, pid) is None:
             return "owner lost access to project"
+    if (await credential_status(s, owner.id))["claude"] == "none":
+        return "owner has no Claude credential"
     return None
 
 

@@ -13,7 +13,13 @@ from ..agent_env import MissingCredential
 from ..config import settings
 from ..constants import VALID_MODELS, Status
 from ..database import SessionLocal
-from ..access import ALL, project_role, require_project_role, visible_project_ids
+from ..access import (
+    ALL,
+    project_role,
+    require_project_role,
+    user_is_maintainer,
+    visible_project_ids,
+)
 from ..models import McpServer, Project, ProjectMember, Task, TaskSummary, Team, User
 from ..schemas import (
     MemberIn,
@@ -41,6 +47,7 @@ MAINTAINER_FIELDS = {
     "budget_usd",
     "github_repo",
     "auto_review_prs",
+    "automation_owner_id",
 }
 ADMIN_FIELDS = {"directory", "env", "archived"}
 MASK = "••••"
@@ -340,6 +347,10 @@ async def update_project(project_id: str, payload: ProjectUpdate, request: Reque
         if "default_model" in data and data["default_model"] not in VALID_MODELS:
             raise HTTPException(400, "Invalid model")
         project = await _get_or_404(s, project_id)
+        if data.get("automation_owner_id") is not None and not await user_is_maintainer(
+            s, data["automation_owner_id"], project_id
+        ):
+            raise HTTPException(400, "Automation owner must be a maintainer of this project")
         if data.get("name") and data["name"] != project.name:
             await _require_unique_name(s, data["name"], exclude_id=project_id)
         if "directory" in data and data["directory"]:

@@ -449,6 +449,7 @@ class WorkerManager:
             "env",
             {
                 "applied": sorted(k for k in project_env if k not in PROJECT_ENV_BLOCKED),
+                "blocked": sorted(k for k in project_env if k in PROJECT_ENV_BLOCKED),
                 "credentials": sub_env.credentials,
             },
         )

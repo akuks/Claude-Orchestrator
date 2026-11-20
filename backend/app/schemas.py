@@ -242,6 +242,8 @@ class ProjectUpdate(BaseModel):
     github_repo: Optional[str] = None
     auto_review_prs: Optional[bool] = None
     env: Optional[dict[str, str]] = None
+    # Who webhook-triggered work runs as; null = the project creator.
+    automation_owner_id: Optional[str] = None
 
 
 class ProjectOut(BaseModel):
@@ -260,6 +262,7 @@ class ProjectOut(BaseModel):
     github_repo: Optional[str] = None
     auto_review_prs: bool = False
     env: dict = {}
+    automation_owner_id: Optional[str] = None
     task_count: int = 0
     total_cost_usd: float = 0.0
     my_role: Optional[str] = None

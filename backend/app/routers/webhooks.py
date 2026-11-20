@@ -14,7 +14,7 @@ from sqlalchemy import select
 
 from ..config import settings
 from ..database import SessionLocal
-from ..models import Project
+from ..models import Project, User
 from ..security import build_security_prompt
 from ..task_service import build_task
 
@@ -32,6 +32,17 @@ def _verify(body: bytes, signature: str | None) -> bool:
         settings.github_webhook_secret.encode(), body, hashlib.sha256
     ).hexdigest()
     return hmac.compare_digest(f"sha256={digest}", signature)
+
+
+async def _automation_owner(s, project: Project) -> str | None:
+    """Who the review runs as: the project's automation owner, else (unset or
+    inactive) the project creator; None when neither is an active user."""
+    for uid in (project.automation_owner_id, project.created_by):
+        if uid:
+            user = await s.get(User, uid)
+            if user is not None and user.active:
+                return uid
+    return None
 
 
 @router.post("/github")
@@ -74,6 +85,9 @@ async def github_webhook(
         ).scalar_one_or_none()
         if project is None:
             return {"ok": True, "ignored": f"no auto-review project for {repo}"}
+        owner_id = await _automation_owner(s, project)
+        if owner_id is None:
+            return {"ok": True, "ignored": "no automation owner"}
 
         task = await build_task(
             s,
@@ -83,7 +97,7 @@ async def github_webhook(
             model="opus",
             max_turns=60,
             tags=["security", "vapt", "code-review", "auto"],
-            created_by=project.created_by,
+            created_by=owner_id,
         )
         info = (task.id, task.priority, task.created_at, task.status)
         await s.commit()

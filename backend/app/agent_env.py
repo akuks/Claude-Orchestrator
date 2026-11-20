@@ -21,7 +21,8 @@ log = logging.getLogger(__name__)
 # task gets are the creator's own (or the org fallback key) injected below.
 # Routing (base URL, Bedrock/Vertex/Foundry switches, custom headers) is
 # included so project env can't send the injected credential elsewhere or run
-# on another account.
+# on another account. Defence in depth, not exhaustive: other project-env
+# keys (proxies, NODE_OPTIONS, PATH_PREPEND, ...) are admin-trusted.
 PROJECT_ENV_BLOCKED = frozenset({
     "ANTHROPIC_API_KEY",
     "CLAUDE_CODE_OAUTH_TOKEN",
@@ -160,9 +161,17 @@ async def agent_env_or_none(
     s, user_id: str | None, *, project_env: dict | None = None, purpose: str
 ) -> AgentEnv | None:
     """build_agent_env for background server-side calls (memory, findings):
-    None instead of MissingCredential, logged at info (no secret)."""
+    None instead of MissingCredential, logged at info (no secret). Any other
+    error is logged as a warning (purpose and user id only) and also yields
+    None, so a background job never dies with an unretrieved exception."""
     try:
         return await build_agent_env(s, user_id, project_env=project_env)
     except MissingCredential:
         log.info("%s skipped: no Claude credential for user %s", purpose, user_id)
+        return None
+    except Exception as exc:  # noqa: BLE001 - background callers must not crash
+        log.warning(
+            "%s skipped: could not build env for user %s (%s)",
+            purpose, user_id, type(exc).__name__,
+        )
         return None

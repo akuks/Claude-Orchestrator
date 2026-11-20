@@ -9,7 +9,7 @@ from fastapi import HTTPException
 from sqlalchemy import and_, false, or_, select, true
 
 from .auth import Principal
-from .models import ProjectMember, Task, TeamMember
+from .models import ProjectMember, Task, TeamMember, User
 
 ALL = object()  # sentinel: every project is visible (admin)
 
@@ -61,6 +61,15 @@ async def project_role(s, p: Principal, project_id: str) -> str | None:
     sub = _grants(p.user.id).subquery()
     rows = await s.execute(select(sub.c.role).where(sub.c.project_id == project_id))
     return _best(rows.scalars())
+
+
+async def user_is_maintainer(s, user_id: str, project_id: str) -> bool:
+    """Whether that user (not the caller) is an active admin or a maintainer
+    of the project, directly or via a team."""
+    user = await s.get(User, user_id)
+    if user is None:
+        return False
+    return await project_role(s, Principal(user), project_id) == "maintainer"
 
 
 async def require_project_role(
