@@ -90,10 +90,14 @@ def redact(text: str, secrets: list[str]) -> str:
     return text
 
 
-async def run_claude_probe(env: dict[str, str]) -> tuple[bool, str]:
-    """Run a one-turn `claude -p` with exactly `env`. ok iff exit 0; the detail is
-    stderr with every credential value in `env` replaced by "***" (redacted
-    before truncation, so no secret prefix survives the cut)."""
+async def run_claude_probe(
+    env: dict[str, str], cwd: str | None = None
+) -> tuple[bool, str]:
+    """Run a one-turn `claude -p` with exactly `env` in `cwd` (the user's
+    per-user root, so the server's working directory's CLAUDE.md / .claude /
+    .mcp.json can't load). ok iff exit 0; the detail is stderr with every
+    credential value in `env` replaced by "***" (redacted before truncation,
+    so no secret prefix survives the cut)."""
     secrets = [env[n] for n in SECRET_ENV_NAMES if env.get(n)]
     try:
         proc = await asyncio.create_subprocess_exec(
@@ -105,6 +109,7 @@ async def run_claude_probe(env: dict[str, str]) -> tuple[bool, str]:
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
             env=env,
+            cwd=cwd,
         )
     except (FileNotFoundError, PermissionError):
         return False, "claude binary not found"
@@ -138,13 +143,14 @@ async def prepare_claude_probe(s, user_id: str):
     Claude credential only - succeeding on the org key would say nothing about
     theirs - in the exact env a task of theirs gets (app.agent_env: per-user
     CLAUDE_CONFIG_DIR etc., never the server's ~/.claude)."""
-    from .agent_env import MissingCredential, build_agent_env  # imports this module
+    from .agent_env import MissingCredential, build_agent_env, user_root  # imports this module
 
     try:
         env = dict(await build_agent_env(s, user_id, allow_fallback=False))
     except MissingCredential:
         return lambda: _refuse(MISSING_CLAUDE)
-    return lambda: run_claude_probe(env)
+    cwd = str(user_root(user_id))  # created by build_agent_env
+    return lambda: run_claude_probe(env, cwd)
 
 
 def _http_client() -> httpx.AsyncClient:

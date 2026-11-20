@@ -22,6 +22,12 @@ _VALID_NOTIFY = {"never", "on_failure", "always"}
 _CONTENT_FIELDS = {"prompt", "agent_id", "project_id", "model"}
 
 
+async def _out(s, sch: Schedule) -> ScheduleOut:
+    out = ScheduleOut.model_validate(sch)
+    out.blocked_reason = await owner_block_reason(s, sch)
+    return out
+
+
 @router.get("/preview")
 async def preview_cron(cron: str, count: int = 5):
     """Return the next N run times for a cron expression (for the UI builder)."""
@@ -65,7 +71,7 @@ async def create_schedule(payload: ScheduleCreate, request: Request):
         s.add(sch)
         await s.commit()
         await s.refresh(sch)
-        return ScheduleOut.model_validate(sch)
+        return await _out(s, sch)
 
 
 async def _require_targets(
@@ -103,7 +109,7 @@ async def list_schedules(request: Request):
         rows = (
             await s.execute(select(Schedule).where(clause).order_by(Schedule.created_at.desc()))
         ).scalars().all()
-    return [ScheduleOut.model_validate(r) for r in rows]
+        return [await _out(s, r) for r in rows]
 
 
 async def _get_or_404(s, p, schedule_id: str, manage: bool = False) -> Schedule:
@@ -125,9 +131,7 @@ async def _get_or_404(s, p, schedule_id: str, manage: bool = False) -> Schedule:
 @router.get("/{schedule_id}", response_model=ScheduleOut)
 async def get_schedule(schedule_id: str, request: Request):
     async with SessionLocal() as s:
-        return ScheduleOut.model_validate(
-            await _get_or_404(s, request.state.principal, schedule_id)
-        )
+        return await _out(s, await _get_or_404(s, request.state.principal, schedule_id))
 
 
 @router.patch("/{schedule_id}", response_model=ScheduleOut)
@@ -160,7 +164,7 @@ async def update_schedule(schedule_id: str, payload: ScheduleUpdate, request: Re
             sch.next_run_at = None
         await s.commit()
         await s.refresh(sch)
-        return ScheduleOut.model_validate(sch)
+        return await _out(s, sch)
 
 
 @router.delete("/{schedule_id}", status_code=204)

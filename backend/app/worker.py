@@ -114,6 +114,18 @@ def _short(value) -> str:
     return text[:_MAX_TOOL_RESULT_CHARS]
 
 
+def _session_file_exists(config_dir: str | None, session_id: str) -> bool:
+    """Whether `<config_dir>/projects/**/<session_id>.jsonl` exists."""
+    # The id becomes a glob pattern: refuse separators and glob characters.
+    if not config_dir or not session_id or any(c in session_id for c in "/\\*?[]"):
+        return False
+    projects = Path(config_dir) / "projects"
+    if not projects.is_dir():
+        return False
+    name = f"{session_id}.jsonl"
+    return any(p.is_file() for p in projects.rglob(name))
+
+
 async def _coordinator_context(s, task_id: str, me_id: str) -> str:
     """Build the registry + delegation instructions injected into a coordinator's
     prompt: the other agents it can delegate to, and how to dispatch to them."""
@@ -339,6 +351,16 @@ class WorkerManager:
 
         workspace.mkdir(parents=True, exist_ok=True)
         await emit("started", {"model": model, "max_turns": max_turns})
+
+        # Resume only a session this account actually has: Claude Code keeps it
+        # as <CLAUDE_CONFIG_DIR>/projects/<cwd>/<id>.jsonl. If it's gone (another
+        # host, cleared config, a different per-user dir), start a fresh session
+        # with the same context a new thread gets instead of failing the resume.
+        if resume_session_id and not _session_file_exists(
+            sub_env.get("CLAUDE_CONFIG_DIR"), resume_session_id
+        ):
+            resume_session_id = None
+            await emit("fresh_session", {"reason": "previous session not available"})
 
         # Project tasks: prepend assembled context (instructions + memory + relevant
         # past-task summaries) so Claude starts with the project's accumulated state.

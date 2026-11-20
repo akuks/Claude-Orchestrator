@@ -41,6 +41,9 @@ PROJECT_ENV_BLOCKED = frozenset({
     "GITHUB_TOKEN",
     "GH_ENTERPRISE_TOKEN",
     "GITHUB_ENTERPRISE_TOKEN",
+    # Git must never read the server's system config (its credential helpers,
+    # e.g. a keychain holding the server user's GitHub login).
+    "GIT_CONFIG_NOSYSTEM",
 })
 _DIR_MODE = 0o700
 _FILE_MODE = 0o600
@@ -76,7 +79,9 @@ def _git_value(v: str) -> str:
     return '"' + v.replace("\\", "\\\\").replace('"', '\\"') + '"'
 
 
-def _write_gitconfig(path: Path, name: str | None, email: str | None) -> None:
+def _write_gitconfig(
+    path: Path, name: str | None, email: str | None, github: bool
+) -> None:
     lines = []
     if name or email:
         lines.append("[user]")
@@ -85,7 +90,18 @@ def _write_gitconfig(path: Path, name: str | None, email: str | None) -> None:
         if email:
             lines.append(f"\temail = {_git_value(email)}")
     # Repos are owned by the server user, not this one.
-    lines += ["[safe]", "\tdirectory = *", ""]
+    lines += ["[safe]", "\tdirectory = *"]
+    # Credential helpers: an empty `helper =` resets any inherited list. With a
+    # GitHub token, gh (reading GH_TOKEN from the env) answers for github.com;
+    # otherwise no helper at all.
+    lines += ["[credential]", "\thelper ="]
+    if github:
+        lines += [
+            '[credential "https://github.com"]',
+            "\thelper =",
+            "\thelper = !gh auth git-credential",
+        ]
+    lines.append("")
     # Write-then-rename so a concurrent task of the same user never reads a
     # half-written file.
     tmp = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
@@ -138,10 +154,12 @@ async def build_agent_env(
     _private_dir(user_root(user_id).parent)
     root = _private_dir(user_root(user_id))
     gitconfig = root / "gitconfig"
-    _write_gitconfig(gitconfig, git_name, git_email)
+    _write_gitconfig(gitconfig, git_name, git_email, github=bool(gh_token))
     env["CLAUDE_CONFIG_DIR"] = str(_private_dir(root / "claude"))
     env["GH_CONFIG_DIR"] = str(_private_dir(root / "gh"))
     env["GIT_CONFIG_GLOBAL"] = str(gitconfig)
+    # After project env (which can't set it anyway): no system gitconfig.
+    env["GIT_CONFIG_NOSYSTEM"] = "1"
 
     # Exactly one Claude variable (project env's were dropped above).
     env[claude[0]] = claude[1]

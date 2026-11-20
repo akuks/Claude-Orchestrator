@@ -79,10 +79,10 @@ async def owner_block_reason(s, sch: Schedule) -> str | None:
     """Why the schedule's owner may not fire it now, or None. Blocked when the
     owner row is gone, disabled, no longer contributes to every project the
     run would land in (the schedule's and its agent's; admins always pass), or
-    has no Claude credential and there is no org fallback. Legacy schedules
-    without an owner are not blocked."""
+    has no Claude credential and there is no org fallback. A schedule without
+    an owner (legacy) is blocked: its runs would have no credential."""
     if not sch.created_by:
-        return None
+        return "schedule has no owner"
     owner = await s.get(User, sch.created_by)
     if owner is None:
         return "owner no longer exists"

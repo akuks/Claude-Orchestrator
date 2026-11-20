@@ -13,7 +13,8 @@ import logging
 from fastapi import APIRouter, Header, HTTPException, Request
 from sqlalchemy import select
 
-from ..access import user_is_maintainer
+from ..access import project_role, user_is_maintainer
+from ..auth import Principal
 from ..config import settings
 from ..credentials import credential_status
 from ..database import SessionLocal
@@ -40,15 +41,15 @@ def _verify(body: bytes, signature: str | None) -> bool:
 
 async def _automation_owner(s, project: Project) -> str | None:
     """Who the review runs as: the project's automation owner while they are
-    still an active admin or maintainer of it, else the project creator (if
-    active); None when neither is usable."""
+    still an active admin or maintainer of it, else the project creator while
+    they are active and still have a role on it; None when neither is usable."""
     if project.automation_owner_id and await user_is_maintainer(
         s, project.automation_owner_id, project.id
     ):
         return project.automation_owner_id
     if project.created_by:
         user = await s.get(User, project.created_by)
-        if user is not None and user.active:
+        if user is not None and await project_role(s, Principal(user), project.id):
             return project.created_by
     return None
 

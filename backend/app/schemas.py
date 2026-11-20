@@ -458,6 +458,8 @@ class ScheduleOut(BaseModel):
     last_run_at: Optional[datetime]
     next_run_at: Optional[datetime]
     created_at: datetime
+    # Why the scheduler skips it right now (scheduler.owner_block_reason).
+    blocked_reason: Optional[str] = None
 
     model_config = {"from_attributes": True}
 
