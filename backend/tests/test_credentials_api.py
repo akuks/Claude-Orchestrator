@@ -87,6 +87,8 @@ def test_put_validation(client):
         {"claude_token": _fake("x"), "claude_kind": "password"},
         {"github_token": ""},
         {"github_token": None},
+        {"github_token": "fake-nbsp\u00a0inside"},  # any whitespace, not just " "
+        {"claude_token": "fake-em\u2003space", "claude_kind": "api_key"},
         {"git_name": "evil\n[core]"},
         {"git_email": "not-an-email"},
         {"unknown_field": "x"},
@@ -167,7 +169,10 @@ def test_delete_parts(client):
 
 def test_other_user_cannot_read(client):
     # No credential route can even name another user.
-    cred_routes = [(m, p) for m, p in _all_http_routes(app) if p.startswith(("/me/", "/admin/"))]
+    cred_routes = [
+        (m, p) for m, p in _all_http_routes(app)
+        if p.startswith("/me/") or p == "/admin/org-fallback"
+    ]
     assert cred_routes
     assert all("{" not in p for _, p in cred_routes), cred_routes
     m = login_as(f"cred-o-{_uid()}@test.local")
@@ -242,14 +247,28 @@ def test_test_connection_claude_failure_redacted(client, tmp_path, monkeypatch):
     # The probe env is the allowlisted base plus exactly the one Claude variable.
     got = {n for n in names.read_text().split() if n}
     allowed = {"PATH", "HOME", "USER", "LOGNAME", "SHELL", "LANG", "TERM", "TMPDIR", "TZ",
-               "CLAUDE_CODE_OAUTH_TOKEN"}
+               "CLAUDE_CODE_OAUTH_TOKEN", "CLAUDE_CONFIG_DIR", "GH_CONFIG_DIR", "GIT_CONFIG_GLOBAL"}
     # bash itself sets a few (PWD, SHLVL, _, OLDPWD) when started.
     extra = {n for n in got - allowed if not n.startswith("LC_")} - {"PWD", "SHLVL", "_", "OLDPWD"}
     assert not extra, extra
     assert "CLAUDE_CODE_OAUTH_TOKEN" in got and "ANTHROPIC_API_KEY" not in got
+    # Per-user CLI config, never the server's ~/.claude.
+    assert "CLAUDE_CONFIG_DIR" in got
 
 
-def test_test_connection_claude_success_and_fallback(client, tmp_path, monkeypatch):
+def test_test_connection_uses_per_user_config_dir(client, tmp_path, monkeypatch):
+    m = login_as(f"cred-cd-{_uid()}@test.local")
+    m.put("/me/credentials", json={"claude_token": _fake("k"), "claude_kind": "api_key"})
+    seen = tmp_path / "dir.txt"
+    monkeypatch.setattr(settings, "claude_bin", _probe_script(tmp_path, (
+        f'echo "$CLAUDE_CONFIG_DIR" > "{seen}"\nexit 0\n'
+    )))
+    assert m.post("/me/credentials/test", json={"which": "claude"}).json()["ok"] is True
+    want = settings.workspaces_dir / "_users" / m.user_id / "claude"
+    assert seen.read_text().strip() == str(want)
+
+
+def test_test_connection_claude_own_only(client, tmp_path, monkeypatch):
     m = login_as(f"cred-ts-{_uid()}@test.local")
     seen = tmp_path / "seen.txt"
     monkeypatch.setattr(settings, "claude_bin", _probe_script(tmp_path, (
@@ -257,20 +276,81 @@ def test_test_connection_claude_success_and_fallback(client, tmp_path, monkeypat
         'echo OK\n'
         "exit 0\n"
     )))
-    # No own credential: the probe runs on the org fallback.
+    # No own credential: the org fallback being set doesn't make "my" test pass.
+    r = m.post("/me/credentials/test", json={"which": "claude"})
+    assert r.status_code == 200
+    assert r.json() == {
+        "ok": False,
+        "detail": "No Claude credential: add one under My credentials (or ask an admin to set an org fallback key).",
+    }
+    assert not seen.exists()  # nothing was run
+    own = _fake("apikey")
+    m.put("/me/credentials", json={"claude_token": own, "claude_kind": "api_key"})
     r = m.post("/me/credentials/test", json={"which": "claude"})
     assert r.status_code == 200 and r.json()["ok"] is True, r.json()
-    assert seen.read_text().strip() == FALLBACK
-    assert FALLBACK not in r.text
+    assert seen.read_text().strip() == own
+    assert own not in r.text
+
+
+def test_test_connection_one_at_a_time(client, tmp_path, monkeypatch):
+    import threading
+    import time
+
+    m = login_as(f"cred-1-{_uid()}@test.local")
+    m.put("/me/credentials", json={"claude_token": _fake("k"), "claude_kind": "api_key"})
+    started, release = tmp_path / "started", tmp_path / "release"
+    monkeypatch.setattr(settings, "claude_bin", _probe_script(tmp_path, (
+        f'touch "{started}"\n'
+        f'for i in $(seq 200); do [ -f "{release}" ] && exit 0; sleep 0.05; done\nexit 1\n'
+    )))
+    out = {}
+    th = threading.Thread(
+        target=lambda: out.update(r=m.post("/me/credentials/test", json={"which": "claude"}))
+    )
+    th.start()
     try:
-        client.delete("/admin/org-fallback")
-        r = m.post("/me/credentials/test", json={"which": "claude"})
-        assert r.json() == {
-            "ok": False,
-            "detail": "No Claude credential: add one under My credentials (or ask an admin to set an org fallback key).",
-        }
+        for _ in range(200):
+            if started.exists():
+                break
+            time.sleep(0.05)
+        assert started.exists()
+        assert m.post("/me/credentials/test", json={"which": "claude"}).status_code == 429
+        assert m.post("/me/credentials/test", json={"which": "github"}).status_code == 429
+        # Another user is not blocked.
+        other = login_as(f"cred-1b-{_uid()}@test.local")
+        assert other.post("/me/credentials/test", json={"which": "github"}).status_code == 200
     finally:
-        _restore_fallback(client)
+        release.touch()
+        th.join(timeout=15)
+    assert out["r"].status_code == 200 and out["r"].json()["ok"] is True
+    # Released afterwards.
+    assert m.post("/me/credentials/test", json={"which": "claude"}).status_code == 200
+
+
+def test_claude_probe_killed_on_cancel(tmp_path, monkeypatch):
+    import os
+    import time
+
+    pidf = tmp_path / "pid"
+    monkeypatch.setattr(settings, "claude_bin", _probe_script(tmp_path, (
+        f'echo $$ > "{pidf}"\nexec sleep 30\n'
+    )))
+
+    async def go():
+        t = asyncio.ensure_future(credentials.run_claude_probe(dict(os.environ)))
+        for _ in range(200):
+            if pidf.exists() and pidf.read_text().strip():
+                break
+            await asyncio.sleep(0.05)
+        t.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await t
+
+    _run(go())
+    pid = int(pidf.read_text())
+    time.sleep(0.1)
+    with pytest.raises(ProcessLookupError):
+        os.kill(pid, 0)
 
 
 def _mock_github(monkeypatch, status, payload, seen):
