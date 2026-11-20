@@ -42,6 +42,12 @@ NOT_PROJECT_BOUND = {
     ("GET", "/users/directory"): "id/name/email of active users for the Members picker, by spec",
     ("GET", "/schedules/preview"): "pure cron-expression preview (needs ?cron=), reads no data",
     ("GET", "/system/claude"): "local claude CLI version/status, no project data",
+    # Personal credentials: always the caller's own record (no user id anywhere).
+    ("GET", "/me/credentials"): "the caller's own credential status, never another user's",
+    ("PUT", "/me/credentials"): "writes the caller's own credentials only",
+    ("DELETE", "/me/credentials/claude"): "removes the caller's own Claude credential only",
+    ("DELETE", "/me/credentials/github"): "removes the caller's own GitHub token only",
+    ("POST", "/me/credentials/test"): "probes the caller's own credentials, no project data",
 }
 
 # Admin-only routes with no project binding: the outsider must get 403.
@@ -55,6 +61,9 @@ ADMIN_ONLY = {
     ("DELETE", "/teams/{team_id}"),
     ("PUT", "/teams/{team_id}/members"),
     ("GET", "/projects/discover"),
+    ("GET", "/admin/org-fallback"),
+    ("PUT", "/admin/org-fallback"),
+    ("DELETE", "/admin/org-fallback"),
 }
 
 # Writes that silently skip ids the caller may not decide: 200 with an empty list.

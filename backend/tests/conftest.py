@@ -75,6 +75,10 @@ def client():
         r = c.post("/auth/login", json={"email": ADMIN_EMAIL, "password": ADMIN_PASSWORD})
         assert r.status_code == 200, r.text
         c.headers["X-Requested-With"] = "co"
+        # Tasks need a Claude credential; an org fallback lets every test run
+        # without one. Tests that need "no fallback" delete and restore it.
+        r = c.put("/admin/org-fallback", json={"api_key": "sk-test-fallback"})
+        assert r.status_code == 200, r.status_code
         global _ADMIN_CLIENT
         _ADMIN_CLIENT = c
         yield c

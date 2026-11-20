@@ -42,7 +42,7 @@ def test_fresh_db_migrates_to_head(tmp_path):
     run_migrations(url)
     tables = _tables(tmp_path / "fresh.db")
     assert {"tasks", "projects", "context_docs", "alembic_version"} <= tables
-    assert _alembic_version(tmp_path / "fresh.db") == "0004"
+    assert _alembic_version(tmp_path / "fresh.db") == "0005"
 
 
 def test_legacy_db_is_stamped_not_recreated(tmp_path):
@@ -75,7 +75,7 @@ def test_legacy_db_missing_table_and_column_is_repaired(tmp_path):
         row = c.execute("SELECT id, prompt, read_only FROM tasks").fetchall()
     assert "read_only" in cols
     assert row == [("t1", "hi", 0)]
-    assert _alembic_version(db) == "0004"
+    assert _alembic_version(db) == "0005"
     assert "users" in _tables(db)
 
 
@@ -93,3 +93,22 @@ def test_migration_0004(tmp_path):
     with sqlite3.connect(db) as c:
         assert "project_ids" not in {r[1] for r in c.execute("PRAGMA table_info(workflow_runs)")}
     assert _alembic_version(db) == "0003"
+
+
+def test_migration_0005(tmp_path):
+    from alembic import command
+
+    db = tmp_path / "m5.db"
+    url = f"sqlite+aiosqlite:///{db}"
+    run_migrations(url)
+    assert {"user_credentials", "org_settings"} <= _tables(db)
+    with sqlite3.connect(db) as c:
+        cols = {r[1] for r in c.execute("PRAGMA table_info(user_credentials)")}
+        assert {"user_id", "claude_kind", "claude_enc", "github_enc", "git_name", "git_email",
+                "updated_at"} <= cols
+        assert "automation_owner_id" in {r[1] for r in c.execute("PRAGMA table_info(projects)")}
+    command.downgrade(_alembic_cfg(url), "0004")
+    assert not ({"user_credentials", "org_settings"} & _tables(db))
+    with sqlite3.connect(db) as c:
+        assert "automation_owner_id" not in {r[1] for r in c.execute("PRAGMA table_info(projects)")}
+    assert _alembic_version(db) == "0004"
