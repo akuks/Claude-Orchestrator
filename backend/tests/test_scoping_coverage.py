@@ -9,14 +9,16 @@ reason, so adding a route anywhere makes this test look at it."""
 
 import asyncio
 import re
+import threading
 import uuid
+from datetime import datetime, timezone
 
 import pytest
 from starlette.websockets import WebSocketDisconnect
 
 from app.database import SessionLocal
 from app.main import app
-from app.models import Finding, Task
+from app.models import Finding, McpCall, Task
 from conftest import login_as
 from test_lockdown import OPEN_ROUTES, _all_http_routes, _all_ws_routes
 
@@ -39,7 +41,6 @@ NOT_PROJECT_BOUND = {
     ("GET", "/teams"): "team names/members are visible to everyone by spec; teams hold no project data",
     ("GET", "/users/directory"): "id/name/email of active users for the Members picker, by spec",
     ("GET", "/schedules/preview"): "pure cron-expression preview (needs ?cron=), reads no data",
-    ("GET", "/health"): "liveness probe",
     ("GET", "/system/claude"): "local claude CLI version/status, no project data",
 }
 
@@ -94,6 +95,7 @@ def _set_task(task_id, **fields):
 def world(client, tmp_path_factory):
     """Project P with one of everything in it, created by the admin; an
     outsider (member, no grants) and a team/user the admin-only routes target."""
+    # A new list/aggregate route over a new table needs a P row of that type here.
     tag = _uid()
     p = _ok(client.post("/projects", json={"name": f"cov-{tag}"}))
     pid = p["id"]
@@ -139,6 +141,15 @@ def world(client, tmp_path_factory):
     (finding_id,) = _add(Finding(
         project_id=pid, fingerprint=uuid.uuid4().hex, severity="high", title=finding_title,
     ))
+    # A completed, costed P task (inserted finished, so the worker never picks it
+    # up) plus an MCP call from it, so aggregates have P data they could leak.
+    done_id = uuid.uuid4().hex
+    _add(Task(
+        id=done_id, title=f"cov-done-{tag}", prompt=f"cov-done-{tag}", project=p["name"],
+        project_id=pid, status="completed", total_cost_usd=2.5, input_tokens=100,
+        output_tokens=50, model_used=f"cov-model-{tag}", completed_at=datetime.now(timezone.utc),
+    ))
+    _add(McpCall(task_id=done_id, server=f"cov-mcp-{tag}", tool="t"))
     team = _ok(client.post("/teams", json={"name": f"cov-team-{tag}"}))
 
     outsider = login_as(f"cov-out-{tag}@test.local")
@@ -164,6 +175,7 @@ def world(client, tmp_path_factory):
         pid, p["name"], task["id"], f"cov-task-{tag}", schedule["id"], f"cov-sch-{tag}",
         finding_title, doc["id"], f"cov/{tag}.md", pack["id"], f"cov-pack-{tag}",
         server["id"], f"cov-mcp-{tag}", run["id"], f"cov-run-{tag}",
+        done_id, f"cov-done-{tag}", f"cov-model-{tag}",
     }
     return {
         "ids": ids, "secrets": secrets, "outsider": outsider, "project": p,
@@ -237,6 +249,7 @@ def test_not_project_bound_is_exact():
         assert not stale, f"no such route: {stale}"
     assert all(len(reason) > 10 for reason in NOT_PROJECT_BOUND.values())
     assert not (set(NOT_PROJECT_BOUND) & ADMIN_ONLY)
+    assert not (set(NOT_PROJECT_BOUND) & OPEN_ROUTES)
 
 
 def test_every_project_bound_route_enforces_membership(client, world):
@@ -309,16 +322,53 @@ def test_body_borne_project_refs_refused(client, world):
         (f"/agents/{free['id']}/bulk", {"prompts": ["x"], "project_id": pid}),
         ("/agents/dispatch", {"project_id": pid, "items": [{"agent": free["id"], "prompt": "x"}]}),
         ("/schedules", {"name": "x", "cron": "0 3 * * *", "agent_id": i["agent_id"]}),
+        # Template runs take no override; a body trying to unbind P's template is ignored.
+        (f"/templates/{i['template_id']}/run", {"project_id": None}),
     ]
     for url, body in calls:
         r = out.post(url, json=body)
         assert r.status_code in (403, 404), (url, body, r.status_code, r.text)
 
 
-def test_outsider_ws_on_project_task_is_4404(world):
-    out = world["outsider"]
-    for path in _all_ws_routes(app):
-        with pytest.raises(WebSocketDisconnect) as e:
-            with out.websocket_connect(_fill(path, world["ids"])) as ws:
+def _ws_close_code(c, url, timeout=10.0):
+    """Close code of a WebSocket the server should refuse. Fails (instead of
+    hanging) if the server accepts and then sends nothing."""
+    got = {}
+
+    def go():
+        try:
+            with c.websocket_connect(url) as ws:
                 ws.receive_json()
-        assert e.value.code == 4404, path
+            got["code"] = "accepted"
+        except WebSocketDisconnect as e:
+            got["code"] = e.code
+
+    t = threading.Thread(target=go, daemon=True)
+    t.start()
+    t.join(timeout)
+    assert not t.is_alive(), f"{url}: accepted and silent"
+    return got.get("code")
+
+
+def test_outsider_ws_on_project_task_is_4404(world):
+    for path in _all_ws_routes(app):
+        assert _ws_close_code(world["outsider"], _fill(path, world["ids"])) == 4404, path
+
+
+def test_aggregates_exclude_project_for_zero_grants(world):
+    """Counts and totals carry no ids, so check them directly: a user with no
+    grants and no tasks of their own sees zeros, though P has a costed task,
+    a finding and an MCP call."""
+    z = login_as(f"cov-zero-{_uid()}@test.local")
+    st = z.get("/tasks/stats").json()
+    assert st["by_status"] == {}, st
+    assert st["tasks_today"] == st["running"] == st["queued"] == st["completed_today"] == 0, st
+    s = z.get("/usage/summary").json()
+    for window in ("today", "last_7d", "last_30d", "all_time"):
+        assert s[window]["tasks"] == 0 and s[window]["cost_usd"] == 0, (window, s)
+    assert z.get("/findings/summary").json()["total"] == 0
+    assert z.get("/mcp/observability").json()["total_calls"] == 0
+    assert z.get("/usage/timeseries").json() == []
+    assert z.get("/usage/by-user").json() == []
+    assert z.get("/usage/by-project").json() == []
+    assert z.get("/usage/by-model").json() == []
