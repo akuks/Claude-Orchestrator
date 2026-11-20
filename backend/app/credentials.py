@@ -108,7 +108,7 @@ async def run_claude_probe(
             stdin=asyncio.subprocess.DEVNULL,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
-            env=env,
+            env=dict(env),  # uvloop only accepts a plain dict
             cwd=cwd,
         )
     except (FileNotFoundError, PermissionError):
