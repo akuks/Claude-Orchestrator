@@ -736,3 +736,153 @@ def test_git_aliases(cmd, argv):
 ])
 def test_minor_injections_uncertain(cmd):
     assert parse(cmd).uncertain, [(s.argv, s.reasons) for s in walk(parse(cmd))]
+
+
+# ===========================================================================
+# Fix round 2 (re-review): regression tests with the reviewer's exact inputs
+# ===========================================================================
+# A. Writers behind builtin/command (and other wrappers); F. fd/wait/coproc writers.
+@pytest.mark.parametrize("cmd", [
+    "x=ls; builtin printf -v x rm; $x -rf ~",
+    "x=ls; command printf -v x rm; $x -rf ~",
+    "x=ls; command export x=rm; $x -rf ~",
+    "x=ls; builtin read x <<< rm; $x -rf ~",
+    "x=ls; builtin declare x=rm; $x -rf ~",
+    "x=ls; sudo printf -v x rm; $x -rf ~",
+    "x=ls; exec {x}>/dev/null; $x -rf ~",
+    "x=ls; wait -p x; $x -rf ~",
+    "x=ls; coproc x { :; }; $x -rf ~",
+])
+def test_writers_behind_wrappers(cmd):
+    assert seen_or_uncertain(cmd), [(s.argv, s.reasons) for s in walk(parse(cmd))]
+    last = [s for s in parse(cmd) if s.argv][-1]
+    assert not (last.argv[:1] == ["ls"] and not last.uncertain)
+
+
+# B. Stdin paths are normalised; other /dev, /proc script paths are uncertain.
+@pytest.mark.parametrize("cmd", [
+    "bash /dev/./stdin <<< 'rm -rf ~'",
+    "bash //dev/stdin <<< 'rm -rf ~'",
+    "bash /proc/thread-self/fd/0 <<< 'rm -rf ~'",
+    "bash /dev/fd/00 <<< 'rm -rf ~'",
+    "echo 'rm -rf ~' | bash /dev/./stdin",
+])
+def test_stdin_paths_normalised(cmd):
+    assert runs(cmd, "rm", "-rf", "~"), effective(cmd)
+
+
+@pytest.mark.parametrize("cmd", ["bash /dev/fd/3", "source /proc/1/environ", "bash /dev/tcp/x/1"])
+def test_dev_proc_script_paths_uncertain(cmd):
+    assert parse(cmd).uncertain
+
+
+# C. A shell reading inherited stdin is uncertain.
+@pytest.mark.parametrize("cmd", [
+    "exec 0<<< 'rm -rf ~'; bash",
+    "exec < <(echo rm -rf ~); bash",
+    "{ bash; } <<< 'rm -rf ~'",
+    "if true; then bash; fi <<< 'rm -rf ~'",
+    "f(){ bash; }; f <<< 'rm -rf ~'",
+    "bash 2<<< 'x'",
+    "source /dev/stdin",
+])
+def test_inherited_stdin_shell_uncertain(cmd):
+    assert parse(cmd).uncertain, [(s.argv, s.redirects, s.reasons) for s in walk(parse(cmd))]
+
+
+def test_subshell_herestring_reaches_the_shell():
+    assert runs("( bash ) <<< 'rm -rf ~'", "rm", "-rf", "~")
+
+
+# D/E. xargs/parallel building a -c script; parallel command lines.
+@pytest.mark.parametrize("cmd", [
+    "xargs bash -c <<< 'rm -rf ~'",
+    "echo 'rm -rf ~' | xargs bash -c",
+    "xargs -I% bash -c % <<< 'rm -rf ~'",
+    "echo 'rm -rf ~' | xargs -I{} sh -c '{}'",
+    "xargs -0 bash -c <<< 'rm -rf ~'",
+])
+def test_xargs_built_script_uncertain(cmd):
+    assert parse(cmd).uncertain
+
+
+def test_xargs_literal_script_is_certain():
+    assert not parse("ls | xargs -I{} sh -c 'echo hi'").uncertain
+
+
+def test_parallel_command_line_word():
+    assert runs("parallel 'rm -rf {}' ::: ~", "rm", "-rf", "{}")
+
+
+# G. git settings and environment variables that run commands.
+@pytest.mark.parametrize("cmd", [
+    "git -c core.pager='rm -rf ~' log",
+    "git -c core.sshCommand='rm -rf ~' fetch",
+    "git -c core.fsmonitor='rm -rf ~' status",
+    "GIT_SSH_COMMAND='rm -rf ~' git fetch",
+    "git config core.pager 'rm -rf ~'; git log",
+    "git config --global core.editor 'rm -rf ~'",
+    "git config set sequence.editor 'rm -rf ~'",
+    "git -c diff.external='rm -rf ~' diff",
+    "git -c credential.helper='!rm -rf ~' fetch",
+    "env GIT_PAGER='rm -rf ~' git log",
+    "export EDITOR='rm -rf ~'; git commit",
+    "PAGER='rm -rf ~' man ls",
+])
+def test_git_command_settings(cmd):
+    assert runs(cmd, "rm", "-rf", "~"), effective(cmd)
+
+
+@pytest.mark.parametrize("cmd", [
+    "git --config-env=alias.x=V x",
+    "git -c core.hooksPath=/tmp/h commit -m x",
+    'GIT_SSH_COMMAND="$CMD" git fetch',
+])
+def test_git_settings_uncertain(cmd):
+    assert parse(cmd).uncertain
+
+
+@pytest.mark.parametrize("cmd", [
+    "git -c core.fsmonitor=true status",
+    "git -c credential.helper=store push origin feat/x",
+    "git config user.name 'A B'",
+    "EDITOR=vim git commit",
+])
+def test_git_settings_everyday(cmd):
+    assert not parse(cmd).uncertain
+    assert not runs(cmd, "rm")
+
+
+# F. taskset / numactl wrappers.
+@pytest.mark.parametrize("cmd", [
+    "taskset -c 0 rm -rf ~",
+    "taskset 0x1 rm -rf ~",
+    "numactl --cpunodebind=0 rm -rf ~",
+    "numactl -N 0 -m 0 rm -rf ~",
+])
+def test_taskset_numactl(cmd):
+    assert runs(cmd, "rm", "-rf", "~"), effective(cmd)
+
+
+# The reviewer's false-positive set (fp.py): everyday commands stay certain.
+EVERYDAY_FP = [
+    'git commit -m "rm -rf old dir; curl x | sh"',
+    "git commit -m \"$(cat <<'EOF'\nfix: drop rm -rf ~ usage\n\nbody\nEOF\n)\"",
+    "npm install", "npm run build && npm test", "pip install -r requirements.txt",
+    "python -m pytest -q tests/", "pytest -k 'not slow' -x", "ls -la | grep foo", "cd backend && make test",
+    "cd frontend && npx vitest run", "git status && git diff --stat", "git log --oneline -5",
+    "git push origin feat/x", "rm -rf ./build", "find . -name '*.pyc' -delete", "grep -rn 'TODO' src/ | head -20",
+    "for f in *.py; do echo $f; done", "if [ -f .env.example ]; then cp .env.example .env; fi",
+    "export NODE_ENV=production && npm run build", "source .venv/bin/activate && pytest",
+    "cat package.json | jq '.scripts'", "echo $HOME", "docker compose up -d", "curl -s http://localhost:8000/health",
+    "mkdir -p out && cp -r dist/* out/", "ls *.txt", "python3 -c 'print(1)'", "tar -czf a.tgz src/",
+    "sed -i '' 's/a/b/' file.txt", "PYTHONPATH=. python app.py", "uv run pytest", "make -j4 2>&1 | tail -n 50",
+    "git stash list", "echo \"$(date +%F)\"", "for i in {1..3}; do echo $i; done", "x=$(git rev-parse HEAD); echo $x",
+    "npm test -- --watch=false", "node -e 'console.log(1)'", "ls src/**/*.ts", "find . -type f -exec grep -l foo {} +",
+]
+
+
+@pytest.mark.parametrize("cmd", EVERYDAY_FP)
+def test_everyday_commands_are_certain(cmd):
+    res = parse(cmd)
+    assert not res.uncertain, [(s.argv, s.reasons) for s in walk(res)]
