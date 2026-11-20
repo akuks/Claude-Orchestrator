@@ -66,7 +66,13 @@ HARD (never approvable):
   a target or ``cd`` that names ``$CO_POLICY_FILE``, ``$CO_TASK_DIR``,
   ``$CLAUDE_CONFIG_DIR`` or ``$CLAUDE_PLUGIN_ROOT`` when its value is not
   known; inline interpreter code that names those variables or a protected
-  path; running ``co_hook.py`` by hand. Backstop: a guard variable NAME
+  path - the same checks run on every code text an interpreter gets
+  (``-c``/``-e``, a heredoc or here-string on stdin, literal text piped in, a
+  file written and run in the same line); a writer whose substituted
+  arguments or ``xargs`` input come from an environment dump (``env``,
+  ``printenv``, ``export -p``, ``declare -p``, ``set``, ``/proc/*/environ``)
+  or from ``ls``/``find`` of protected paths; running ``co_hook.py`` by
+  hand. Backstop: a guard variable NAME
   (or a ``$NAME`` reference) anywhere in the command line -
   ``p=$CO_POLICY_FILE``, ``${CO_POLICY_FILE%.json}``, ``$(printenv
   CO_TASK_DIR)``, ``${!v}`` - is hard unless every stage is a pure reader
@@ -285,6 +291,11 @@ _SED_EXEC = re.compile(r"(^|[;{}\n])\s*(\d+|\$|/[^/]*/)?\s*(,\s*(\d+|\$|/[^/]*/)
 _NODE = frozenset({"node", "nodejs", "bun", "deno"})
 _AWK = frozenset({"awk", "gawk", "mawk", "nawk"})
 _VIM = frozenset({"vim", "vi", "nvim", "ex", "view", "gvim", "vimdiff", "rvim"})
+# forge WRITES_TEXT: inline code that may change a file
+_WRITES_TEXT = re.compile(r"write|append|copy|rename|move|unlink|remove|\brm|symlink|truncate|chmod|mkdir|"
+                          r"\bos\.replace\b|open\s{0,5}\([^)]{0,300}?['\"](?=[rbt]{0,3}[wax+])[rwaxbt+]{1,4}['\"]|"
+                          r"system|exec|spawn|popen|subprocess", re.I)
+_AGENT_CODE = re.compile(r"\.claude[\\/]+(settings[^'\"\s]*\.json|hooks\b)|\.claude['\"]|\.mcp\.json", re.I)
 _GITMODULES_EXEC = re.compile(r"(?im)^\s*update\s*=\s*!")
 _STDIN_PATHS = frozenset({"-", "/dev/stdin", "/dev/fd/0", "/proc/self/fd/0"})
 _MAKEFILES = frozenset({"makefile", "gnumakefile"})
@@ -1574,6 +1585,14 @@ class _Bash:
                     if (p and ctx.is_protected_dest(p)) or (e and ctx.glob_hits_protected(_norm(e))):
                         ctx.hit("self-protect", True, raw)
 
+        # R2: a writer whose arguments (substitutions) or xargs input come from an
+        # environment dump, or from ls/find of protected paths
+        if name not in _READERS:
+            for res in st.nested:
+                self.producer_check(res, cwd)
+            if "xargs" in st.wrappers or "parallel" in st.wrappers:
+                self.producer_check([x for x in pipeline if x.index < st.index], cwd)
+
         # recursive deletes
         if name in _DELETERS:
             recursive, targets = _rm_targets(argv, dyn)
@@ -1609,18 +1628,21 @@ class _Bash:
         kind = _interp_kind(name)
         if kind:
             for code, d in _inline_code(kind, args, dargs):
-                if d or _code_runs_shell(kind, code):
-                    ctx.hit("uncertain-command", False, raw)
-                if "co_hook" in code or any(v in code for v in _GUARD_VARS) or any(
-                        m in code.lower() for m in ctx.mentions):
-                    ctx.hit("self-protect", True, raw)
+                self.check_code(kind, code, d)
             if kind not in ("awk", "vim") and _reads_stdin(name, args):
+                # R1: code given on stdin - a heredoc, a here-string, or literal text piped in
                 for _dl, _q, body in st.heredocs:
-                    if _code_runs_shell(kind, body):
-                        ctx.hit("uncertain-command", False, raw)
+                    self.check_code(kind, body)
                 for op, t in st.redirects:
-                    if op == "<<<" and _code_runs_shell(kind, t):
-                        ctx.hit("uncertain-command", False, raw)
+                    if op == "<<<":
+                        self.check_code(kind, t, "$" in t or "`" in t)
+                prev = [x for x in pipeline if x.index == st.index - 1]
+                if prev:
+                    pargv = _sh.expand_wrappers(prev[0]) or []
+                    pdyn = prev[0].dynamic[len(prev[0].argv) - len(pargv):]
+                    text = _literal_output(prev[0], pargv, pdyn)
+                    if isinstance(text, str):
+                        self.check_code(kind, text)
         if name == "sed":
             scripts = [c for c, _d in _short_opt_value(args, dargs, "e", ("--expression",))]
             if not scripts:
@@ -1695,6 +1717,53 @@ class _Bash:
         p = self.ctx.path(word, cwd)
         return (p in self.written, self.written.get(p)) if p else (False, None)
 
+    def producer_check(self, stages, cwd):
+        ctx, raw = self.ctx, self.raw
+        for s2 in _sh.walk(stages):
+            if _env_dump(s2):
+                ctx.hit("self-protect", True, raw)
+                return
+            a2 = _sh.expand_wrappers(s2) or []
+            if not a2:
+                continue
+            n2, args2 = _sh.command_name(a2[0]), a2[1:]
+            if n2 == "find":
+                i = 0
+                while i < len(args2) and args2[i] in ("-H", "-L", "-P"):
+                    i += 1
+                roots = []
+                while i < len(args2) and not (args2[i].startswith("-") or args2[i] in ("(", "!")):
+                    roots.append(args2[i])
+                    i += 1
+                expr = args2[i:]
+                names = [expr[k + 1] for k, a in enumerate(expr) if a in ("-name", "-iname") and k + 1 < len(expr)]
+                only = names and not any(a in _FIND_NARROW and a not in ("-name", "-iname") for a in expr)
+                for r in roots or ["."]:
+                    p = ctx.path(r, cwd)
+                    if p:
+                        _protect_find(ctx, p, names if only else None, raw)
+            elif n2 in ("ls", "realpath", "readlink", "stat", "dirname", "basename", "printf", "echo"):
+                for w in args2:
+                    if w.startswith("-"):
+                        continue
+                    e = ctx.expand(w, cwd)
+                    if e and (ctx.glob_hits_protected(_norm(e)) or ctx.is_protected_dest(_real(e))):
+                        ctx.hit("self-protect", True, raw)
+                        return
+
+    def check_code(self, kind, code, dynamic=False):
+        """The same checks for every code text an interpreter receives: inline
+        (-c/-e), heredoc, here-string, piped literal text, a file written and
+        run in the same line."""
+        ctx, raw = self.ctx, self.raw
+        if dynamic or _code_runs_shell(kind, code):
+            ctx.hit("uncertain-command", False, raw)
+        low = code.lower()
+        if "co_hook" in code or _GUARD_NAME.search(code) or any(m in low for m in ctx.mentions):
+            ctx.hit("self-protect", True, raw)
+        if _AGENT_CODE.search(code) and _WRITES_TEXT.search(code):
+            ctx.hit("agent-config", False, raw)
+
     def run_text(self, content, cwd, kind=None):
         if content is _FETCHED:
             self.ctx.hit("pipe-to-shell", False, self.raw)
@@ -1702,8 +1771,8 @@ class _Bash:
             self.ctx.hit("uncertain-command", False, self.raw)
         elif kind in (None, "shell"):
             self.nested_eval(content, cwd)
-        elif _code_runs_shell(kind, content):
-            self.ctx.hit("uncertain-command", False, self.raw)
+        else:
+            self.check_code(kind, content)
 
     def write_then_run(self, st, argv, dyn, name, args, cwd, kind, pipeline):
         if not self.written:
@@ -1913,6 +1982,28 @@ def _fetch_before(st, pipeline):
     return False
 
 
+_ENVIRON = re.compile(r"/proc/[^/\s]+/(task/[^/\s]+/)?environ")
+
+
+def _env_dump(st):
+    """env / printenv with no names, export -p, declare|typeset -p, bare set,
+    or /proc/*/environ: the whole environment, guard paths included."""
+    if any(_ENVIRON.search(w) for w in st.argv) or any(_ENVIRON.search(t) for _op, t in st.redirects):
+        return True
+    if not st.argv:
+        return False
+    name, args = _sh.command_name(st.argv[0]), st.argv[1:]
+    if name == "printenv":
+        return not [a for a in args if not a.startswith("-")]
+    if name == "env":
+        return _sh.expand_wrappers(st) is None and not any(a.startswith(("-S", "--split-string")) for a in args)
+    if name in ("export", "declare", "typeset", "readonly"):
+        return any(re.fullmatch(r"-[a-zA-Z]*p[a-zA-Z]*", a) for a in args)
+    if name in ("set", "compgen"):
+        return not args or name == "compgen" and "-e" in args
+    return False
+
+
 _PURE_SINK = frozenset({"/dev/null", "/dev/stdout", "/dev/stderr"})
 
 
@@ -1978,7 +2069,8 @@ def _allowed_sub(ctx, word):
             return a[-1] if re.fullmatch(_TOOL_NAME, a[-1]) else None
         return None
     if a == ["git", "rev-parse", "--show-toplevel"]:
-        return ctx.project + rest
+        target = _norm(ctx.project + rest)
+        return target if _inside(target.lower(), ctx.project.lower()) else None
     tail = None
     if a == ["npm", "bin"]:
         tail = re.fullmatch(r"/(" + _TOOL_NAME + ")", rest)
