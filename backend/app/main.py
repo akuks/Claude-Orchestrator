@@ -1,8 +1,7 @@
 import asyncio
-import os
 from contextlib import asynccontextmanager
 
-from fastapi import Depends, FastAPI
+from fastapi import Depends, FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 
 from datetime import datetime, timedelta, timezone
@@ -13,6 +12,7 @@ from . import mcp_manager
 from . import auth as auth_mod
 from .auth import current_principal
 from .config import settings
+from .credentials import credential_status
 from .constants import Status
 from .database import SessionLocal, init_db
 from .models import Task
@@ -162,9 +162,11 @@ async def health():
 
 
 @app.get("/system/claude", tags=["meta"], dependencies=_authed)
-async def claude_status():
-    """Report whether the Claude CLI is present and can authenticate — so a
-    headless deployment can be verified before running tasks."""
+async def claude_status(request: Request):
+    """Whether the Claude CLI is present on the server (binary + version, a
+    server check), and whether the *calling user* can run tasks: their own
+    Claude credential, the org fallback, or none. The server's own login or
+    ANTHROPIC_API_KEY is never reported - tasks never use it. No secrets."""
 
     async def _run(args: list[str]):
         try:
@@ -182,12 +184,13 @@ async def claude_status():
             return None, "error"
 
     vcode, version = await _run(["--version"])
-    acode, _ = await _run(["auth", "status"])
-    has_key = bool(os.environ.get("ANTHROPIC_API_KEY"))
+    async with SessionLocal() as s:
+        you = await credential_status(s, request.state.principal.user.id)
     return {
         "claude_bin": settings.claude_bin,
         "found": vcode is not None,
         "version": version if vcode == 0 else None,
-        "authenticated": bool(has_key or acode == 0),
-        "auth_method": "ANTHROPIC_API_KEY" if has_key else ("login/token" if acode == 0 else None),
+        "authenticated": you["claude"] != "none",
+        "auth_method": you["claude"] if you["claude"] != "none" else None,
+        "you": you,
     }

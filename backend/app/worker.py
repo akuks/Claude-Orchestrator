@@ -15,7 +15,7 @@ from pathlib import Path
 from sqlalchemy import func, select
 
 from . import auth, context_store, mcp_manager, memory, notifications, security
-from .agent_env import MissingCredential, build_agent_env
+from .agent_env import PROJECT_ENV_BLOCKED, MissingCredential, build_agent_env
 from .config import settings
 from .constants import Priority, Status
 from .database import SessionLocal
@@ -447,7 +447,10 @@ class WorkerManager:
         # Names only, never values.
         await emit(
             "env",
-            {"applied": sorted(project_env.keys()), "credentials": sub_env.credentials},
+            {
+                "applied": sorted(k for k in project_env if k not in PROJECT_ENV_BLOCKED),
+                "credentials": sub_env.credentials,
+            },
         )
 
         # Scoped agent token: lets a coordinator call back into the API as the
@@ -585,9 +588,10 @@ class WorkerManager:
         # Fold the completed work into the project's living memory (background,
         # non-blocking — it makes its own cheap Claude call).
         if project_id and not failed:
-            asyncio.create_task(memory.update_after_task(task_id))
+            # Both run Claude as the task's owner (skipped if they can't).
+            asyncio.create_task(memory.update_after_task(task_id, task_owner))
             # Security review → extract structured findings into the tracker.
-            asyncio.create_task(security.extract_findings(task_id))
+            asyncio.create_task(security.extract_findings(task_id, task_owner))
 
         # Notify if this run came from a schedule (honors its notify policy).
         asyncio.create_task(notifications.notify_task_finished(task_id))

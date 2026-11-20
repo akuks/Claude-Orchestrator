@@ -14,9 +14,10 @@ from datetime import datetime, timezone
 
 from sqlalchemy import select
 
+from .agent_env import agent_env_or_none
 from .config import settings
 from .database import SessionLocal
-from .models import Finding, Task
+from .models import Finding, Project, Task
 
 _SEV = {"critical", "high", "medium", "low", "info"}
 
@@ -46,8 +47,9 @@ _FINDINGS_SCHEMA = {
 }
 
 
-async def _extract_json(prompt: str, model: str) -> dict:
-    """Run Claude with --json-schema so the output is guaranteed valid JSON."""
+async def _extract_json(prompt: str, model: str, env: dict) -> dict:
+    """Run Claude with --json-schema so the output is guaranteed valid JSON,
+    with exactly `env` (from app.agent_env)."""
     try:
         proc = await asyncio.create_subprocess_exec(
             settings.claude_bin,
@@ -59,6 +61,7 @@ async def _extract_json(prompt: str, model: str) -> dict:
             stdin=asyncio.subprocess.PIPE,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.DEVNULL,
+            env=env,
         )
     except (FileNotFoundError, OSError):
         return {}
@@ -133,7 +136,9 @@ _EXTRACT_PROMPT = (
 )
 
 
-async def extract_findings(task_id: str) -> None:
+async def extract_findings(task_id: str, user_id: str | None) -> None:
+    """Runs Claude as `user_id` (the scan task's owner); skipped quietly if
+    they have no Claude credential and there is no org fallback."""
     async with SessionLocal() as s:
         task = await s.get(Task, task_id)
         if task is None or not task.project_id or not task.result_text:
@@ -143,8 +148,17 @@ async def extract_findings(task_id: str) -> None:
         project_id = task.project_id
         report = task.result_text
         full_scan = "(full)" in (task.title or "")
+        project = await s.get(Project, project_id)
+        env = await agent_env_or_none(
+            s, user_id, project_env=project.env if project else None,
+            purpose="findings extraction",
+        )
+    if env is None:
+        return
 
-    data = await _extract_json(_EXTRACT_PROMPT + report[:12000], settings.memory_model)
+    data = await _extract_json(
+        _EXTRACT_PROMPT + report[:12000], settings.memory_model, env
+    )
     items = data.get("findings", []) if isinstance(data, dict) else []
 
     now = _now()

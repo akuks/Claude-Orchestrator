@@ -362,6 +362,11 @@ async def followup_task(task_id: str, payload: FollowupCreate, request: Request)
             raise HTTPException(
                 409, "Parent has no resumable session yet (must finish a run first)"
             )
+        # Claude sessions belong to an account: only the parent's creator
+        # resumes it. Anyone else starts a fresh session on their own
+        # credential (same thread and workspace).
+        sender = p.user.id
+        resume = parent.session_id if sender == parent.created_by else None
         child = Task(
             title=_default_title(payload.prompt),
             prompt=payload.prompt,
@@ -373,10 +378,10 @@ async def followup_task(task_id: str, payload: FollowupCreate, request: Request)
             max_turns=parent.max_turns,
             parent_task_id=parent.id,
             root_id=parent.root_id or parent.id,  # join the parent's thread
-            resume_session_id=parent.session_id,
+            resume_session_id=resume,
             workspace_dir=parent.workspace_dir,  # same workspace = continues context
             status=Status.QUEUED,
-            created_by=request.state.principal.user.id,
+            created_by=sender,
         )
         s.add(child)
         await s.commit()

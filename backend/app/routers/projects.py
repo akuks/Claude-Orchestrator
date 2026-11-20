@@ -9,6 +9,7 @@ from pydantic import BaseModel
 from sqlalchemy import delete, func, select, update
 
 from .. import memory
+from ..agent_env import MissingCredential
 from ..config import settings
 from ..constants import VALID_MODELS, Status
 from ..database import SessionLocal
@@ -392,7 +393,11 @@ async def regenerate_memory(project_id: str, request: Request):
     async with SessionLocal() as s:
         await require_project_role(s, request.state.principal, project_id, "maintainer")
         await _get_or_404(s, project_id)
-    await memory.rebuild_memory(project_id)
+    # Runs Claude as the clicking user (their credential or the org fallback).
+    try:
+        await memory.rebuild_memory(project_id, request.state.principal.user.id)
+    except MissingCredential as e:
+        raise HTTPException(409, str(e))
     async with SessionLocal() as s:
         project = await _get_or_404(s, project_id)
         return MemoryOut(

@@ -138,11 +138,12 @@ async def prepare_claude_probe(s, user_id: str):
     Claude credential only - succeeding on the org key would say nothing about
     theirs - in the exact env a task of theirs gets (app.agent_env: per-user
     CLAUDE_CONFIG_DIR etc., never the server's ~/.claude)."""
-    from .agent_env import build_agent_env  # agent_env imports this module
+    from .agent_env import MissingCredential, build_agent_env  # imports this module
 
-    if await get_claude_secret(s, user_id) is None:
+    try:
+        env = dict(await build_agent_env(s, user_id, allow_fallback=False))
+    except MissingCredential:
         return lambda: _refuse(MISSING_CLAUDE)
-    env = dict(await build_agent_env(s, user_id))
     return lambda: run_claude_probe(env)
 
 
