@@ -326,7 +326,7 @@ function RunDialog({ workflow, onClose, onRan }) {
   )
 }
 
-export default function WorkflowsView({ agents = [] }) {
+export default function WorkflowsView({ agents = [], isAdmin = false }) {
   const [workflows, setWorkflows] = useState([])
   const [presets, setPresets] = useState([])
   const [runs, setRuns] = useState([])
@@ -382,15 +382,17 @@ export default function WorkflowsView({ agents = [] }) {
   return (
     <>
       <Space style={{ marginBottom: 12 }} wrap>
-        <Button type="primary" icon={<PlusOutlined />} onClick={() => { setEditing(null); setModalOpen(true) }}>
-          New Workflow
-        </Button>
+        {isAdmin && (
+          <Button type="primary" icon={<PlusOutlined />} onClick={() => { setEditing(null); setModalOpen(true) }}>
+            New Workflow
+          </Button>
+        )}
         <Button icon={<ReloadOutlined />} onClick={refresh}>Refresh</Button>
         <Typography.Text type="secondary">
           Saved pipelines — ordered stages of agents. Auto-advances on success, halts on failure, pauses at gated stages.
         </Typography.Text>
       </Space>
-      {presets.length > 0 && (
+      {isAdmin && presets.length > 0 && (
         <Space wrap style={{ marginBottom: 12 }}>
           <Typography.Text type="secondary">Templates:</Typography.Text>
           {presets.map((p) => (
@@ -402,7 +404,7 @@ export default function WorkflowsView({ agents = [] }) {
       )}
 
       <div style={{ display: 'flex', flexWrap: 'wrap', gap: 12 }}>
-        {workflows.length === 0 && !loading && <Empty description="No workflows yet — add one or start from a template." />}
+        {workflows.length === 0 && !loading && <Empty description={isAdmin ? 'No workflows yet — add one or start from a template.' : 'No workflows yet.'} />}
         {workflows.map((w) => (
           <Card
             key={w.id}
@@ -412,10 +414,12 @@ export default function WorkflowsView({ agents = [] }) {
             extra={
               <Space size={4}>
                 <Button size="small" type="primary" icon={<PlayCircleOutlined />} onClick={() => setRunWf(w)}>Run</Button>
-                <Button size="small" onClick={() => { setEditing(w); setModalOpen(true) }}>Edit</Button>
-                <Popconfirm title="Delete workflow?" onConfirm={() => remove(w.id)}>
-                  <Button size="small" danger icon={<DeleteOutlined />} />
-                </Popconfirm>
+                {isAdmin && <Button size="small" onClick={() => { setEditing(w); setModalOpen(true) }}>Edit</Button>}
+                {isAdmin && (
+                  <Popconfirm title="Delete workflow?" onConfirm={() => remove(w.id)}>
+                    <Button size="small" danger icon={<DeleteOutlined />} />
+                  </Popconfirm>
+                )}
               </Space>
             }
           >

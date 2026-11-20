@@ -18,7 +18,7 @@ import {
 import { DeleteOutlined, EditOutlined, EyeOutlined, PlusOutlined, ReloadOutlined } from '@ant-design/icons'
 import { api } from '../api'
 
-function DocModal({ open, doc, projects, onClose, onSaved }) {
+function DocModal({ open, doc, projects, isAdmin, onClose, onSaved }) {
   const [form] = Form.useForm()
   const [saving, setSaving] = useState(false)
   const scope = Form.useWatch('scope', form)
@@ -30,7 +30,7 @@ function DocModal({ open, doc, projects, onClose, onSaved }) {
     form.setFieldsValue(
       doc
         ? { ...doc, project_id: doc.project_id || undefined }
-        : { scope: 'global', enabled: true, path: '', title: '', abstract: '', body: '' }
+        : { scope: isAdmin ? 'global' : 'project', enabled: true, path: '', title: '', abstract: '', body: '' }
     )
   }, [open, doc])
 
@@ -92,7 +92,7 @@ function DocModal({ open, doc, projects, onClose, onSaved }) {
             <Select
               style={{ width: 300 }}
               options={[
-                { value: 'global', label: 'Global — every agent task' },
+                ...(isAdmin ? [{ value: 'global', label: 'Global — every agent task' }] : []),
                 { value: 'project', label: 'Project — overrides a global doc at the same path' },
               ]}
             />
@@ -101,7 +101,9 @@ function DocModal({ open, doc, projects, onClose, onSaved }) {
             <Form.Item name="project_id" label="Project" rules={[{ required: true, message: 'Pick a project' }]}>
               <Select
                 style={{ width: 220 }}
-                options={projects.filter((p) => !p.archived).map((p) => ({ value: p.id, label: p.name }))}
+                options={projects
+                  .filter((p) => !p.archived && (isAdmin || p.my_role === 'maintainer'))
+                  .map((p) => ({ value: p.id, label: p.name }))}
               />
             </Form.Item>
           )}
@@ -114,7 +116,7 @@ function DocModal({ open, doc, projects, onClose, onSaved }) {
   )
 }
 
-export default function ContextStoreView({ projects = [] }) {
+export default function ContextStoreView({ projects = [], isAdmin = false }) {
   const [docs, setDocs] = useState([])
   const [loading, setLoading] = useState(false)
   const [editing, setEditing] = useState(null) // null=closed, {}=new, doc=edit
@@ -122,6 +124,11 @@ export default function ContextStoreView({ projects = [] }) {
   const [preview, setPreview] = useState(null)
 
   const projName = (id) => projects.find((p) => p.id === id)?.name
+  // Global docs: admins only. Project docs: maintainers of that project.
+  const canWrite = (doc) =>
+    isAdmin ||
+    (doc.scope === 'project' && projects.find((p) => p.id === doc.project_id)?.my_role === 'maintainer')
+  const canAdd = isAdmin || projects.some((p) => !p.archived && p.my_role === 'maintainer')
 
   const refresh = useCallback(async () => {
     setLoading(true)
@@ -192,29 +199,39 @@ export default function ContextStoreView({ projects = [] }) {
       title: 'Enabled',
       dataIndex: 'enabled',
       width: 90,
-      render: (en, row) => <Switch checked={en} onChange={(v) => toggle(row, v)} />,
+      render: (en, row) =>
+        canWrite(row) ? (
+          <Switch checked={en} onChange={(v) => toggle(row, v)} />
+        ) : en ? (
+          <Tag color="green">on</Tag>
+        ) : (
+          <Tag>off</Tag>
+        ),
     },
     {
       title: '',
       key: 'a',
       width: 100,
-      render: (_, row) => (
-        <Space>
-          <Button size="small" icon={<EditOutlined />} onClick={() => setEditing(row)} />
-          <Popconfirm title="Delete this doc?" onConfirm={() => remove(row.id)}>
-            <Button size="small" danger icon={<DeleteOutlined />} />
-          </Popconfirm>
-        </Space>
-      ),
+      render: (_, row) =>
+        canWrite(row) && (
+          <Space>
+            <Button size="small" icon={<EditOutlined />} onClick={() => setEditing(row)} />
+            <Popconfirm title="Delete this doc?" onConfirm={() => remove(row.id)}>
+              <Button size="small" danger icon={<DeleteOutlined />} />
+            </Popconfirm>
+          </Space>
+        ),
     },
   ]
 
   return (
     <>
       <Space style={{ marginBottom: 12 }} wrap>
-        <Button type="primary" icon={<PlusOutlined />} onClick={() => setEditing({})}>
-          Add doc
-        </Button>
+        {canAdd && (
+          <Button type="primary" icon={<PlusOutlined />} onClick={() => setEditing({})}>
+            Add doc
+          </Button>
+        )}
         <Button icon={<ReloadOutlined />} onClick={refresh}>
           Refresh
         </Button>
@@ -252,6 +269,7 @@ export default function ContextStoreView({ projects = [] }) {
         open={editing !== null}
         doc={editing && editing.id ? editing : null}
         projects={projects}
+        isAdmin={isAdmin}
         onClose={() => setEditing(null)}
         onSaved={refresh}
       />

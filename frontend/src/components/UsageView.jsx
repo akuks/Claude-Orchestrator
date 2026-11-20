@@ -45,19 +45,22 @@ export default function UsageView() {
   const [series, setSeries] = useState([])
   const [byProject, setByProject] = useState([])
   const [byModel, setByModel] = useState([])
+  const [byUser, setByUser] = useState([])
 
   const refresh = useCallback(async () => {
     try {
-      const [s, ts, bp, bm] = await Promise.all([
+      const [s, ts, bp, bm, bu] = await Promise.all([
         api.usageSummary(),
         api.usageTimeseries(30),
         api.usageByProject(),
         api.usageByModel(),
+        api.usageByUser(),
       ])
       setSummary(s)
       setSeries(ts)
       setByProject(bp)
       setByModel(bm)
+      setByUser(bu)
     } catch (e) {
       message.error(e.message)
     }
@@ -153,6 +156,43 @@ export default function UsageView() {
                 ) : (
                   <Typography.Text type="secondary">—</Typography.Text>
                 ),
+            },
+            { title: 'Tokens', dataIndex: 'tokens', width: 100, render: (t) => compact(t) },
+            { title: 'Tasks', dataIndex: 'tasks', width: 80 },
+          ]}
+        />
+      </Card>
+
+      <Card size="small" title="Cost by user" style={{ marginTop: 16 }}>
+        <Table
+          rowKey={(r) => r.user_id || '(unassigned)'}
+          size="small"
+          pagination={false}
+          dataSource={byUser}
+          locale={{ emptyText: 'No cost data yet' }}
+          columns={[
+            {
+              title: 'User',
+              dataIndex: 'name',
+              render: (n, row) =>
+                row.user_id ? (
+                  <span>
+                    <b>{n}</b>{' '}
+                    {row.email && row.email !== n && (
+                      <Typography.Text type="secondary">{row.email}</Typography.Text>
+                    )}
+                  </span>
+                ) : (
+                  <Typography.Text type="secondary">{n}</Typography.Text>
+                ),
+            },
+            {
+              title: 'Cost',
+              dataIndex: 'cost_usd',
+              width: 120,
+              render: (c) => money(c),
+              sorter: (a, b) => a.cost_usd - b.cost_usd,
+              defaultSortOrder: 'descend',
             },
             { title: 'Tokens', dataIndex: 'tokens', width: 100, render: (t) => compact(t) },
             { title: 'Tasks', dataIndex: 'tasks', width: 80 },

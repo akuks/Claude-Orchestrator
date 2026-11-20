@@ -13,6 +13,7 @@ import {
   Space,
   Switch,
   Table,
+  Tabs,
   Tag,
   Typography,
   message,
@@ -24,10 +25,12 @@ import {
   ReloadOutlined,
   BookOutlined,
   RadarChartOutlined,
+  TeamOutlined,
 } from '@ant-design/icons'
 import dayjs from 'dayjs'
 import relativeTime from 'dayjs/plugin/relativeTime'
 import { api } from '../api'
+import ProjectMembers from './ProjectMembers'
 
 dayjs.extend(relativeTime)
 
@@ -37,7 +40,7 @@ const MODEL_OPTS = [
   { value: 'haiku', label: 'Haiku' },
 ]
 
-function ProjectModal({ open, project, onClose, onSaved }) {
+function ProjectModal({ open, project, isAdmin, onClose, onSaved }) {
   const [form] = Form.useForm()
   const [saving, setSaving] = useState(false)
   const isEdit = !!project
@@ -47,11 +50,10 @@ function ProjectModal({ open, project, onClose, onSaved }) {
     if (project) {
       form.setFieldsValue({
         name: project.name,
-        directory: project.directory,
+        ...(isAdmin ? { directory: project.directory, archived: project.archived } : {}),
         default_model: project.default_model,
         instructions: project.instructions,
         memory_enabled: project.memory_enabled,
-        archived: project.archived,
         budget_usd: project.budget_usd,
         github_repo: project.github_repo,
         auto_review_prs: project.auto_review_prs,
@@ -68,6 +70,11 @@ function ProjectModal({ open, project, onClose, onSaved }) {
       v = await form.validateFields()
     } catch {
       return
+    }
+    if (!isAdmin) {
+      // Admin-only fields; the server would reject the whole PATCH with 403.
+      delete v.directory
+      delete v.archived
     }
     setSaving(true)
     try {
@@ -96,13 +103,15 @@ function ProjectModal({ open, project, onClose, onSaved }) {
         <Form.Item name="name" label="Name" rules={[{ required: true }]}>
           <Input placeholder="e.g. OpsMind" />
         </Form.Item>
-        <Form.Item
-          name="directory"
-          label="Directory"
-          extra="Absolute path to the repo/folder tasks run in. Defaults to ./projects/<slug>."
-        >
-          <Input placeholder="/Users/you/code/opsmind" disabled={isEdit} />
-        </Form.Item>
+        {isAdmin && (
+          <Form.Item
+            name="directory"
+            label="Directory"
+            extra="Absolute path to the repo/folder tasks run in. Defaults to ./projects/<slug>."
+          >
+            <Input placeholder="/Users/you/code/opsmind" disabled={isEdit} />
+          </Form.Item>
+        )}
         <div style={{ display: 'flex', gap: 12 }}>
           <Form.Item name="default_model" label="Default model" style={{ flex: 1 }}>
             <Select options={MODEL_OPTS} />
@@ -142,7 +151,7 @@ function ProjectModal({ open, project, onClose, onSaved }) {
           >
             <Switch />
           </Form.Item>
-          {isEdit && (
+          {isEdit && isAdmin && (
             <Form.Item name="archived" label="Archived" valuePropName="checked">
               <Switch />
             </Form.Item>
@@ -153,7 +162,7 @@ function ProjectModal({ open, project, onClose, onSaved }) {
   )
 }
 
-function MemoryDrawer({ project, onClose, onSaved }) {
+function MemoryPane({ project, canEdit, onSaved }) {
   const [mem, setMem] = useState('')
   const [summaries, setSummaries] = useState([])
   const [busy, setBusy] = useState(false)
@@ -162,7 +171,7 @@ function MemoryDrawer({ project, onClose, onSaved }) {
     if (!project) return
     api.getMemory(project.id).then((m) => setMem(m.memory || ''))
     api.listSummaries(project.id).then(setSummaries)
-  }, [project])
+  }, [project?.id])
 
   const save = async () => {
     setBusy(true)
@@ -192,28 +201,24 @@ function MemoryDrawer({ project, onClose, onSaved }) {
   }
 
   return (
-    <Drawer
-      open={!!project}
-      onClose={onClose}
-      width={640}
-      title={project ? `Memory — ${project.name}` : ''}
-      extra={
-        <Space>
+    <>
+      <Typography.Paragraph type="secondary">
+        Living memory is auto-updated after each task.
+        {canEdit && " You can edit it directly, or regenerate it from the project's task history."}
+      </Typography.Paragraph>
+      {canEdit && (
+        <Space style={{ marginBottom: 12 }}>
           <Button icon={<ReloadOutlined />} loading={busy} onClick={regenerate}>
             Regenerate
           </Button>
           <Button type="primary" loading={busy} onClick={save}>
-            Save
+            Save memory
           </Button>
         </Space>
-      }
-    >
-      <Typography.Paragraph type="secondary">
-        Living memory is auto-updated after each task. You can edit it directly, or
-        regenerate it from the project's task history.
-      </Typography.Paragraph>
+      )}
       <Input.TextArea
         value={mem}
+        readOnly={!canEdit}
         onChange={(e) => setMem(e.target.value)}
         autoSize={{ minRows: 8, maxRows: 20 }}
         style={{ fontFamily: 'ui-monospace, Menlo, monospace', fontSize: 13 }}
@@ -239,6 +244,41 @@ function MemoryDrawer({ project, onClose, onSaved }) {
         />
       ) : (
         <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="No task history yet" />
+      )}
+    </>
+  )
+}
+
+// Per-project drawer: Members and Memory tabs.
+function ProjectDrawer({ project, tab, onTab, currentUser, onClose, onSaved }) {
+  const canEdit = project?.my_role === 'maintainer'
+  return (
+    <Drawer open={!!project} onClose={onClose} width={680} title={project?.name || ''} destroyOnClose>
+      {project && (
+        <Tabs
+          activeKey={tab}
+          onChange={onTab}
+          items={[
+            {
+              key: 'members',
+              label: (
+                <span>
+                  <TeamOutlined /> Members
+                </span>
+              ),
+              children: <ProjectMembers project={project} currentUser={currentUser} onSaved={onSaved} />,
+            },
+            {
+              key: 'memory',
+              label: (
+                <span>
+                  <BookOutlined /> Memory
+                </span>
+              ),
+              children: <MemoryPane project={project} canEdit={canEdit} onSaved={onSaved} />,
+            },
+          ]}
+        />
       )}
     </Drawer>
   )
@@ -349,13 +389,15 @@ function DiscoverModal({ open, onClose, onImported }) {
   )
 }
 
-export default function ProjectsView({ onProjectsChanged }) {
+export default function ProjectsView({ currentUser, onProjectsChanged }) {
+  const isAdmin = currentUser?.role === 'admin'
   const [projects, setProjects] = useState([])
   const [loading, setLoading] = useState(false)
   const [modalOpen, setModalOpen] = useState(false)
   const [discoverOpen, setDiscoverOpen] = useState(false)
   const [editing, setEditing] = useState(null)
-  const [memoryProject, setMemoryProject] = useState(null)
+  const [drawer, setDrawer] = useState(null) // {id, tab}
+  const drawerProject = drawer ? projects.find((p) => p.id === drawer.id) || null : null
 
   const refresh = useCallback(async () => {
     setLoading(true)
@@ -391,6 +433,9 @@ export default function ProjectsView({ onProjectsChanged }) {
         <Space>
           <b>{n}</b>
           {row.archived && <Tag>archived</Tag>}
+          {!isAdmin && (
+            <Tag color={row.my_role === 'maintainer' ? 'gold' : 'default'}>{row.my_role}</Tag>
+          )}
           {!row.memory_enabled && <Tag color="default">memory off</Tag>}
         </Space>
       ),
@@ -412,26 +457,34 @@ export default function ProjectsView({ onProjectsChanged }) {
     {
       title: 'Actions',
       key: 'actions',
-      width: 220,
+      width: 300,
       render: (_, row) => (
         <Space size="small">
-          <Button size="small" icon={<BookOutlined />} onClick={() => setMemoryProject(row)}>
+          <Button size="small" icon={<TeamOutlined />} onClick={() => setDrawer({ id: row.id, tab: 'members' })}>
+            Members
+          </Button>
+          <Button size="small" icon={<BookOutlined />} onClick={() => setDrawer({ id: row.id, tab: 'memory' })}>
             Memory
           </Button>
-          <Button
-            size="small"
-            icon={<EditOutlined />}
-            onClick={() => {
-              setEditing(row)
-              setModalOpen(true)
-            }}
-          />
-          <Popconfirm
-            title="Delete this project? Task history is removed; the directory is left untouched."
-            onConfirm={() => remove(row.id)}
-          >
-            <Button size="small" danger icon={<DeleteOutlined />} />
-          </Popconfirm>
+          {row.my_role === 'maintainer' && (
+            <Button
+              size="small"
+              icon={<EditOutlined />}
+              title="Edit"
+              onClick={() => {
+                setEditing(row)
+                setModalOpen(true)
+              }}
+            />
+          )}
+          {isAdmin && (
+            <Popconfirm
+              title="Delete this project? Task history is removed; the directory is left untouched."
+              onConfirm={() => remove(row.id)}
+            >
+              <Button size="small" danger icon={<DeleteOutlined />} title="Delete" />
+            </Popconfirm>
+          )}
         </Space>
       ),
     },
@@ -440,19 +493,23 @@ export default function ProjectsView({ onProjectsChanged }) {
   return (
     <>
       <Space style={{ marginBottom: 12 }}>
-        <Button
-          type="primary"
-          icon={<PlusOutlined />}
-          onClick={() => {
-            setEditing(null)
-            setModalOpen(true)
-          }}
-        >
-          New Project
-        </Button>
-        <Button icon={<RadarChartOutlined />} onClick={() => setDiscoverOpen(true)}>
-          Discover
-        </Button>
+        {isAdmin && (
+          <Button
+            type="primary"
+            icon={<PlusOutlined />}
+            onClick={() => {
+              setEditing(null)
+              setModalOpen(true)
+            }}
+          >
+            New Project
+          </Button>
+        )}
+        {isAdmin && (
+          <Button icon={<RadarChartOutlined />} onClick={() => setDiscoverOpen(true)}>
+            Discover
+          </Button>
+        )}
         <Button icon={<ReloadOutlined />} onClick={refresh}>
           Refresh
         </Button>
@@ -464,25 +521,35 @@ export default function ProjectsView({ onProjectsChanged }) {
         columns={columns}
         dataSource={projects}
         pagination={false}
-        locale={{ emptyText: <Empty description="No projects yet" /> }}
+        locale={{
+          emptyText: (
+            <Empty description={isAdmin ? 'No projects yet' : 'You are not a member of any project yet'} />
+          ),
+        }}
       />
 
       <ProjectModal
         open={modalOpen}
         project={editing}
+        isAdmin={isAdmin}
         onClose={() => setModalOpen(false)}
         onSaved={refresh}
       />
-      <MemoryDrawer
-        project={memoryProject}
-        onClose={() => setMemoryProject(null)}
+      <ProjectDrawer
+        project={drawerProject}
+        tab={drawer?.tab}
+        onTab={(tab) => setDrawer((d) => ({ ...d, tab }))}
+        currentUser={currentUser}
+        onClose={() => setDrawer(null)}
         onSaved={refresh}
       />
-      <DiscoverModal
-        open={discoverOpen}
-        onClose={() => setDiscoverOpen(false)}
-        onImported={refresh}
-      />
+      {isAdmin && (
+        <DiscoverModal
+          open={discoverOpen}
+          onClose={() => setDiscoverOpen(false)}
+          onImported={refresh}
+        />
+      )}
     </>
   )
 }

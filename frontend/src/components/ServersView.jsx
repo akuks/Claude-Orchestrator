@@ -96,7 +96,7 @@ function ServerModal({ open, server, existingNames, onClose, onSave }) {
   )
 }
 
-export default function ServersView({ projects = [] }) {
+export default function ServersView({ projects = [], isAdmin = false }) {
   const usable = useMemo(() => projects.filter((p) => !p.archived), [projects])
   const [projectId, setProjectId] = useState(null)
   const [servers, setServers] = useState([])
@@ -174,7 +174,7 @@ export default function ServersView({ projects = [] }) {
           <span style={{ color: '#c4b8ad' }}>—</span>
         ),
     },
-    {
+    isAdmin && {
       title: 'Actions',
       key: 'a',
       width: 100,
@@ -195,7 +195,7 @@ export default function ServersView({ projects = [] }) {
         </Space>
       ),
     },
-  ]
+  ].filter(Boolean)
 
   return (
     <>
@@ -208,17 +208,19 @@ export default function ServersView({ projects = [] }) {
           options={usable.map((p) => ({ value: p.id, label: p.name }))}
           placeholder="Pick a project"
         />
-        <Button
-          type="primary"
-          icon={<PlusOutlined />}
-          disabled={!projectId || saving}
-          onClick={() => {
-            setEditing(null)
-            setModalOpen(true)
-          }}
-        >
-          Add server
-        </Button>
+        {isAdmin && (
+          <Button
+            type="primary"
+            icon={<PlusOutlined />}
+            disabled={!projectId || saving}
+            onClick={() => {
+              setEditing(null)
+              setModalOpen(true)
+            }}
+          >
+            Add server
+          </Button>
+        )}
         <Button icon={<ReloadOutlined />} onClick={refresh} disabled={!projectId}>
           Reload
         </Button>

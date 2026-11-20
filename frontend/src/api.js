@@ -52,6 +52,14 @@ export const api = {
   createUser: (payload) => req('POST', '/users', payload),
   updateUser: (id, payload) => req('PATCH', `/users/${id}`, payload),
   resetUserPassword: (id, password) => req('POST', `/users/${id}/reset-password`, { password }),
+  userDirectory: () => req('GET', '/users/directory'),
+
+  // ---- Teams (writes are admin-only) ----
+  listTeams: () => req('GET', '/teams'),
+  createTeam: (name) => req('POST', '/teams', { name }),
+  updateTeam: (id, name) => req('PATCH', `/teams/${id}`, { name }),
+  deleteTeam: (id) => req('DELETE', `/teams/${id}`),
+  setTeamMembers: (id, userIds) => req('PUT', `/teams/${id}/members`, { user_ids: userIds }),
 
   listTasks: (params = {}) => {
     const qs = new URLSearchParams(
@@ -97,12 +105,16 @@ export const api = {
   regenerateMemory: (id) => req('POST', `/projects/${id}/memory/regenerate`),
   listSummaries: (id) => req('GET', `/projects/${id}/summaries`),
   projectStats: (id) => req('GET', `/projects/${id}/stats`),
+  // members: [{subject_type: 'user'|'team', subject_id, role}] — PUT replaces the list
+  getProjectMembers: (id) => req('GET', `/projects/${id}/members`),
+  setProjectMembers: (id, members) => req('PUT', `/projects/${id}/members`, members),
 
   // ---- Usage & cost ----
   usageSummary: () => req('GET', '/usage/summary'),
   usageTimeseries: (days = 30) => req('GET', `/usage/timeseries?days=${days}`),
   usageByProject: () => req('GET', '/usage/by-project'),
   usageByModel: () => req('GET', '/usage/by-model'),
+  usageByUser: () => req('GET', '/usage/by-user'),
 
   // ---- Security findings ----
   listFindings: (params = {}) => {

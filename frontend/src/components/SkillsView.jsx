@@ -79,7 +79,7 @@ function InstallModal({ open, projects, onClose, onDone }) {
   )
 }
 
-export default function SkillsView({ projects = [] }) {
+export default function SkillsView({ projects = [], isAdmin = false }) {
   const [packs, setPacks] = useState([])
   const [presets, setPresets] = useState([])
   const [loading, setLoading] = useState(false)
@@ -160,9 +160,10 @@ export default function SkillsView({ projects = [] }) {
       title: 'Enabled',
       dataIndex: 'enabled',
       width: 90,
-      render: (en, row) => <Switch checked={en} onChange={(v) => toggle(row, v)} />,
+      render: (en, row) =>
+        isAdmin ? <Switch checked={en} onChange={(v) => toggle(row, v)} /> : en ? <Tag color="green">on</Tag> : <Tag>off</Tag>,
     },
-    {
+    isAdmin && {
       title: '',
       key: 'a',
       width: 60,
@@ -172,14 +173,16 @@ export default function SkillsView({ projects = [] }) {
         </Popconfirm>
       ),
     },
-  ]
+  ].filter(Boolean)
 
   return (
     <>
       <Space style={{ marginBottom: 12 }} wrap>
-        <Button type="primary" icon={<PlusOutlined />} onClick={() => setModalOpen(true)}>
-          Install from git
-        </Button>
+        {isAdmin && (
+          <Button type="primary" icon={<PlusOutlined />} onClick={() => setModalOpen(true)}>
+            Install from git
+          </Button>
+        )}
         <Button icon={<ReloadOutlined />} onClick={refresh}>
           Refresh
         </Button>
@@ -188,7 +191,7 @@ export default function SkillsView({ projects = [] }) {
         </Typography.Text>
       </Space>
 
-      {presets.length > 0 && (
+      {isAdmin && presets.length > 0 && (
         <Space wrap style={{ marginBottom: 12 }}>
           <Typography.Text type="secondary">Curated:</Typography.Text>
           {presets.map((pr) => (
