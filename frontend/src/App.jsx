@@ -47,6 +47,7 @@ import { buildCommands, isPaletteShortcut } from './shell/commands'
 import Rail from './shell/Rail'
 import TopBar from './shell/TopBar'
 import CommandPalette from './shell/CommandPalette'
+import { pendingApprovalTotal } from './guard/guard'
 
 dayjs.extend(relativeTime)
 
@@ -169,15 +170,15 @@ function AppInner({ user, onLogout }) {
   }, [])
   const noCredential = claudeInfo?.you?.claude === 'none'
 
+  // Task approvals + co-guard action approvals the viewer may decide.
   const loadApprovalCount = useCallback(async () => {
-    try {
-      setApprovalCount((await api.listApprovals()).length)
-    } catch (_) {}
+    const n = await pendingApprovalTotal(api)
+    if (n != null) setApprovalCount(n)
   }, [])
 
   useEffect(() => {
     loadApprovalCount()
-    const id = setInterval(loadApprovalCount, 5000)
+    const id = setInterval(() => document.visibilityState !== 'hidden' && loadApprovalCount(), 5000)
     return () => clearInterval(id)
   }, [loadApprovalCount])
 
@@ -447,7 +448,7 @@ function AppInner({ user, onLogout }) {
               onRunHandled={clearRunRequest}
             />
           )}
-          {page === 'approvals' && <ApprovalsView onChanged={loadApprovalCount} />}
+          {page === 'approvals' && <ApprovalsView onChanged={loadApprovalCount} focusId={route.id} />}
           {page === 'usage' && <UsageView />}
           {page === 'security' && <SecurityView projects={projects} />}
           {page === 'tasks' && (

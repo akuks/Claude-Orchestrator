@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import {
   Button,
   Descriptions,
@@ -14,22 +14,66 @@ import {
 } from 'antd'
 import {
   ApartmentOutlined,
+  BugOutlined,
   CheckCircleFilled,
+  CheckCircleOutlined,
+  ClockCircleOutlined,
+  CloseCircleOutlined,
   ClockCircleFilled,
   CloseCircleFilled,
   CopyOutlined,
   DeleteOutlined,
   DownloadOutlined,
   ExclamationCircleFilled,
+  HourglassOutlined,
+  InfoCircleOutlined,
   KeyOutlined,
+  PlayCircleOutlined,
+  PoweroffOutlined,
   LoadingOutlined,
   MinusCircleFilled,
   ReloadOutlined,
   SendOutlined,
   StopOutlined,
+  WarningOutlined,
 } from '@ant-design/icons'
 import { api, notifyUnauthorized, PRIORITY_COLORS, STATUS_COLORS, shortModel } from '../api'
 import { statusVar } from '../theme/tokens'
+import { guardLine, waitingLine } from '../guard/guard'
+import '../guard/guard.css'
+
+// co-guard lines in the run log: one icon per kind (guard.js guardLine).
+const GUARD_ICON = {
+  blocked: <StopOutlined />,
+  waiting: <HourglassOutlined />,
+  approved: <CheckCircleOutlined />,
+  rejected: <CloseCircleOutlined />,
+  expired: <ClockCircleOutlined />,
+  override: <WarningOutlined />,
+  error: <BugOutlined />,
+  watchdog: <PoweroffOutlined />,
+  ran: <PlayCircleOutlined />,
+  info: <InfoCircleOutlined />,
+}
+const GUARD_POLL_MS = 3000
+
+// Plain text only: guard fields come from the agent's commands.
+function GuardLine({ line }) {
+  return (
+    <div className={`co-guard-line co-guard-line-${line.kind}`} data-testid={`guard-line-${line.kind}`}>
+      {GUARD_ICON[line.kind] || GUARD_ICON.info}
+      <span className="co-guard-line-text">
+        {line.text}
+        {line.kind === 'waiting' && line.requestId && (
+          <>
+            {' '}
+            <a href={`#/approvals/${encodeURIComponent(line.requestId)}`}>open the request</a>
+          </>
+        )}
+      </span>
+    </div>
+  )
+}
 
 const EVENT_STYLE = {
   started: { color: 'var(--co-terminal-muted)', prefix: '▶' },
@@ -218,6 +262,8 @@ export default function TaskDetail({ taskId, onClose, onChanged, onOpenTask, onO
   const [thread, setThread] = useState([])
   const [followup, setFollowup] = useState('')
   const [sending, setSending] = useState(false)
+  const [requests, setRequests] = useState([]) // this task's co-guard approval requests
+  const [names, setNames] = useState(() => new Map())
   const wsRef = useRef(null)
   const termRef = useRef(null)
   const lastSeqRef = useRef(0)
@@ -266,6 +312,37 @@ export default function TaskDetail({ taskId, onClose, onChanged, onOpenTask, onO
       ws.close()
     }
   }, [taskId])
+
+  // co-guard requests of this task: who decided (run log enrichment) and what
+  // still waits for a person. Polled while the task runs and the tab is visible.
+  const guardEvents = events.filter((e) => e.type === 'guard').length
+  const running = task?.status === 'running'
+  useEffect(() => setRequests([]), [taskId])
+  useEffect(() => {
+    if (!taskId) return
+    let live = true
+    const load = () =>
+      api
+        .taskActionApprovals(taskId)
+        .then((list) => live && setRequests(Array.isArray(list) ? list : []))
+        .catch(() => {})
+    load()
+    const id = running ? setInterval(() => document.visibilityState !== 'hidden' && load(), GUARD_POLL_MS) : null
+    return () => {
+      live = false
+      if (id) clearInterval(id)
+    }
+  }, [taskId, running, guardEvents])
+  const needNames = requests.some((a) => a.decided_by)
+  useEffect(() => {
+    if (!needNames || names.size) return
+    api
+      .userDirectory()
+      .then((us) => setNames(new Map(us.map((u) => [u.id, u.name || u.email]))))
+      .catch(() => {})
+  }, [needNames, names.size])
+  const guardCtx = useMemo(() => ({ approvals: new Map(requests.map((a) => [a.id, a])), names }), [requests, names])
+  const waiting = requests.filter((a) => a.status === 'pending')
 
   // Auto-scroll the terminal as events arrive.
   useEffect(() => {
@@ -446,6 +523,7 @@ export default function TaskDetail({ taskId, onClose, onChanged, onOpenTask, onO
           <span className="co-terminal-muted">Waiting for output…</span>
         )}
         {events.map((ev, i) => {
+          if (ev.type === 'guard') return <GuardLine key={i} line={guardLine(ev.payload || {}, guardCtx)} />
           const line = renderLine(ev)
           return (
             <div key={i} style={{ color: line.color }}>
@@ -454,6 +532,9 @@ export default function TaskDetail({ taskId, onClose, onChanged, onOpenTask, onO
             </div>
           )
         })}
+        {waiting.map((a) => (
+          <GuardLine key={`wait:${a.id}`} line={waitingLine(a)} />
+        ))}
       </div>
 
       <Space

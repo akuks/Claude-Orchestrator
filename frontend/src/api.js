@@ -197,6 +197,14 @@ export const api = {
   rejectTask: (id, reason) => req('POST', `/approvals/${id}/reject`, { reason }),
   bulkApprove: (taskIds) => req('POST', '/approvals/approve', { task_ids: taskIds }),
 
+  // ---- co-guard action approvals (a 409 "expired" means the request expired) ----
+  // Pending requests the viewer may decide (each carries can_decide).
+  listActionApprovals: () => req('GET', '/guard/approvals?status=pending'),
+  // Every request of one task (run log enrichment).
+  taskActionApprovals: (taskId) => req('GET', `/guard/approvals${qs({ task_id: taskId, status: 'all' })}`),
+  approveAction: (id) => req('POST', `/guard/approvals/${encodeURIComponent(id)}/approve`),
+  rejectAction: (id, reason) => req('POST', `/guard/approvals/${encodeURIComponent(id)}/reject`, { reason: reason || null }),
+
   streamUrl: (id, lastSeq = 0) => {
     const proto = window.location.protocol === 'https:' ? 'wss' : 'ws'
     return `${proto}://${window.location.host}/tasks/${id}/stream?last_seq=${lastSeq}`

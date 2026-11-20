@@ -67,6 +67,13 @@ export function buildCommands({ projects = [], tasks = [], runs = [], workflows 
       run: () => (runWorkflow ? runWorkflow(w) : navigate({ page: 'automation' })),
     })
   }
+  cmds.push({
+    id: 'action:approvals',
+    label: 'Open approvals',
+    group: 'Actions',
+    keywords: 'pending approve reject actions guard co-guard',
+    run: () => navigate({ page: 'approvals' }),
+  })
   if (newTask) cmds.push({ id: 'action:new-task', label: 'New task…', group: 'Actions', run: newTask })
   if (openCredentials)
     cmds.push({ id: 'action:credentials', label: 'My credentials', group: 'Actions', keywords: 'claude key token', run: openCredentials })

@@ -14,6 +14,7 @@ dayjs.extend(relativeTime)
 const KIND_TAG = {
   credential: { color: 'warning', text: 'set up' },
   approval: { color: 'magenta', text: 'approve' },
+  action: { color: 'volcano', text: 'action' },
   failed: { color: 'error', text: 'failed' },
   schedule: { color: 'gold', text: 'paused' },
 }
@@ -72,12 +73,19 @@ export default function HomeView({ user, navigate, onOpenCredentials, onApproval
   const approve = async (item) => {
     setApproving(item.id)
     try {
-      await api.approveTask(item.id)
-      message.success(`Approved “${item.title}”`)
+      if (item.kind === 'action') {
+        await api.approveAction(item.id)
+        message.success('Approved — the call runs once')
+      } else {
+        await api.approveTask(item.id)
+        message.success(`Approved “${item.title}”`)
+      }
       onApprovalsChanged?.()
       await reload()
     } catch (e) {
-      message.error(e.message)
+      // 409 "expired": the action's request closed before the decision
+      message.error(e.status === 409 && e.message === 'expired' ? 'This request expired' : e.message)
+      if (e.status === 409) reload()
     } finally {
       setApproving(null)
     }
@@ -86,6 +94,7 @@ export default function HomeView({ user, navigate, onOpenCredentials, onApproval
   const openItem = (item) => {
     if (item.kind === 'credential') onOpenCredentials?.()
     else if (item.kind === 'schedule') navigate({ page: 'automation' })
+    else if (item.kind === 'action') navigate({ page: 'approvals', id: item.id })
     else navigate({ page: 'tasks', id: item.id })
   }
   const openComet = (c) => navigate(c.kind === 'run' ? { page: 'runs', id: c.id } : { page: 'tasks', id: c.id })
@@ -119,7 +128,7 @@ export default function HomeView({ user, navigate, onOpenCredentials, onApproval
               <Skeleton active paragraph={{ rows: 3 }} title={false} />
             ) : needsYou.length === 0 ? (
               // An all-clear only when every source behind it loaded.
-              errors.needsYou ? null : <Empty title="You're all caught up" text="Approvals, failed tasks and paused schedules will show up here." />
+              errors.needsYou ? null : <Empty title="You're all caught up" text="Approvals, paused actions, failed tasks and paused schedules will show up here." />
             ) : (
               <ul className="co-home-rows">
                 {needsYou.map((item) => (
@@ -140,7 +149,7 @@ export default function HomeView({ user, navigate, onOpenCredentials, onApproval
                       </div>
                     </div>
                     <div className="co-home-row-actions">
-                      {item.kind === 'approval' && (
+                      {(item.kind === 'approval' || (item.kind === 'action' && item.canDecide)) && (
                         <Button
                           size="small"
                           type="primary"
