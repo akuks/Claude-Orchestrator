@@ -322,3 +322,46 @@ def test_ws_stream_rejects_foreign_origin(client):
         assert ws.receive_json()["seq"] >= 1
     with client.websocket_connect(url) as ws:  # non-browser client: no Origin
         assert ws.receive_json()["seq"] >= 1
+
+
+def test_agent_token_guard_routes_are_own_task_only(thread, client):
+    """co-guard: an agent token may file/poll/report for its OWN task only
+    (not its thread) and can never list or decide action requests."""
+    import uuid
+    from datetime import datetime, timezone
+
+    from app.database import SessionLocal
+    from app.models import Task
+
+    me = thread["user_id"]
+    own, sibling = uuid.uuid4().hex, uuid.uuid4().hex
+
+    async def mk():
+        async with SessionLocal() as s:
+            s.add(Task(id=own, title="g-own", prompt="x", root_id=thread["a"]["id"], parent_task_id=thread["a"]["id"],
+                       status="running", created_by=me, created_at=datetime.now(timezone.utc)))
+            s.add(Task(id=sibling, title="g-sib", prompt="x", root_id=thread["a"]["id"],
+                       parent_task_id=thread["a"]["id"], status="running", created_by=me))
+            await s.commit()
+
+    _run(mk())
+    t = _bearer(_mint(me, "agent-task", own))
+    body = {"task_id": own, "rule_ids": ["git-reset-hard"], "tool": "Bash", "summary": "x", "cwd": "/",
+            "reason": "r", "command_hash": "h"}
+    r = t.post("/guard/approvals", json=body)
+    assert r.status_code == 201, r.text
+    rid = r.json()["id"]
+    assert t.get(f"/guard/approvals/{rid}").json() == {"id": rid, "status": "pending"}
+    # same thread is not enough for co-guard routes
+    assert t.post("/guard/approvals", json=dict(body, task_id=sibling)).status_code == 403
+    assert t.post("/guard/report", json={"task_id": sibling, "decision": "deny"}).status_code == 403
+    sib = _bearer(_mint(me, "agent-task", sibling))
+    assert sib.get(f"/guard/approvals/{rid}").status_code == 404
+    # never list or decide
+    assert t.get("/guard/approvals").status_code == 403
+    assert t.post(f"/guard/approvals/{rid}/approve").status_code == 403
+    assert t.post(f"/guard/approvals/{rid}/reject", json={}).status_code == 403
+    # a personal token is a person: may not file for an agent
+    pat = _bearer(_mint(me, "personal"))
+    assert pat.post("/guard/approvals", json=body).status_code == 403
+    assert client.post(f"/guard/approvals/{rid}/approve").status_code == 200  # admin, a person

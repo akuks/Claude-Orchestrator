@@ -42,7 +42,7 @@ def test_fresh_db_migrates_to_head(tmp_path):
     run_migrations(url)
     tables = _tables(tmp_path / "fresh.db")
     assert {"tasks", "projects", "context_docs", "alembic_version"} <= tables
-    assert _alembic_version(tmp_path / "fresh.db") == "0005"
+    assert _alembic_version(tmp_path / "fresh.db") == "0006"
 
 
 def test_legacy_db_is_stamped_not_recreated(tmp_path):
@@ -75,7 +75,7 @@ def test_legacy_db_missing_table_and_column_is_repaired(tmp_path):
         row = c.execute("SELECT id, prompt, read_only FROM tasks").fetchall()
     assert "read_only" in cols
     assert row == [("t1", "hi", 0)]
-    assert _alembic_version(db) == "0005"
+    assert _alembic_version(db) == "0006"
     assert "users" in _tables(db)
 
 
@@ -112,3 +112,32 @@ def test_migration_0005(tmp_path):
     with sqlite3.connect(db) as c:
         assert "automation_owner_id" not in {r[1] for r in c.execute("PRAGMA table_info(projects)")}
     assert _alembic_version(db) == "0004"
+
+
+def test_migration_0006(tmp_path):
+    from alembic import command
+
+    db = tmp_path / "m6.db"
+    url = f"sqlite+aiosqlite:///{db}"
+    run_migrations(url)
+    assert "action_approvals" in _tables(db)
+    with sqlite3.connect(db) as c:
+        cols = {r[1] for r in c.execute("PRAGMA table_info(action_approvals)")}
+        assert {"id", "task_id", "project_id", "requested_by", "rule_ids", "tool", "summary", "cwd", "reason",
+                "command_hash", "idempotency_key", "status", "created_at", "expires_at", "decided_by",
+                "decided_at", "decision_reason"} <= cols
+        pcols = {r[1] for r in c.execute("PRAGMA table_info(projects)")}
+        assert {"guard_enabled", "approval_wait_seconds"} <= pcols
+    # existing projects get the defaults
+    command.downgrade(_alembic_cfg(url), "0005")
+    with sqlite3.connect(db) as c:
+        c.execute("INSERT INTO projects (id, name, slug, directory, default_model, env, memory, memory_enabled,"
+                  " archived, auto_review_prs, created_at) VALUES ('p6', 'six', 'six', '/x', 'sonnet', '{}', '',"
+                  " 1, 0, 0, CURRENT_TIMESTAMP)")
+    assert "action_approvals" not in _tables(db)
+    assert _alembic_version(db) == "0005"
+    command.upgrade(_alembic_cfg(url), "head")
+    with sqlite3.connect(db) as c:
+        row = c.execute("SELECT guard_enabled, approval_wait_seconds FROM projects WHERE id='p6'").fetchone()
+    assert tuple(row) == (1, 300)
+    assert _alembic_version(db) == "0006"

@@ -1,0 +1,564 @@
+"""co-guard server side (Task 4): action approvals, the two-person rule (R25),
+expiry, idempotency, one-shot grants, /guard/report and its dedupe with the
+spool, project guard settings.
+
+Tasks are inserted already RUNNING (the worker never picks them up); agent
+tokens are minted for them exactly as the worker does."""
+
+import asyncio
+import json
+import uuid
+from collections import Counter
+from datetime import datetime, timedelta, timezone
+
+import pytest
+from fastapi.testclient import TestClient
+from sqlalchemy import select
+
+from app import auth
+from app.database import SessionLocal
+from app.main import app
+from app.models import ActionApproval, Task, TaskEvent
+from conftest import login_as
+
+CO_TOKEN_SHAPE = "co_" + "Z" * 43
+
+
+def _uid():
+    return uuid.uuid4().hex[:8]
+
+
+def _run(coro):
+    return asyncio.run(coro)
+
+
+def _mint(user_id, task_id):
+    async def go():
+        async with SessionLocal() as s:
+            raw = await auth.mint_token(s, user_id, "agent-task", task_id, 3600)
+            await s.commit()
+            return raw
+
+    return _run(go())
+
+
+def _bearer(raw):
+    c = TestClient(app)
+    c.headers["Authorization"] = f"Bearer {raw}"
+    return c
+
+
+def _task(created_by, project_id=None, status="running", **kw):
+    tid = uuid.uuid4().hex
+
+    async def go():
+        async with SessionLocal() as s:
+            s.add(Task(id=tid, title=kw.pop("title", f"t-{tid[:6]}"), prompt="p", project_id=project_id,
+                        root_id=kw.pop("root_id", tid), status=status, created_by=created_by, **kw))
+            await s.commit()
+
+    _run(go())
+    return tid
+
+
+def _set(model, pk, **fields):
+    async def go():
+        async with SessionLocal() as s:
+            row = await s.get(model, pk)
+            for k, v in fields.items():
+                setattr(row, k, v)
+            await s.commit()
+
+    _run(go())
+
+
+def _get(model, pk):
+    async def go():
+        async with SessionLocal() as s:
+            return await s.get(model, pk)
+
+    return _run(go())
+
+
+def _events(task_id, etype="guard"):
+    async def go():
+        async with SessionLocal() as s:
+            rows = (await s.execute(select(TaskEvent).where(TaskEvent.task_id == task_id, TaskEvent.type == etype)
+                                    .order_by(TaskEvent.seq))).scalars().all()
+            return [r.payload for r in rows]
+
+    return _run(go())
+
+
+def _body(task_id, **over):
+    b = {"task_id": task_id, "rule_ids": ["git-reset-hard"], "tool": "Bash", "summary": "git reset --hard",
+         "cwd": "/w", "reason": "discards local changes", "command_hash": "a" * 64}
+    b.update(over)
+    return b
+
+
+def _file(agent, task_id, key=None, **over):
+    headers = {"Idempotency-Key": key} if key else {}
+    return agent.post("/guard/approvals", json=_body(task_id, **over), headers=headers)
+
+
+@pytest.fixture(scope="module")
+def world(client):
+    """Project P: owner O (maintainer, owns task T), second maintainer M,
+    contributor C, outsider X (no grant). T runs with an agent token."""
+    tag = _uid()
+    p = client.post("/projects", json={"name": f"ga-{tag}"}).json()
+    o = login_as(f"ga-owner-{tag}@test.local")
+    m = login_as(f"ga-maint-{tag}@test.local")
+    c = login_as(f"ga-contrib-{tag}@test.local")
+    x = login_as(f"ga-out-{tag}@test.local")
+    r = client.put(f"/projects/{p['id']}/members", json=[
+        {"subject_type": "user", "subject_id": o.user_id, "role": "maintainer"},
+        {"subject_type": "user", "subject_id": m.user_id, "role": "maintainer"},
+        {"subject_type": "user", "subject_id": c.user_id, "role": "contributor"},
+    ])
+    assert r.status_code == 200, r.text
+    return {"p": p, "o": o, "m": m, "c": c, "x": x, "admin": client}
+
+
+@pytest.fixture
+def task(world):
+    """A fresh running task of O in P, with its agent client."""
+    tid = _task(world["o"].user_id, world["p"]["id"])
+    return tid, _bearer(_mint(world["o"].user_id, tid))
+
+
+# ---- filing ---------------------------------------------------------------------------
+
+
+def test_agent_files_a_request(world, task):
+    tid, agent = task
+    r = _file(agent, tid, key="k1")
+    assert r.status_code == 201, r.text
+    out = r.json()
+    assert out["status"] == "pending" and isinstance(out["id"], str) and out["id"]
+    exp = datetime.fromisoformat(out["expires_at"])
+    left = (exp - datetime.now(timezone.utc)).total_seconds()
+    assert 290 < left <= 300  # project default approval_wait_seconds
+    row = _get(ActionApproval, out["id"])
+    assert row.task_id == tid and row.rule_ids == ["git-reset-hard"] and row.tool == "Bash"
+    assert row.requested_by == world["o"].user_id and row.project_id == world["p"]["id"]
+    g = agent.get(f"/guard/approvals/{out['id']}")
+    assert g.status_code == 200 and g.json()["id"] == out["id"] and g.json()["status"] == "pending"
+
+
+def test_expiry_follows_the_project_wait(client, world):
+    p2 = client.post("/projects", json={"name": f"ga-wait-{_uid()}"}).json()
+    assert client.patch(f"/projects/{p2['id']}", json={"approval_wait_seconds": 120}).status_code == 200
+    tid = _task(world["o"].user_id, p2["id"])
+    out = _file(_bearer(_mint(world["o"].user_id, tid)), tid).json()
+    left = (datetime.fromisoformat(out["expires_at"]) - datetime.now(timezone.utc)).total_seconds()
+    assert 110 < left <= 120
+
+
+def test_idempotency_key_returns_the_same_request(task):
+    tid, agent = task
+    a = _file(agent, tid, key="same")
+    b = _file(agent, tid, key="same")
+    assert a.status_code == 201 and b.status_code == 200
+    assert a.json()["id"] == b.json()["id"] and b.json()["status"] == "pending"
+    c = _file(agent, tid, key="other")
+    d = _file(agent, tid)  # no key: always new
+    assert len({a.json()["id"], c.json()["id"], d.json()["id"]}) == 3
+
+
+def test_same_key_after_a_decision_files_a_new_request(world, task):
+    """One-shot: an approval answers exactly one request (one waiting hook).
+    The hook only re-POSTs the same key while retrying before a decision; a
+    POST with that key after the decision is a new call and waits again."""
+    tid, agent = task
+    first = _file(agent, tid, key="k").json()["id"]
+    assert world["m"].post(f"/guard/approvals/{first}/approve").status_code == 200
+    again = _file(agent, tid, key="k")
+    assert again.status_code == 201 and again.json()["id"] != first and again.json()["status"] == "pending"
+    # the same command in a NEW call (new tool_use_id -> new key) is not pre-approved either
+    new_call = _file(agent, tid, key="k-next-call")
+    assert new_call.json()["status"] == "pending"
+    # the approved one still reads approved (a second GET is harmless)
+    for _ in range(2):
+        assert agent.get(f"/guard/approvals/{first}").json() == {"id": first, "status": "approved"}
+
+
+def test_agent_may_file_only_for_its_own_task(world, task):
+    tid, agent = task
+    other = _task(world["o"].user_id, world["p"]["id"])
+    assert _file(agent, other).status_code == 403
+    assert agent.post("/guard/approvals", json=_body(None)).status_code in (403, 422)
+    # humans never file action requests
+    assert _file(world["o"], tid).status_code == 403
+    assert _file(world["admin"], tid).status_code == 403
+
+
+def test_filing_needs_a_running_task(world):
+    tid = _task(world["o"].user_id, world["p"]["id"], status="completed")
+    assert _file(_bearer(_mint(world["o"].user_id, tid)), tid).status_code == 409
+
+
+def test_pending_requests_per_task_are_capped(world, task):
+    from app.routers.guard import MAX_PENDING_PER_TASK
+
+    tid, agent = task
+    for i in range(MAX_PENDING_PER_TASK):
+        assert _file(agent, tid, key=f"cap{i}").status_code == 201
+    assert _file(agent, tid, key="one-too-many").status_code == 429
+    assert _file(agent, tid, key="cap0").status_code == 200  # a retry of a filed one still answers
+
+
+def test_stored_fields_are_redacted_and_bounded(world, task):
+    tid, agent = task
+    out = _file(agent, tid, summary=f"push with {CO_TOKEN_SHAPE} " + "x" * 5000,
+                reason="https://u:pw@github.com/x", cwd="/w" * 2000, rule_ids=["r"] * 50).json()
+    row = _get(ActionApproval, out["id"])
+    assert CO_TOKEN_SHAPE not in row.summary and len(row.summary) <= 2000
+    assert "pw@" not in row.reason and len(row.cwd) <= 1000 and len(row.rule_ids) <= 20
+
+
+# ---- reading --------------------------------------------------------------------------
+
+
+def test_reading_another_tasks_request_is_404(world, task):
+    tid, agent = task
+    rid = _file(agent, tid).json()["id"]
+    other = _task(world["o"].user_id, world["p"]["id"])
+    other_agent = _bearer(_mint(world["o"].user_id, other))
+    assert other_agent.get(f"/guard/approvals/{rid}").status_code == 404
+    assert other_agent.get("/guard/approvals/nope").status_code == 404
+
+
+def test_humans_read_by_visibility(world, task):
+    tid, agent = task
+    rid = _file(agent, tid).json()["id"]
+    for who in ("o", "m", "c", "admin"):
+        r = world[who].get(f"/guard/approvals/{rid}")
+        assert r.status_code == 200 and r.json()["status"] == "pending", who
+    assert world["x"].get(f"/guard/approvals/{rid}").status_code == 404
+
+
+# ---- deciding (R25, roles, agents) -----------------------------------------------------
+
+
+def test_agent_cannot_decide(world, task):
+    tid, agent = task
+    rid = _file(agent, tid).json()["id"]
+    assert agent.post(f"/guard/approvals/{rid}/approve").status_code == 403
+    assert agent.post(f"/guard/approvals/{rid}/reject", json={}).status_code == 403
+    assert agent.get("/guard/approvals").status_code == 403
+    assert agent.get(f"/guard/approvals/{rid}").json()["status"] == "pending"
+
+
+def test_r25_owner_maintainer_cannot_approve_own_tasks_actions(world, task):
+    tid, agent = task
+    rid = _file(agent, tid).json()["id"]
+    assert world["o"].post(f"/guard/approvals/{rid}/approve").status_code == 403
+    assert world["o"].post(f"/guard/approvals/{rid}/reject", json={}).status_code == 403
+    assert world["c"].post(f"/guard/approvals/{rid}/approve").status_code == 403
+    assert world["x"].post(f"/guard/approvals/{rid}/approve").status_code == 404
+    r = world["m"].post(f"/guard/approvals/{rid}/approve")
+    assert r.status_code == 200, r.text
+    out = r.json()
+    assert out["status"] == "approved" and out["decided_by"] == world["m"].user_id and out["decided_at"]
+    assert agent.get(f"/guard/approvals/{rid}").json()["status"] == "approved"
+    # decided once: no second decision
+    assert world["admin"].post(f"/guard/approvals/{rid}/reject", json={}).status_code == 409
+
+
+def test_reject_records_reason(world, task):
+    tid, agent = task
+    rid = _file(agent, tid).json()["id"]
+    r = world["admin"].post(f"/guard/approvals/{rid}/reject", json={"reason": "not on main"})
+    assert r.status_code == 200 and r.json()["status"] == "rejected"
+    assert r.json()["decision_reason"] == "not on main"
+    assert agent.get(f"/guard/approvals/{rid}").json()["status"] == "rejected"
+    assert world["m"].post(f"/guard/approvals/{rid}/approve").status_code == 409
+
+
+def test_admin_may_decide_own_tasks_actions(client, world):
+    me = client.get("/auth/me").json()["id"]
+    tid = _task(me, world["p"]["id"])
+    rid = _file(_bearer(_mint(me, tid)), tid).json()["id"]
+    assert client.post(f"/guard/approvals/{rid}/approve").status_code == 200
+
+
+def test_ad_hoc_task_actions_are_admin_only(world):
+    tid = _task(world["m"].user_id, None)
+    agent = _bearer(_mint(world["m"].user_id, tid))
+    rid = _file(agent, tid).json()["id"]
+    assert world["m"].post(f"/guard/approvals/{rid}/approve").status_code == 403
+    assert world["o"].post(f"/guard/approvals/{rid}/approve").status_code == 404
+    assert world["admin"].post(f"/guard/approvals/{rid}/approve").status_code == 200
+
+
+def test_ad_hoc_step_in_project_thread_uses_root_project(world):
+    root = _task(world["o"].user_id, world["p"]["id"], status="completed")
+    step = _task(world["o"].user_id, None, root_id=root)
+    rid = _file(_bearer(_mint(world["o"].user_id, step)), step).json()["id"]
+    assert _get(ActionApproval, rid).project_id == world["p"]["id"]
+    assert world["o"].post(f"/guard/approvals/{rid}/approve").status_code == 403  # R25
+    assert world["m"].post(f"/guard/approvals/{rid}/approve").status_code == 200
+
+
+# ---- expiry -----------------------------------------------------------------------------
+
+
+def test_decide_after_expiry_is_409_and_reads_expired(world, task):
+    tid, agent = task
+    rid = _file(agent, tid).json()["id"]
+    _set(ActionApproval, rid, expires_at=datetime.now(timezone.utc) - timedelta(seconds=1))
+    r = world["m"].post(f"/guard/approvals/{rid}/approve")
+    assert r.status_code == 409 and r.json()["detail"] == "expired"
+    assert agent.get(f"/guard/approvals/{rid}").json()["status"] == "expired"
+    row = _get(ActionApproval, rid)
+    assert row.status == "expired" and row.decided_by is None  # never recorded as approved
+
+
+def test_decisions_close_before_the_hook_gives_up(world, task):
+    """The hook polls every 2 s and stops at its own deadline: an approval in
+    the last seconds could land after the hook already denied. Decisions close
+    DECIDE_MARGIN seconds before expires_at."""
+    from app.routers.guard import DECIDE_MARGIN
+
+    tid, agent = task
+    rid = _file(agent, tid).json()["id"]
+    _set(ActionApproval, rid, expires_at=datetime.now(timezone.utc) + timedelta(seconds=DECIDE_MARGIN - 1))
+    assert world["m"].post(f"/guard/approvals/{rid}/approve").status_code == 409
+
+
+def test_request_expires_when_the_task_stops(world, task):
+    tid, agent = task
+    rid = _file(agent, tid).json()["id"]
+    _set(Task, tid, status="cancelled")
+    assert world["m"].post(f"/guard/approvals/{rid}/approve").status_code == 409
+    assert world["m"].get(f"/guard/approvals/{rid}").json()["status"] == "expired"
+
+
+def test_hook_timeout_report_expires_the_request(world, task):
+    """The hook gave up (timeout) and reported it: the request can no longer be
+    approved, so an approval can never land on a call that was denied."""
+    tid, agent = task
+    rid = _file(agent, tid).json()["id"]
+    r = agent.post("/guard/report", json={
+        "task_id": tid, "event": "PreToolUse", "decision": "deny", "status": "timeout", "request_id": rid,
+        "tool": "Bash", "rule_ids": ["git-reset-hard"], "summary": "git reset --hard", "tool_use_id": "tuX"})
+    assert r.status_code == 202
+    assert world["m"].post(f"/guard/approvals/{rid}/approve").status_code == 409
+    assert agent.get(f"/guard/approvals/{rid}").json()["status"] == "expired"
+
+
+def test_report_cannot_expire_another_tasks_request(world, task):
+    tid, agent = task
+    rid = _file(agent, tid).json()["id"]
+    other = _task(world["o"].user_id, world["p"]["id"])
+    other_agent = _bearer(_mint(world["o"].user_id, other))
+    other_agent.post("/guard/report", json={"task_id": other, "event": "PreToolUse", "decision": "deny",
+                                            "status": "timeout", "request_id": rid})
+    assert agent.get(f"/guard/approvals/{rid}").json()["status"] == "pending"
+
+
+# ---- listing --------------------------------------------------------------------------
+
+
+def test_pending_list_holds_only_what_the_viewer_may_decide(world, task):
+    tid, agent = task
+    rid = _file(agent, tid).json()["id"]
+    gone = _file(agent, tid).json()["id"]
+    _set(ActionApproval, gone, expires_at=datetime.now(timezone.utc) - timedelta(seconds=1))
+
+    def ids(who, **params):
+        r = world[who].get("/guard/approvals", params=params or {"status": "pending"})
+        assert r.status_code == 200, r.text
+        return {a["id"] for a in r.json()}
+
+    assert rid in ids("m") and rid in ids("admin")
+    assert gone not in ids("m") and gone not in ids("admin")
+    assert rid not in ids("o")  # R25
+    assert rid not in ids("c") and rid not in ids("x")
+    card = next(a for a in world["m"].get("/guard/approvals").json() if a["id"] == rid)
+    assert card["task_id"] == tid and card["project_id"] == world["p"]["id"] and card["can_decide"] is True
+    assert card["rule_ids"] == ["git-reset-hard"] and card["summary"] == "git reset --hard"
+    assert card["task_title"] and card["requested_by"] == world["o"].user_id
+
+
+def test_task_filter_lists_visible_requests(world, task):
+    tid, agent = task
+    rid = _file(agent, tid).json()["id"]
+    mine = world["o"].get("/guard/approvals", params={"task_id": tid, "status": "all"})
+    assert mine.status_code == 200
+    card = next(a for a in mine.json() if a["id"] == rid)
+    assert card["can_decide"] is False  # R25
+    assert world["x"].get("/guard/approvals", params={"task_id": tid}).status_code == 404
+    assert world["m"].get("/guard/approvals", params={"status": "bogus"}).status_code == 422
+
+
+# ---- /guard/report ----------------------------------------------------------------------
+
+
+def test_report_is_agent_only_and_own_task(world, task):
+    tid, agent = task
+    rec = {"task_id": tid, "event": "PreToolUse", "decision": "deny"}
+    assert world["admin"].post("/guard/report", json=rec).status_code == 403
+    other = _task(world["o"].user_id, world["p"]["id"])
+    assert agent.post("/guard/report", json=dict(rec, task_id=other)).status_code == 403
+
+
+def test_report_without_a_live_run_is_dropped(world, task):
+    tid, agent = task
+    r = agent.post("/guard/report", json={"task_id": tid, "event": "PreToolUse", "decision": "deny"})
+    assert r.status_code == 202 and r.json() == {"accepted": False}
+    assert _events(tid) == []
+
+
+def test_report_during_a_live_run_emits_a_guard_event(world, task):
+    tid, agent = task
+    worker = app.state.worker
+    got = []
+
+    async def emit(etype, payload):
+        got.append((etype, payload))
+
+    worker._guard_live[tid] = {"emit": emit, "reported": Counter()}
+    try:
+        rec = {"task_id": tid, "event": "PreToolUse", "decision": "deny", "rule_ids": ["rm-rf-outside"],
+               "tool": "Bash", "summary": "rm -rf ~ " + CO_TOKEN_SHAPE, "reason": "deletes home",
+               "tool_use_id": "tu1", "agent_id": None, "junk": "dropped"}
+        r = agent.post("/guard/report", json=rec)
+        assert r.status_code == 202 and r.json() == {"accepted": True}
+    finally:
+        worker._guard_live.pop(tid, None)
+    assert len(got) == 1 and got[0][0] == "guard"
+    payload = got[0][1]
+    assert "junk" not in payload and "task_id" not in payload
+    assert payload["decision"] == "deny" and payload["rule_ids"] == ["rm-rf-outside"]
+    assert CO_TOKEN_SHAPE not in json.dumps(payload)
+
+
+def test_reported_record_is_not_ingested_twice_from_the_spool(tmp_path, monkeypatch):
+    """The hook spools a decision AND posts it: the run shows it once."""
+    from app.guard import runtime
+    from app.worker import WorkerManager
+
+    w = WorkerManager()
+    tid = "dedupe" + _uid()
+    got = []
+
+    async def emit(etype, payload):
+        got.append(payload)
+
+    deny = {"event": "PreToolUse", "tool": "Bash", "rule_ids": ["rm-rf-outside"], "summary": "rm -rf ~",
+            "tool_use_id": "tu1", "agent_id": None, "decision": "deny", "reason": "deletes home"}
+    other = dict(deny, tool_use_id="tu2")
+    spool = [{"event": "PreToolUse", "tool_use_id": "tu1", "seen": True, "ts": 1.0}, dict(deny, ts=2.0),
+             dict(other, ts=3.0)]
+    monkeypatch.setattr(runtime, "read_spool", lambda task_id: list(spool))
+    monkeypatch.setattr(runtime, "remove_task_dir", lambda task_id: None)
+
+    async def go():
+        w._guard_live[tid] = {"emit": emit, "reported": Counter()}
+        assert await w.report_guard(tid, dict(deny, task_id=tid)) is True
+        await w._ingest_guard_spool(tid, emit)
+
+    _run(go())
+    assert [p["tool_use_id"] for p in got] == ["tu1", "tu2"]
+    # the reported copy and the spool copy have the same shape (bar the spool's ts)
+    assert {k: v for k, v in got[0].items() if k != "ts"} == {k: v for k, v in deny.items()}
+
+
+# ---- project settings -------------------------------------------------------------------
+
+
+def test_maintainer_edits_guard_settings(world):
+    pid = world["p"]["id"]
+    m, c = world["m"], world["c"]
+    got = m.get(f"/projects/{pid}").json()
+    assert got["guard_enabled"] is True and got["approval_wait_seconds"] == 300
+    r = m.patch(f"/projects/{pid}", json={"guard_enabled": False, "approval_wait_seconds": 600})
+    assert r.status_code == 200, r.text
+    assert r.json()["guard_enabled"] is False and r.json()["approval_wait_seconds"] == 600
+    for bad in (59, 901, -1):
+        assert m.patch(f"/projects/{pid}", json={"approval_wait_seconds": bad}).status_code == 422, bad
+    assert m.patch(f"/projects/{pid}", json={"guard_enabled": None}).status_code in (200, 422)
+    assert m.get(f"/projects/{pid}").json()["guard_enabled"] is False
+    assert c.patch(f"/projects/{pid}", json={"guard_enabled": True}).status_code == 403
+    assert m.patch(f"/projects/{pid}", json={"guard_enabled": True, "approval_wait_seconds": 300}).status_code == 200
+
+
+def test_forged_reports_are_not_shown(world, task):
+    """The agent can read CO_API_TOKEN and call /guard/report itself: it cannot
+    log a fake approval or a non-hook event."""
+    tid, agent = task
+    rid = _file(agent, tid).json()["id"]
+    worker = app.state.worker
+    got = []
+
+    async def emit(etype, payload):
+        got.append(payload)
+
+    base = {"task_id": tid, "event": "PreToolUse", "tool": "Bash", "rule_ids": ["git-reset-hard"]}
+    worker._guard_live[tid] = {"emit": emit, "reported": Counter()}
+    try:
+        forged = [dict(base, decision="approved", request_id=rid),  # still pending
+                  dict(base, decision="approved", request_id="nope"),
+                  dict(base, decision="approved"),
+                  dict(base, event="SessionStart", decision="deny"),
+                  dict(base, decision="ran")]
+        for rec in forged:
+            assert agent.post("/guard/report", json=rec).json() == {"accepted": False}, rec
+        assert world["m"].post(f"/guard/approvals/{rid}/approve").status_code == 200
+        real = dict(base, decision="approved", status="approved", request_id=rid, tool_use_id="tu9")
+        assert agent.post("/guard/report", json=real).json() == {"accepted": True}
+    finally:
+        worker._guard_live.pop(tid, None)
+    assert [p["decision"] for p in got] == ["approved"]
+
+
+def test_live_reports_are_capped_per_run():
+    from app.worker import WorkerManager
+
+    w = WorkerManager()
+    got = []
+
+    async def emit(etype, payload):
+        got.append(payload)
+
+    async def go():
+        w._guard_live["cap"] = {"emit": emit, "reported": Counter()}
+        res = [await w.report_guard("cap", {"event": "PreToolUse", "decision": "deny", "tool_use_id": str(i)})
+               for i in range(w.GUARD_REPORT_CAP + 3)]
+        return res
+
+    res = _run(go())
+    assert res.count(True) == w.GUARD_REPORT_CAP and len(got) == w.GUARD_REPORT_CAP
+
+
+def test_dedupe_holds_when_the_record_carries_a_run_secret(monkeypatch):
+    """The router redacts a report before the worker keys it; the spool copy
+    is keyed on its redacted form too, so the decision still shows once."""
+    from app.guard import runtime
+    from app.redaction import redact_obj
+    from app.worker import WorkerManager
+
+    w = WorkerManager()
+    tid = "dedupe-secret" + _uid()
+    secret = "s3cret-value-" + _uid()
+    w._run_secrets[tid] = [secret]
+    got = []
+
+    async def emit(etype, payload):
+        got.append(payload)
+
+    deny = {"event": "PreToolUse", "tool": "Bash", "rule_ids": ["secret-files"], "summary": f"cat {secret}",
+            "tool_use_id": "tu1", "decision": "deny"}
+    monkeypatch.setattr(runtime, "read_spool", lambda task_id: [dict(deny, ts=1.0)])
+    monkeypatch.setattr(runtime, "remove_task_dir", lambda task_id: None)
+
+    async def go():
+        w._guard_live[tid] = {"emit": emit, "reported": Counter()}
+        assert await w.report_guard(tid, redact_obj(dict(deny, task_id=tid), [secret])) is True
+        await w._ingest_guard_spool(tid, emit)
+
+    _run(go())
+    assert len(got) == 1
