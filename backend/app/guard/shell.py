@@ -117,10 +117,12 @@ human-readable entry in ``Stage.reasons``:
 * git, fail closed: ``--config-env``, ``GIT_CONFIG_*``, ``GIT_EXEC_PATH``,
   ``include*``, ``core.hooksPath``, ``core.gitProxy``, ``remote.*.uploadpack|
   receivepack``, ``uploadpack.packObjectsHook``, ``core.alternateRefsCommand``,
-  ``mergetool|difftool.*.cmd``, any ``ext::`` argument, and an unrecognised
+  ``mergetool|difftool.*.cmd``, ``init.templateDir``, ``lfs.customtransfer.*``,
+  ``lfs.extension.*``, any ``ext::`` argument, and an unrecognised
   key (not a known command or data key) whose value has whitespace or ``/``;
 * a privileged shell with no visible input (``sudo -s``, ``su``, ``sudo su``),
-  a heredoc body after a dangling ``|``/``&&``/``||``, or a command-valued
+  a heredoc body after a dangling ``|``/``&&``/``||`` (it feeds a later
+  pipeline stage; treated as uncertain), or a command-valued
   variable that is not a literal;
 * a shell hook variable is set (``PS4``, ``PROMPT_COMMAND``, ``BASH_ENV``,
   ``ENV`` ...), ``${x@P}``, an array subscript holding ``$( )`` in a name
@@ -213,16 +215,21 @@ _CMD_ENV_VARS = frozenset({"GIT_SSH_COMMAND", "GIT_SSH", "GIT_PAGER", "GIT_EDITO
 _GIT_CMD_KEYS = re.compile(
     r"(core\.(pager|editor|sshcommand|fsmonitor|askpass)|sequence\.editor|diff\.external|pager\..+"
     r"|diff\..+\.(textconv|command)|merge\..+\.driver|filter\..+\.(clean|smudge|process)"
-    r"|gpg(\..+)?\.program|credential(\..+)?\.helper|alias\..+)")
+    r"|gpg(\..+)?\.program|credential(\..+)?\.helper|alias\..+|submodule\.[^.]+\.update)")
 # git keys that are always uncertain (fail closed); the value is also nested when it is a command.
 _GIT_RISKY_KEYS = re.compile(
     r"(include\..+|includeif\..+|remote\..+\.(uploadpack|receivepack)|core\.gitproxy"
-    r"|uploadpack\.packobjectshook|core\.alternaterefscommand|(mergetool|difftool)\..+\.cmd|core\.hookspath)")
-_GIT_RISKY_NO_NEST = re.compile(r"(include\..+|includeif\..+|core\.hookspath)")
+    r"|uploadpack\.packobjectshook|core\.alternaterefscommand|(mergetool|difftool)\..+\.cmd|core\.hookspath"
+    r"|init\.templatedir|lfs\.(customtransfer|extension)\..+)")
+_GIT_RISKY_NO_NEST = re.compile(
+    r"(include\..+|includeif\..+|core\.hookspath|init\.templatedir|lfs\.(customtransfer|extension)\..+)")
 # git keys known to hold plain data (names, colours, urls, paths): never uncertain.
 _GIT_DATA_KEYS = re.compile(
-    r"((user|author|committer|color|i18n|init|branch|push|pull|fetch|rebase|advice|log|format|status|help"
-    r"|safe|http|https|column|gc|pack|index|maintenance|feature|submodule|lfs)\..+"
+    r"((user|author|committer|color|i18n|branch|push|pull|fetch|rebase|advice|log|format|status|help"
+    r"|safe|http|https|column|gc|pack|index|maintenance|feature)\..+"
+    r"|init\.defaultbranch|submodule\.(recurse|fetchjobs|propagatebranches|active)"
+    r"|submodule\.[^.]+\.(url|path|branch|ignore|shallow|active|fetchrecursesubmodules)"
+    r"|lfs\.(url|pushurl|fetchinclude|fetchexclude|concurrenttransfers|locksverify)"
     r"|remote\.[^.]+\.(url|pushurl|fetch|push|tagopt|prune|mirror)"
     r"|merge\.(ff|conflictstyle|log|renamelimit)|commit\.(template|gpgsign|verbose|cleanup)|tag\.(gpgsign|sort)"
     r"|core\.(autocrlf|filemode|excludesfile|attributesfile|ignorecase|quotepath|whitespace|eol|longpaths"
@@ -776,7 +783,7 @@ class _Level:
         self.prev_sep = None  # the operator before the current pipeline
         self.pending_writes = []  # candidate safe writers of the current pipeline
         self.redir_fd = None  # fd digits before the pending redirect
-        self.dangling = False  # just after | && || (a heredoc body here is a syntax error)
+        self.dangling = False  # just after | && || (a heredoc body here feeds a later stage)
         self._reset_word()
 
     @staticmethod
@@ -1580,6 +1587,9 @@ def _git_scripts(args, st):
             continue
         if k.startswith("alias."):
             scripts.append(val[1:] if val.startswith("!") else "git " + val)
+        elif k.startswith("submodule."):
+            if val.startswith("!"):  # submodule.NAME.update=!cmd; other values are modes
+                scripts.append(val[1:])
         elif k.startswith("credential"):
             if val.startswith("!"):
                 scripts.append(val[1:])
@@ -1676,7 +1686,7 @@ def _lex(s, start, nested, ctx, vars_):
             continue
         if c == "\n" and lv.heredocs:
             if lv.dangling:
-                lv.error("heredoc body after a dangling | && || (bash syntax error)")
+                lv.error("heredoc body feeds a later pipeline stage; treated as uncertain")
             lv.end_pipeline(";")
             i = lv.read_bodies(i + 1, nested)
             continue
