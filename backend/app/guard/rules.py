@@ -129,7 +129,8 @@ or holds home or the project, nor over ssh), ``git-force-push-main``, ``git-rese
 ``.git/hooks``, ``.git/info/attributes``, ``.gitmodules`` with an
 ``update = !cmd`` key), ``agent-config`` (Rulings R6/R7/R20: writes to a
 ``.claude/settings*.json``, ``.claude/hooks/**``, ``.claude/agents/**``,
-``.claude/skills/**``, ``.claude/commands/**`` or ``.mcp.json``),
+``.claude/skills/**``, ``.claude/commands/**``, ``.mcp.json`` or - Ruling P13,
+the repo rules file a later task loads - ``.claude-orchestrator/**``),
 ``uncertain-command``, ``mcp-require-approval``, ``unknown-tool``,
 ``sql-destroy`` and ``db-write`` (database rules, ported in ``dbrules.py``:
 DROP/TRUNCATE/DELETE without WHERE in the SQL a client or a database MCP
@@ -315,6 +316,7 @@ DISABLEABLE = frozenset({"rm-rf-outside", "git-force-push-main", "git-reset-hard
                          "git-stash-drop", "secret-files", "chmod-wide", "pipe-to-shell", "sql-destroy", "db-write"})
 ERROR_REASON = "co-guard error \u2014 action blocked for safety"  # co_hook.ERROR_REASON
 _BUDGET_MAX_MS = 1000  # the hook must answer well inside its own timeout
+_WORD_TEXTS_MAX = 4096  # distinct argv texts kept per call for custom rules
 
 # Ruling R17: tools are checked fail closed, by name.
 _BASH_TOOLS = frozenset({"Bash", "Monitor"})  # tool_input.command is a Bash command line
@@ -406,7 +408,7 @@ _WRITES_TEXT = re.compile(r"write|append|copy|rename|move|unlink|remove|\brm|sym
                           r"\bos\.replace\b|open\s{0,5}\([^)]{0,300}?['\"](?=[rbt]{0,3}[wax+])[rwaxbt+]{1,4}['\"]|"
                           r"system|exec|spawn|popen|subprocess", re.I)
 _AGENT_CODE = re.compile(r"\.claude[\\/]+(settings[^'\"\s]*\.json|hooks\b|agents\b|skills\b|commands\b)"
-                         r"|\.claude['\"]|\.mcp\.json", re.I)
+                         r"|\.claude['\"]|\.mcp\.json|\.claude-orchestrator\b", re.I)
 # Ruling R20: subagent, skill and slash-command definitions can start processes
 # (frontmatter mcpServers, hooks, inline !`cmd`) outside PreToolUse.
 _AGENT_DIRS = frozenset({"hooks", "agents", "skills", "commands"})
@@ -578,10 +580,13 @@ def _git_internal_kind(path):
 
 
 def _agent_config(path):
-    """A .claude/settings*.json, .claude/{hooks,agents,skills,commands}/** or
-    .mcp.json path (R6/R7/R20)."""
+    """A .claude/settings*.json, .claude/{hooks,agents,skills,commands}/**,
+    .mcp.json (R6/R7/R20) or .claude-orchestrator[/**] (the repo rules file a
+    later task loads, Ruling P13) path."""
     parts = path.lower().split("/")
     if parts and parts[-1] == ".mcp.json":
+        return True
+    if ".claude-orchestrator" in parts:
         return True
     for i in range(len(parts) - 1, -1, -1):
         if parts[i] == ".claude":
@@ -665,6 +670,7 @@ class _Ctx:
         # text naming a protected path (for inline interpreter code)
         self.mentions = sorted({posixpath.dirname(v) if g else v for v, g in self.protected} - {"", "/"})
         self.hits = []
+        self.words = {}  # Ruling P12: de-quoted argv texts of every simple command (custom rules)
         self.remote = False  # inside `ssh host CMD`: nothing is the project
         self.depth = 0
         self.evals = 0
@@ -711,6 +717,15 @@ class _Ctx:
         if not hard and rule_id in self.disabled:  # an admin switched it off (never its hard part)
             return
         self.hits.append(_make_hit(rule_id, hard, summary))
+
+    def note_words(self, argv, unwrapped):
+        """The de-quoted argv of a simple command (and without its wrappers),
+        for custom rules: `"git" push`, `g\\it push`, `$'git' push` -> `git push`."""
+        if not self.custom:
+            return
+        for words in (argv, unwrapped):
+            if words and len(self.words) < _WORD_TEXTS_MAX:
+                self.words.setdefault(" ".join(" ".join(map(str, words)).split()), None)
 
     # -- paths -------------------------------------------------------------
     def expand(self, word, cwd):
@@ -861,8 +876,18 @@ def _target_kinds(ctx, word, dyn, cwd):
     return out
 
 
+def _rules_dir_delete(ctx, path, glob, summary):
+    """Ruling P13: deleting the repo rules file (or its folder) relaxes what a
+    later task loads - agent-config, like editing it."""
+    parts = path.lower().split("/") + ([glob.lower()] if glob not in (None, _SOME) else [])
+    if any(c == ".claude-orchestrator" or ("claude" in c and _GLOB.search(c) and
+                                           fnmatch.fnmatchcase(".claude-orchestrator", c)) for c in parts):
+        ctx.hit("agent-config", False, summary)
+
+
 def _protect_delete(ctx, path, glob, summary):
     """self-protect for deleting/moving `path` (glob: which children)."""
+    _rules_dir_delete(ctx, path, glob, summary)
     if ctx.is_protected(path, as_ancestor=glob is None):
         ctx.hit("self-protect", True, summary)
         return
@@ -1545,6 +1570,7 @@ class _Bash:
             dyn += [False] * (len(argv or ()) - len(dyn))
             self.note_vars(st, argv, dyn)
             self.note_db_env(st, argv, dyn)
+            self.ctx.note_words(st.argv, argv)
             self.stage(st, argv, dyn, cwd, pipelines.get(st.pipeline, [st]), outer)
             cwd = self.after_cd(argv, dyn, cwd)
 
@@ -1961,9 +1987,10 @@ class _Bash:
                     _classify(ctx, targets, cwd, raw)
             else:
                 for word, d in targets:
-                    for path, _g in _target_kinds(ctx, word, d, cwd) or ():
+                    for path, g in _target_kinds(ctx, word, d, cwd) or ():
                         if ctx.is_protected(path):
                             ctx.hit("self-protect", True, raw)
+                        _rules_dir_delete(ctx, path, g, raw)
         rim = _rimraf_targets(name, args)
         if rim is not None and name != "rimraf":
             _classify(ctx, self.bind([(a, False) for a in rim if not a.startswith("-")]), cwd, raw)
@@ -2736,36 +2763,54 @@ def _file_tool(ctx, tool_name, tool_input, cwd):
             ctx.hit("git-internals", False, raw)
 
 
-def _rule_text(tool_name, tool_input):
-    """What custom rules match: Bash/Monitor the command with whitespace
-    collapsed; file tools ``<tool> <path>``; others ``<tool> <compact sorted JSON>``."""
+def _rule_texts(ctx, tool_name, tool_input, cwd):
+    """What custom rules match (Ruling P12; a rule hits when ANY text matches):
+    Bash/Monitor - the command with backslash-newlines removed and whitespace
+    collapsed, plus the de-quoted argv of every simple command (nested and
+    unwrapped ones included, collected while the Bash rules ran); file tools -
+    ``<tool> <path>`` for the raw, the normalised absolute and the real path;
+    others - ``<tool> <compact sorted JSON>`` and forge's newline-joined values
+    (as they are, and with whitespace collapsed inside each value)."""
     if tool_name in _BASH_TOOLS:
         command = tool_input.get("command")
-        return " ".join(str(command if command is not None else "").split())
+        command = str(command if command is not None else "")
+        return [" ".join(command.replace("\\\n", "").split())] + list(ctx.words)
     if tool_name in _FILE_TOOLS:
-        raw = tool_input.get("file_path") or tool_input.get("notebook_path") or ""
-        return f"{tool_name} {raw}"
+        raw = str(tool_input.get("file_path") or tool_input.get("notebook_path") or "")
+        texts = [f"{tool_name} {raw}"]
+        if raw:
+            ab = ctx.expand(raw, cwd)
+            if ab:
+                texts.append(f"{tool_name} {_norm(ab)}")
+                texts.append(f"{tool_name} {_real(ab)}")
+        return texts
     try:
         text = json.dumps(tool_input, sort_keys=True, separators=(",", ":"), ensure_ascii=False, default=str)
     except (TypeError, ValueError, RecursionError):
         text = "<input>"
-    return f"{tool_name} {text}"
+    return [f"{tool_name} {text}", f"{tool_name}\n{_cu.values_text(tool_input)}",
+            f"{tool_name}\n{_cu.values_text(tool_input, collapse=True)}"]
 
 
-def _custom(ctx, tool_name, tool_input):
+def _custom(ctx, tool_name, tool_input, cwd):
     """Org/project/repo rules (custom.py); they apply even with the guard off."""
     if not ctx.custom:
         return
-    text = _rule_text(tool_name, tool_input)
-    for rule, how in _cu.match_rules(text, ctx.custom, ctx.regex_budget_ms):
+    texts = _rule_texts(ctx, tool_name, tool_input, cwd)
+    summary = _short(texts[0])
+    for rule, how in _cu.match_rules(texts, ctx.custom, ctx.regex_budget_ms):
         rid = rule["id"]
-        if how == "timeout":  # never a pass; also for a never rule (forge)
-            ctx.hits.append(Hit(rid, f"rule {rid} took too long to check, so it needs approval", False,
-                                _short(text)))
+        never = rule["kind"] == "never"
+        if how == "timeout":  # never a pass (Ruling P11: only a repo never rule becomes confirmable)
+            if never and not _cu.is_repo_rule(rule):
+                ctx.hits.append(Hit(rid, f"rule {rid} took too long to check, so it is blocked", True, summary))
+            else:
+                ctx.hits.append(Hit(rid, f"rule {rid} took too long to check, so it needs approval", False,
+                                    summary))
             continue
         reason = (_cu.clean_reason(rule.get("reason"))
                   or f'this matches the rule "{_cu.clean_reason(rule["pattern"])}"')
-        ctx.hits.append(Hit(rid, reason, rule["kind"] == "never", _short(text)))
+        ctx.hits.append(Hit(rid, reason, never, summary))
 
 
 def _order(hits):
@@ -2822,7 +2867,7 @@ def evaluate(tool_name, tool_input, policy, cwd):
             text = "<input>"
         ctx.hit("unknown-tool", False, f"{tool_name} {text}")
     if isinstance(tool_input, dict):
-        _custom(ctx, tool_name, tool_input)
+        _custom(ctx, tool_name, tool_input, start)
     hits = _order(ctx.hits)
     if any(h.rule_id == "sql-destroy" for h in hits):  # it already holds the statement: one approval, not two
         hits = [h for h in hits if h.rule_id != "db-write"]
