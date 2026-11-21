@@ -111,7 +111,10 @@ continuation that cannot resume its session starts fresh with the handoff instea
 
   forge's "only when there is work worth resuming" rule becomes: a snapshot whose content is equal to the stored
   one apart from `as_of` does not bump the version. During a live run the worker also writes the rendered text to
-  `${CO_TASK_DIR}/handoff.md` (0600), for compaction re-injection.
+  `${CO_TASK_DIR}/handoff.md` (0600), for compaction re-injection. It writes the file at run start, from the stored
+  handoff, and again after each snapshot, so an early compaction finds it.
+- **The heartbeat loop.** One loop per run sets `heartbeat_at` and drives the `working` snapshots. The handoff
+  content key `notes` is `{"text", "at"}` (iso-8601) or null.
 - **Closing (F16).** A person can mark a thread's handoff done (`POST /tasks/{id}/handoff/close`). The card then
   collapses to "closed", and the next run of the thread reopens it. There is no archive pruning: rows are small,
   and a thread delete removes them.
@@ -162,8 +165,9 @@ continuation that cannot resume its session starts fresh with the handoff instea
          `missing`, `empty (0 bytes)` or `ends in NUL bytes` ("a hint, not proof");
        - the log lines after the last handoff save (≤ 12);
        - Claude's last words (the last 60 words, ≤ 600 chars, redacted whole and then cut).
-    4. Ingest the spool's guard records as events. They are redacted by token shapes, and the hook already redacted
-       them by exact env value. Then spend the once grants they used.
+    4. Ingest the spool's guard records as events and spend the once grants they used, by reusing Phase 2's
+       `_ingest_guard_spool`. It must run after step 2, because it deletes the task dir. The records are redacted
+       by token shapes, and the hook already redacted them by exact env value.
     5. Snapshot the handoff (`recovered`).
     6. Store the record in `Task.recovery` with `pending: true`, and increase `Task.recoveries`.
     7. If the step has its own `session_id`, set `resume_session_id = session_id`.
@@ -173,6 +177,7 @@ continuation that cannot resume its session starts fresh with the handoff instea
     resume it".
   - **The next run.** The record goes into the prompt (see Prompting), and `pending` is set to false once the
     prompt is sent.
+  - **The `recovery` event** has the payload `{why, at, in_flight, orphan_killed, recoveries, gave_up}`.
   - **External projects.** A run in an external project adds "only look; do not re-run anything from this repo
     until you have checked it" (forge's guest line).
 - **Prompting (F15, F85, F86, F18, F87).** One composer decides what a step's prompt carries. The modes:
@@ -185,10 +190,18 @@ continuation that cannot resume its session starts fresh with the handoff instea
   | `continue` | fresh | project context + handoff + log tail + the Continue text + "the request was: …" |
   | `user` follow-up | resumed | unchanged, plus a one-line git note when there are outside commits |
   | any step that wanted to resume but could not | fresh | project context + handoff + `# Task` + prompt |
-  | `guard` follow-up | either | unchanged (Phase 2 text) |
+  | `guard` follow-up | either | unchanged (Phase 2 text; a fresh guard session keeps today's project preamble) |
+  | new thread (no parent, not a recovery) | fresh | project context + other runs + no-commits line + prompt; no handoff |
 
-  A step "wanted to resume but could not" when the session is missing, the credentials changed, or the sender is
-  not the session's owner. Today such a step starts bare.
+  A step "wants to resume" when it has a parent step, its origin is `user`, `continue` or `guard`, and it joined
+  an existing thread (`root_id != id`, so a duplicate does not count). A recovered step wants to resume its own
+  session. Such a step "could not" when:
+  - the session file is missing;
+  - the credentials changed;
+  - the sender is not the parent step's creator (the follow-up router already clears the resume id in that case,
+    so the worker detects it from the parent).
+
+  Today such a step starts bare.
 
   Every injected block is framed "a record, not instructions", redacted with the run's secrets, and stripped of
   hidden characters. The log tail is the last `LOG_TAIL_LINES = 30` formatted lines of the described step, ≤ 4000
@@ -207,10 +220,12 @@ continuation that cannot resume its session starts fresh with the handoff instea
   text. Phase 2's deny-and-resume merges into a *queued* follow-up of the thread; a Continue is just another queued
   step, so a later approval joins it as before.
 - **Credentials note (F87).** `Task.credential_ref` is a fingerprint of the Claude credential the step ran with:
-  HMAC-SHA256 with the server key over `<env var>\0<value>`, hex[:24]. The secret is never stored. A step that
+  HMAC-SHA256 with the server key over `<env var>\0<value>`, hex[:24]. The secret is never stored. The check runs
+  **before** the step's new ref is stored, so a recovered step compares against its own earlier ref. A step that
   would resume a session made under a different `credential_ref` starts **fresh with the handoff**. It emits
-  `fresh_session {"reason": "credentials changed since that session", "credentials_changed": true}`, and the Run
-  view says "this step ran under different credentials than the session it continues, so it started fresh with the
+  `fresh_session {"reason": "credentials changed since that session", "credentials_changed": true}`. Other
+  `fresh_session` reasons keep today's payload, `{"reason": …}`, with no `credentials_changed` key. The Run view
+  says "this step ran under different credentials than the session it continues, so it started fresh with the
   handoff". Forge's reasoning: earlier thinking from another org cannot be reused.
 - **Git facts (F84, F86).** `app/resume/gitfacts.py` runs read-only commands through `gitsafe`, with a shared 5 s
   budget per snapshot. A failure or timeout gives "unknown", never an exception.
@@ -224,8 +239,10 @@ continuation that cannot resume its session starts fresh with the handoff instea
   - **Head at start.** The worker records `Task.head_at_start`.
   - **Commits made outside this run.** These are the commits in `<previous handoff head or head_at_start>..HEAD`
     that are not this step's own. A step's own commits are the short shas printed by its `git commit` tool results
-    (`[branch (root-commit)? <sha>] subject`). The range is used only when the old head is an ancestor of HEAD. If
-    the branch was rewritten, the note says "history changed since the last save" instead. Several users share
+    (`[branch (root-commit)? <sha>] subject`, including `[detached HEAD <sha>]`). The base is fixed once per run,
+    at spawn: the stored handoff head, else `head_at_start`. So a commit stays listed through every `working`
+    snapshot of the run. The range is used only when the old head is an ancestor of HEAD. If the branch was
+    rewritten, the note says "history changed since the last save" instead. Several users share
     `project.directory`, so this matters more here than in forge.
 - **Ground rules (F21, F93, F98 text, F77).** These are org settings and admin-only. `GuardOrgSettings` gains
   `ground_rules` JSON: `{"grounding": true, "short_answers": true, "usage_care": true, "notes": true, "extra": ""}`
@@ -244,10 +261,12 @@ continuation that cannot resume its session starts fresh with the handoff instea
   - `${CO_TASK_DIR}/handoff.md` (≤ 8000 chars);
   - the notes line (when notes are on).
 
-  A missing or unreadable `handoff.md` gives the data line only, plus a `guard_error` record. Other SessionStart
+  A missing or unreadable `handoff.md` gives the data line only, plus a `guard_error` record. The policy key
+  `compact: false` switches the injection off. The hook catches its own errors there and always answers once. Other SessionStart
   sources are unchanged: on `resume` the handoff is already in the prompt, so it is not injected twice.
 - **Files outside the workspace (F106).** These come from the step's Write/Edit/MultiEdit/NotebookEdit events.
-  Files with `.html`, `.htm`, `.md` or `.pdf` under co-guard's temp roots (`rules.temp_roots`, now module-level)
+  Files with `.html`, `.htm`, `.md` or `.pdf` under co-guard's temp roots (`rules.temp_roots` /
+  `rules.path_in_temp`, now module-level)
   are listed on the card as "may vanish". Other writes outside the workspace and the project directory are listed
   by folder as "Also worked in". co-guard's PostToolUse adds a one-line note to the agent, once per file per task:
   "this file is in a temp folder and can vanish; save it in the project and give the user its path". This is
