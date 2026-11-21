@@ -3502,3 +3502,72 @@ def test_fix2_m4_mktemp_elsewhere_is_still_unknown(ro2):
                                       ("type make", False), ("which pytest", False), ("command make", True)])
 def test_fix2_m7_lookups_are_free_under_quarantine(env, cmd, held):
     assert ("guest-quarantine" in ids(qbash(env, cmd))) is held
+
+
+# ---- Task 3 fix round 3 (Ruling P19: in-place formatters, builds aimed at a root, more writers) -----------
+P19_FORMAT_DENIED = [
+    "black .", "ruff format .", "prettier --write .", "npx prettier --write .", "gofmt -w .", "isort .",
+    "autopep8 -i -r .", "black vendor/old", "clang-format -i vendor/old/x.c", "cd {R} && black .",
+    "cd {R} && go fmt ./...", "cd {R} && cargo fmt", "black {R}", "prettier --write {R}", "eslint --fix {R}",
+    "ruff check --fix .", "pnpm exec prettier --write src vendor", "yarn dlx prettier -w .", "rubocop -A",
+    "shfmt -i 2 -w vendor/old/x.sh", "terraform fmt", "goimports -w {R}", "rustfmt {R}/src/main.rs", "stylua .",
+    "swiftformat .", "eslint --fix", "cargo fmt --manifest-path {R}/Cargo.toml", "go fmt ./vendor/...",
+]
+P19_FORMAT_FREE = [
+    "black --check .", "ruff check .", "prettier --check .", "gofmt -l .", "black src", "prettier --write src",
+    "eslint --fix src", "isort --check-only .", "cargo fmt --check", "rubocop", "terraform fmt -check",
+    "clang-format x.c", "shfmt -d x.sh", "go vet ./...", "black --diff .", "eslint .", "gofmt -d vendor/old",
+]
+P19_BUILD_DENIED = [
+    "cmake -S {R} -B /tmp/b", "cmake -B {R}/build", "cmake --build {R}/build",
+    "cargo build --manifest-path {R}/Cargo.toml", "cargo test --manifest-path={R}/Cargo.toml", "go build -C {R}",
+    "go -C {R} build", "pip install -e {R}", "uv sync --project {R}", "uv run --directory {R} pytest",
+    "poetry -C {R} install", "poetry --directory {R} build", "tsc -p {R}", "tsc --project {R}/tsconfig.json",
+    "npm --prefix {R} run build", "git -C {R} submodule update --init",
+    # P18 list grown: tools that write into their cwd
+    "cd {R} && go build ./...", "cd {R} && go generate ./...", "cd {R} && go install", "cd {R} && python setup.py build",
+    "cd {R} && python -m build", "cd {R} && pip install -e .", "cd {R} && cargo check", "cd {R} && cargo clippy",
+    "cd {R} && cargo clippy --fix", "cd {R} && npm run build", "cd {R} && yarn build", "cd {R} && pnpm build",
+    "cd {R} && bun run build", "cd {R} && npm version patch", "cd {R} && npm audit fix", "cd {R} && tsc",
+    "cd {R} && npx tsc", "cd {R} && meson setup b", "cd {R} && meson compile -C b", "cd {R} && dotnet build",
+    "cd {R} && dotnet publish", "cd {R} && dotnet restore", "cd {R} && swift build", "cd {R} && bazel build //...",
+    "cd {R} && zig build", "cd {R} && autoreconf -fi", "cd {R} && mix deps.get", "cd {R} && mix compile",
+    "cd {R} && git submodule update --init", "cd {R} && poetry install", "cd {R} && bundle install",
+]
+P19_BUILD_NOT_HARD = [
+    "cmake -S src -B build", "cargo metadata --manifest-path {R}/Cargo.toml", "cargo tree --manifest-path {R}/Cargo.toml",
+    "go -C {R} version", "go list -C {R} ./...", "tsc -p {R} --noEmit", "pip install {R}", "uv --directory {R} tree",
+    "poetry -C {R} show", "cd {R} && npx tsc --noEmit", "cd {R} && npm test", "cd {R} && go vet ./...",
+    "cd {R} && go test ./...", "cd {R} && npm run lint", "cd {R} && git submodule status", "cd {R} && cargo build --dry-run",
+]
+
+
+@pytest.mark.parametrize("cmd", P19_FORMAT_DENIED + P19_BUILD_DENIED)
+def test_p19_formatters_and_builds_into_a_root_are_hard(ro2, cmd):
+    v = rbash(ro2, cmd)
+    assert v.decision == "deny" and "readonly-source" in hard_ids(v), v
+
+
+@pytest.mark.parametrize("cmd", P19_FORMAT_FREE)
+def test_p19_check_modes_and_other_folders_stay_free(ro2, cmd):
+    v = rbash(ro2, cmd)
+    assert "readonly-source" not in ids(v), v
+
+
+@pytest.mark.parametrize("cmd", P19_BUILD_NOT_HARD)
+def test_p19_reads_and_non_writers_are_not_hard(ro2, cmd):
+    v = rbash(ro2, cmd)
+    assert "readonly-source" not in ids(v) and v.decision != "deny", v
+
+
+@pytest.mark.parametrize("cmd", ["black .", "prettier --write .", "cd sub && cargo fmt", "go build -C sub",
+                                 "cmake -B build", "npm run build", "tsc"])
+def test_p19_no_roots_changes_nothing(env, cmd):
+    assert bash(env, cmd).decision == "allow"
+
+
+def test_p19_formatter_after_unknown_cd(ro2):
+    v = rbash(ro2, "cd $D && black src")  # P15 places it in no root -> P17 asks
+    assert v.decision == "approve" and P17_REASON in [h.reason for h in v.hits], v
+    v = rbash(ro2, "cd $D && black .")  # "." from the project is a parent of vendor/old -> hard (P15)
+    assert v.decision == "deny" and "readonly-source" in hard_ids(v), v
