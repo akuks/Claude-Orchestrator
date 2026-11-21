@@ -1,0 +1,5 @@
+{"type":"system","subtype":"init","session_id":"test-session"}
+{"type":"assistant","message":{"id":"m1","model":"claude-test","content":[{"type":"tool_use","id":"tuT","name":"TodoWrite","input":{"todos":[{"content":"Read the code","status":"completed","activeForm":"Reading the code"},{"content":"Write the parser","status":"in_progress","activeForm":"Writing the parser"},{"content":"Test it","status":"pending","activeForm":"Testing it"},{"content":"Ship it","status":"pending","activeForm":"Shipping it"}]}}]}}
+{"__spool__": {"event":"PreToolUse","tool_use_id":"tuT","seen":true,"tool":"TodoWrite","what":"TodoWrite"}}
+{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"tuT","content":"Todos have been modified successfully"}]}}
+{"type":"result","subtype":"success","result":"parser half done","num_turns":1,"total_cost_usd":0.01,"duration_ms":100,"is_error":false,"usage":{"input_tokens":1,"output_tokens":1}}

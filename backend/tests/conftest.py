@@ -162,7 +162,7 @@ def read_probe_file(key: str, suffix: str) -> str | None:
 
 
 def clear_env_probe(key: str) -> None:
-    for suffix in ("vars", "names", "args", "policy", "policymode", "taskdirmode"):
+    for suffix in ("vars", "names", "args", "policy", "policymode", "taskdirmode", "handoff"):
         (_PROBES / f"{key}.{suffix}").unlink(missing_ok=True)
 
 

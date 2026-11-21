@@ -44,7 +44,8 @@ fi
 # marker [env-probe:KEY] makes the task run (stream-json only, so memory and
 # findings calls quoting the prompt don't overwrite it) record its env to
 # PROBES/KEY.vars (selected names=values), PROBES/KEY.names (every name) and
-# PROBES/KEY.args (argv, one per line).
+# PROBES/KEY.args (argv, one per line), plus PROBES/KEY.handoff (a copy of
+# $CO_TASK_DIR/handoff.md when it exists).
 if [[ "$args" == *"stream-json"* && "$prompt" =~ \[env-probe:([A-Za-z0-9_-]+)\] ]]; then
   f="__PROBES__/${BASH_REMATCH[1]}"
   {
@@ -60,6 +61,10 @@ if [[ "$args" == *"stream-json"* && "$prompt" =~ \[env-probe:([A-Za-z0-9_-]+)\] 
     cp "$CO_POLICY_FILE" "$f.policy"
     (stat -c %a "$CO_POLICY_FILE" 2>/dev/null || stat -f %Lp "$CO_POLICY_FILE") >"$f.policymode"
     (stat -c %a "$CO_TASK_DIR" 2>/dev/null || stat -f %Lp "$CO_TASK_DIR") >"$f.taskdirmode"
+  fi
+  # resume: the handoff.md the worker wrote at spawn (absent: no stored handoff)
+  if [[ -n "$CO_TASK_DIR" && -f "$CO_TASK_DIR/handoff.md" ]]; then
+    cp "$CO_TASK_DIR/handoff.md" "$f.handoff"
   fi
   mv "$f.vars.tmp" "$f.vars"
 fi
