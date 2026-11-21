@@ -1664,6 +1664,8 @@ class _Bash:
                     break  # unparseable already recorded once
             if f.uncertain:  # psql \\! with no command, sqlite .once -x, an unknown dot-command ...
                 ctx.hit("uncertain-command", False, self.raw)
+            for path in f.outputs:  # psql -o / \\o FILE, sqlite .output, mysql tee, sqlcmd :out ...
+                self.check_write(path, "$" in path or "`" in path, "redirect", cwd)
         if _db.cli_write(name, args, ctx.db_dev):
             ctx.hit("db-write", False, self.raw)
 

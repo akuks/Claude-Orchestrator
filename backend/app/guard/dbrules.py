@@ -47,6 +47,15 @@ Options are parsed getopt-style: short clusters (``-Atc SQL``), attached
 values (``-hprod``, ``-dpostgres://x``) and unambiguous long prefixes
 (``--ho=prod``).
 
+Files a client writes locally (psql ``-o``/``-L``/``\\o``/``\\w``/``\\g FILE``/
+``\\copy .. to 'f'``, ``COPY .. TO 'f'`` and mysql ``INTO OUTFILE`` on a local
+server, sqlite ``.output``/``.once``/``.save``/``.backup``/``VACUUM INTO``/
+``ATTACH``, mysql ``tee``/``\\T``/``--tee``, sqlcmd ``:out``/``-o``) are returned
+in ``Finding.outputs`` for the caller's write-target checks. mongosh code that
+reaches Node.js (``require(``, ``process.``, ``child_process``) and sqlite
+``edit(`` are uncertain. sqlcmd ``:!!`` is a shell escape, ``:connect`` a new
+target, ``:r`` unknown SQL.
+
 Shell escapes inside a client (psql ``\\!``, ``\\o|\\g|\\w |cmd``, ``-o |cmd``,
 ``\\copy``/``COPY ... PROGRAM 'cmd'``, sqlite/duckdb ``.shell``/``.system``/
 ``.once |cmd``, mysql ``system``/``\\!``/``pager``/``--pager``) are returned
@@ -84,6 +93,10 @@ Seatbelt limits (co-guard sees command text, not what runs)
   and ``.call``/``.apply`` forms that are caught.
 * Files a client reads (``-f``, ``\\i``, ``source``, ``.read``) are never
   opened: they are unknown SQL (a write when not local, never a destroy).
+* psql meta-command arguments end at the end of their line, but the lexer
+  reads a quote in one (``\\echo '``) as a string running on to the next quote,
+  so SQL between two such lines is not seen (a write when not local is still
+  held only if other text gives it away).
 * A dev pattern relaxes whatever host name the command names (DNS is not
   resolved), and env vars an existing script or Makefile reads are not seen.
 """
@@ -110,6 +123,7 @@ class Finding:
     write: bool = False
     shell: tuple = ()  # shell commands the client would run (escapes), for the caller to check
     uncertain: bool = False  # the client may run something co-guard cannot see (\! with no command, .once -x)
+    outputs: tuple = ()  # local files the client writes (-o, \o, .output, tee, :out, COPY TO 'f' ...)
 
 
 _NONE = Finding()
@@ -432,7 +446,7 @@ def _stmt_writes(stmt, kept=""):
         return bool(_SQL_WRITE_WORD.search(body) or _SQL_SIDE_EFFECT.search(body))
     if k == "explain":  # plain EXPLAIN runs nothing
         return bool(_ANALYZE.search(t)) and bool(_SQL_WRITE_WORD.search(body) or _SQL_SIDE_EFFECT.search(body))
-    if k in ("begin", "end", "use", "set", "declare"):  # T-SQL / MariaDB need no semicolon before the next statement
+    if k in ("begin", "end", "use", "set", "declare", "commit", "rollback", "fetch", "savepoint", "release"):  # T-SQL / MariaDB need no semicolon before the next statement
         if _SQL_WRITE_WORD.search(body) or _SQL_SIDE_EFFECT.search(body):
             return True
     if k == "set":
@@ -480,7 +494,7 @@ _LITE_DOT = tuple(("archive auth backup bail binary cd changes check clone conne
                    "session sha3sum shell show stats system tables timeout timer trace unmodule version vfsinfo "
                    "vfslist vfsname width www").split())
 _LITE_PIPE_FILE = frozenset({"once", "output", "excel", "import", "read"})
-_DOT_LINE = re.compile(r"(?m)^[ \t]*\.([A-Za-z_][\w-]*)")
+_DOT_LINE = re.compile(r"(?m)^[ \t]*\.[ \t]*([A-Za-z_][\w-]*)")
 _SETENV_PAGER = re.compile(r"\\setenv\s+(PAGER|PSQL_PAGER|PSQL_WATCH_PAGER|PSQL_EDITOR|EDITOR|VISUAL|SHELL)\s+", re.A)
 
 
@@ -537,7 +551,70 @@ def _escapes(text, family):
                         cmd = cmd.split(arg[0], 1)[0]
                     cmds.append(cmd)
                     uncertain = uncertain or not cmd.strip()
+    if family == "lite" and re.search(r"\bedit\s*\(", out, re.I):
+        uncertain = True  # sqlite edit(): runs an editor (any program)
+    if family == "tsql":  # sqlcmd script commands
+        for m in re.finditer(r"(?mi)^[ \t]*:?!!", out):
+            rest = _rest_of_line(raw, m.end())
+            cmds.append(rest)
+            uncertain = uncertain or not rest.strip()
+        if re.search(r"(?mi)^[ \t]*:?ed\b", out):
+            uncertain = True  # :ed runs an editor
     return [c.strip() for c in cmds if c.strip()], uncertain
+
+
+_FILE_TOKEN = re.compile(r"\s*('([^']*)'|\"([^\"]*)\"|(\S+))")
+
+
+def _token_at(raw, k):
+    """The file name written at ``raw[k:]`` (quotes removed), or None."""
+    m = _FILE_TOKEN.match(raw, k)
+    if not m:
+        return None
+    v = next(g for g in m.groups()[1:] if g is not None)
+    return v.rstrip(";") or None
+
+
+def _outputs(text, family, local):
+    """Local files a client writes from its SQL text. ``local``: the server
+    is this machine, so server-side writes (COPY TO 'f', INTO OUTFILE) land here."""
+    raw = str(text)
+    lx = _lexings(raw, "mysql" if family == "mysql" else "pg")[0]
+    out, files = lx.out, []
+
+    def body_after(pattern):
+        for start, _end, content in lx.bodies:
+            if re.search(pattern, out[max(0, start - 40):start], re.I):
+                files.append(content)
+
+    if family == "pg":
+        for m in re.finditer(r"\\(o|out|w|write|g|gx)(?![a-z_])[ \t]+(?=[^\s|])", out):
+            files.append(_token_at(raw, m.end()))
+        for m in re.finditer(r"(?mi)^[ \t(]*(\\)?copy\b[^;\n]*?\bto\s+", out):
+            if m.group(1) or local:
+                tok = _token_at(raw, m.end())
+                if tok and tok.lower() not in ("stdout", "pstdout", "program"):
+                    files.append(tok)
+    if family == "mysql":
+        for m in re.finditer(r"\\T[ \t]+|(?:^|[;\n])[ \t]*tee[ \t]+", out, re.I):
+            files.append(_token_at(raw, m.end()))
+        if local:
+            body_after(r"\binto\s+(outfile|dumpfile)\s*$")
+    if family == "lite":
+        for m in _DOT_LINE.finditer(raw):
+            names = [d for d in _LITE_DOT if d.startswith(m.group(1).lower())]
+            if names and all(d in ("output", "once", "save", "backup", "clone", "excel", "open") for d in names):
+                args = [a for a in re.findall(r"'[^']*'|\"[^\"]*\"|\S+", _rest_of_line(raw, m.end()))
+                        if not a.startswith("-")]
+                if args and not args[-1].lstrip("'\"").startswith("|"):
+                    files.append(args[-1].strip("'\""))
+        body_after(r"\b(vacuum\s+(\w+\s+)?into|attach\s+(database\s+)?(if\s+not\s+exists\s+)?)\s*$")
+    if family == "tsql":
+        for m in re.finditer(r"(?mi)^[ \t]*:(out|error|perftrace)[ \t]+", out):
+            tok = _token_at(raw, m.end())
+            if tok and tok.lower() not in ("stdout", "stderr"):
+                files.append(tok)
+    return [f for f in files if f and f not in (":memory:",)]
 
 
 def shell_escapes(text, family):
@@ -556,6 +633,8 @@ def _retargets(text, family):
         return True  # \c otherdb, dblink('host=prod', ...): another server
     if family == "mysql" and (re.search(r"(?:^|[;\n])[ \t]*connect\b", out, re.I) or re.search(r"\\r\b", out)):
         return True
+    if family == "tsql" and re.search(r"(?mi)^[ \t]*:(connect\b|setvar[ \t]+SQLCMDSERVER\b)", out):
+        return True  # sqlcmd :connect prod
     if family == "duckdb":
         for start, _end, content in lx.bodies:
             if re.search(r"\battach\s+(database\s+)?(if\s+not\s+exists\s+)?$", out[max(0, start - 40):start], re.I) \
@@ -766,7 +845,7 @@ def _spec(**kw):
     base = {"sql": (), "file": (), "host": (), "conn": (), "value": (), "unknown": (), "flags": (),
             "optval": (), "pipe": (), "pager": (), "subcmds": (), "uri_positional": False,
             "positional_sql": False, "mongo": False, "redis": False, "restore": False, "at_host": False,
-            "file_db": False, "single_dash": False, "dialect": None, "family": None, "read_modes": (),
+            "file_db": False, "single_dash": False, "outfile": (), "dialect": None, "family": None, "read_modes": (),
             "free_long": False}
     base.update(kw)
     return base
@@ -774,7 +853,8 @@ def _spec(**kw):
 
 _PG = _spec(
     sql=_w("-c --command"), file=_w("-f --file"), host=_w("-h --host"), conn=_w("-d --dbname"),
-    value=_w("-p --port -U --username -v --set --variable -L --log-file -P --pset -F --field-separator "
+    outfile=_w("-L --log-file"),
+    value=_w("-p --port -U --username -v --set --variable -P --pset -F --field-separator "
              "-R --record-separator -T --table-attr"),
     pipe=_w("-o --output"),
     flags=_w("-a --echo-all -A --no-align -b --echo-errors -e --echo-queries -E --echo-hidden -H --html -l --list "
@@ -793,11 +873,12 @@ _MY = _spec(
     unknown=_w("--login-path --defaults-file --defaults-extra-file --defaults-group-suffix"),
     value=_w("-u --user -P --port -D --database -S --socket --protocol --ssl-mode --ssl-ca --ssl-capath --ssl-cert "
              "--ssl-key --ssl-cipher --ssl-crl --ssl-crlpath --tls-version --tls-ciphersuites --default-character-set "
-             "--character-sets-dir --connect-timeout --max-allowed-packet --net-buffer-length --prompt --tee "
+             "--character-sets-dir --connect-timeout --max-allowed-packet --net-buffer-length --prompt "
              "--delimiter --plugin-dir --default-auth --server-public-key-path --select-limit --max-join-size "
              "--histignore --load-data-local-dir --compression-algorithms --zstd-compression-level --bind-address "
              "--dns-srv-name --network-namespace --ssl-fips-mode --oci-config-file"),
     optval=_w("-p --password -# --debug --local-infile"),
+    outfile=_w("--tee"),
     pager=_w("--pager"),
     flags=_w("-B --batch -N --skip-column-names -s --silent -t --table -v --verbose -E --vertical -r --raw -f --force "
              "-n --unbuffered -q --quick -A --no-auto-rehash --auto-rehash -C --compress -X --xml -H --html "
@@ -825,9 +906,10 @@ _COCKROACH = _spec(
     value=_w("--port -p --user -u --database -d --certs-dir --format --set --watch --cluster-name"),
     flags=_w("--insecure --echo-sql --safe-updates --no-line-editor --debug-sql-cli --embedded --read-only"),
     subcmds=("sql", "demo"), dialect="pg", family="pg")
-_SQLCMD = _spec(
+_SQLCMD = _spec(family="tsql", 
     sql=_w("-Q -q"), file=_w("-i"), host=_w("-S"),
-    value=_w("-U -P -d -o -s -w -h -t -l -v -f -H -a -c -m -y -Y -z -Z -K -V"),
+    outfile=_w("-o"),
+    value=_w("-U -P -d -s -w -h -t -l -v -f -H -a -c -m -y -Y -z -Z -K -V"),
     optval=_w("-r -p -k"),
     flags=_w("-E -b -e -I -X -x -C -N -R -W -j -u -G -? -M -A -L"))
 _LITE = _spec(
@@ -899,7 +981,7 @@ def db_env_name(name):
     return str(name).upper() if isinstance(name, str) and DB_ENV.match(name) else None
 
 
-_CATS = ("sql", "file", "host", "conn", "unknown", "pipe", "pager", "value", "optval", "flags")
+_CATS = ("sql", "file", "host", "conn", "unknown", "pipe", "pager", "outfile", "value", "optval", "flags")
 
 
 def _opt_table(spec):
@@ -917,11 +999,12 @@ def _opt_table(spec):
 
 class _Args:
     __slots__ = ("sql", "file", "hosts", "conn", "positional", "other", "unknown", "uncertain", "shell", "modes",
-                 "loose")
+                 "loose", "outputs")
 
     def __init__(self):
         self.sql, self.hosts, self.conn, self.positional, self.other, self.shell, self.modes = [], [], [], [], [], [], []
         self.loose = []  # values attached to options we do not know
+        self.outputs = []  # local files written (-o FILE, -L FILE, --tee=FILE)
         self.file = self.unknown = self.uncertain = False
 
 
@@ -939,6 +1022,11 @@ def _take(r, cat, opt, val):
     elif cat == "pipe":
         if val.lstrip().startswith("|"):
             r.shell.append(val.lstrip()[1:])
+        elif val:
+            r.outputs.append(val)
+    elif cat == "outfile":
+        if val:
+            r.outputs.append(val)
     elif cat == "pager":
         if val:
             r.shell.append(val)
@@ -956,6 +1044,8 @@ def _match_long(table, name):
 
 
 def _resolve_long(table, name, spec):
+    if spec["family"] == "mysql":
+        name = "--" + name[2:].replace("_", "-")  # mysql: --login_path is --login-path
     opt, cat = _match_long(table, name)
     if cat is not None or spec["family"] != "mysql":
         return (opt, cat) if cat is not None else (None, None)
@@ -1012,7 +1102,7 @@ def _client_args(spec, args):
             elif eq:
                 _take(r, cat, opt, val)
             else:
-                v = next_value(cat in ("sql", "file", "pipe"))
+                v = next_value(cat in ("sql", "file", "pipe", "outfile"))
                 if v is not None:
                     _take(r, cat, opt, v)
             if opt in spec["read_modes"]:
@@ -1041,7 +1131,7 @@ def _client_args(spec, args):
             if rest:
                 _take(r, cat, o, rest)
             else:
-                v = next_value(cat in ("sql", "file", "pipe"))
+                v = next_value(cat in ("sql", "file", "pipe", "outfile"))
                 if v is not None:
                     _take(r, cat, o, v)
             break
@@ -1200,11 +1290,20 @@ def client_finding(name, args, *, prefix_env=None, line_env=None, stdin="none", 
             shell += cmds
             unsure = unsure or u
             retarget = retarget or _retargets(x, family)
+    if spec["mongo"] and any(re.search(r"\brequire\s*\(|\bprocess\s*\.|child_process|\bimport\s*\(", x)
+                             for x in texts):
+        unsure = True  # mongosh runs Node.js: require('child_process') is a shell, like node -e
     destroy = is_sql and any(sql_destructive(x, dialect) for x in texts)
+    outputs = list(p.outputs)
+    if is_sql:
+        local = not _far(spec, p, line_env, prefix_env, remote)
+        fam = "lite" if family in ("lite", "duckdb") else family
+        for x in texts:
+            outputs += _outputs(x, fam, local)
     write = _client_write(spec, p, texts, unknown_in, _env(line_env, prefix_env), patterns, remote or retarget,
                           bool(shell))
     return Finding(destroy, write or (unsure and not p.file and _far(spec, p, line_env, prefix_env, remote)),
-                   tuple(shell), unsure)
+                   tuple(shell), unsure, tuple(outputs))
 
 
 def _far(spec, p, line_env, prefix_env, remote):
