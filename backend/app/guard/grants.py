@@ -180,26 +180,54 @@ async def thread_cover(s, *, root_id, rule_ids, tool, grant_key, now) -> list[Ac
     return out
 
 
+RUN_REFUSED = "this request can't be approved for the whole run"
+ONCE_ONLY_REASON = ("This request can't be approved for the whole run (the agent filed it itself, or the command is "
+                    "too long to show in full), so only Approve once is offered.")
+
+
+async def run_grant_problem(s, approval: ActionApproval, cache: dict | None = None) -> str | None:
+    """Why "approve for this run" cannot work for this request (the card's
+    ``run_reason``), or None when it can: every rule id must be grantable
+    (``grantable_ids``: never a hard-only, unknown or org/project never
+    rule) and every command-keyed rule needs the request's verified
+    ``grant_key`` (Ruling P23). ``cache`` memoises ``grantable_ids`` per
+    (rule ids, project) across the cards of one listing."""
+    ids = list(dict.fromkeys(r for r in (approval.rule_ids or []) if isinstance(r, str)))
+    if not ids:
+        return "This request names no rule, so only Approve once is offered."
+    ck = (tuple(ids), approval.project_id)
+    ok = cache.get(ck) if cache is not None else None
+    if ok is None:
+        ok = await grantable_ids(s, ids, approval.project_id)
+        if cache is not None:
+            cache[ck] = ok
+    bad = [r for r in ids if r not in ok]
+    if bad:
+        return (f"{', '.join(bad)} can't be approved for the whole run (a hard or never rule, or one since "
+                f"removed), so only Approve once is offered.")
+    for _rid, kind, key in scope_keys(ids, approval.tool, approval.grant_key):
+        if kind == "command" and not is_hex_key(key):
+            return ONCE_ONLY_REASON
+    return None
+
+
 async def create_run_grants(s, approval: ActionApproval, task: Task, decider_id) -> list[ActionGrant]:
-    """One run grant per grantable rule id of the request (flushed, not
-    committed). ValueError when nothing is grantable or a command key is
-    missing (a request filed without a ``grant_key``)."""
+    """One run grant per rule id of the request (flushed, not committed).
+    ValueError (``RUN_REFUSED``) when any rule id is not grantable or a
+    command key is missing (``run_grant_problem``) - nothing is skipped."""
+    if await run_grant_problem(s, approval) is not None:
+        # Ruling P23 / final wave: never a partial grant, never an unverified command key
+        raise ValueError(RUN_REFUSED)
     now = _now()
     out = []
-    ok = await grantable_ids(s, approval.rule_ids, approval.project_id)
     for rid, kind, key in scope_keys(approval.rule_ids, approval.tool, approval.grant_key):
-        if rid not in ok:
-            continue
-        if kind == "command" and not is_hex_key(key):
-            # Ruling P23: no verified grant key - the command a run grant would cover is not what the card shows
-            raise ValueError("this request can't be approved for the whole run")
         g = ActionGrant(root_id=task.root_id or task.id, task_id=task.id, approval_id=approval.id, scope="run",
                         rule_id=rid, key_kind=kind, key=key, created_by=decider_id, created_at=now,
                         expires_at=now + timedelta(seconds=RUN_GRANT_TTL))
         s.add(g)
         out.append(g)
     if not out:
-        raise ValueError("this request can't be approved for the whole run")
+        raise ValueError(RUN_REFUSED)
     await s.flush()
     return out
 

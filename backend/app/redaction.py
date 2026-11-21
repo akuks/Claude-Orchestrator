@@ -6,8 +6,10 @@ broadcasts (events, result_text, error) passes through here:
 
 * exact values of the run's sensitive env vars (owner credentials, the minted
   CO_API_TOKEN, secret-looking project env) -> "***";
-* plus, defence in depth, well-known token shapes and URL user:password
-  credentials even when not in the env.
+* plus, defence in depth, well-known token shapes (API keys, AWS key ids,
+  Slack tokens, JWTs, PEM private keys), URL user:password credentials and
+  labelled values (``password=``, ``token:``, ``Bearer``, ``mysql -p``...)
+  even when not in the env (final wave: forge F90b).
 
 Redaction is per string: a secret split across two stdout chunks/events would
 not be caught (stream-json delivers whole lines, so this is rare)."""
@@ -34,20 +36,48 @@ _SENSITIVE_NAME_RE = re.compile(
 )
 
 # Known token shapes. co_ matches auth.mint_token exactly: "co_" +
-# secrets.token_urlsafe(32), i.e. 43 urlsafe-base64 chars.
+# secrets.token_urlsafe(32), i.e. 43 urlsafe-base64 chars. The rest follow
+# jspark-forge's scripts/lib/redact.js (v0.6.0, MIT) - generic sk- keys, AWS
+# key ids (AKIA, and ASIA for temporary ones), Slack tokens, JWTs - plus PEM
+# private key blocks (to the end of the text when the END line was cut off).
+# co_hook.py keeps an identical copy (a test compares the patterns).
 _URLSAFE = r"A-Za-z0-9_\-"
 TOKEN_SHAPES = re.compile(
     "|".join(
         (
             r"sk-ant-[A-Za-z0-9_\-]{20,}",
+            r"\bsk-[A-Za-z0-9_\-]{20,}",
             r"gh[pousr]_[A-Za-z0-9]{30,}",
             r"github_pat_[A-Za-z0-9_]{30,}",
             rf"(?<![{_URLSAFE}])co_[{_URLSAFE}]{{43}}(?![{_URLSAFE}])",
+            r"\b(?:AKIA|ASIA)[0-9A-Z]{16}\b",
+            r"\bxox[abposr]-[A-Za-z0-9\-]{6,}",
+            r"\beyJ[A-Za-z0-9_\-]+\.eyJ[A-Za-z0-9_\-]+\.[A-Za-z0-9_\-]*",
+            r"-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----[\s\S]*?(?:-----END [A-Z0-9 ]*PRIVATE KEY-----|\Z)",
         )
     )
 )
 # user:password in URL-style values (postgres://u:p@host, https://x:tok@github.com).
 URL_USERINFO = re.compile(r"://[^/\s:@]+:[^/\s@]+@")
+# Labelled secrets: the label stays, the value (group 2's place) becomes MASK.
+# Forge's LABELLED set, widened to keys that CONTAIN a secret word
+# (DB_PASSWORD=, aws_secret_access_key:, accessToken:) but not where the word
+# runs on (max_tokens, tokenizer, passwords); PWD=/OLDPWD= (the working
+# directory) and values that are only a shell reference ($VAR, ${VAR}, $(...))
+# are left alone. Every repeat is bounded (linear time on long input).
+_VALUE_END = r"""[\s&;'",]"""
+LABELLED = (
+    re.compile(r"(\bBearer\s+)[A-Za-z0-9._~+/=\-]{6,}", re.IGNORECASE),
+    re.compile(
+        r"((?<![A-Za-z0-9_.\-])(?!(?-i:(?:OLD)?PWD)=)[A-Za-z0-9_.\-]{0,40}?"
+        r"(?:password|passwd|pwd|secret|token|api[_-]?key)(?![a-z])[A-Za-z0-9_.\-]{0,40}"
+        r"""["']?(?:\s+is)?\s*[:=]\s*["']?)"""
+        rf"(?!\$\{{?[A-Za-z_][A-Za-z0-9_]*\}}?(?={_VALUE_END}|\Z)|\$\()[^\s&;'\",]+",
+        re.IGNORECASE,
+    ),
+    # mysql -p<password> (not -p alone, not --port)
+    re.compile(r"""((?:^|\s)(?:mysql|mysqldump|mariadb)\b[^\n]*?\s-p)(?=\S)(?!ort\b)[^\s'"]+""", re.IGNORECASE),
+)
 
 
 def is_sensitive_name(name: str) -> bool:
@@ -68,8 +98,10 @@ def redact(text: str, secrets: list[str]) -> str:
     # Longest first, so a secret containing another is scrubbed whole.
     for sec in sorted((x for x in secrets if x), key=len, reverse=True):
         text = text.replace(sec, MASK)
-    text = TOKEN_SHAPES.sub(MASK, text)
-    return URL_USERINFO.sub("://***:***@", text)
+    text = URL_USERINFO.sub("://***:***@", TOKEN_SHAPES.sub(MASK, text))
+    for pattern in LABELLED:
+        text = pattern.sub(lambda m: m.group(1) + MASK, text)
+    return text
 
 
 def redact_obj(obj: Any, secrets: list[str]) -> Any:

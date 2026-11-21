@@ -66,7 +66,20 @@ Phase 2 (Task 5):
   with ``status: "filed"``.
 * SessionStart re-adds ``DATA_LINE`` as ``additionalContext`` unless the
   policy's ``trust`` is ``own`` (an unknown value, or a policy that cannot be
-  read, counts as external).
+  read, counts as external); SubagentStart does the same for every helper
+  the agent starts (final wave, forge F94).
+
+Final wave:
+
+* More than ``MAX_RULE_IDS`` (50) hits: the request names the first 50 and
+  is once-only (no ``grant_key``, no ``tool_input``) - never refused for its
+  size.
+* A hook other than PreToolUse that fails is not swallowed: a
+  ``{"event": "guard_error", "hook_event", "error": "<Type>: <redacted
+  message>"}`` record is spooled and best-effort reported (forge F88).
+  PreToolUse keeps failing closed with its deny record.
+* Every spool line is fsynced (and the task dir when the line created the
+  file).
 
 ConfigChange (unverified with a real CLI): exit 2 blocks a settings change
 that sets ``disableAllHooks`` / ``allowManagedHooksOnly`` or disables the
@@ -117,7 +130,10 @@ GRANTED_CONTEXT = "co-guard: allowed by a person's earlier approval (grant {ids}
 SHELL_TOOLS = ("Bash", "Monitor")
 GRANT_SCOPES = ("run", "once")
 GRANT_KEY_KINDS = ("rule", "tool", "command")
-MAX_GRANT_IDS = 20
+MAX_GRANT_IDS = 50
+# rule ids a request names (the server's cap): beyond it the first 50 are sent and the
+# request is once-only (no grant_key, no tool_input), never refused for its size
+MAX_RULE_IDS = 50
 EVENTS = ("PreToolUse", "PostToolUse", "SessionStart", "Stop", "SessionEnd", "SubagentStart", "SubagentStop",
           "ConfigChange")
 # Ruling R17: every tool goes through the hook; rules.evaluate decides by tool name.
@@ -128,15 +144,33 @@ CONFIG_MATCHER = "user_settings|project_settings|local_settings"
 class Refused(Exception):
     """The approval API cannot be trusted or used: deny now, do not wait."""
 
-# Local copy of app.redaction's token shapes (the hook cannot import the app).
+# Local copy of app.redaction's patterns (the hook cannot import the app); a
+# test keeps them identical.
 _URLSAFE = r"A-Za-z0-9_\-"
 _TOKEN_SHAPES = re.compile("|".join((
     r"sk-ant-[A-Za-z0-9_\-]{20,}",
+    r"\bsk-[A-Za-z0-9_\-]{20,}",
     r"gh[pousr]_[A-Za-z0-9]{30,}",
     r"github_pat_[A-Za-z0-9_]{30,}",
     rf"(?<![{_URLSAFE}])co_[{_URLSAFE}]{{43}}(?![{_URLSAFE}])",
+    r"\b(?:AKIA|ASIA)[0-9A-Z]{16}\b",
+    r"\bxox[abposr]-[A-Za-z0-9\-]{6,}",
+    r"\beyJ[A-Za-z0-9_\-]+\.eyJ[A-Za-z0-9_\-]+\.[A-Za-z0-9_\-]*",
+    r"-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----[\s\S]*?(?:-----END [A-Z0-9 ]*PRIVATE KEY-----|\Z)",
 )))
 _URL_USERINFO = re.compile(r"://[^/\s:@]+:[^/\s@]+@")
+_VALUE_END = r"""[\s&;'",]"""
+_LABELLED = (
+    re.compile(r"(\bBearer\s+)[A-Za-z0-9._~+/=\-]{6,}", re.IGNORECASE),
+    re.compile(
+        r"((?<![A-Za-z0-9_.\-])(?!(?-i:(?:OLD)?PWD)=)[A-Za-z0-9_.\-]{0,40}?"
+        r"(?:password|passwd|pwd|secret|token|api[_-]?key)(?![a-z])[A-Za-z0-9_.\-]{0,40}"
+        r"""["']?(?:\s+is)?\s*[:=]\s*["']?)"""
+        rf"(?!\$\{{?[A-Za-z_][A-Za-z0-9_]*\}}?(?={_VALUE_END}|\Z)|\$\()[^\s&;'\",]+",
+        re.IGNORECASE,
+    ),
+    re.compile(r"""((?:^|\s)(?:mysql|mysqldump|mariadb)\b[^\n]*?\s-p)(?=\S)(?!ort\b)[^\s'"]+""", re.IGNORECASE),
+)
 _SECRET_NAME = re.compile(r"TOKEN|SECRET|PASSWORD|PASSWD|API_KEY|PRIVATE_KEY|ACCESS_KEY|CREDENTIAL|DSN"
                           r"|DATABASE_URL|(?<![A-Z])AUTH(?![A-Z])|_KEY$", re.IGNORECASE)
 
@@ -154,6 +188,8 @@ def redact(text, limit=SUMMARY_MAX):
     for sec in _secrets():
         text = text.replace(sec, "***")
     text = _URL_USERINFO.sub("://***:***@", _TOKEN_SHAPES.sub("***", text))
+    for pattern in _LABELLED:
+        text = pattern.sub(lambda m: m.group(1) + "***", text)
     return text if limit is None or len(text) <= limit else text[:limit - 1] + "…"
 
 
@@ -387,18 +423,33 @@ def load_rules():
 
 # -- spool / report ---------------------------------------------------------
 def _spool_strict(record):
-    """Append one line to the spool; raises when it cannot."""
+    """Append one line to the spool and fsync it (and the folder when this
+    write created the file), so a power cut cannot lose the record the
+    worker's watchdog and grant bookkeeping rely on; raises when it cannot."""
     tdir = os.environ.get("CO_TASK_DIR")
     if not tdir:
         raise RuntimeError("CO_TASK_DIR is not set")
     record = dict(record, ts=round(time.time(), 3))
-    line = json.dumps(record, default=str) + "\n"
-    fd = os.open(os.path.join(tdir, "spool.jsonl"), os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o600)
+    data = (json.dumps(record, default=str) + "\n").encode()
+    path = os.path.join(tdir, "spool.jsonl")
     try:
-        if os.write(fd, line.encode()) != len(line.encode()):
+        fd = os.open(path, os.O_WRONLY | os.O_APPEND | os.O_CREAT | os.O_EXCL, 0o600)
+        created = True
+    except FileExistsError:
+        fd = os.open(path, os.O_WRONLY | os.O_APPEND)
+        created = False
+    try:
+        if os.write(fd, data) != len(data):
             raise OSError("short spool write")
+        os.fsync(fd)
     finally:
         os.close(fd)
+    if created:
+        dfd = os.open(tdir, os.O_RDONLY)
+        try:
+            os.fsync(dfd)
+        finally:
+            os.close(dfd)
 
 
 def _spool(record):
@@ -525,19 +576,21 @@ def request_approval(policy, payload, verdict, summary, deadline, info=None):
     tool = str(payload.get("tool_name") or "")
     canon = json.dumps({"tool_name": tool, "tool_input": payload.get("tool_input")}, sort_keys=True, default=str)
     command_hash = hashlib.sha256(canon.encode()).hexdigest()
+    rule_ids = [h.rule_id for h in verdict.hits]
+    once_only = len(rule_ids) > MAX_RULE_IDS
     body = {
         "task_id": policy.get("task_id") or os.environ.get("CO_TASK_ID"),
-        "rule_ids": [h.rule_id for h in verdict.hits],
+        "rule_ids": rule_ids[:MAX_RULE_IDS],
         "tool": tool,
         "summary": "",
         "cwd": redact(payload.get("cwd") or policy.get("cwd") or "", 1000),
         "reason": redact("; ".join(h.reason for h in verdict.hits), 2000),
         "command_hash": command_hash,
         "wait_left": 0.0,
-        "grant_key": grant_key(tool, payload.get("tool_input")),
+        "grant_key": "" if once_only else grant_key(tool, payload.get("tool_input")),
     }
     _fit(body, redact(summary, None))  # redact the whole text first, then cut
-    if tool not in SHELL_TOOLS:
+    if tool not in SHELL_TOOLS and not once_only:
         # Ruling P23: the server checks a non-shell grant_key against the input
         # (never stored). Left out when it does not fit: the request is then
         # approvable once only.
@@ -669,7 +722,7 @@ def grant_cover(policy, payload, verdict, tool, base):
     gkey = grant_key(tool, payload.get("tool_input"))
     with _TaskLock():
         ids = covering_grants(verdict.hits, tool, gkey, grants, _granted_ids(), time.time())
-        if not ids:
+        if not ids or len(ids) > MAX_GRANT_IDS:  # the server takes at most MAX_GRANT_IDS per record
             return False
         rec = dict(base, decision="granted", grant_ids=ids)
         _spool_strict(rec)  # a once grant is used when this line is written; if it cannot be: error, deny
@@ -679,16 +732,30 @@ def grant_cover(policy, payload, verdict, tool, base):
     return True
 
 
-def session_context():
-    """SessionStart: the data line unless the task's project is trusted as own."""
+def session_context(event="SessionStart"):
+    """SessionStart and SubagentStart (helpers the agent starts get it too):
+    the data line unless the task's project is trusted as own."""
     try:
         trust = load_policy().get("trust")
     except Exception:  # noqa: BLE001 - unreadable policy: treat as external (fail safe)
         trust = None
     if trust != "own":
-        context_only(DATA_LINE, "SessionStart")
+        context_only(DATA_LINE, event)
     else:
         _emit(None)
+
+
+def guard_error(event, exc):
+    """A hook other than PreToolUse failed: record it (spool, then a
+    best-effort report) instead of swallowing it. Never raises."""
+    rec = {"event": "guard_error", "hook_event": redact(event or "?", 50),
+           "error": redact(f"{type(exc).__name__}: {exc}", 200)}
+    _spool(rec)
+    try:
+        policy = load_policy()
+    except Exception:  # noqa: BLE001 - no policy, no API address: the spool has it
+        return
+    post_report(policy, rec)
 
 
 def _approved_ids():
@@ -782,20 +849,25 @@ def main(argv):
             _emit(None)
         else:
             other_event(event, payload)
-            if event == "SessionStart":
-                session_context()
+            if event in ("SessionStart", "SubagentStart"):
+                session_context(event)
             else:
                 _emit(None)
-    except BaseException:  # noqa: BLE001 - fail closed on anything
+    except BaseException as exc:  # noqa: BLE001 - fail closed on anything
         if is_pre or event not in EVENTS:
             deny(ERROR_REASON)
             _spool({"event": event or "?", "decision": "deny", "rule_ids": [], "reason": "co-guard error"})
         elif event == "ConfigChange":
             _spool({"event": event, "decision": "blocked", "reason": "co-guard error"})
+            guard_error(event, exc)
             sys.stderr.write("co-guard: settings change blocked (it could not be checked)\n")
             return 2
         else:
-            _emit(None)
+            guard_error(event, exc)
+            if event in ("SessionStart", "SubagentStart"):
+                session_context(event)  # the data line does not depend on the payload
+            else:
+                _emit(None)
     finally:
         if watchdog is not None:
             watchdog.cancel()

@@ -54,37 +54,44 @@ async def _mcp_health_loop():
             continue
 
 
+async def auto_reject_stale(submit=None) -> list[str]:
+    """Cancel tasks left awaiting approval longer than the configured timeout;
+    co-guard (Ruling P24): each one drops its thread's deferred follow-ups
+    (``grants.after_task_finished``). Returns the cancelled task ids."""
+    if settings.approval_timeout_seconds <= 0:
+        return []
+    now = datetime.now(timezone.utc)
+    cutoff = now - timedelta(seconds=settings.approval_timeout_seconds)
+    async with SessionLocal() as s:
+        stale = (
+            await s.execute(
+                select(Task).where(
+                    Task.status == Status.AWAITING_APPROVAL,
+                    Task.created_at < cutoff,
+                )
+            )
+        ).scalars().all()
+        for t in stale:
+            t.status = Status.CANCELLED
+            t.decided_at = now
+            t.completed_at = now
+            t.decision_reason = "Auto-rejected (approval timed out)"
+        await s.commit()
+        ended = [t.id for t in stale]
+    for tid in ended:
+        try:
+            await guard_grants.after_task_finished(tid, submit=submit)
+        except Exception:  # noqa: BLE001
+            pass
+    return ended
+
+
 async def _approval_timeout_loop():
     """Auto-reject approvals left pending longer than the configured timeout."""
     while True:
         await asyncio.sleep(settings.approval_check_interval_seconds)
-        if settings.approval_timeout_seconds <= 0:
-            continue
-        cutoff = datetime.now(timezone.utc) - timedelta(
-            seconds=settings.approval_timeout_seconds
-        )
         try:
-            async with SessionLocal() as s:
-                stale = (
-                    await s.execute(
-                        select(Task).where(
-                            Task.status == Status.AWAITING_APPROVAL,
-                            Task.created_at < cutoff,
-                        )
-                    )
-                ).scalars().all()
-                for t in stale:
-                    t.status = Status.CANCELLED
-                    t.decided_at = datetime.now(timezone.utc)
-                    t.completed_at = datetime.now(timezone.utc)
-                    t.decision_reason = "Auto-rejected (approval timed out)"
-                await s.commit()
-                ended = [t.id for t in stale]
-            for tid in ended:  # co-guard (Ruling P24): drop the thread's deferred follow-ups
-                try:
-                    await guard_grants.after_task_finished(tid, submit=app.state.worker.submit)
-                except Exception:  # noqa: BLE001
-                    pass
+            await auto_reject_stale(app.state.worker.submit)
         except Exception:  # noqa: BLE001
             continue
 

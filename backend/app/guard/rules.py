@@ -737,11 +737,22 @@ def _glob_could_match(pattern, path):
     return len(pp) == len(tp) and all(fnmatch.fnmatchcase(t, p) for t, p in zip(tp, pp))
 
 
+# forge v0.5.1 (F89) CODE_FILE: a name holding "secret"/"credentials" with one of
+# these extensions is source code or a document (secrets.ts makes tokens, it does
+# not hold them), not a secrets store.
+_CODE_FILE = re.compile(r"\.(?:[cm]?[jt]sx?|py|go|rs|java|kt|kts|cs|rb|php|swift|c|h|cc|cpp|hpp|scala|dart|ex|exs"
+                        r"|vue|svelte|md|mdx)$")
+
+
 def is_secret_name(path):
     """forge isSecretName (.env*, *.pem, *.key, id_rsa*, *credentials*, *secret*)
     plus SSH keys, .netrc, .npmrc, .pypirc, .docker/config.json, .kube/config.
     A template word (example, sample, template, dist) exempts a file only as
-    its LAST suffix (.env.example yes, .env.sample.local no)."""
+    its LAST suffix (.env.example yes, .env.sample.local no). Final wave
+    (forge v0.5.1): the *credentials* / *secret* substring case lets source
+    code and documents through (``_CODE_FILE``: secrets.ts, credentials.py,
+    docs/secrets.md); data files (secrets.yml, credentials.json) and every
+    other name above stay held whatever their extension."""
     parts = [p for p in re.split(r"[\\/]", str(path)) if p]
     if not parts:
         return False
@@ -755,8 +766,12 @@ def is_secret_name(path):
     if base in _SECRET_NAMES or (parent == ".docker" and base == "config.json") or \
             (parent == ".kube" and base == "config"):
         return True
-    return (base.startswith(".env") or base.endswith(".pem") or base.endswith(".key") or base.startswith("id_rsa")
-            or base.startswith(("id_ed25519", "id_ecdsa", "id_dsa")) or "credentials" in base or "secret" in base)
+    if (base.startswith(".env") or base.endswith(".pem") or base.endswith(".key") or base.startswith("id_rsa")
+            or base.startswith(("id_ed25519", "id_ecdsa", "id_dsa"))):
+        return True
+    if _CODE_FILE.search(base):
+        return False
+    return "credentials" in base or "secret" in base
 
 
 def _is_template(path):

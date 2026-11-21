@@ -60,8 +60,22 @@ Grants and deny-and-resume (Phase 2, ``guard.grants``):
   ``resume_until`` answers 409 "the agent is giving up on this request; try
   again in a few seconds" (without it: 409 "expired", as before). R25 holds.
 * The card adds ``delivery``, ``resume_until``, ``scope``,
-  ``followup_task_id``, ``grant_ids`` and ``run_keys``. The pending list (the
-  Home / badge count) includes resume-phase requests.
+  ``followup_task_id``, ``grant_ids`` and ``run_keys``, and (final wave) the
+  server's ``can_approve_run`` / ``run_reason`` (``grants.run_grant_problem``:
+  every rule id grantable and a verified key wherever a rule is keyed by the
+  command); ``run`` approval refuses with 409 whenever it is false - nothing is
+  silently skipped. The pending list (the Home / badge count) includes
+  resume-phase requests.
+* Final wave: a request names at most ``MAX_RULE_IDS`` (50) rule ids. A
+  retried POST (same ``Idempotency-Key``, identical content) within
+  ``REPLAY_WINDOW`` seconds of a row a run grant answered replays that row
+  (200) instead of recording a second use. A Bash/Monitor summary holding a
+  ``HIDDEN_CHARS`` character, and a non-shell call whose ``full_summary`` is
+  longer than ``SUMMARY_LIMIT`` or changed by redaction, get no grant key.
+* ``POST /guard/report`` also takes ``{"event": "guard_error", "hook_event",
+  "error"}`` (a hook other than PreToolUse failed): a run-log line only.
+  ``GET /guard/health`` (people): the hook errors of the tasks the viewer can
+  see in the last 48 h - count and latest (the Agent guard page's line).
 * ``POST /guard/report``: a deny with ``status: "filed"`` moves a request
   with ``resume_until`` to the resume phase instead of expiring it; a
   ``granted`` record is taken only when every grant id is a live run grant
@@ -156,6 +170,14 @@ SUMMARY_LIMIT = 8000  # the full command a person decides on (the hook cuts to f
 # Stored request fields, compared whole when an idempotency key is reused.
 CONTENT_FIELDS = ("rule_ids", "tool", "summary", "cwd", "reason", "command_hash", "grant_key")
 GIVING_UP = "the agent is giving up on this request; try again in a few seconds"
+MAX_RULE_IDS = co_hook.MAX_RULE_IDS  # rule ids per request (the hook sends the first 50, once-only beyond)
+REPLAY_WINDOW = 60  # s: a retried POST answered from a run grant replays that answer
+# Characters that can make a command read differently from what runs (the
+# frontend's guard.js HIDDEN_CHARS): a shell summary holding one gets no grant
+# key, so it can only be approved once, inline, after the card revealed them.
+HIDDEN_CHARS = re.compile(
+    "[\u0000-\u0008\u000b-\u001f\u007f-\u009f\u00ad\u034f\u061c\u115f\u180e\u200b-\u200f\u2028\u2029"
+    "\u202a-\u202e\u2060-\u2064\u2066-\u2069\u3164\ufeff\uffa0\U000e0000-\U000e007f]")
 
 
 @router.get("/whoami")
@@ -324,14 +346,18 @@ class ActionApprovalOut(BaseModel):
     followup_task_id: Optional[str] = None
     grant_ids: list = []
     run_keys: list = []  # what "approve for this run" covers: [{rule_id, key_kind, key}]
+    # whether "approve for this run" can work (server-computed), else why not
+    can_approve_run: bool = False
+    run_reason: Optional[str] = None
 
 
-def _card(a: ActionApproval, task_title: str, status: str, can_decide: bool,
-          delivery: str | None = None) -> ActionApprovalOut:
+async def _card(s, a: ActionApproval, task_title: str, status: str, can_decide: bool,
+                delivery: str | None = None, cache: dict | None = None) -> ActionApprovalOut:
+    problem = await guard_grants.run_grant_problem(s, a, cache)
     return ActionApprovalOut(
         delivery=delivery or a.delivery or "inline", resume_until=_aware(a.resume_until) if a.resume_until else None, scope=a.scope,
         followup_task_id=a.followup_task_id, grant_ids=list(a.grant_ids or []),
-        run_keys=guard_grants.run_keys(a),
+        run_keys=guard_grants.run_keys(a), can_approve_run=problem is None, run_reason=problem,
         id=a.id, task_id=a.task_id, task_title=task_title or "", project_id=a.project_id,
         requested_by=a.requested_by, rule_ids=list(a.rule_ids or []), tool=a.tool or "",
         summary=a.summary or "", cwd=a.cwd or "", reason=a.reason or "", command_hash=a.command_hash or "",
@@ -350,7 +376,7 @@ MAX_COVERED_PER_TASK = 1000  # Ruling P25: auto-approved (covered) rows, apart f
 
 class FileBody(BaseModel):
     task_id: str
-    rule_ids: list[Annotated[str, Field(pattern=RULE_ID_RE, max_length=100)]] = Field([], max_length=20)
+    rule_ids: list[Annotated[str, Field(pattern=RULE_ID_RE, max_length=100)]] = Field([], max_length=MAX_RULE_IDS)
     tool: str = ""
     summary: str = ""
     cwd: str = ""
@@ -367,20 +393,23 @@ class FileBody(BaseModel):
 def _verified_key(body: FileBody, tool: str, summary: str, secrets: list[str]) -> str:
     """Ruling P23: the grant_key only when it stands for what the card shows.
     Bash/Monitor: the key is the hash of the stored summary (so it was neither
-    cut nor changed by redaction). Other tools: the key is the hash of the
-    sent ``tool_input`` and the stored summary is that input's redacted, cut
-    ``full_summary``. Otherwise "" - the request can be approved once only."""
+    cut nor changed by redaction) and the summary has no hidden characters
+    (``HIDDEN_CHARS``). Other tools: the key is the hash of the sent
+    ``tool_input`` and the stored summary is that input's ``full_summary``
+    exactly - within ``SUMMARY_LIMIT`` and unchanged by redaction. Otherwise
+    "" - the request can be approved once only."""
     key = body.grant_key
     if not key or tool != body.tool:
         return ""
     if tool in co_hook.SHELL_TOOLS:
-        ok = co_hook.grant_key(tool, {"command": summary}) == key
+        ok = co_hook.grant_key(tool, {"command": summary}) == key and not HIDDEN_CHARS.search(summary)
     else:
         if body.tool_input is None:
             return ""
         try:
-            ok = (co_hook.grant_key(tool, body.tool_input) == key and summary == _cut(
-                redact(co_hook.full_summary(tool, body.tool_input), secrets), SUMMARY_LIMIT))
+            full = co_hook.full_summary(tool, body.tool_input)
+            ok = (co_hook.grant_key(tool, body.tool_input) == key and len(full) <= SUMMARY_LIMIT
+                  and redact(full, secrets) == full and summary == full)
         except Exception:  # noqa: BLE001 - an input we cannot check is not verified
             ok = False
     return key if ok else ""
@@ -391,7 +420,7 @@ def _content(body: FileBody, secrets: list[str]) -> dict:
     tool = _cut(redact(body.tool, secrets), 200)
     summary = _cut(redact(body.summary, secrets), SUMMARY_LIMIT)
     return {
-        "rule_ids": [redact(str(r), secrets)[:64] for r in body.rule_ids][:20],
+        "rule_ids": [redact(str(r), secrets)[:64] for r in body.rule_ids][:MAX_RULE_IDS],
         "tool": tool,
         "summary": summary,
         "cwd": _cut(redact(body.cwd, secrets), 1000),
@@ -405,6 +434,20 @@ def _same_content(a: ActionApproval, content: dict) -> bool:
     return all(
         (list(a.rule_ids or []) if k == "rule_ids" else getattr(a, k)) == content[k] for k in CONTENT_FIELDS
     )
+
+
+async def _find_covered(s, task_id: str, key: str, now: datetime) -> ActionApproval | None:
+    """The latest row this key got answered from a run grant within
+    ``REPLAY_WINDOW`` (a retried POST replays it: one call, one use)."""
+    return (
+        await s.execute(
+            select(ActionApproval)
+            .where(ActionApproval.task_id == task_id, ActionApproval.idempotency_key == key, _is_covered_row(),
+                   ActionApproval.created_at >= now - timedelta(seconds=REPLAY_WINDOW))
+            .order_by(ActionApproval.created_at.desc())
+            .limit(1)
+        )
+    ).scalar_one_or_none()
 
 
 async def _find_pending(s, task_id: str, key: str) -> ActionApproval | None:
@@ -488,6 +531,10 @@ async def file_request(
             prior = await _find_pending(s, task.id, key)
             if prior is not None and await _settle(s, prior, task) == "pending":
                 return _replay(prior, content, response)
+            answered = await _find_covered(s, task.id, key, now)
+            if answered is not None and _same_content(answered, content):
+                response.status_code = 200  # the hook's retry of a call a run grant already answered
+                return _filed(answered)
         is_covered = _is_covered_row()
         counts = (
             await s.execute(
@@ -589,10 +636,10 @@ async def list_requests(
         rows = (
             await s.execute(stmt.order_by(ActionApproval.created_at.desc()).limit(LIST_LIMIT))
         ).all()
-    out = []
-    for a, t in rows:
-        st, delivery = _state(a, t.status, now)
-        out.append(_card(a, t.title, st, decidable, delivery))
+        out, cache = [], {}
+        for a, t in rows:
+            st, delivery = _state(a, t.status, now)
+            out.append(await _card(s, a, t.title, st, decidable, delivery, cache))
     return out
 
 
@@ -615,7 +662,7 @@ async def get_request(approval_id: str, request: Request):
         if a is None or task is None or not await can_see_task(s, p, task):
             raise HTTPException(404, "Not found")
         st = await _settle(s, a, task)
-        return _card(a, task.title, st, await _may_decide(s, p, task))
+        return await _card(s, a, task.title, st, await _may_decide(s, p, task))
 
 
 # ---- deciding (people) --------------------------------------------------------------------
@@ -682,7 +729,7 @@ async def _decide(request: Request, approval_id: str, status: str, reason: str |
             await s.commit()
             await s.refresh(a)
             jobs = [(t.id, t.priority, t.created_at) for t in spawned]
-            out = _card(a, task.title, a.status, False)
+            out = await _card(s, a, task.title, a.status, False)
     w = _worker(request)
     for job in jobs:
         if w is not None:
@@ -706,6 +753,8 @@ async def reject(approval_id: str, request: Request, body: Optional[RejectBody] 
 # What a "granted" report keeps: the hook's own spool record minus its ts, so the
 # worker keys both copies alike (one TaskDetail line, one counted use).
 GRANTED_REPORT_KEYS = ("event", "decision", "grant_ids", "tool", "rule_ids", "summary", "tool_use_id", "agent_id")
+# What a guard_error report keeps (the hook's spooled record minus its ts).
+GUARD_ERROR_KEYS = ("event", "hook_event", "error")
 
 
 @api.post("/report", status_code=202, dependencies=[Depends(_limit_body)])
@@ -730,6 +779,13 @@ async def report(request: Request, rec: dict = Body(...)):
                             .where(mine, ActionApproval.delivery != "resume")
                             .values(status="expired"))
             await s.commit()
+    if rec.get("event") == "guard_error":
+        # a hook other than PreToolUse failed (final wave, forge F88): a run-log
+        # line only - the agent could send one too, so it changes nothing else
+        rec = {k: str(rec[k])[:300] for k in GUARD_ERROR_KEYS if isinstance(rec.get(k), str)}
+        w = _worker(request)
+        accepted = bool(w is not None and hasattr(w, "report_guard") and await w.report_guard(task_id, rec))
+        return {"accepted": accepted}
     # The token is in the agent's env, so the agent can call this too: accept
     # only what the hook reports (PreToolUse deny / approved / granted), an
     # "approved" record only for a request of this task a person approved, and
@@ -772,6 +828,43 @@ async def report(request: Request, rec: dict = Body(...)):
             await guard_grants.record_use(s, grants, count=True)
             await s.commit()
     return {"accepted": accepted}
+
+
+# ---- health (people) -------------------------------------------------------------------------
+
+HEALTH_WINDOW_HOURS = 48
+HEALTH_SCAN_LIMIT = 5000
+
+
+@api.get("/health")
+async def guard_health(request: Request):
+    """co-guard's doctor line (forge F88/F108): hook errors (``guard_error``
+    run-log events: a hook other than PreToolUse failed) in the last
+    ``HEALTH_WINDOW_HOURS`` hours, over the tasks the viewer can see - the
+    count and the latest one. People only."""
+    from ..models import TaskEvent
+
+    p = request.state.principal
+    _person(p)
+    since = _now() - timedelta(hours=HEALTH_WINDOW_HOURS)
+    async with SessionLocal() as s:
+        visible = select(Task.id).where(await task_visibility_clause(s, p))
+        rows = (await s.execute(
+            select(TaskEvent.task_id, TaskEvent.payload, TaskEvent.created_at)
+            .where(TaskEvent.type == "guard", TaskEvent.created_at >= since, TaskEvent.task_id.in_(visible))
+            .order_by(TaskEvent.created_at.desc(), TaskEvent.id.desc())
+            .limit(HEALTH_SCAN_LIMIT)
+        )).all()
+    errors = [(tid, pl, at) for tid, pl, at in rows if isinstance(pl, dict) and pl.get("event") == "guard_error"]
+    latest = errors[0] if errors else None
+    return {"hook_errors": {
+        "window_hours": HEALTH_WINDOW_HOURS,
+        "count": len(errors),
+        "latest_at": _aware(latest[2]) if latest else None,
+        "latest_task_id": latest[0] if latest else None,
+        "latest_hook_event": latest[1].get("hook_event") if latest else None,
+        "latest_error": latest[1].get("error") if latest else None,
+    }}
 
 
 # ---- grants (people) -------------------------------------------------------------------------

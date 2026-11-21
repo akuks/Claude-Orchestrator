@@ -766,6 +766,7 @@ class WorkerManager:
     _GUARD_KEYS = (
         "event", "decision", "rule_ids", "grant_ids", "tool", "summary", "reason", "status", "request_id",
         "tool_use_id", "agent_id", "agent_type", "source", "ts",
+        "hook_event", "error",  # guard_error records (a hook other than PreToolUse failed)
     )
 
     async def _prepare_guard(self, task_id, guard_project, workspace, sub_env, mcp, emit, owner_id=None):
@@ -973,7 +974,7 @@ class WorkerManager:
         payload = redact_obj({k: rec[k] for k in cls._GUARD_KEYS if k in rec}, secrets or [])
         for k, v in list(payload.items()):
             if k in ("rule_ids", "grant_ids"):
-                payload[k] = [str(x)[:64] for x in v][:20] if isinstance(v, list) else []
+                payload[k] = [str(x)[:64] for x in v][:guard_grants.MAX_GRANT_IDS] if isinstance(v, list) else []
             elif isinstance(v, str):
                 payload[k] = v[:2000]
             elif not isinstance(v, (int, float, bool)) and v is not None:
