@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { api } from '../api'
 import { parseTime } from '../time'
-import { actionTitle, ruleName } from '../guard/guard'
+import { actionTitle, revealHidden, ruleName } from '../guard/guard'
 
 // Data behind Home: what needs the viewer, live workflows, their recent work
 // and today's cost. Every source is fetched independently (one failing never
@@ -56,7 +56,7 @@ export function selectNeedsYou({ approvals, actionApprovals, failedTasks, schedu
       detail: [a.task_title, (a.rule_ids || []).map(ruleName).join(', ')].filter(Boolean).join(' · ') || null,
       at: a.created_at,
       // the whole request, for the row's tooltip (Home never approves it: R27)
-      fullTitle: a.tool ? `${a.tool}: ${a.summary || ''}` : a.summary || '',
+      fullTitle: revealHidden(a.tool ? `${a.tool}: ${a.summary || ''}` : a.summary || '').text,
     })
   for (const t of failedTasks || []) {
     if (!meId || t.created_by !== meId) continue

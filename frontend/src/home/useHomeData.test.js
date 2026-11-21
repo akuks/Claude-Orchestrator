@@ -46,6 +46,14 @@ describe('selectNeedsYou', () => {
     expect(items[1].fullTitle).toBe('Bash: git reset --hard\nmore')
   })
 
+  it('the row tooltip (fullTitle) shows hidden characters as markers', () => {
+    const items = selectNeedsYou({
+      ...base,
+      actionApprovals: [{ id: 'r1', task_id: 't1', tool: 'Bash', summary: 'echo a\u202e;rm x', rule_ids: [], created_at: hoursAgo(0.1) }],
+    })
+    expect(items[0].fullTitle).toBe('Bash: echo a⟦U+202E⟧;rm x')
+  })
+
   it('keeps only own failed tasks within the last 24h', () => {
     const items = selectNeedsYou({
       ...base,
