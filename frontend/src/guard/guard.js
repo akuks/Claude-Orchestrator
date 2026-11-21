@@ -117,28 +117,31 @@ export function revealHidden(text) {
 
 // ---- approve for this run ----
 
-const HEX64 = /^[0-9a-f]{64}$/
-// Whether "Approve for this run" can work for this card: the server lists what a
-// run grant would cover (run_keys); a rule keyed to the command needs the
-// verified command key, which agent-filed or cut requests lack (409 otherwise).
+// Whether "Approve for this run" can work for this card: the server decides
+// (can_approve_run: a verified key where one is needed, every rule grantable,
+// no hard rule) and says why not (run_reason); the client never guesses.
 export function canApproveForRun(card) {
-  const keys = Array.isArray(card?.run_keys) ? card.run_keys : []
-  if (!keys.length) return false
-  return keys.every((k) => k && (k.key_kind !== 'command' || HEX64.test(String(k.key || ''))))
+  return card?.can_approve_run === true
+}
+export function runReason(card) {
+  return (card && typeof card.run_reason === 'string' && card.run_reason) || ONCE_ONLY_REASON
+}
+// What a grant covers, in words (the grants list and the run-grant tooltip).
+export function grantCovers(g) {
+  if (g?.key_kind === 'rule') return g.rule_id === 'guest-quarantine' ? "all of this repo's code" : 'every call'
+  if (g?.key_kind === 'tool') return `every call of the tool ${revealHidden(g.key).text}`
+  return 'the same command'
 }
 export function runGrantTooltip(card) {
   const keys = Array.isArray(card?.run_keys) ? card.run_keys : []
   if (keys.length && keys.every((k) => k.rule_id === 'guest-quarantine')) return QUARANTINE_GRANT_HELP
   const names = [...new Set(keys.map((k) => ruleName(k.rule_id)))]
   const extra = keys.some((k) => k.rule_id === 'guest-quarantine') ? `; ${QUARANTINE_GRANT_HELP.toLowerCase()}` : ''
+  // a tool-keyed grant (MCP) lets every call of that tool through: say so
+  const tools = [...new Set(keys.filter((k) => k.key_kind === 'tool').map((k) => grantCovers(k)))]
+  const wide = tools.map((t) => `. Covers ${t} in this thread for 12 h`).join('')
   const shared = keys.some((k) => k.key_kind === 'command') ? `. ${SHARED_KEY_NOTE}` : ''
-  return `${RUN_GRANT_HELP}${names.length ? ` (${names.join(', ')})` : ''}${extra}${shared}`
-}
-// What a grant covers, in words.
-export function grantCovers(g) {
-  if (g?.key_kind === 'rule') return g.rule_id === 'guest-quarantine' ? "all of this repo's code" : 'every call'
-  if (g?.key_kind === 'tool') return `the tool ${revealHidden(g.key).text}`
-  return 'the same command'
+  return `${RUN_GRANT_HELP}${names.length ? ` (${names.join(', ')})` : ''}${extra}${wide}${shared}`
 }
 
 // Mirrors backend runtime.GUARD_SETTINGS_HELP (keep the two in step).
@@ -211,6 +214,8 @@ export function guardLine(p = {}, ctx = {}) {
   }
   if (ev === 'watchdog')
     return { kind: 'watchdog', text: `co-guard watchdog stopped the task: ${p.reason || 'a call ran unchecked'}` }
+  if (ev === 'guard_error')
+    return { kind: 'error', text: `co-guard hook error in ${p.hook_event || 'a hook'}: ${p.error || 'unknown error'}` }
   if (ev === 'unchecked_error')
     return { kind: 'info', text: `${p.tool || 'A tool'} call rejected before co-guard ran (not executed)` }
   if (ev === 'ConfigChange')
@@ -272,6 +277,19 @@ export function guardLine(p = {}, ctx = {}) {
   }
   const bits = [p.agent_type, p.source, p.reason].filter(Boolean).join(', ')
   return { kind: 'info', text: `${ev || 'co-guard'}${bits ? ` (${bits})` : ''}` }
+}
+
+// The doctor line of GET /guard/health: hook errors (a hook other than
+// PreToolUse failed) in the last window_hours; null when there were none.
+export function hookErrorsLine(health) {
+  const h = health?.hook_errors
+  const n = Number(h?.count) || 0
+  if (!n) return null
+  const where = h.latest_hook_event ? ` (${h.latest_hook_event})` : ''
+  const latest = h.latest_error ? `; latest${where}: ${h.latest_error}` : ''
+  return revealHidden(
+    `${n} co-guard hook error${n === 1 ? '' : 's'} in the last ${Number(h.window_hours) || 48} h${latest}`,
+  ).text
 }
 
 // A pending request of the run, shown while it waits for a person.

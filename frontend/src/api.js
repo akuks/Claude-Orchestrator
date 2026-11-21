@@ -220,6 +220,7 @@ export const api = {
   deleteGuardRule: (id) => req('DELETE', `/guard/rules/${encodeURIComponent(id)}`),
   guardBuiltins: () => req('GET', '/guard/builtins'),
   guardOrgSettings: () => req('GET', '/guard/org-settings'),
+  guardHealth: () => req('GET', '/guard/health'),
   saveGuardOrgSettings: (payload) => req('PUT', '/guard/org-settings', payload),
   projectRulesFile: (id) => req('GET', `/projects/${encodeURIComponent(id)}/guard/rules-file`),
 

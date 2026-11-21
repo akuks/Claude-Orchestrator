@@ -8,6 +8,7 @@ vi.mock('../api', () => ({
     guardBuiltins: vi.fn(),
     guardOrgSettings: vi.fn(),
     saveGuardOrgSettings: vi.fn(),
+    guardHealth: vi.fn(async () => ({ hook_errors: { count: 0, window_hours: 48 } })),
   },
 }))
 
@@ -38,6 +39,7 @@ beforeEach(() => {
   vi.clearAllMocks()
   api.guardBuiltins.mockImplementation(async () => BUILTINS)
   api.guardOrgSettings.mockImplementation(async () => ({ disabled_rules: ['git-reset-hard'], dev_db_patterns: ['host:*.dev'] }))
+  api.guardHealth.mockImplementation(async () => ({ hook_errors: { count: 0, window_hours: 48 } }))
 })
 afterEach(async () => {
   await view?.unmount()
@@ -96,5 +98,27 @@ describe('OrgGuardView (Settings → Agent guard)', () => {
     expect(q(c, 'org-guard-save')).toBeNull()
     expect(q(c, 'builtin-git-reset-hard').querySelector('input').disabled).toBe(true)
     expect(q(c, 'rule-add-org')).toBeNull()
+  })
+
+  it('shows the hook-error health line when hooks failed lately', async () => {
+    api.guardHealth.mockImplementation(async () => ({
+      hook_errors: { count: 3, window_hours: 48, latest_hook_event: 'SessionEnd', latest_error: 'OSError: disk full' },
+    }))
+    const c = await mount({ isAdmin: true })
+    expect(q(c, 'guard-health').textContent).toContain(
+      '3 co-guard hook errors in the last 48 h; latest (SessionEnd): OSError: disk full',
+    )
+  })
+
+  it('no health line when there were no hook errors, or the check failed', async () => {
+    let c = await mount({ isAdmin: true })
+    expect(q(c, 'guard-health')).toBeNull()
+    await view.unmount()
+    api.guardHealth.mockImplementation(async () => {
+      throw new Error('nope')
+    })
+    c = await mount({ isAdmin: true })
+    expect(q(c, 'guard-health')).toBeNull()
+    expect(q(c, 'builtin-list')).not.toBeNull()
   })
 })

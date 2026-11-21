@@ -165,6 +165,8 @@ import {
   grantCovers,
   revealHidden,
   runGrantTooltip,
+  runReason,
+  hookErrorsLine,
   waitingLine,
 } from './guard'
 
@@ -197,24 +199,30 @@ describe('revealHidden', () => {
 })
 
 describe('approve for this run', () => {
-  it('is offered when every command-keyed rule has the verified key', () => {
-    expect(canApproveForRun({ run_keys: [{ rule_id: 'git-reset-hard', key_kind: 'command', key: KEY }] })).toBe(true)
-    expect(canApproveForRun({ run_keys: [{ rule_id: 'guest-quarantine', key_kind: 'rule', key: '*' }] })).toBe(true)
-    expect(canApproveForRun({ run_keys: [{ rule_id: 'mcp-require-approval', key_kind: 'tool', key: 'mcp__db__q' }] })).toBe(true)
-  })
-  it('is not offered for agent-filed / cut requests (no key) or when nothing is grantable', () => {
-    expect(canApproveForRun({ run_keys: [{ rule_id: 'git-reset-hard', key_kind: 'command', key: '' }] })).toBe(false)
-    expect(canApproveForRun({ run_keys: [] })).toBe(false)
+  it('follows the server: can_approve_run', () => {
+    expect(canApproveForRun({ can_approve_run: true, run_keys: [] })).toBe(true)
+    // the client no longer guesses from run_keys
+    expect(canApproveForRun({ run_keys: [{ rule_id: 'git-reset-hard', key_kind: 'command', key: KEY }] })).toBe(false)
+    expect(canApproveForRun({ can_approve_run: false, run_keys: [{ rule_id: 'x', key_kind: 'rule', key: '*' }] })).toBe(false)
     expect(canApproveForRun({})).toBe(false)
-    expect(
-      canApproveForRun({
-        run_keys: [
-          { rule_id: 'guest-quarantine', key_kind: 'rule', key: '*' },
-          { rule_id: 'secret-files', key_kind: 'command', key: '' },
-        ],
-      }),
-    ).toBe(false)
+    expect(canApproveForRun(null)).toBe(false)
+  })
+  it('the reason comes from the server when it gives one', () => {
+    expect(runReason({ run_reason: 'readonly-source can only be approved once' })).toBe(
+      'readonly-source can only be approved once',
+    )
+    expect(runReason({ run_reason: null })).toBe(ONCE_ONLY_REASON)
+    expect(runReason({})).toBe(ONCE_ONLY_REASON)
     expect(ONCE_ONLY_REASON).toMatch(/can't be approved for the whole run/)
+  })
+  it('a tool-keyed grant says how wide it is, in the words of the grants list', () => {
+    const k = { rule_id: 'mcp-require-approval', key_kind: 'tool', key: 'mcp__db__q' }
+    expect(grantCovers(k)).toBe('every call of the tool mcp__db__q')
+    expect(runGrantTooltip({ run_keys: [k] })).toBe(
+      'These rules, this thread, 12 h (MCP tool needs approval). Covers every call of the tool mcp__db__q in this thread for 12 h',
+    )
+    const two = runGrantTooltip({ run_keys: [k, { ...k, rule_id: 'db-write' }] })
+    expect(two.match(/every call of the tool mcp__db__q/g)).toHaveLength(1)
   })
   it('tooltips say what the grant covers', () => {
     expect(runGrantTooltip({ run_keys: [{ rule_id: 'git-reset-hard', key_kind: 'command', key: KEY }] })).toBe(
@@ -224,7 +232,7 @@ describe('approve for this run', () => {
       QUARANTINE_GRANT_HELP,
     )
     expect(QUARANTINE_GRANT_HELP).toBe("Lets this repo's code run in this thread for 12 h")
-    expect(grantCovers({ key_kind: 'tool', key: 'mcp__db__q' })).toBe('the tool mcp__db__q')
+    expect(grantCovers({ key_kind: 'tool', key: 'mcp__db__q' })).toBe('every call of the tool mcp__db__q')
     expect(grantCovers({ key_kind: 'rule', rule_id: 'guest-quarantine' })).toBe("all of this repo's code")
     expect(grantCovers({ key_kind: 'command' })).toBe('the same command')
   })
@@ -297,6 +305,31 @@ describe('fix round 1: wider hidden-character set', () => {
     expect(runGrantTooltip({ run_keys: [{ rule_id: 'mcp-require-approval', key_kind: 'tool', key: 'mcp__x__y' }] })).not.toMatch(/Monitor/)
   })
   it('a tool grant key is revealed', () => {
-    expect(grantCovers({ key_kind: 'tool', key: 'mcp__a\u202e__b' })).toBe('the tool mcp__a⟦U+202E⟧__b')
+    expect(grantCovers({ key_kind: 'tool', key: 'mcp__a\u202e__b' })).toBe('every call of the tool mcp__a⟦U+202E⟧__b')
+  })
+})
+
+describe('guard_error run-log line (final wave)', () => {
+  it('names the hook and the error', () => {
+    expect(guardLine({ event: 'guard_error', hook_event: 'SessionEnd', error: 'OSError: disk full' })).toEqual({
+      kind: 'error',
+      text: 'co-guard hook error in SessionEnd: OSError: disk full',
+    })
+    expect(guardLine({ event: 'guard_error' })).toEqual({ kind: 'error', text: 'co-guard hook error in a hook: unknown error' })
+  })
+})
+
+describe('hook error health line (final wave)', () => {
+  it('says how many and the latest, or nothing', () => {
+    expect(hookErrorsLine(null)).toBeNull()
+    expect(hookErrorsLine({ hook_errors: { count: 0, window_hours: 48 } })).toBeNull()
+    expect(
+      hookErrorsLine({
+        hook_errors: { count: 2, window_hours: 48, latest_hook_event: 'Stop', latest_error: 'ValueError: x\u202e' },
+      }),
+    ).toBe('2 co-guard hook errors in the last 48 h; latest (Stop): ValueError: x⟦U+202E⟧')
+    expect(hookErrorsLine({ hook_errors: { count: 1, window_hours: 48, latest_error: 'E' } })).toBe(
+      '1 co-guard hook error in the last 48 h; latest: E',
+    )
   })
 })

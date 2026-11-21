@@ -15,7 +15,6 @@ import relativeTime from 'dayjs/plugin/relativeTime'
 import { api } from '../api'
 import { parseTime, when } from '../time'
 import {
-  ONCE_ONLY_REASON,
   RESUME_BADGE,
   RESUME_HELP,
   canApproveForRun,
@@ -24,6 +23,7 @@ import {
   revealHidden,
   ruleName,
   runGrantTooltip,
+  runReason,
 } from './guard'
 import './guard.css'
 
@@ -34,7 +34,8 @@ dayjs.extend(relativeTime)
 // is visible, with a per-second countdown to when decisions close. Every
 // request field is rendered as plain text — never HTML — and the command block
 // shows bidi / zero-width characters as visible ⟦U+XXXX⟧ markers.
-// Phase 2: Approve once / Approve for this run (run_keys), and the resume
+// Phase 2: Approve once / Approve for this run (the server says whether it can:
+// can_approve_run, run_reason), and the resume
 // phase (deny-and-resume: the agent stopped; approving starts a follow-up).
 
 export const POLL_MS = 3000
@@ -272,7 +273,7 @@ function ActionCard({ card, state, now, busy, names, focused, onApprove, onRejec
                   Approve once
                 </Button>
               </Popconfirm>
-              <Tooltip title={runOk ? runGrantTooltip(card) : ONCE_ONLY_REASON}>
+              <Tooltip title={runOk ? runGrantTooltip(card) : runReason(card)}>
                 <span data-testid={`action-run-${id}`}>
                   <Popconfirm
                     disabled={!runOk || !confirmText || busy}

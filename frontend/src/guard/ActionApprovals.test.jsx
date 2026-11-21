@@ -274,7 +274,8 @@ describe('ActionApprovals cards', () => {
 
 describe('ActionApprovals: approve scope, resume phase, hidden characters', () => {
   const KEY = 'b'.repeat(64)
-  const runCard = (over = {}) => card({ run_keys: [{ rule_id: 'git-reset-hard', key_kind: 'command', key: KEY }], ...over })
+  const runCard = (over = {}) =>
+    card({ run_keys: [{ rule_id: 'git-reset-hard', key_kind: 'command', key: KEY }], can_approve_run: true, ...over })
 
   it('offers Approve once and Approve for this run; run sends scope "run"', async () => {
     api.listActionApprovals.mockImplementation(async () => [runCard()])
@@ -298,7 +299,9 @@ describe('ActionApprovals: approve scope, resume phase, hidden characters', () =
   })
 
   it('an agent-filed or cut request (no verified key) offers Approve once only, with the reason', async () => {
-    api.listActionApprovals.mockImplementation(async () => [card({ run_keys: [{ rule_id: 'git-reset-hard', key_kind: 'command', key: '' }] })])
+    api.listActionApprovals.mockImplementation(async () => [
+      card({ run_keys: [{ rule_id: 'git-reset-hard', key_kind: 'command', key: '' }], can_approve_run: false, run_reason: null }),
+    ])
     const c = await mount()
     expect(btn(c, 'Approve for this run').disabled).toBe(true)
     expect(btn(c, 'Approve once').disabled).toBe(false)
@@ -314,9 +317,47 @@ describe('ActionApprovals: approve scope, resume phase, hidden characters', () =
     expect(btn(c, 'Approve for this run').disabled).toBe(true)
   })
 
+  it('the server decides: a card with a verified key but a rule that cannot be granted stays once-only, with its reason', async () => {
+    api.listActionApprovals.mockImplementation(async () => [
+      runCard({
+        rule_ids: ['git-reset-hard', 'readonly-source'],
+        can_approve_run: false,
+        run_reason: 'readonly-source can only be approved once (server)',
+      }),
+    ])
+    const c = await mount()
+    expect(btn(c, 'Approve for this run').disabled).toBe(true)
+    await act(async () => {
+      q(c, 'action-run-r1').dispatchEvent(new MouseEvent('mouseover', { bubbles: true }))
+      await vi.advanceTimersByTimeAsync(300)
+    })
+    expect(document.body.textContent).toContain('readonly-source can only be approved once (server)')
+  })
+
+  it('a tool-keyed run grant says it covers every call of the tool', async () => {
+    api.listActionApprovals.mockImplementation(async () => [
+      card({
+        tool: 'mcp__db__q',
+        rule_ids: ['mcp-require-approval'],
+        can_approve_run: true,
+        run_keys: [{ rule_id: 'mcp-require-approval', key_kind: 'tool', key: 'mcp__db__q' }],
+      }),
+    ])
+    const c = await mount()
+    await act(async () => {
+      q(c, 'action-run-r1').dispatchEvent(new MouseEvent('mouseover', { bubbles: true }))
+      await vi.advanceTimersByTimeAsync(300)
+    })
+    expect(document.body.textContent).toContain('every call of the tool mcp__db__q in this thread for 12 h')
+  })
+
   it('a quarantine card explains the run grant', async () => {
     api.listActionApprovals.mockImplementation(async () => [
-      card({ rule_ids: ['guest-quarantine'], run_keys: [{ rule_id: 'guest-quarantine', key_kind: 'rule', key: '*' }] }),
+      card({
+        rule_ids: ['guest-quarantine'],
+        can_approve_run: true,
+        run_keys: [{ rule_id: 'guest-quarantine', key_kind: 'rule', key: '*' }],
+      }),
     ])
     const c = await mount()
     await act(async () => {

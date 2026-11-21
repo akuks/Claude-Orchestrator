@@ -3,7 +3,7 @@ import { Alert, Button, Card, Checkbox, Select, Space, Tag, Tooltip, Typography,
 import { LockOutlined, SafetyOutlined } from '@ant-design/icons'
 import { api } from '../api'
 import RuleTable from './RuleTable'
-import { DEV_DB_HELP, LOCKED_HELP, RM_RF_DISABLE_HELP, ruleName } from './guard'
+import { DEV_DB_HELP, LOCKED_HELP, RM_RF_DISABLE_HELP, hookErrorsLine, ruleName } from './guard'
 import './guard.css'
 
 const sameSet = (a, b) => a.length === b.length && a.every((x) => b.includes(x))
@@ -69,6 +69,7 @@ export default function OrgGuardView({ isAdmin = false }) {
   const [patterns, setPatterns] = useState([])
   const [error, setError] = useState(null)
   const [saving, setSaving] = useState(false)
+  const [health, setHealth] = useState(null)
 
   const load = useCallback(async () => {
     try {
@@ -85,6 +86,17 @@ export default function OrgGuardView({ isAdmin = false }) {
   useEffect(() => {
     load()
   }, [load])
+  // co-guard's doctor line (hook errors lately); a failed check shows nothing
+  useEffect(() => {
+    let alive = true
+    Promise.resolve()
+      .then(() => api.guardHealth?.())
+      .then((h) => alive && setHealth(hookErrorsLine(h)))
+      .catch(() => alive && setHealth(null))
+    return () => {
+      alive = false
+    }
+  }, [])
 
   const dirty = useMemo(
     () => !sameSet(disabled, saved.disabled_rules) || !sameSet(patterns, saved.dev_db_patterns),
@@ -120,6 +132,16 @@ export default function OrgGuardView({ isAdmin = false }) {
       </Typography.Paragraph>
       {!isAdmin && (
         <Alert type="info" showIcon style={{ marginBottom: 16 }} message="Only admins can change the org's guard settings." />
+      )}
+      {health && (
+        <Alert
+          type="warning"
+          showIcon
+          style={{ marginBottom: 16 }}
+          data-testid="guard-health"
+          message={health}
+          description="A hook that fails is recorded in its run's log; look there for what happened."
+        />
       )}
 
       <Card className="co-guard-panel" title="Org rules" size="small">

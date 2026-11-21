@@ -63,7 +63,7 @@ describe('RunGrants', () => {
     api.listGrants.mockImplementation(async () => [grant({ rule_id: 'mcp-require-approval', key_kind: 'tool', key: 'mcp__db\u202e__q' })])
     view = await render(<RunGrants />)
     await flush()
-    expect(view.container.textContent).toContain('the tool mcp__db⟦U+202E⟧__q')
+    expect(view.container.textContent).toContain('every call of the tool mcp__db⟦U+202E⟧__q')
   })
 
   it('fix round 1: nothing reloads or sets state after unmount', async () => {
