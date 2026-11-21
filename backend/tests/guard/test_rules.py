@@ -867,7 +867,8 @@ def test_every_rule_id_is_known():
     expected = {"rm-rf-outside", "git-force-push-main", "git-reset-hard", "git-clean-fdx", "git-stash-drop",
                 "secret-files", "chmod-wide", "pipe-to-shell", "self-protect", "mcp-require-approval",
                 "mcp-block", "unparseable", "uncertain-command", "git-internals", "agent-config",
-                "unsupported-shell", "unknown-tool", "sql-destroy", "db-write"}
+                "unsupported-shell", "unknown-tool", "sql-destroy", "db-write", "guest-quarantine",
+                "readonly-source"}
     assert set(RULES) == expected
 
 
@@ -2914,4 +2915,306 @@ def test_p13_shell_writes_into_the_rules_dir_are_agent_config(env, cmd):
 @pytest.mark.parametrize("cmd", ["cat .claude-orchestrator/rules.md", "grep -r Never .claude-orchestrator",
                                  "rm -rf build/*", "echo x > notes.md"])
 def test_p13_reads_stay_free(env, cmd):
+    assert "agent-config" not in ids(bash(env, cmd))
+
+
+# ===========================================================================
+# Task 3: guest-quarantine (forge quarantined(), F4-F7) and readonly-source (F37)
+# ===========================================================================
+def qbash(env, cmd, cwd=None, **policy):
+    return bash(env, cmd, cwd=cwd, **dict({"quarantine": True}, **policy))
+
+
+QUARANTINE_HELD = [
+    # forge tests/blocklist.test.js 'guest-quarantine'
+    "npm install", "npm ci", "pnpm install", "yarn", "pip install -r requirements.txt", "python -m pytest",
+    "pytest -q", "make", "./scripts/setup.sh", "bash scripts/build.sh", "docker compose up", "cargo build",
+    "go test ./...", "npx vite", "node scripts/gen.js", "uv sync", "python setup.py install", "cd sub && npm test",
+    "cargo check", "npm audit fix", "npm --loglevel info install", "python3.11 setup.py build", "cat x.py | python",
+    "echo $(npm install)", "echo `make`", "bundle list", "gradle help", "java -jar build/app.jar", "rspec",
+    "sbt test", "bazel build //...",
+    # the brief's list, versioned names and every stage (nested, wrapped, piped)
+    "./gradlew test", "docker build .", "cat build.sh | bash", "python scripts/x.py", "node22 scripts/gen.js",
+    "pip3.12 install requests", "sudo npm install", "env CI=1 make", "timeout 60 pytest", "bash -c 'npm install'",
+    "ls | xargs npm install", "docker image build .", "conda env create -f environment.yml", "podman run img",
+    "docker-compose up", "source ./env.sh", ". scripts/activate", "sh < build.sh", "python3 < gen.py",
+    "{P}/scripts/run.sh", "sub/build.sh", "pwsh build.ps1", "uv run pytest", "true && npx tsc",
+]
+
+QUARANTINE_FREE = [
+    "git status", "npm view react", "cat package.json", "ls -la", "grep -r foo .", "node /tmp/scratch.js",
+    "yarn info react", "pip --version", "docker ps", "python --version", "go env", "go fmt ./...", "cargo fmt",
+    "eslint --version", "make -n", "npm audit", "npm ls", "pip list", "python /tmp/scratch.py", "node --version",
+    "docker image ls", "conda env list", "bash -c 'ls -la'", "make --dry-run all", "npx --help", "/usr/bin/env",
+    "echo npm install", "ssh-keygen -l -f key.pub",
+]
+
+
+@pytest.mark.parametrize("cmd", QUARANTINE_HELD)
+def test_quarantine_holds_repo_code(env, cmd):
+    v = qbash(env, cmd)
+    assert "guest-quarantine" in ids(v), v
+    assert "guest-quarantine" not in hard_ids(v)
+
+
+@pytest.mark.parametrize("cmd", QUARANTINE_FREE)
+def test_quarantine_leaves_reads_free(env, cmd):
+    assert "guest-quarantine" not in ids(qbash(env, cmd))
+
+
+@pytest.mark.parametrize("cmd", ["npm install", "make", "./scripts/setup.sh", "cat x.py | python"])
+def test_quarantine_off_holds_nothing(env, cmd):
+    assert "guest-quarantine" not in ids(bash(env, cmd))
+    assert "guest-quarantine" not in ids(bash(env, cmd, quarantine=False))
+
+
+def test_quarantine_ignores_the_guard_switch_and_disabled_rules(env):
+    v = qbash(env, "npm install", guard_enabled=False, disabled_rules=["guest-quarantine"])
+    assert v.decision == "approve" and ids(v) == {"guest-quarantine"}, v
+    assert "guest-quarantine" not in rules.DISABLEABLE
+
+
+def test_quarantine_reason_is_forge_text(env):
+    h = [h for h in qbash(env, "npm ci").hits if h.rule_id == "guest-quarantine"][0]
+    assert h.reason == RULES["guest-quarantine"][0]
+    assert "runs code from a repo" in h.reason
+
+
+def test_quarantine_inside_repo_means_project_dir(env, tmp_path):
+    other = tmp_path / "elsewhere"
+    other.mkdir()
+    (other / "x.py").write_text("print(1)\n")
+    assert "guest-quarantine" not in ids(qbash(env, f"python {other}/x.py"))
+    assert "guest-quarantine" not in ids(qbash(env, "python x.py", cwd=other))
+    assert "guest-quarantine" in ids(qbash(env, f"cd {env.P} && python x.py", cwd=other))
+    # a symlink outside the project to a script inside it is the repo's code
+    (env.P / "gen.py").write_text("print(1)\n")
+    (other / "link.py").symlink_to(env.P / "gen.py")
+    assert "guest-quarantine" in ids(qbash(env, f"python {other}/link.py"))
+    # case-folded (Ruling R9)
+    assert "guest-quarantine" in ids(qbash(env, f"python {str(env.P).upper()}/gen.py"))
+
+
+@pytest.mark.parametrize("value", ["yes", 1, [], {"on": True}])
+def test_quarantine_malformed_value_holds(env, value):
+    assert "guest-quarantine" in ids(bash(env, "npm install", quarantine=value))
+
+
+@pytest.mark.parametrize("value", [None, False])
+def test_quarantine_none_or_false_is_off(env, value):
+    assert bash(env, "npm install", quarantine=value).decision == "allow"
+
+
+def test_quarantine_grant_does_not_hide_other_hits(env):
+    v = qbash(env, "npm install && git reset --hard")
+    assert ids(v) == {"guest-quarantine", "git-reset-hard"}, v
+
+
+# ---- readonly-source -------------------------------------------------------
+@pytest.fixture
+def ro(env, tmp_path):
+    ref = tmp_path / "refs" / "legacy"
+    (ref / "old").mkdir(parents=True)
+    (ref / "a.txt").write_text("a\n")
+    (ref / "a.c").write_text("int x;\n")
+    (env.P / "vendor" / "old").mkdir(parents=True)
+    (env.P / "src").mkdir()
+    env.R, env.V = ref, env.P / "vendor" / "old"
+    env.policy["readonly_paths"] = [
+        {"path": str(ref), "reason": "migrating from, never edit", "source": "reference"},
+        {"path": "vendor/old", "reason": "", "source": "project"},
+    ]
+    return env
+
+
+def rfmt(env, text):
+    return env.fmt(text.replace("{R}", str(env.R)).replace("{V}", str(env.V)))
+
+
+def rbash(env, cmd, cwd=None, **policy):
+    pol = dict(env.policy, **policy)
+    return evaluate("Bash", {"command": rfmt(env, cmd)}, pol, rfmt(env, str(cwd)) if cwd else str(env.P))
+
+
+RO_DENIED = [
+    # forge tests/readonly.test.js BASH_POS (../legacy-app -> {R})
+    "echo x > {R}/a.txt", "rm -rf {R}/old", "mv notes.txt {R}/", "cp a.txt {R}/b.txt",
+    "sed -i 's/a/b/' {R}/a.c", "git -C {R} commit -am x", "printf x | tee {R}/t.txt", "rm vendor/old/x.js",
+    "touch {R}/new.txt", "git -C {R} checkout -- .",
+    # Review Focus 3 and the rest of "change"
+    "cp x {R}/", "mv {R}/a.txt b", "rm -rf {R}/..", "rm -rf vendor", "rm -rf vendor/old", "echo x >> vendor/old/f",
+    "mkdir {R}/d", "chmod 644 {R}/a.c", "chmod -R 755 {R}/..", "chown me {R}/a.c", "truncate -s0 {R}/a.c",
+    "ln -s /x {R}/l", "rsync -a src/ {R}/", "dd if=/dev/zero of={R}/a.c", "curl -o {R}/x https://e.x/y",
+    "perl -pi -e 's/a/b/' {R}/a.c", "find {R} -name '*.o' -delete", "find {R}/.. -name '*.o' -delete",
+    "find . -name '*.pyc' -delete", "rmdir {R}/old", "unlink {R}/a.txt", "install -m 644 x {R}/x",
+    "cd {R} && git commit -am x", "cd {R} && echo x > a.txt", "git -C {R} reset --hard", "git -C {R}/old stash",
+    "git -C {R} pull", "git --work-tree={R} checkout .", "git --git-dir {R}/.git commit -m x",
+    "git rm vendor/old/x.js", "git mv vendor/old/a.c src/", "git checkout -- vendor/old",
+    "bash -c 'echo x > {R}/a.txt'", "echo $(touch {R}/z)", "echo x > {R}/$name", "f=1; echo x > {R}/old/$f.txt",
+    "mv {R} /tmp/elsewhere", "mv {P}/vendor /tmp/v", "npx rimraf {R}/old", "sudo tee {R}/a.c < /dev/null",
+    "for f in {R}/*.c; do sed -i s/a/b/ $f; done", "sed -i s/a/b/ {R}/*.c", "tar -xf a.tgz -C {R}",
+    "tar xzf a.tgz --directory={R}/old", "cd {R} && unzip -o a.zip", "unzip a.zip -d vendor/old",
+    "mkdir -p -m 755 {R}/n", "cp -r src vendor/old", "git checkout .", "rm -rf *", "fd -e pyc -X rm",
+    "chmod -R 755 .",
+]
+
+RO_FREE = [
+    # forge BASH_NEG
+    "cat {R}/a.txt", "grep -r foo {R}", "git -C {R} log --oneline", "cp {R}/a.txt .", "ls {R}",
+    "diff {R}/a.c src/a.ts", "echo x > src/new.ts",
+    # more reads
+    "cp {R}/a.txt ./", "cp -r {R}/old ./old-copy", "git -C {R} status", "git -C {R} diff HEAD~1",
+    "cd {R} && cat a.txt && git log", "head {R}/a.c > notes.txt", "find {R} -name '*.c'", "rg foo vendor/old",
+    "tar -czf /tmp/x.tgz -C {R} .", "rm -rf build", "echo x > {R}-new/a", "touch vendor/older", "mkdir vendor/new",
+    "git add src/a.ts", "git commit -m x", "wc -l {R}/a.c | tee out.txt", "cat {R}/a.c | grep x > found.txt",
+    "tar -czf /tmp/r.tgz {R}", "tar -tf {R}/x.tar", "cd {R} && unzip -l a.zip", "git checkout main",
+    "rsync -a {R}/ ./mirror/", "ln -s {R}/a.txt link", "for f in a b; do echo x > $f; done", "rm -f vendor/old.txt",
+    "mkdir -m 755 vendor/new", "cp -r src vendor/",
+]
+
+
+@pytest.mark.parametrize("cmd", RO_DENIED)
+def test_readonly_changes_are_hard(ro, cmd):
+    v = rbash(ro, cmd)
+    assert v.decision == "deny" and "readonly-source" in hard_ids(v), v
+
+
+@pytest.mark.parametrize("cmd", RO_FREE)
+def test_readonly_reads_stay_free(ro, cmd):
+    assert "readonly-source" not in ids(rbash(ro, cmd))
+
+
+@pytest.mark.parametrize("name,inp", [
+    ("Edit", {"file_path": "{R}/a.c", "old_string": "a", "new_string": "b"}),
+    ("Write", {"file_path": "{V}/x.js", "content": "x"}),
+    ("MultiEdit", {"file_path": "{R}/old/m.c", "edits": []}),
+    ("NotebookEdit", {"notebook_path": "{R}/n.ipynb", "new_source": "x"}),
+    ("Write", {"file_path": "{P}/vendor/old/../old/y.js", "content": "x"}),
+])
+def test_readonly_file_tools_are_hard(ro, name, inp):
+    inp = {k: rfmt(ro, v) if isinstance(v, str) else v for k, v in inp.items()}
+    v = evaluate(name, inp, ro.policy, str(ro.P))
+    assert v.decision == "deny" and hard_ids(v) == {"readonly-source"}, v
+
+
+@pytest.mark.parametrize("name,inp", [
+    ("Edit", {"file_path": "{P}/src/a.ts", "old_string": "a", "new_string": "b"}),
+    ("Write", {"file_path": "{P}/vendor/new/x.js", "content": "x"}),
+    ("Write", {"file_path": "{R}-new/x.js", "content": "x"}),
+    ("Read", {"file_path": "{R}/a.c"}),
+    ("Grep", {"pattern": "x", "path": "{R}"}),
+])
+def test_readonly_file_tools_elsewhere_and_reads_are_free(ro, name, inp):
+    inp = {k: rfmt(ro, v) if isinstance(v, str) else v for k, v in inp.items()}
+    assert "readonly-source" not in ids(evaluate(name, inp, ro.policy, str(ro.P)))
+
+
+def test_readonly_reason_names_the_root_and_its_reason(ro):
+    v = tool(ro, "Write", {"file_path": str(ro.R / "a.c"), "content": "x"})
+    assert v.hits[0].reason == f"this changes {ro.R}, which is read-only (migrating from, never edit)"
+    v = tool(ro, "Write", {"file_path": str(ro.V / "a.c"), "content": "x"})
+    assert v.hits[0].reason == "this changes vendor/old, which is read-only"
+
+
+def test_readonly_is_hard_with_the_guard_off_and_everything_disabled(ro):
+    from app.guard.rules import DISABLEABLE
+    v = rbash(ro, "echo x > {R}/a.txt", guard_enabled=False, disabled_rules=sorted(DISABLEABLE))
+    assert v.decision == "deny" and ids(v) == {"readonly-source"}, v
+
+
+def test_readonly_wins_over_confirmable_hits(ro):
+    # rm -rf of the reference's parent: rm-rf-outside alone would be approvable; readonly makes it a deny
+    v = rbash(ro, "rm -rf {R}/..")
+    assert v.decision == "deny" and "readonly-source" in hard_ids(v) and "rm-rf-outside" in ids(v), v
+    # forge: a read-only source inside the project wins over the (free) inside-project delete
+    v = rbash(ro, "rm -rf vendor/old")
+    assert v.decision == "deny" and ids(v) == {"readonly-source"}, v
+
+
+def test_readonly_symlink_into_a_root(ro):
+    (ro.P / "legacy-link").symlink_to(ro.R)
+    assert rbash(ro, "echo x > legacy-link/a.txt").decision == "deny"
+    assert tool(ro, "Write", {"file_path": "{P}/legacy-link/new.c", "content": "x"}).decision == "deny"
+    assert "readonly-source" not in ids(rbash(ro, "cat legacy-link/a.txt"))
+    # a root given through a symlink also covers its real path
+    (ro.H / "ref-alias").symlink_to(ro.R)
+    pol = dict(ro.policy, readonly_paths=[{"path": str(ro.H / "ref-alias"), "reason": "r", "source": "reference"}])
+    assert evaluate("Write", {"file_path": str(ro.R / "a.c"), "content": "x"}, pol, str(ro.P)).decision == "deny"
+    assert evaluate("Write", {"file_path": str(ro.H / "ref-alias" / "a.c"), "content": "x"}, pol,
+                    str(ro.P)).decision == "deny"
+
+
+def test_readonly_case_folded(ro):
+    pol = dict(ro.policy, readonly_paths=[{"path": str(ro.R.parent / "LEGACY"), "reason": "", "source": "reference"}])
+    v = evaluate("Write", {"file_path": str(ro.R / "a.c"), "content": "x"}, pol, str(ro.P))
+    assert v.decision == "deny" and hard_ids(v) == {"readonly-source"}, v
+    v = evaluate("Bash", {"command": f"echo x > {ro.R.parent / 'Legacy'}/b.txt"}, pol, str(ro.P))
+    assert v.decision == "deny", v
+
+
+def test_readonly_reference_outside_the_project_only(ro):
+    pol = dict(ro.policy, readonly_paths=[{"path": str(ro.R), "reason": "", "source": "reference"}])
+    assert "readonly-source" not in ids(evaluate("Bash", {"command": "rm -rf vendor/old"}, pol, str(ro.P)))
+    assert evaluate("Bash", {"command": f"rm -rf {ro.R}"}, pol, str(ro.P)).decision == "deny"
+
+
+def test_readonly_over_ssh_is_another_machine(ro):
+    assert "readonly-source" not in ids(rbash(ro, "ssh host 'echo x > {R}/a.txt'"))
+
+
+def test_readonly_never_filed(ro, tmp_path):
+    """A readonly hit with confirmable ones is a deny, so the hook never files it (it files only 'approve')."""
+    v = rbash(ro, "npm install && cp x {R}/ && git reset --hard", quarantine=True)
+    assert v.decision == "deny" and hard_ids(v) == {"readonly-source"}
+    assert {"guest-quarantine", "git-reset-hard"} <= ids(v)
+
+
+@pytest.mark.parametrize("value", [
+    None, "x", {"path": "/a"}, [1], [{"reason": "r"}], [{"path": 3}], [{"path": ""}],
+    [{"path": "/a", "reason": 4}], [{"path": "/a", "source": "repo"}], [{"path": "/a"}, "x"],
+])
+@pytest.mark.parametrize("guard_enabled", [True, False])
+def test_readonly_malformed_fails_closed(env, value, guard_enabled):
+    v = bash(env, "ls", guard_enabled=guard_enabled, readonly_paths=value)
+    assert v.decision == "deny"
+    assert [(h.rule_id, h.hard) for h in v.hits] == [("unparseable", True)]
+    assert v.hits[0].reason.startswith(ERROR_REASON) and "readonly_paths" in v.hits[0].reason
+
+
+def test_readonly_missing_or_empty_is_nothing(env):
+    assert bash(env, "echo x > /opt/x/a").decision == "allow"
+    assert bash(env, "echo x > /opt/x/a", readonly_paths=[]).decision == "allow"
+    pol = dict(env.policy, readonly_paths=[{"path": "/opt/x"}])  # reason and source are optional
+    assert evaluate("Bash", {"command": "echo x > /opt/x/a"}, pol, str(env.P)).decision == "deny"
+
+
+def test_new_rule_ids_are_builtin():
+    assert RULES["readonly-source"][0] is None and RULES["readonly-source"][1]  # hard only
+    assert RULES["guest-quarantine"][0] and RULES["guest-quarantine"][1] is None  # confirmable only
+    assert "." not in "readonly-source" + "guest-quarantine"
+
+
+# ---- P13 carry-over: moves and git rm/mv of the repo rules file ---------------
+@pytest.mark.parametrize("cmd", [
+    "mv .claude-orchestrator/rules.md /tmp/x", "mv .claude-orchestrator x", "mv {P}/.Claude-Orchestrator /tmp/y",
+    "git rm .claude-orchestrator/rules.md", "git rm -r .claude-orchestrator", "git mv .claude-orchestrator y",
+    "git mv .claude-orchestrator/rules.md old.md", "git rm --cached .claude-orchestrator/rules.md",
+    "find . -name rules.md -delete", "find . -name '*.md' -delete", "find {P} -type f -delete",
+    "find .claude-orchestrator -name '*.md' -delete", "git -C {P} rm .claude-orchestrator/rules.md",
+    "cd sub && git rm ../.claude-orchestrator/rules.md",
+])
+def test_p13_moves_of_the_rules_dir_are_agent_config(env, cmd):
+    (env.P / ".claude-orchestrator").mkdir()
+    (env.P / ".claude-orchestrator" / "rules.md").write_text("## Never\n")
+    v = bash(env, cmd)
+    assert "agent-config" in ids(v) and "agent-config" not in hard_ids(v), v
+
+
+@pytest.mark.parametrize("cmd", [
+    "mv a.txt b.txt", "git rm old.txt", "git mv a.c b.c", "find . -name '*.pyc' -delete",
+    "find /tmp/x -name rules.md -delete", "find sub -name rules.md -delete", "mv /tmp/rules.md /tmp/x",
+])
+def test_p13_other_moves_stay_free(env, cmd):
+    (env.P / ".claude-orchestrator").mkdir()
+    (env.P / ".claude-orchestrator" / "rules.md").write_text("## Never\n")
     assert "agent-config" not in ids(bash(env, cmd))

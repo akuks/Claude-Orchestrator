@@ -173,6 +173,22 @@ def test_hard_deny(run, stub):
     assert sp[0]["decision"] == "deny" and sp[0]["rule_ids"] == ["rm-rf-outside"] and sp[0]["tool"] == "Bash"
 
 
+def test_readonly_source_is_never_filed(plugin, tmp_path, stub):
+    """Task 3: a readonly-source hit denies at once with its reason, even with the guard off and a
+    confirmable quarantine hit in the same command; no approval request is filed."""
+    ref = tmp_path / "legacy"
+    ref.mkdir()
+    run = Run(plugin, tmp_path, stub.base, guard_enabled=False, quarantine=True,
+              readonly_paths=[{"path": str(ref), "reason": "old app", "source": "reference"}])
+    out = run(bash(f"npm install && echo x > {ref}/a.txt"))
+    assert decision(out) == "deny"
+    assert "readonly-source" in reason(out) and f"this changes {ref}, which is read-only (old app)" in reason(out)
+    assert "/guard/approvals" not in stub.paths()
+    out = run({"hook_event_name": "PreToolUse", "tool_name": "Edit", "tool_use_id": "tu2", "session_id": "s1",
+               "tool_input": {"file_path": str(ref / "a.c"), "old_string": "a", "new_string": "b"}})
+    assert decision(out) == "deny" and "/guard/approvals" not in stub.paths()
+
+
 def test_self_protect_write_to_policy(run):
     out = run({"tool_name": "Write", "tool_input": {"file_path": str(run.tdir / "policy.json"), "content": "{}"}})
     assert decision(out) == "deny" and "self-protect" in reason(out)
