@@ -151,3 +151,127 @@ describe('canEditGuard', () => {
     expect(canEditGuard({ my_role: 'viewer' }, { role: 'member' })).toBe(false)
   })
 })
+
+// ---- Phase 2 ----
+import {
+  HIDDEN_CHARS,
+  ONCE_ONLY_REASON,
+  QUARANTINE_GRANT_HELP,
+  READONLY_HELP,
+  SEATBELT_HELP,
+  TRUST_HELP,
+  NO_ANSWER_HELP,
+  canApproveForRun,
+  grantCovers,
+  revealHidden,
+  runGrantTooltip,
+  waitingLine,
+} from './guard'
+
+const KEY = 'a'.repeat(64)
+
+describe('phase 2 rule names', () => {
+  it('names the new built-ins and custom rule ids', () => {
+    for (const id of ['sql-destroy', 'db-write', 'guest-quarantine', 'readonly-source']) expect(ruleName(id)).not.toBe(id)
+    expect(ruleName('org.no-prod-deploys')).toBe('Org rule no-prod-deploys')
+    expect(ruleName('project.x')).toBe('Project rule x')
+    expect(ruleName('repo.y')).toBe('Repo rule y')
+    expect(ruleName('weird.z')).toBe('weird.z')
+  })
+})
+
+describe('revealHidden', () => {
+  it('makes every bidi and zero-width character visible and counts them', () => {
+    const chars = ['‪', '‮', '⁦', '⁩', '​', '‏', '⁠', '⁤', '﻿']
+    const { text, count } = revealHidden(`rm${chars.join('')}x`)
+    expect(count).toBe(chars.length)
+    expect(text).toContain('⟦U+202E⟧')
+    expect(text).toContain('⟦U+FEFF⟧')
+    expect(text).toContain('⟦U+200B⟧')
+    expect(text.match(HIDDEN_CHARS)).toBeNull()
+  })
+  it('leaves ordinary text alone', () => {
+    expect(revealHidden('ls -la ü 😀')).toEqual({ text: 'ls -la ü 😀', count: 0 })
+    expect(revealHidden(null)).toEqual({ text: '', count: 0 })
+  })
+})
+
+describe('approve for this run', () => {
+  it('is offered when every command-keyed rule has the verified key', () => {
+    expect(canApproveForRun({ run_keys: [{ rule_id: 'git-reset-hard', key_kind: 'command', key: KEY }] })).toBe(true)
+    expect(canApproveForRun({ run_keys: [{ rule_id: 'guest-quarantine', key_kind: 'rule', key: '*' }] })).toBe(true)
+    expect(canApproveForRun({ run_keys: [{ rule_id: 'mcp-require-approval', key_kind: 'tool', key: 'mcp__db__q' }] })).toBe(true)
+  })
+  it('is not offered for agent-filed / cut requests (no key) or when nothing is grantable', () => {
+    expect(canApproveForRun({ run_keys: [{ rule_id: 'git-reset-hard', key_kind: 'command', key: '' }] })).toBe(false)
+    expect(canApproveForRun({ run_keys: [] })).toBe(false)
+    expect(canApproveForRun({})).toBe(false)
+    expect(
+      canApproveForRun({
+        run_keys: [
+          { rule_id: 'guest-quarantine', key_kind: 'rule', key: '*' },
+          { rule_id: 'secret-files', key_kind: 'command', key: '' },
+        ],
+      }),
+    ).toBe(false)
+    expect(ONCE_ONLY_REASON).toMatch(/can't be approved for the whole run/)
+  })
+  it('tooltips say what the grant covers', () => {
+    expect(runGrantTooltip({ run_keys: [{ rule_id: 'git-reset-hard', key_kind: 'command', key: KEY }] })).toBe(
+      'These rules, this thread, 12 h (Discard uncommitted work)',
+    )
+    expect(runGrantTooltip({ run_keys: [{ rule_id: 'guest-quarantine', key_kind: 'rule', key: '*' }] })).toBe(
+      QUARANTINE_GRANT_HELP,
+    )
+    expect(QUARANTINE_GRANT_HELP).toBe("Lets this repo's code run in this thread for 12 h")
+    expect(grantCovers({ key_kind: 'tool', key: 'mcp__db__q' })).toBe('the tool mcp__db__q')
+    expect(grantCovers({ key_kind: 'rule', rule_id: 'guest-quarantine' })).toBe("all of this repo's code")
+    expect(grantCovers({ key_kind: 'command' })).toBe('the same command')
+  })
+})
+
+describe('phase 2 help texts', () => {
+  it('carry the owed hints', () => {
+    expect(SEATBELT_HELP).toMatch(/seatbelt, not a boundary/)
+    expect(SEATBELT_HELP).toMatch(/reading \.env/)
+    expect(READONLY_HELP).toMatch(/formatters on "\."/)
+    expect(READONLY_HELP).toMatch(/src/)
+    expect(READONLY_HELP).toMatch(/exclude/)
+    expect(TRUST_HELP).toMatch(/commit authors' emails/)
+    expect(TRUST_HELP).toMatch(/git email/)
+    expect(NO_ANSWER_HELP.deny_and_resume).toMatch(/24 h/)
+    expect(NO_ANSWER_HELP.deny_and_resume).toMatch(/cancelled/)
+  })
+})
+
+describe('guardLine: phase 2 records', () => {
+  it('granted: allowed by an earlier approval', () => {
+    const l = guardLine({ event: 'PreToolUse', decision: 'granted', grant_ids: ['g1'], tool: 'Bash', summary: 'git reset --hard', rule_ids: ['git-reset-hard'] })
+    expect(l.kind).toBe('granted')
+    expect(l.text).toBe('Bash: git reset --hard [Discard uncommitted work] — allowed by an earlier approval (grant g1)')
+  })
+  it('filed: the agent stopped; the request waits for a person', () => {
+    const ctx = { approvals: new Map([['r9', { id: 'r9', can_decide: true }]]) }
+    const l = guardLine({ event: 'PreToolUse', decision: 'deny', status: 'filed', request_id: 'r9', tool: 'Bash', summary: 'x', rule_ids: [] }, ctx)
+    expect(l.kind).toBe('filed')
+    expect(l.requestId).toBe('r9')
+    expect(l.canDecide).toBe(true)
+    expect(l.text).toMatch(/filed for a person; the agent stopped/)
+  })
+  it('policy events at task start', () => {
+    expect(guardLine({ event: 'references', count: 2 }).text).toBe('co-guard: 2 reference projects mounted read-only')
+    expect(guardLine({ event: 'reference_skipped', project_id: 'p', reason: 'gone' }).kind).toBe('override')
+    const rf = guardLine({ event: 'rules_file', path: '/r', errors: [{ line: 3, message: 'disable: lines are ignored' }] })
+    expect(rf.text).toContain('line 3: disable: lines are ignored')
+  })
+  it('a resume-phase waiting line says the agent stopped', () => {
+    expect(waitingLine({ id: 'r', delivery: 'resume', can_decide: true, tool: 'Bash', summary: 'x' }).text).toMatch(/agent stopped/)
+  })
+})
+
+describe('actionTitle reveals hidden characters', () => {
+  it('Home rows and waiting lines cannot be reordered by bidi controls', async () => {
+    const { actionTitle } = await import('./guard')
+    expect(actionTitle({ tool: 'Bash', summary: 'a\u202eb' })).toBe('Bash: a⟦U+202E⟧b')
+  })
+})

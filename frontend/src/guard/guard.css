@@ -154,10 +154,12 @@
   color: var(--co-terminal-error);
 }
 .co-guard-line-approved,
+.co-guard-line-granted,
 .co-guard-line-ran {
   color: var(--co-terminal-success);
 }
 .co-guard-line-waiting,
+.co-guard-line-filed,
 .co-guard-line-override {
   color: var(--co-warning);
 }
@@ -177,4 +179,94 @@
 .co-guard-settings-slider {
   flex: 1 1 260px;
   min-width: 200px;
+}
+
+.co-guard-settings-stack {
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 6px;
+}
+.co-guard-help {
+  font-size: 12.5px;
+  max-width: 760px;
+}
+.co-guard-help-alert {
+  margin-bottom: 10px;
+}
+.co-guard-path-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1.2fr) minmax(0, 1fr) auto;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+@media (max-width: 560px) {
+  .co-guard-path-row {
+    grid-template-columns: minmax(0, 1fr) auto;
+  }
+}
+.co-guard-file-rules {
+  margin: 6px 0 0;
+  padding-left: 18px;
+  overflow-wrap: anywhere;
+}
+
+/* Rule tables (org page, project Guard tab). */
+.co-guard-rule-table {
+  min-width: 0;
+}
+.co-guard-rule-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 6px;
+}
+.co-guard-rule-cell {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.co-guard-pattern {
+  display: inline-flex;
+  gap: 4px;
+  align-items: baseline;
+  overflow-wrap: anywhere;
+  word-break: break-all;
+}
+
+/* Settings → Agent guard. */
+.co-guard-page {
+  max-width: 1000px;
+}
+.co-guard-panel {
+  margin-bottom: 16px;
+}
+.co-guard-builtins {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+  gap: 10px 16px;
+}
+.co-guard-builtin {
+  min-width: 0;
+}
+.co-guard-builtin-name {
+  font-weight: 600;
+}
+.co-guard-builtin-id {
+  color: var(--co-text-muted);
+  font-size: 12px;
+}
+.co-guard-builtin-why {
+  margin-left: 24px;
+  font-size: 12.5px;
+  color: var(--co-text-secondary);
+}
+.co-guard-builtin-warn {
+  margin-left: 24px;
+  font-size: 12.5px;
+  color: var(--co-warning-text);
+}
+.co-guard-builtin-locked .co-guard-builtin-name {
+  color: var(--co-text-secondary);
 }
