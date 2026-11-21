@@ -32,6 +32,7 @@ from .guard import runtime as guard_runtime
 from .guard.plugin import ensure_plugin
 from .models import Agent, Artifact, McpCall, Project, SkillPack, Task, TaskEvent, User
 from .redaction import redact, redact_obj, secrets_from_env
+from .resume import gitfacts, handoff
 
 _MAX_TOOL_RESULT_CHARS = 2000
 
@@ -211,6 +212,9 @@ class WorkerManager:
         # emits through the run's own emit (same seq, same redaction), and the
         # spool ingestion skips what was already reported (Counter of keys).
         self._guard_live: dict[str, dict] = {}
+        # task_id -> the run's outside-commit base, fixed at spawn (F9); the
+        # finish snapshot uses it too.
+        self._run_since: dict[str, str | None] = {}
         self._dispatcher: asyncio.Task | None = None
 
     # ---- lifecycle -------------------------------------------------------
@@ -294,6 +298,7 @@ class WorkerManager:
         finally:
             self._run_secrets.pop(task_id, None)
             self._guard_live.pop(task_id, None)
+            self._run_since.pop(task_id, None)
             self._sem.release()
 
     # ---- execution -------------------------------------------------------
@@ -315,10 +320,12 @@ class WorkerManager:
         # redact by exact value too.
         run_secrets: list[str] = []
         self._run_secrets[task_id] = run_secrets
+        run_state = {"events": 0}  # events emitted by this run (the heartbeat's "new events")
 
         async def emit(etype: str, payload: dict) -> None:
             nonlocal seq
             seq += 1
+            run_state["events"] += 1
             payload = redact_obj(payload, run_secrets)
             async with SessionLocal() as s:
                 s.add(TaskEvent(task_id=task_id, seq=seq, type=etype, payload=payload))
@@ -607,6 +614,11 @@ class WorkerManager:
                 await s.commit()
             run_secrets[:] = secrets_from_env(sub_env)
 
+        # Resume bookkeeping (F8-F10): the head this run starts from, the
+        # outside-commit base held for the whole run, and handoff.md from the
+        # stored handoff (so an early compaction finds it).
+        since = await self._spawn_handoff(task_id, workspace, run_secrets)
+
         try:
             proc = await asyncio.create_subprocess_exec(
                 *cmd,
@@ -651,12 +663,15 @@ class WorkerManager:
             "task_id": task_id,
             "mcp_ids": {},
             "secrets": run_secrets,
+            "since": since,
+            "run": run_state,
             # co-guard watchdog (Ruling R21): tool_use ids checked through the spool
             "guard": {"calls": {}, "lanes": {}, "done": set(), "seen": set(), "offset": 0, "violation": None,
                       "proc": proc, "emit": emit,
                       "spool": guard_runtime.task_dir(task_id) / guard_runtime.SPOOL_NAME},
         }
         watch = asyncio.create_task(self._guard_watch(ctx))
+        beat = asyncio.create_task(self._heartbeat_loop(task_id, ctx))
         try:
             await asyncio.wait_for(
                 self._consume_stdout(proc, emit, result, ctx),
@@ -664,6 +679,7 @@ class WorkerManager:
             )
             await proc.wait()
         except asyncio.TimeoutError:
+            beat.cancel()
             self._signal_group(proc, signal.SIGKILL)
             await proc.wait()
             await stderr_task
@@ -674,6 +690,7 @@ class WorkerManager:
             return
         finally:
             watch.cancel()
+            beat.cancel()
             await stderr_task
 
         self._running.pop(task_id, None)
@@ -758,6 +775,60 @@ class WorkerManager:
 
         # Notify if this run came from a schedule (honors its notify policy).
         asyncio.create_task(notifications.notify_task_finished(task_id))
+
+    # ---- resume: head at start, heartbeat, handoff ---------------------------
+
+    async def _spawn_handoff(self, task_id: str, workspace: Path, secrets: list[str]) -> str | None:
+        """Record head_at_start, return the run's outside-commit base (the
+        stored handoff's head, else head_at_start) and write handoff.md from
+        the stored handoff. Never raises (None: no base)."""
+        since = None
+        try:
+            f = await asyncio.to_thread(gitfacts.facts, workspace, gitfacts.Budget())
+            async with SessionLocal() as s:
+                t = await s.get(Task, task_id)
+                if t is not None:
+                    t.head_at_start = f.head
+                    await s.commit()
+            since = await handoff.boundary(task_id)
+            self._run_since[task_id] = since
+            row = await handoff.stored(task_id)
+            if row is not None and row.text:
+                handoff.write_file(task_id, row.text, secrets)
+        except Exception:  # noqa: BLE001 - resume bookkeeping never stops a run
+            pass
+        return since
+
+    async def _heartbeat_loop(self, task_id: str, ctx) -> None:
+        """Every HEARTBEAT_SECONDS: Task.heartbeat_at = now; when new events
+        arrived and HANDOFF_EVERY_SECONDS passed since the last snapshot, a
+        ``working`` snapshot and a fresh handoff.md. Never raises."""
+        snapped, last = ctx["run"]["events"], time.monotonic()
+        while True:
+            await asyncio.sleep(handoff.HEARTBEAT_SECONDS)
+            try:
+                async with SessionLocal() as s:
+                    t = await s.get(Task, task_id)
+                    if t is not None:
+                        t.heartbeat_at = _now()
+                        await s.commit()
+            except Exception:  # noqa: BLE001
+                pass
+            try:
+                n = ctx["run"]["events"]
+                if n != snapped and time.monotonic() - last >= handoff.HANDOFF_EVERY_SECONDS:
+                    snapped, last = n, time.monotonic()
+                    row = await handoff.snapshot(task_id, "working", secrets=ctx["secrets"], since=ctx["since"])
+                    if row is not None:
+                        handoff.write_file(task_id, row.text, ctx["secrets"])
+            except Exception:  # noqa: BLE001
+                pass
+
+    @staticmethod
+    def _finish_reason(status: str, error: str | None) -> str:
+        if status == Status.CANCELLED or error == "Task exceeded time limit":
+            return "cut off"
+        return "run ended"
 
     # ---- co-guard ----------------------------------------------------------
 
@@ -1250,6 +1321,12 @@ class WorkerManager:
                     )
                 )
             await s.commit()
+        # where the thread stands now (the run's outside-commit base when one is held)
+        try:
+            await handoff.snapshot(task_id, self._finish_reason(status, error), secrets=secrets,
+                                   since=self._run_since.get(task_id))
+        except Exception:  # noqa: BLE001 - never breaks a finish
+            pass
         # co-guard deny-and-resume: follow-ups deferred while this step was active
         try:
             await guard_grants.after_task_finished(task_id, submit=self.submit)

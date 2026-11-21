@@ -22,7 +22,8 @@ from ..config import settings
 from ..constants import VALID_MODELS, Priority, Status
 from ..database import SessionLocal
 from .. import reports
-from ..models import ActionGrant, Artifact, Project, Task, TaskEvent
+from ..models import ActionGrant, Artifact, Project, Task, TaskEvent, TaskHandoff
+from ..resume import handoff as resume_handoff
 from ..task_service import build_task
 from ..schemas import (
     ArtifactOut,
@@ -450,11 +451,74 @@ async def delete_task(task_id: str, request: Request):
                 except OSError:
                     pass
             await s.delete(m)
+        # the deleted threads' handoffs (no FK either)
+        await s.execute(delete(TaskHandoff).where(TaskHandoff.root_id.in_(deleted)))
         # co-guard grants of the deleted thread / steps (no FK: they would be orphans)
         await s.execute(delete(ActionGrant).where(
             or_(ActionGrant.root_id.in_(deleted),
                 and_(ActionGrant.scope == "once", ActionGrant.task_id.in_(deleted)))))
         await s.commit()
+
+
+# ---- handoff (phase 3a): where the thread stands. People only (agent tokens are
+# outside the allowlist); any viewer reads it, a manager refreshes or closes it.
+
+
+def _handoff_out(row: TaskHandoff) -> dict:
+    return {
+        "content": row.content or {},
+        "text": row.text or "",
+        "version": row.version,
+        "status": row.status,
+        "reason": row.reason,
+        "saved_at": row.saved_at.isoformat() if row.saved_at else None,
+        "prev_available": row.prev_text is not None,
+    }
+
+
+async def _thread_handoff(s, task: Task) -> TaskHandoff | None:
+    return (
+        await s.execute(select(TaskHandoff).where(TaskHandoff.root_id == (task.root_id or task.id)))
+    ).scalar_one_or_none()
+
+
+@router.get("/{task_id}/handoff")
+async def get_handoff(task_id: str, request: Request):
+    async with SessionLocal() as s:
+        task = await require_task(s, request.state.principal, task_id)
+        row = await _thread_handoff(s, task)
+    if row is None:
+        raise HTTPException(404, "No handoff for this thread yet")
+    return _handoff_out(row)
+
+
+@router.post("/{task_id}/handoff/refresh")
+async def refresh_handoff(task_id: str, request: Request):
+    p = request.state.principal
+    async with SessionLocal() as s:
+        task = await require_task(s, p, task_id)
+        await _require_manage(s, p, task)
+    row = await resume_handoff.snapshot(task_id, "manual")
+    if row is None:
+        raise HTTPException(404, "Task not found")
+    return _handoff_out(row)
+
+
+@router.post("/{task_id}/handoff/close")
+async def close_handoff(task_id: str, request: Request):
+    """Mark the thread's handoff done; the next snapshot reopens it."""
+    p = request.state.principal
+    async with SessionLocal() as s:
+        task = await require_task(s, p, task_id)
+        await _require_manage(s, p, task)
+        row = await _thread_handoff(s, task)
+        if row is None:
+            raise HTTPException(404, "No handoff for this thread yet")
+        row.status = "closed"
+        row.closed_at = datetime.now(timezone.utc)
+        row.closed_by = p.user.id
+        await s.commit()
+        return _handoff_out(row)
 
 
 def _safe_filename(task: Task, ext: str) -> str:
