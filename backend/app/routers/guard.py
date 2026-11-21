@@ -154,7 +154,7 @@ from ..guard import runtime as guard_runtime
 from ..guard import co_hook
 from ..guard.co_hook import SUMMARY_MAX as HOOK_SUMMARY_MAX
 from ..models import ActionApproval, ActionGrant, ActionRule, GuardOrgSettings, Project, Task
-from ..redaction import redact
+from ..redaction import HIDDEN_CHARS, redact
 
 router = APIRouter(prefix="/guard", tags=["guard"])
 api = APIRouter(prefix="/guard", tags=["guard"])
@@ -172,12 +172,9 @@ CONTENT_FIELDS = ("rule_ids", "tool", "summary", "cwd", "reason", "command_hash"
 GIVING_UP = "the agent is giving up on this request; try again in a few seconds"
 MAX_RULE_IDS = co_hook.MAX_RULE_IDS  # rule ids per request (the hook sends the first 50, once-only beyond)
 REPLAY_WINDOW = 60  # s: a retried POST answered from a run grant replays that answer
-# Characters that can make a command read differently from what runs (the
-# frontend's guard.js HIDDEN_CHARS): a shell summary holding one gets no grant
-# key, so it can only be approved once, inline, after the card revealed them.
-HIDDEN_CHARS = re.compile(
-    "[\u0000-\u0008\u000b-\u001f\u007f-\u009f\u00ad\u034f\u061c\u115f\u180e\u200b-\u200f\u2028\u2029"
-    "\u202a-\u202e\u2060-\u2064\u2066-\u2069\u3164\ufeff\uffa0\U000e0000-\U000e007f]")
+# HIDDEN_CHARS (app.redaction): characters that can make a command read differently from
+# what runs - a shell summary holding one gets no grant key, so it can only be approved
+# once, inline, after the card revealed them.
 
 
 @router.get("/whoami")

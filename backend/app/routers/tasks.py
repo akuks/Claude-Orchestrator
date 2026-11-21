@@ -333,6 +333,7 @@ async def duplicate_task(task_id: str, request: Request):
             model=src.model,
             max_turns=src.max_turns,
             parent_task_id=src.id,
+            origin="user",
             status=Status.QUEUED,
             created_by=request.state.principal.user.id,
         )
@@ -383,6 +384,7 @@ async def followup_task(task_id: str, payload: FollowupCreate, request: Request)
             model=parent.model,
             max_turns=parent.max_turns,
             parent_task_id=parent.id,
+            origin="user",
             root_id=parent.root_id or parent.id,  # join the parent's thread
             resume_session_id=resume,
             workspace_dir=parent.workspace_dir,  # same workspace = continues context

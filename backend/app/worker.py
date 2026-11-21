@@ -767,7 +767,9 @@ class WorkerManager:
         "event", "decision", "rule_ids", "grant_ids", "tool", "summary", "reason", "status", "request_id",
         "tool_use_id", "agent_id", "agent_type", "source", "ts",
         "hook_event", "error",  # guard_error records (a hook other than PreToolUse failed)
+        "background", "what",  # Stop: background tasks still running; seen: what the call was
     )
+    BACKGROUND_MAX = 10
 
     async def _prepare_guard(self, task_id, guard_project, workspace, sub_env, mcp, emit, owner_id=None):
         """Write the task's policy (0600) into a fresh CO_TASK_DIR, add the
@@ -975,6 +977,9 @@ class WorkerManager:
         for k, v in list(payload.items()):
             if k in ("rule_ids", "grant_ids"):
                 payload[k] = [str(x)[:64] for x in v][:guard_grants.MAX_GRANT_IDS] if isinstance(v, list) else []
+            elif k == "background":
+                payload[k] = [{"id": str(b.get("id"))[:200], "what": str(b.get("what"))[:200]}
+                              for b in v if isinstance(b, dict)][:cls.BACKGROUND_MAX] if isinstance(v, list) else []
             elif isinstance(v, str):
                 payload[k] = v[:2000]
             elif not isinstance(v, (int, float, bool)) and v is not None:
@@ -1109,7 +1114,8 @@ class WorkerManager:
                     await emit("text_output", {"text": block["text"]})
                 elif block.get("type") == "tool_use":
                     name = block.get("name")
-                    await emit("tool_use", {"name": name, "input": block.get("input")})
+                    await emit("tool_use", {"name": name, "input": block.get("input"),
+                                            "id": block.get("id"), "parent": obj.get("parent_tool_use_id") or None})
                     if name and name.startswith("mcp__"):
                         await self._record_mcp_call(ctx, name, block.get("id"))
         elif etype == "user":
@@ -1119,7 +1125,10 @@ class WorkerManager:
                     if isinstance(block, dict) and block.get("type") == "tool_result":
                         await emit(
                             "tool_result",
-                            {"content": _short(block.get("content"), ctx.get("secrets") or [])},
+                            {"content": _short(block.get("content"), ctx.get("secrets") or []),
+                             "tool_use_id": block.get("tool_use_id"),
+                             "is_error": bool(block.get("is_error")),
+                             "parent": obj.get("parent_tool_use_id") or None},
                         )
                         if block.get("is_error"):
                             call_id = ctx["mcp_ids"].get(block.get("tool_use_id"))

@@ -62,6 +62,11 @@ class TaskOut(BaseModel):
     created_by: Optional[str] = None
     decided_by: Optional[str] = None
     thread_count: int = 1  # number of steps in this task's thread
+    origin: str = "user"
+    notes: Optional[str] = None
+    notes_updated_at: Optional[datetime] = None
+    recoveries: int = 0
+    recovery: Optional[dict] = None
     created_at: datetime
     started_at: Optional[datetime]
     completed_at: Optional[datetime]

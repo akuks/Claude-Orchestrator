@@ -121,6 +121,7 @@ async def build_task(
         requires_approval=gated,
         risk=risk,
         parent_task_id=parent.id if parent else None,
+        origin="agent" if parent else "user",
         workflow_run_id=workflow_run_id,
         stage_index=stage_index,
         created_by=created_by,

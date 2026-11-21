@@ -25,7 +25,7 @@ PreToolUse
     configured timeout.
 
 Ruling R21: the very first thing PreToolUse does (before any evaluation) is
-append ``{"event":"PreToolUse","tool_use_id":..,"seen":true}`` to the spool;
+append ``{"event":"PreToolUse","tool_use_id":..,"seen":true,"tool":..,"what":..}`` to the spool;
 the worker's watchdog requires that record for every tool result. If it
 cannot be written, the call is denied.
 
@@ -114,6 +114,9 @@ FILE_BUDGET = 10.0  # seconds to get a request filed before giving up
 UNREACHABLE = "approval service unreachable \u2014 action blocked"
 REPORT_TIMEOUT = 0.5
 SUMMARY_MAX = 300  # spool / run-log lines (single line)
+WHAT_MAX = 200  # a call's `what` on the seen line: a shell command, an agent type, a tool name
+WHAT_PATH_MAX = 300  # ... a file path
+BACKGROUND_MAX = 10  # background tasks a Stop line names
 # The approval card's summary: the FULL redacted call, cut with the server's
 # marker (routers/guard.py _cut) at REQUEST_SUMMARY_MAX chars and so the POST
 # body stays within the server's 16 KB cap (BODY_BUDGET leaves room for the rest).
@@ -215,6 +218,66 @@ def cut(text, limit):
         return text
     mark = f"\u2026 (truncated, {len(text)} chars)"
     return text[: max(0, limit - len(mark))] + mark
+
+
+def what_of(tool, tool_input):
+    """What a call is, in a line: Bash/Monitor "<description> :: <command>" (the command
+    alone when there is no description), a file tool its file_path, Agent its
+    subagent_type, anything else the tool name. Redacted first, then cut."""
+    ti = tool_input if isinstance(tool_input, dict) else {}
+    limit = WHAT_MAX
+    if tool in SHELL_TOOLS and isinstance(ti.get("command"), str):
+        desc = ti.get("description")
+        text = f"{desc} :: {ti['command']}" if isinstance(desc, str) and desc else ti["command"]
+    elif tool in FILE_TOOLS and isinstance(ti.get("file_path") or ti.get("notebook_path"), str):
+        text = ti.get("file_path") or ti.get("notebook_path")
+        limit = WHAT_PATH_MAX
+    elif tool == "Agent" and isinstance(ti.get("subagent_type"), str) and ti["subagent_type"]:
+        text = ti["subagent_type"]
+    else:
+        text = str(tool)
+    return redact(text, None)[:limit]
+
+
+def seen_record(payload):
+    """The watchdog's proof the call reached co-guard, plus what it was. If what_of
+    fails the line is still written, without `what`."""
+    rec = {"event": "PreToolUse", "tool_use_id": payload.get("tool_use_id"), "seen": True}
+    try:
+        tool = payload.get("tool_name")
+        what = what_of(tool, payload.get("tool_input"))
+        rec["tool"] = redact(tool, 100) if tool is not None else ""
+        rec["what"] = what
+    except Exception:  # noqa: BLE001 - the seen line must still be written
+        rec.pop("tool", None)
+        rec.pop("what", None)
+    return rec
+
+
+def background_of(value):
+    """Stop's background_tasks -> [{"id", "what"}] of those still running (at most
+    BACKGROUND_MAX), or None when the key carries nothing usable (absent, None)."""
+    if isinstance(value, dict):
+        items = [dict(v, id=k) if isinstance(v, dict) else {"id": k} for k, v in value.items()]
+    elif isinstance(value, list):
+        items = value
+    else:
+        return None
+    out = []
+    for it in items:
+        if isinstance(it, str):
+            it = {"id": it}
+        if not isinstance(it, dict) or it.get("id") is None:
+            continue
+        status = it.get("status")
+        if status is not None and status != "running":
+            continue
+        ident = str(it["id"])
+        what = it.get("command") or it.get("description") or ident
+        out.append({"id": redact(ident, 200), "what": redact(what, 200)})
+        if len(out) >= BACKGROUND_MAX:
+            break
+    return out
 
 
 def _chars(value):
@@ -794,6 +857,8 @@ def _approved_ids():
 def other_event(event, payload):
     if event == "PostToolUse":
         tid = payload.get("tool_use_id")
+        if tid:
+            _spool({"event": event, "tool_use_id": tid, "done": True})
         if tid and tid in _approved_ids():
             _spool({"event": event, "tool": payload.get("tool_name"), "tool_use_id": tid, "decision": "ran"})
         return
@@ -801,6 +866,13 @@ def other_event(event, payload):
     for k in ("source", "reason", "agent_id", "agent_type", "session_id"):
         if payload.get(k) is not None:
             rec[k] = redact(payload[k], 200)
+    if event == "Stop":
+        try:
+            bg = background_of(payload.get("background_tasks"))
+        except Exception:  # noqa: BLE001 - the Stop line is written anyway
+            bg = None
+        if bg is not None:
+            rec["background"] = bg
     _spool(rec)
 
 
@@ -853,7 +925,7 @@ def main(argv):
                 raise ValueError("event mismatch")
             # Ruling R21: proof for the worker's watchdog that this call reached
             # co-guard - written FIRST; if it cannot be written, deny.
-            _spool_strict({"event": "PreToolUse", "tool_use_id": payload.get("tool_use_id"), "seen": True})
+            _spool_strict(seen_record(payload))
             pre_tool_use(payload, load_policy(), started)
         elif event == "ConfigChange":
             why = config_change(payload)

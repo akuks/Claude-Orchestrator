@@ -392,6 +392,28 @@ def hook_blockers(cwd: Path, claude_config_dir: str | None) -> dict:
     return {"project": project, "user": user}
 
 
+MAX_SPOOL_RAW = 10000
+
+
+def read_spool_raw(task_id: str) -> list[dict]:
+    """Every parsable spool line (at most MAX_SPOOL_RAW), bookkeeping included."""
+    out: list[dict] = []
+    try:
+        with open(task_dir(task_id) / SPOOL_NAME, encoding="utf-8", errors="replace") as f:
+            for line in f:
+                try:
+                    rec = json.loads(line)
+                except ValueError:
+                    continue
+                if isinstance(rec, dict):
+                    out.append(rec)
+                    if len(out) >= MAX_SPOOL_RAW:
+                        break
+    except OSError:
+        pass
+    return out
+
+
 def read_spool(task_id: str) -> list[dict]:
     path = task_dir(task_id) / SPOOL_NAME
     out: list[dict] = []
@@ -403,8 +425,9 @@ def read_spool(task_id: str) -> list[dict]:
                     rec = json.loads(line)
                 except ValueError:
                     continue
-                if not isinstance(rec, dict) or rec.get("seen") is True:
-                    continue  # watchdog bookkeeping: never counts against the cap
+                if not isinstance(rec, dict) or rec.get("seen") is True or rec.get("done") is True \
+                        or "outside_doc" in rec:
+                    continue  # bookkeeping (watchdog, done, temp-doc note): never counts against the cap
                 if kept >= MAX_SPOOL_LINES:
                     out.append({"event": "spool", "decision": "truncated"})
                     break

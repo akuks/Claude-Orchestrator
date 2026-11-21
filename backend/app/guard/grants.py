@@ -414,6 +414,7 @@ async def _spawn(s, approvals: list[ActionApproval], root: Task, decider_id) -> 
         model=parent.model,
         max_turns=parent.max_turns,
         parent_task_id=parent.id,
+        origin="guard",
         root_id=root.id,
         # the owner's own session only (Claude sessions belong to an account)
         resume_session_id=parent.session_id if parent.created_by == owner else None,

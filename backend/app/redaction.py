@@ -17,6 +17,13 @@ not be caught (stream-json delivers whole lines, so this is rare)."""
 import re
 from typing import Any
 
+# Characters that can make text read differently from what it says (the frontend's
+# guard.js HIDDEN_CHARS): control characters except \t and \n, soft hyphen, zero
+# widths, bidi controls, tag characters.
+HIDDEN_CHARS = re.compile(
+    "[\u0000-\u0008\u000b-\u001f\u007f-\u009f\u00ad\u034f\u061c\u115f\u180e\u200b-\u200f\u2028\u2029"
+    "\u202a-\u202e\u2060-\u2064\u2066-\u2069\u3164\ufeff\uffa0\U000e0000-\U000e007f]")
+
 MASK = "***"
 MIN_SECRET_LEN = 8  # shorter values are too likely to collide with normal text
 
@@ -133,3 +140,12 @@ def redact_obj(obj: Any, secrets: list[str]) -> Any:
     if isinstance(obj, (list, tuple)):
         return [redact_obj(v, secrets) for v in obj]
     return obj
+
+
+def clean_text(text, limit: int | None = None) -> str:
+    """Strip HIDDEN_CHARS (``\\n`` and ``\\t`` stay), then cut to ``limit``.
+    None gives "". Redact BEFORE cutting (this only cleans and cuts)."""
+    if text is None:
+        return ""
+    out = HIDDEN_CHARS.sub("", str(text))
+    return out if limit is None else out[:limit]
