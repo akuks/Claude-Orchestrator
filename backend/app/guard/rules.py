@@ -128,8 +128,10 @@ commands that write a database, database MCP write tools - checked for
 every stage, nested and wrapped ones included, with ``PGHOST``-style
 variables from the hook's own env (Ruling P6), prefixes (also into
 ``bash -c`` bodies) and earlier ``export``s - ``source``/``.``, ``set -a``,
-``export $(..)``, ``read``, ``eval "$x"`` and ``dotenv --`` make them
-unknown; shell escapes inside a client (psql ``\\!``, ``\\o |cmd``,
+``export $(..)``, ``read``, ``eval "$x"``, ``env -S`` and env loaders
+(``dotenv``/``env-cmd``/``with-env`` also via npx..., ``op|infisical|doppler
+run --``, ``direnv exec``) make them unknown; ``exec < file`` makes every later
+client's input unknown; shell escapes inside a client (psql ``\\!``, ``\\o |cmd``,
 ``COPY .. PROGRAM``, sqlite ``.shell``, mysql ``system``) are checked as
 commands; a client with no inline SQL on a line with a pipe reads unknown
 input; when both fire on one call only ``sql-destroy`` is kept; an
@@ -585,6 +587,7 @@ class _Ctx:
         # PGHOST-style variables: inherited from the hook's env (Ruling P6, the agent's shell has them too),
         # then set earlier in the command line (None: unknown)
         self.db_env = {n: os.environ[n] for n in _db.DB_ENV_NAMES if n in os.environ}
+        self.exec_stdin = False  # `exec < file` earlier in the line: every later client reads unknown input
         env = policy.get("env_paths")
         env = {k: str(v) for k, v in env.items() if isinstance(k, str) and v} if isinstance(env, dict) else {}
         cfg = policy.get("claude_config_dir")
@@ -1535,6 +1538,9 @@ class _Bash:
         line connect there (forge noteDbEnv). A value from a substitution, a
         sourced file or a dynamic export is unknown (None)."""
         env = self.ctx.db_env
+        if st.argv and not argv and _sh.command_name(st.argv[0]) == "exec" and (
+                st.heredocs or any(op in ("<", "<>", "<<<") for op, _t in st.redirects)):
+            self.ctx.exec_stdin = True  # exec < x.sql; psql -h prod
         if not st.argv:
             for k, v in st.env.items():
                 name = _db.db_env_name(k)
@@ -1580,6 +1586,9 @@ class _Bash:
             if n:
                 out[n] = v
         off = len(st.argv) - len(argv) if argv else len(st.argv)
+        if st.argv[:1] and _sh.command_name(st.argv[0]) == "env" and any(
+                a.startswith(("-S", "--split-string")) or re.fullmatch(r"-[a-zA-Z]*S.*", a) for a in st.argv[1:off or None]):
+            out.update({x: None for x in _db.DB_ENV_NAMES})  # env -S '...': a command line we do not follow
         for w, d in zip(st.argv[:off], list(st.dynamic[:off]) + [False] * off):
             m = re.match(r"([A-Za-z_]\w*)=(.*)\Z", w, re.S)
             n = m and _db.db_env_name(m.group(1))
@@ -1620,8 +1629,8 @@ class _Bash:
                 texts.append(text)
             else:
                 unknown = True
-        if not texts and not unknown and self.compound_input(st):
-            unknown = True  # { psql; } < x.sql
+        if not texts and not unknown and (self.compound_input(st) or self.ctx.exec_stdin):
+            unknown = True  # { psql; } < x.sql, exec < x.sql; psql
         if unknown:
             return "unknown", None
         if texts:
@@ -1633,8 +1642,8 @@ class _Bash:
         shell escapes inside a client are checked as commands."""
         ctx = self.ctx
         prefix = self.db_prefix(st, argv) if prefix is None else prefix
-        if name in _DOTENV and "--" in args and depth < 3:  # dotenv -e .env.prod -- psql ...
-            inner = args[args.index("--") + 1:]
+        inner = _env_runner(name, args) if depth < 3 else None
+        if inner is not None:  # dotenv -e .env.prod -- psql ..., op run -- ..., direnv exec . ...
             if inner:
                 unknown = {x: None for x in _db.DB_ENV_NAMES}
                 self.db_check(st, inner, _sh.command_name(inner[0]), inner[1:], pipeline, cwd,
@@ -1651,6 +1660,10 @@ class _Bash:
                 ctx.hit("db-write", False, self.raw)
             for cmd in f.shell:  # psql \! / \o |cmd / COPY ... PROGRAM, sqlite .shell, mysql system ...
                 self.nested_eval(cmd, cwd)
+                if ctx.evals > _MAX_EVALS or ctx.depth >= _MAX_DEPTH:
+                    break  # unparseable already recorded once
+            if f.uncertain:  # psql \\! with no command, sqlite .once -x, an unknown dot-command ...
+                ctx.hit("uncertain-command", False, self.raw)
         if _db.cli_write(name, args, ctx.db_dev):
             ctx.hit("db-write", False, self.raw)
 
@@ -2345,7 +2358,34 @@ def _reads_stdin(name, args):
     return False
 
 
-_DOTENV = frozenset({"dotenv", "dotenvx", "dotenv-cli", "env-cmd"})
+_DOTENV = frozenset({"dotenv", "dotenvx", "dotenv-cli", "env-cmd", "with-env"})
+_RUN_SECRETS = frozenset({"op", "infisical", "doppler", "dotenvx", "varlock", "teller", "chamber", "aws-vault"})
+_JS_RUNNERS = frozenset({"npx", "pnpx", "bunx", "pnpm", "yarn", "npm", "bun"})
+_ENV_CMD_VALUE = frozenset({"-f", "--file", "-e", "--environments", "-r", "--rc-file", "-c", "--path", "-v"})
+
+
+def _env_runner(name, args):
+    """The command a program that loads an environment runs (its argv), []
+    when it names none we can see, None when ``name`` is no such program."""
+    args = [str(a) for a in args]
+    if name in _JS_RUNNERS:  # npx dotenv -e x -- psql
+        for k, a in enumerate(args):
+            if not a.startswith("-") and a not in ("exec", "dlx", "x", "run"):
+                base = _sh.command_name(re.sub(r"@[^/@]*$", "", a))
+                return _env_runner(base, args[k + 1:]) if base in _DOTENV | {"dotenv-cli"} else None
+        return None
+    if name in _RUN_SECRETS and args[:1] in (["run"], ["exec"]) or name in _DOTENV:
+        if "--" in args:
+            return args[args.index("--") + 1:]
+        if name in ("env-cmd", "with-env", "aws-vault", "chamber"):
+            k = 1 if name in ("aws-vault", "chamber") and args[:1] == ["exec"] else 0
+            while k < len(args) and args[k].startswith("-"):
+                k += 2 if args[k] in _ENV_CMD_VALUE else 1
+            return args[k:]
+        return []
+    if name == "direnv" and args[:1] == ["exec"]:
+        return args[2:]
+    return None
 _COMPOUND_CLOSERS = frozenset({"}", "fi", "done", "esac", ")"})
 
 _OTHER_INTERP = frozenset({"pwsh", "powershell", "rscript", "tclsh", "wish", "osascript"})

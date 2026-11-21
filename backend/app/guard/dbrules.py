@@ -24,9 +24,11 @@ SQL is lexed the way the client's dialect lexes it, and (Ruling P7) where the
 dialect leaves room - backslash escapes, ``$`` as a plain character, ``#``
 comments, nested comments - several lexings are tried and their results OR-ed.
 An unterminated quote, dollar tag or comment is unknown SQL, so a write. pg:
-dollar quotes (only where ``$`` does not continue an identifier), ``E''``
-backslash escapes, nested comments, plus a ``standard_conforming_strings=off``
-lexing. mysql: no dollar quotes, backslash escapes in ``'``/``"`` strings (and
+dollar quotes (only where ``$`` does not continue an identifier - non-ASCII
+characters continue one), ``E''`` backslash escapes, nested comments, plus a
+``standard_conforming_strings=off`` lexing and a belt lexing that reads ``$``
+as a plain character (so write words inside a dollar body are held). The
+extra lexings run only when the text has a backslash, ``$`` or ``#``. mysql: no dollar quotes, backslash escapes in ``'``/``"`` strings (and
 a ``NO_BACKSLASH_ESCAPES`` lexing), ``#`` and ``-- `` comments, ``/*! */``
 runs. Anything else (other clients, MCP servers of unknown dialect): every
 lexing.
@@ -107,6 +109,7 @@ class Finding:
     destroy: bool = False
     write: bool = False
     shell: tuple = ()  # shell commands the client would run (escapes), for the caller to check
+    uncertain: bool = False  # the client may run something co-guard cannot see (\! with no command, .once -x)
 
 
 _NONE = Finding()
@@ -118,7 +121,7 @@ _DOLLAR = re.compile(r"\$([^\W\d]\w*)?\$")
 
 
 def _ident_char(c):
-    return c.isalnum() or c in "_$"
+    return c.isalnum() or c in "_$" or ord(c) >= 0x80  # PostgreSQL: every non-ASCII char continues an identifier
 
 
 class _Lexed:
@@ -129,6 +132,10 @@ class _Lexed:
         self.kept = kept  # same, but quoted identifiers keep their text ("setval" -> setval)
         self.ok = ok  # False: an unterminated quote, dollar tag or comment
         self.bodies = bodies  # [(start, end, content)] of string and dollar-quote literals
+
+
+_SPECIAL = re.compile(r"[-#*/'\"`$]")
+_NOT_NL = re.compile(r"[^\n]")
 
 
 def _lex(s, dollar=True, bs="e", hash_=False, nest=False, dash_space=False, dq_string=False):
@@ -142,10 +149,9 @@ def _lex(s, dollar=True, bs="e", hash_=False, nest=False, dash_space=False, dq_s
     exec_open = 0  # inside /*! ... */ (MySQL runs it)
 
     def blank(a, b, keep_ends=None):
-        for k in range(a, b):
-            if out[k] != "\n":
-                out[k] = " "
-                kept[k] = " "
+        seg = list(_NOT_NL.sub(" ", s[a:b]))
+        out[a:b] = seg
+        kept[a:b] = seg
         if keep_ends:
             out[a] = kept[a] = keep_ends
             if b - 1 > a:
@@ -153,6 +159,10 @@ def _lex(s, dollar=True, bs="e", hash_=False, nest=False, dash_space=False, dq_s
 
     i = 0
     while i < n:
+        m = _SPECIAL.search(s, i)
+        if not m:
+            break
+        i = m.start()
         c = s[i]
         nx = s[i + 1] if i + 1 < n else ""
         if c == "-" and nx == "-" and (not dash_space or i + 2 >= n or s[i + 2] in " \t\r\n\f\v"):
@@ -261,7 +271,7 @@ def _lex(s, dollar=True, bs="e", hash_=False, nest=False, dash_space=False, dq_s
 
 _PG_STD = dict(dollar=True, bs="e", nest=True)
 _LEXINGS = {
-    "pg": (_PG_STD, dict(dollar=True, bs="single", nest=True)),
+    "pg": (_PG_STD, dict(dollar=True, bs="single", nest=True), dict(dollar=False, bs="e", nest=True)),
     "mysql": (dict(dollar=False, bs="all", hash_=True, dash_space=True, dq_string=True),
               dict(dollar=False, bs="none", hash_=True, dash_space=True, dq_string=True)),
     None: (dict(dollar=True, bs="e"), dict(dollar=True, bs="all"), dict(dollar=False, bs="none"),
@@ -269,9 +279,13 @@ _LEXINGS = {
 }
 
 
-@functools.lru_cache(maxsize=64)
+@functools.lru_cache(maxsize=256)
 def _lexings_of(s, dialect):
-    return tuple(_lex(s, **kw) for kw in _LEXINGS.get(dialect, _LEXINGS[None]))
+    kws = _LEXINGS.get(dialect, _LEXINGS[None])
+    # the lexings differ only in how they read \ # $ (and comment nesting): without those chars one is enough
+    if "\\" not in s and "$" not in s and (dialect != None or "#" not in s):  # noqa: E711
+        kws = kws[:1]
+    return tuple(_lex(s, **kw) for kw in kws)
 
 
 def _lexings(text, dialect):
@@ -304,7 +318,7 @@ _NOT_DELETE_BEFORE = re.compile(r"\b(on|for|after|before|of|or|grant|revoke|inst
 _NOT_DELETE_AFTER = re.compile(r"\s*(on\b|,|\)|$)", _F)
 _EXPLAIN = re.compile(r"^[\s(]*explain\b", _F)
 _ANALYZE = re.compile(r"\banaly[sz]e\b", _F)
-_BODY_AFTER = re.compile(r"(\b(do|as|execute)|\\set\s+\w+|\bdblink(_exec)?\s*\([^()]*)\s*$", _F)
+_BODY_AFTER = re.compile(r"(\b(do|as|execute)|\\set\s+\w+|\bdblink(_exec)?\s*\([^()]*)\s*(e|u&|n)?$", _F)
 _GEXEC = re.compile(r"\\gexec(?![a-z_])", _F)
 
 
@@ -346,6 +360,7 @@ def _stmt_destructive(stmt):
     return _unbounded_delete(stmt)
 
 
+@functools.lru_cache(maxsize=1024)
 def _destructive(text, dialect, depth):
     if depth > 4:
         return False
@@ -417,12 +432,15 @@ def _stmt_writes(stmt, kept=""):
         return bool(_SQL_WRITE_WORD.search(body) or _SQL_SIDE_EFFECT.search(body))
     if k == "explain":  # plain EXPLAIN runs nothing
         return bool(_ANALYZE.search(t)) and bool(_SQL_WRITE_WORD.search(body) or _SQL_SIDE_EFFECT.search(body))
+    if k in ("begin", "end", "use", "set", "declare"):  # T-SQL / MariaDB need no semicolon before the next statement
+        if _SQL_WRITE_WORD.search(body) or _SQL_SIDE_EFFECT.search(body):
+            return True
+    if k == "set":
+        return bool(re.search(r"(\b(global|persist|persist_only|password)\b|@@(global|persist))", t, _F))
     if k in _SQL_READ_FIRST:
         return False
     if k == "start":
         return not re.match(r"start\s+transaction\b", t, _F)
-    if k == "set":
-        return bool(re.match(r"set\s+(global|persist|persist_only|password|@@global|@@persist)\b", t, _F))
     if k == "pragma":
         return not _READ_PRAGMA.match(t)
     if k == "copy":
@@ -447,7 +465,7 @@ def sql_writes(text, dialect=None):
 # ---------------------------------------------------------------------------
 _PG_BANG = re.compile(r"\\!", re.A)
 _PG_PIPE = re.compile(r"\\(o|out|g|gx|w|write)[ \t]*\|", _F)
-_PROGRAM = re.compile(r"\bprogram\s*$", _F)
+_PROGRAM = re.compile(r"\bprogram\s*(e|u&|n)?$", _F)
 
 
 def _rest_of_line(raw, k):
@@ -455,32 +473,77 @@ def _rest_of_line(raw, k):
     return raw[k:] if e < 0 else raw[k:e]
 
 
-def shell_escapes(text, family):
-    """Shell commands a client runs from its SQL text: family "pg", "mysql"
-    or "lite"."""
+_LITE_DOT = tuple(("archive auth backup bail binary cd changes check clone connection crlf databases dbconfig "
+                   "dbinfo dbtotxt deserialize dump echo eqp excel exit expert explain filectrl fullschema headers "
+                   "help import imposter indexes intck limit lint load log mode nonce nullvalue once open output "
+                   "parameter print progress prompt quit read recover restore save scanstats schema separator "
+                   "session sha3sum shell show stats system tables timeout timer trace unmodule version vfsinfo "
+                   "vfslist vfsname width www").split())
+_LITE_PIPE_FILE = frozenset({"once", "output", "excel", "import", "read"})
+_DOT_LINE = re.compile(r"(?m)^[ \t]*\.([A-Za-z_][\w-]*)")
+_SETENV_PAGER = re.compile(r"\\setenv\s+(PAGER|PSQL_PAGER|PSQL_WATCH_PAGER|PSQL_EDITOR|EDITOR|VISUAL|SHELL)\s+", re.A)
+
+
+def _unquote_arg(a):
+    a = a.strip()
+    if len(a) >= 2 and a[0] == a[-1] and a[0] in "'\"":
+        return a[1:-1]
+    return a.lstrip("'\"")
+
+
+def _escapes(text, family):
+    """(commands, uncertain): shell commands a client runs from its SQL
+    text; family "pg", "mysql", "lite" (sqlite / duckdb) or None."""
     raw = str(text)
     lx = _lexings(raw, "mysql" if family == "mysql" else "pg")[0]
-    out, cmds = lx.out, []
+    out, cmds, uncertain = lx.out, [], False
     if family == "pg":
         for m in _PG_BANG.finditer(out):
-            cmds.append(_rest_of_line(raw, m.end()))
+            rest = _rest_of_line(raw, m.end())
+            cmds.append(rest)
+            uncertain = uncertain or not rest.strip()  # \! alone: an interactive shell
         for m in _PG_PIPE.finditer(out):
             cmds.append(_rest_of_line(raw, m.end()))
+        for m in _SETENV_PAGER.finditer(out):
+            cmds.append(_unquote_arg(_rest_of_line(raw, m.end())))
     if family in ("pg", None):
         for start, _end, content in lx.bodies:
-            if _PROGRAM.search(out[max(0, start - 20):start]):
+            if _PROGRAM.search(out[max(0, start - 24):start]):
                 cmds.append(content)
     if family == "mysql":
         for a, b in _spans(out):
             st = out[a:b]
-            for m in re.finditer(r"(?:^|\n)[ \t(]*(system|pager|\\!|\\P)(?=[ \t]|$)", st, re.I):
+            for m in re.finditer(r"(?:^|\n)[ \t(]*(system|pager)(?=[ \t]|$)", st, re.I):
                 cmds.append(_rest_of_line(raw, a + m.end()))
-    if family == "lite":
-        for m in re.finditer(r"(?m)^[ \t]*\.(shell|system)\b", out):
+        for m in re.finditer(r"\\[!P]", out):  # \! and \P (pager) work anywhere on a line
             cmds.append(_rest_of_line(raw, m.end()))
-        for m in re.finditer(r"(?m)^[ \t]*\.(once|output|excel)\b[ \t]*['\"]?[ \t]*\|", raw):
-            cmds.append(_rest_of_line(raw, m.end()).rstrip().rstrip("'\""))
-    return [c.strip() for c in cmds if c.strip()]
+    if family == "lite":
+        for m in _DOT_LINE.finditer(raw):
+            word = m.group(1).lower()
+            names = [d for d in _LITE_DOT if d.startswith(word)]
+            rest = _rest_of_line(raw, m.end())
+            if any(d in ("shell", "system") for d in names) or not names:
+                cmds.append(rest)  # .sh / .sys / an unknown or ambiguous prefix: fail safe, a shell
+                uncertain = uncertain or not names
+            elif any(d in _LITE_PIPE_FILE for d in names):
+                arg = rest.strip()
+                if re.match(r"-[xe]\b", arg):
+                    uncertain = True  # .once -x: opens the result in another program
+                arg = re.sub(r"^(--?\w+\s+)*", "", arg)
+                plain = arg.lstrip("'\"").lstrip()
+                if plain.startswith("|"):
+                    cmd = plain[1:]
+                    if arg[:1] in "'\"":
+                        cmd = cmd.split(arg[0], 1)[0]
+                    cmds.append(cmd)
+                    uncertain = uncertain or not cmd.strip()
+    return [c.strip() for c in cmds if c.strip()], uncertain
+
+
+def shell_escapes(text, family):
+    """Shell commands a client runs from its SQL text: family "pg", "mysql"
+    or "lite"."""
+    return _escapes(text, family)[0]
 
 
 def _retargets(text, family):
@@ -491,7 +554,7 @@ def _retargets(text, family):
     out = lx.out
     if family == "pg" and (re.search(r"\\c(onnect)?[ \t]+\S", out) or re.search(r"\bdblink\w*\s*\(", out, re.I)):
         return True  # \c otherdb, dblink('host=prod', ...): another server
-    if family == "mysql" and re.search(r"(?:^|[;\n])[ \t]*(connect\b|\\r\b)", out, re.I):
+    if family == "mysql" and (re.search(r"(?:^|[;\n])[ \t]*connect\b", out, re.I) or re.search(r"\\r\b", out)):
         return True
     if family == "duckdb":
         for start, _end, content in lx.bodies:
@@ -853,10 +916,12 @@ def _opt_table(spec):
 
 
 class _Args:
-    __slots__ = ("sql", "file", "hosts", "conn", "positional", "other", "unknown", "uncertain", "shell", "modes")
+    __slots__ = ("sql", "file", "hosts", "conn", "positional", "other", "unknown", "uncertain", "shell", "modes",
+                 "loose")
 
     def __init__(self):
         self.sql, self.hosts, self.conn, self.positional, self.other, self.shell, self.modes = [], [], [], [], [], [], []
+        self.loose = []  # values attached to options we do not know
         self.file = self.unknown = self.uncertain = False
 
 
@@ -879,14 +944,31 @@ def _take(r, cat, opt, val):
             r.shell.append(val)
 
 
-def _resolve_long(table, name, spec):
+def _match_long(table, name):
+    """(option, category) for an exact or unambiguous prefix; ("?", None) when
+    ambiguous, (None, None) when nothing matches."""
     if name in table:
         return name, table[name]
     hits = [o for o in table if o.startswith("--") and o.startswith(name)]
     if len(hits) == 1:
         return hits[0], table[hits[0]]
-    if spec["family"] == "mysql" and name.startswith(_MY_PREFIXES):
-        return name, "flags"
+    return ("?", None) if hits else (None, None)
+
+
+def _resolve_long(table, name, spec):
+    opt, cat = _match_long(table, name)
+    if cat is not None or spec["family"] != "mysql":
+        return (opt, cat) if cat is not None else (None, None)
+    if name.startswith("--loose-"):  # mysql: --loose-X is X, and an unknown X is ignored
+        opt, cat = _match_long(table, "--" + name[8:])
+        if cat is not None:
+            return opt, cat
+        return (None, None) if opt == "?" else (name, "flags")
+    for pre in ("--skip-", "--enable-", "--disable-", "--maximum-"):
+        if name.startswith(pre):
+            opt, cat = _match_long(table, "--" + name[len(pre):])
+            # only a boolean option takes these prefixes; anything else is a parse we cannot trust (P7)
+            return (name, "flags") if cat == "flags" else (None, None)
     return None, None
 
 
@@ -922,6 +1004,8 @@ def _client_args(spec, args):
             if cat is None:
                 if not (eq and spec["free_long"]):
                     r.uncertain = True
+                    if eq:
+                        r.loose.append(val)
                 r.other.append(a)
             elif cat in ("flags", "optval") or (cat == "pager" and not eq):
                 r.other.append(opt)
@@ -943,6 +1027,8 @@ def _client_args(spec, args):
             if cat is None:
                 r.uncertain = True
                 r.other.append(a)
+                if a[j + 1:]:
+                    r.loose.append(a[j + 1:])
                 break
             if cat == "flags":
                 r.other.append(o)
@@ -1092,8 +1178,8 @@ def client_finding(name, args, *, prefix_env=None, line_env=None, stdin="none", 
     texts = list(p.sql)
     if spec["positional_sql"]:
         texts += p.positional[1:]
-    if p.uncertain:  # Ruling P7: an option we do not know: every positional may be SQL
-        texts += [x for x in p.positional if x not in texts]
+    if p.uncertain:  # Ruling P7: an option we do not know: every positional (and its value) may be SQL
+        texts += [x for x in p.positional + p.loose if x not in texts]
     unknown_in = stdin == "unknown"
     if stdin == "literal" and isinstance(feed, str):
         texts.append(feed)
@@ -1107,14 +1193,23 @@ def client_finding(name, args, *, prefix_env=None, line_env=None, stdin="none", 
     is_sql = name in SQL_CLIENTS
     shell = list(p.shell)
     retarget = p.uncertain
+    unsure = False
     if is_sql:
         for x in texts:
-            shell += shell_escapes(x, "lite" if family in ("lite", "duckdb") else family)
+            cmds, u = _escapes(x, "lite" if family in ("lite", "duckdb") else family)
+            shell += cmds
+            unsure = unsure or u
             retarget = retarget or _retargets(x, family)
     destroy = is_sql and any(sql_destructive(x, dialect) for x in texts)
     write = _client_write(spec, p, texts, unknown_in, _env(line_env, prefix_env), patterns, remote or retarget,
                           bool(shell))
-    return Finding(destroy, write, tuple(shell))
+    return Finding(destroy, write or (unsure and not p.file and _far(spec, p, line_env, prefix_env, remote)),
+                   tuple(shell), unsure)
+
+
+def _far(spec, p, line_env, prefix_env, remote):
+    t = _client_target(spec, p, _env(line_env, prefix_env))
+    return remote or t.unknown or any(not host_local(h) for h in t.hosts)
 
 
 def _client_write(spec, p, texts, unknown_in, env, patterns, unknown_target, escapes):
