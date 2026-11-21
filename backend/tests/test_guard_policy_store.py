@@ -355,14 +355,6 @@ def test_trust_ignores_inherited_git_env(tmp_path, monkeypatch):
     assert trust.suggest_trust(d, ["me@org.example"])[0] == "external"  # d's history, not other's
 
 
-def test_trust_does_not_climb_into_a_parent_repo(tmp_path):
-    parent = _repo(tmp_path / "parent", authors=("a@x.example",))
-    child = parent / "sub"
-    child.mkdir()
-    t, why = trust.suggest_trust(child, ["me@org.example"])
-    assert t == "own" and why == trust.R_NOT_REPO
-
-
 def test_trust_git_missing_is_own(tmp_path, monkeypatch):
     d = _repo(tmp_path / "r")
     monkeypatch.setenv("PATH", str(tmp_path / "empty"))  # no git here
@@ -417,5 +409,70 @@ def test_gitsafe_environment(tmp_path, monkeypatch):
         assert kv in args
     r = gitsafe.run_git(tmp_path, "--version", timeout=5)
     assert r.ok and r.out.startswith("git version")
-    r = gitsafe.run_git(tmp_path / "missing-dir", "status", timeout=5)
+    r = gitsafe.run_git(tmp_path / "missing-dir", "rev-parse", "--git-dir", timeout=5)
     assert not r.ok and r.failed
+
+
+# ---- fix round 2: monorepo subfolders, run_git allowlist --------------------------------------
+
+
+def test_trust_monorepo_subfolder_is_judged_by_its_repo(tmp_path):
+    foreign = _repo(tmp_path / "foreign", authors=("a@x.example",))
+    sub = foreign / "packages" / "app"
+    sub.mkdir(parents=True)
+    assert trust.suggest_trust(sub, ["me@org.example"]) == ("external", trust.R_FOREIGN)
+    mine = _repo(tmp_path / "mine", authors=("me@org.example",))
+    sub2 = mine / "packages" / "app"
+    sub2.mkdir(parents=True)
+    assert trust.suggest_trust(sub2, ["me@org.example"]) == ("own", trust.R_MEMBER)
+
+
+def test_trust_walk_stops_before_home(tmp_path, monkeypatch):
+    home = _repo(tmp_path / "home", authors=("a@x.example",))  # a dotfiles repo in home
+    proj = home / "code" / "proj"
+    proj.mkdir(parents=True)
+    monkeypatch.setenv("HOME", str(home))
+    assert trust.suggest_trust(proj, ["me@org.example"]) == ("own", trust.R_NOT_REPO)
+
+
+@pytest.mark.parametrize("args", [
+    ("status",), ("fetch",), ("remote", "update"), ("log", "-p"), ("log", "--show-signature"),
+    ("log", "--format=%G?"), ("log", "--pretty=%G?"), ("log", "--stat"), ("rev-list", "--all", "-G", "x"),
+    ("config", "core.sshCommand", "x"), ("config", "--list"), ("for-each-ref", "--contains", "x"),
+    ("checkout", "x"), ("clone", "x"), (),
+])
+def test_run_git_allowlist(tmp_path, args):
+    from app import gitsafe
+
+    with pytest.raises(ValueError):
+        gitsafe.run_git(tmp_path, *args, timeout=5)
+
+
+def test_run_git_signature_formats_never_run_gpg(tmp_path):
+    from app import gitsafe
+
+    d = _repo(tmp_path / "r", authors=("a@x.example",))
+    marker = tmp_path / "PWNED"
+    script = tmp_path / "fakegpg.sh"
+    script.write_text(f"#!/bin/sh\ntouch {marker}\nexit 1\n")
+    script.chmod(0o755)
+    _git(d, "config", "gpg.program", str(script))
+    _git(d, "config", "log.showSignature", "true")
+    with pytest.raises(ValueError):
+        gitsafe.run_git(d, "log", "--format=%G?", timeout=5)
+    r = gitsafe.run_git(d, "log", "--all", "--max-count=1", "--format=%H", timeout=5)
+    assert r.ok and r.out
+    assert not marker.exists()
+    for kv in ("gpg.program=false", "gpg.ssh.program=false", "gpg.x509.program=false", "diff.external=",
+               "core.attributesFile=/dev/null"):
+        assert kv in gitsafe.SAFE_ARGS
+
+
+def test_run_git_allows_what_trust_uses(tmp_path):
+    from app import gitsafe
+
+    for args in (("--version",), ("rev-parse", "--git-dir"), ("remote",), ("remote", "-v"),
+                 ("for-each-ref", "--count=1", "--format=%(objectname)", "refs/"), ("config", "--get", "x.y"),
+                 ("log", "--all", "-i", "--fixed-strings", "--max-count=1", "--format=%H", "--author=<a@b>"),
+                 ("rev-list", "--all", "--max-count=1")):
+        gitsafe.check_args(args)
