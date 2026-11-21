@@ -146,8 +146,16 @@ HARD (never approvable):
   ``-es``, ``--batch``, ``--eval`` ...); ``find ROOT -exec|-execdir`` and
   ``fd .. -x|-X`` with a writer (a deleter, the writers above, ``sed``/``perl
   -i``) and ``xargs`` writers fed by ``ls``/``find``/``fd``/``echo``/
-  ``printf`` naming a root; a build/install/test/script run with the cwd in
-  a root (quarantine's tables with the root as "the repo"); inline
+  ``printf`` naming a root - for a copy (``cp``/``install``/``rsync``/
+  ``scp``/``ln -s``) the found paths count only as its destination (the last
+  operand, or with ``-t``), so ``find ref -exec cp {} ./copy/ +`` is a read,
+  while ``mv`` and ``cp -l`` sources count; a build/install/test/script run
+  with the cwd in a root (quarantine's tables with the root as "the repo")
+  is hard only for known writers (Ruling P18: package manager
+  install/add/ci/sync/update, make/cmake/ninja, cargo build/run/test,
+  ``./configure``, docker/podman build, gradle/mvn builds, not their dry
+  runs) and otherwise a confirmable ``uncertain-command`` ("this runs a
+  read-only source's code, which may change it"); inline
   interpreter code that may write (the agent-config pattern) and names a
   root (as written, normalised or real, case-folded) or runs with the cwd in
   one. An unknown path counts by its braces (``{../ref,/tmp}/``), a ``for``
@@ -158,7 +166,10 @@ HARD (never approvable):
   start cwd; Ruling P17: when that places it in no root, the change is a
   confirmable ``uncertain-command`` ("the folder this runs in is unknown, and
   read-only folders exist") - only when readonly roots exist; absolute
-  targets and reads are unaffected. Ruling P16: a ``cd``/``pushd`` inside ``( )`` does not leak out
+  targets and reads are unaffected (``git add`` changes no work tree; ``cd
+  "$(mktemp -d)"`` is a fresh temp folder, not unknown). A ``f() { ..; }``
+  body runs in the current shell (its cd counts); ``f() ( .. )`` is scoped
+  like ``( )``. ``command -v X`` is a lookup (free under quarantine). Ruling P16: a ``cd``/``pushd`` inside ``( )`` does not leak out
   (a redirect after the group uses the outer cwd), ``popd`` pops a tracked
   stack (empty: unknown), ``cd -`` goes back, and a ``cd`` in a pipeline
   changes nothing. Reads stay free; over ssh nothing is a root;
@@ -323,6 +334,15 @@ later (checked when it is written), and archive members with absolute or
 by a ``find`` rooted above it, nor ``git clean -fdx``, ``git stash -u`` or
 ``tar -x`` replacing an untracked rules folder.
 
+cwd tracking (P15-P17) is straight-line: a function body is checked where
+it is defined, in that cwd, not where it is called (``f() { echo > a; };
+cd ref; f`` is missed); a ``cd`` inside ``if``/loops/``||`` is assumed to
+happen (``while false; do cd /tmp; done`` moves the cwd); in zsh the last
+stage of a pipeline runs in the current shell, so ``true | cd ref`` does
+move it there (co-guard follows bash); and ``find`` reach ignores ``-prune``
+and ``-not -path`` (``find . -path ./vendor -prune -o .. -exec sed -i``
+still reaches ``vendor/old``).
+
 guest-quarantine keeps forge's tables, so it misses tools they do not list
 (``tsc``, ``prettier``, ``black``, ``ruff``, ``mypy``, ``gcc``, ``javac``,
 ``java X``, bare ``ant``, ``awk -f``, ``sed -f``, ``Rscript``, ``lua``,
@@ -333,7 +353,7 @@ the environment (``NODE_OPTIONS=--require``, ``PYTHONSTARTUP``),
 ``python -c``, ``node -p``/``--check``, ``python -m json.tool``/
 ``py_compile``, ``bash -n``, ``docker compose ps|config|logs``, ``just|task
 --list``, ``pytest --collect-only``, ``npm explain|pkg``, ``pip download``,
-``--dry-run`` installs, ``go list`` and ``command -v make``.
+``--dry-run`` installs and ``go list``.
 """
 
 from __future__ import annotations
@@ -554,7 +574,11 @@ _BASE_TOOL = re.compile(r"(python|pip|ruby|node|php|perl)\d+(\.\d+)*")  # python
 _GIT_CHANGES = frozenset({"commit", "add", "rm", "mv", "reset", "checkout", "restore", "switch", "clean", "stash",
                           "merge", "rebase", "pull", "apply", "am", "cherry-pick", "revert"})
 _RULES_DIR = ".claude-orchestrator"
+_MKTEMP_DIR = re.compile(r"(?:\$\(|`)\s*mktemp\s+(?:-d|--directory)(?:\s+(?:-q|-t|--tmpdir|[\w.-]*X{3,}[\w.-]*))*\s*(?:\)|`)")
 _UNKNOWN_CWD = "the folder this runs in is unknown, and read-only folders exist"  # Ruling P17
+_RUNS_ROOT = "this runs a read-only source's code, which may change it"  # Ruling P18
+_PM_WRITE_SUBS = frozenset({"install", "i", "add", "ci", "sync", "update", "upgrade", "up"})
+_DRY = frozenset({"-n", "--dry-run", "--just-print", "--recon"})
 
 # Long options per command, for GNU-style prefix matching.
 _RM_LONG = ("--recursive", "--force", "--interactive", "--one-file-system", "--no-preserve-root",
@@ -1345,17 +1369,96 @@ _RUN_WRITERS = frozenset({"touch", "chmod", "chown", "chgrp", "mv", "cp", "ln", 
                           "chattr", "mkdir"}) | _PACKERS
 
 
-def _is_writer(argv):
+_FD_HOLDERS = ("{}", "{/}", "{//}", "{.}", "{/.}")
+
+
+def _known_writer(word, name, args):
+    """Ruling P18: commands that certainly write where they run - package
+    manager install/add/ci/sync/update (bare yarn/bundle), make/cmake/ninja,
+    cargo build/run/test (not a dry run), ./configure, docker/podman build,
+    gradle/mvn builds."""
+    cmd = _BASE_TOOL.sub(r"\1", name) if _BASE_TOOL.fullmatch(name) else name
+    if any(a in _DRY for a in args):
+        return False
+    sub, rest = _subcommand_of(args)
+    if cmd in ("make", "gmake", "cmake", "ninja"):
+        return True
+    if cmd == "cargo":
+        return sub in ("build", "b", "run", "r", "test", "t", "install", "bench")
+    if posixpath.basename(word) == "configure":
+        return True
+    if cmd in ("docker", "podman"):
+        return sub in ("build", "buildx") or (sub == "image" and rest[:1] == ["build"])
+    if cmd in ("gradle", "gradlew", "mvn", "mvnw"):
+        return sub not in ("help", "--version") and bool(args)
+    if cmd in _READONLY_SUBS:
+        return sub in _PM_WRITE_SUBS or (not sub and cmd in ("yarn", "bundle"))
+    return False
+
+
+def _is_writer(argv, holders=("{}",), appended=False):
     """The command (wrappers stripped) changes the files it is given
-    (find -exec / fd -x / xargs): a deleter, a writer, or sed/perl -i."""
+    (find -exec / fd -x / xargs): a deleter, a writer, or sed/perl -i.
+    For a copy (cp/install/rsync/scp/ln -s) only the destination is
+    written: the given paths (``holders`` such as ``{}``, or - appended -
+    added after the last word) count only there (cp {} ./copy/ reads them)."""
     inner = _sh.expand_wrappers(list(argv)) or []
     if not inner:
         return False
     name = _sh.command_name(inner[0])
+    copy = name in ("cp", "install", "rsync", "scp") or (name == "ln" and any(
+        a in ("-s", "--symbolic") or re.fullmatch(r"-[a-zA-Z]*s[a-zA-Z]*", a) for a in inner[1:]))
+    if copy:
+        args = inner[1:]
+        dest, _is_dir, srcs, flags = _copy_parts(name, args, [False] * len(args))
+        if name == "cp" and "-l" in flags:
+            return True  # hard links into the given files
+        tdir = any(a in ("-t", "--target-directory") or a.startswith("--target-directory=") for a in args)
+        if appended and not tdir:
+            return True  # the given path becomes the last operand: the destination
+        return dest is not None and any(h in dest[0] for h in holders)
     if name in _DELETERS or name in _RUN_WRITERS:
         return True
     return name in ("sed", "perl") and any(re.fullmatch(r"-[a-zA-Z]*i.*", a) or a.startswith("--in-place")
                                            for a in inner[1:])
+
+
+def _exec_part(expr, j):
+    """The words of a find -exec/-execdir/-ok command starting after index j."""
+    part = []
+    for w in expr[j + 1:]:
+        if w in (";", "+"):
+            break
+        part.append(w)
+    return part
+
+
+def _xargs_holder(st):
+    """(holders, appended) for the xargs/parallel in a stage's wrappers: -I R,
+    -iR, --replace[=R] put the input where R is; else it is appended."""
+    argv = list(st.argv)
+    for i, a in enumerate(argv):
+        name = _sh.command_name(a)
+        if name not in ("xargs", "parallel"):
+            continue
+        rest = argv[i + 1:]
+        if name == "parallel":
+            return ("{}", "{/}", "{//}", "{.}", "{/.}", "{#}"), not any(h in w for w in rest for h in ("{",))
+        for k, b in enumerate(rest):
+            if not b.startswith("-"):
+                break
+            if b == "-I" and k + 1 < len(rest):
+                return (rest[k + 1],), False
+            if b.startswith("-I") and len(b) > 2:
+                return (b[2:],), False
+            if b in ("-i", "--replace"):
+                return ("{}",), False
+            if b.startswith("-i") and len(b) > 2:
+                return (b[2:],), False
+            if b.startswith("--replace="):
+                return (b.split("=", 1)[1],), False
+        return (), True
+    return (), True
 
 
 def _run_on_roots(ctx, roots, cwd, names, summary):
@@ -1397,7 +1500,7 @@ def _find_check(ctx, argv, dyn, cwd, summary):
     roots = roots or [(".", False)]
     names = [expr[k + 1] for k, a in enumerate(expr) if a in ("-name", "-iname") and k + 1 < len(expr)]
     only_names = names and not any(a in _FIND_NARROW and a not in ("-name", "-iname") for a in expr)
-    runs_writer = any(a in ("-exec", "-execdir", "-ok", "-okdir") and _is_writer(expr[j + 1:])
+    runs_writer = any(a in ("-exec", "-execdir", "-ok", "-okdir") and _is_writer(_exec_part(expr, j))
                       for j, a in enumerate(expr))
     if runs_writer:  # find ref -exec sed -i .. {}, find . -name rules.md -exec mv {} /tmp
         _run_on_roots(ctx, roots, cwd, names if only_names else None, summary)
@@ -1463,7 +1566,7 @@ def _fd_check(ctx, argv, dyn, cwd, summary, bash):
     if not cmd or not cmd[0]:
         return
     inner = cmd[0]
-    if _is_writer(inner):
+    if _is_writer(inner, _FD_HOLDERS, appended=not any(h in w for w in inner for h in _FD_HOLDERS)):
         _run_on_roots(ctx, pos[1:] or [(".", False)], cwd, names_of_fd(exts, other, pos), summary)
     if _sh.command_name(inner[0]) in _DELETERS:
         roots = pos[1:] or [(".", False)]
@@ -1730,7 +1833,7 @@ def _git_readonly(ctx, argv, dyn, d, sub, rest, summary, bash):
                 ctx.readonly_check(p, summary, as_ancestor=True, follow=False)
             if sub in ("rm", "mv"):  # Ruling P13: git rm/mv of the rules file or a folder holding it
                 _rules_dir_delete(ctx, p, None, summary)
-    if d is None:
+    if d is None and sub != "add":  # git add changes the index, not the work tree
         ctx.unknown_cwd(before, summary)
 
 
@@ -2214,7 +2317,9 @@ class _Bash:
             self.ctx.note_words(st.argv, argv)
             self.cur_cwd = cwd
             self.stage(st, argv, dyn, cwd, pipelines.get(st.pipeline, [st]), outer)
-            if len(pipelines.get(st.pipeline, [st])) == 1:  # a cd in a pipeline runs in a subshell
+            # a cd in a pipeline runs in a subshell (bash; zsh runs the last stage here - a documented limit),
+            # unless it opens a ( ) group there: then it applies to the group (restored when it closes)
+            if len(pipelines.get(st.pipeline, [st])) == 1 or st.sub > st.plow:
                 cwd = self.after_cd(argv, dyn, cwd)
 
     def note_vars(self, st, argv, dyn):
@@ -2431,6 +2536,8 @@ class _Bash:
         word, d = args[0]
         if word == "-":
             return old
+        if d and _MKTEMP_DIR.fullmatch(word):  # cd "$(mktemp -d)": a fresh temp folder, no root
+            return _real(posixpath.join(self.ctx.tmpdir or "/tmp", "co-guard-mktemp.XXXXXX"))
         return self.ctx.path(word, cwd, d)
 
     # -- files a stage writes ---------------------------------------------------
@@ -2628,15 +2735,19 @@ class _Bash:
         self.direct_writes(name, args, dargs, cwd)
 
     def readonly_runs(self, st, argv, dyn, name, args, dargs, cwd):
-        """readonly-source for a build/install/test/script run inside a root
-        (quarantine's tables, the root as "the repo"; inline -c/-e code is
-        checked as code)."""
+        """A build/install/test/script run inside a root (quarantine's tables,
+        the root as "the repo"; inline -c/-e code is checked as code).
+        Ruling P18: a known writer (_known_writer) is a hard readonly-source
+        hit; anything else is a confirmable uncertain-command."""
         ctx = self.ctx
         for b in ctx.bases(cwd):
             for forms, shown, reason in ctx.readonly:
                 folder = next((f for f in sorted(forms) if _within(b.lower(), f)), None)
                 if folder and _quarantined(ctx, st, argv[0], name, args, dargs, b, st.index > 0, folder=folder):
-                    ctx.readonly_hit((shown, reason), self.raw)
+                    if _known_writer(argv[0], name, args):  # Ruling P18: hard only for known writers
+                        ctx.readonly_hit((shown, reason), self.raw)
+                    else:
+                        ctx.hits.append(Hit("uncertain-command", _RUNS_ROOT, False, _short(self.raw)))
                     return
 
     def xargs_writer(self, st, cwd, pipeline):
@@ -2902,12 +3013,15 @@ class _Bash:
         self.db_check(st, argv, name, args, pipeline, cwd)
 
         # guest-quarantine: the reviewed repo's install/build/test/run commands (every stage)
-        if ctx.quarantine and _quarantined(ctx, st, argv[0], name, args, dargs, cwd, st.index > 0):
+        lookup = bool(st.argv[:1]) and _sh.command_name(st.argv[0]) == "command" and any(
+            re.fullmatch(r"-[pvV]*[vV][pvV]*", a) for a in st.argv[1:3])  # command -v make: a lookup
+        if ctx.quarantine and not lookup and _quarantined(ctx, st, argv[0], name, args, dargs, cwd, st.index > 0):
             ctx.hit("guest-quarantine", False, raw)
 
-        if ctx.readonly and not ctx.remote:
+        if ctx.readonly and not ctx.remote and not lookup:
             self.readonly_runs(st, argv, dyn, name, args, dargs, cwd)
-        if ("xargs" in st.wrappers or "parallel" in st.wrappers) and not ctx.remote and _is_writer(argv):
+        if ("xargs" in st.wrappers or "parallel" in st.wrappers) and not ctx.remote and \
+                _is_writer(argv, *_xargs_holder(st)):
             self.xargs_writer(st, cwd, pipeline)
 
         # a protected path (or an unknown guard variable) in the arguments of a non-reader

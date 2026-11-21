@@ -1874,8 +1874,8 @@ def _lex(s, start, nested, ctx, vars_):
                 lv.add(s[i:e], dyn=True)
                 i = e
                 continue
-            if nx == ")":  # f() { ...; }: the name is its own stage, the body follows
-                lv.end_stage()
+            if nx == ")":  # f() { ...; }: the name is its own stage (and pipeline), the body follows
+                lv.end_pipeline(lv.prev_sep)
                 i += 2
                 continue
             if nx == "(" and not lv.started:
