@@ -11,6 +11,21 @@ import {
 } from 'antd'
 import { api } from '../api'
 
+// co-guard (Phase 2): what the server's database is, and what happens to its
+// tools that have no policy row. Admin-only on the server.
+export const ENVIRONMENT_OPTIONS = [
+  { value: 'unknown', label: 'Unknown (treated as production)' },
+  { value: 'prod', label: 'Production' },
+  { value: 'dev', label: 'Dev' },
+]
+export const DEFAULT_ACTION_OPTIONS = [
+  { value: 'auto_approve', label: 'Auto-approve' },
+  { value: 'require_approval', label: 'Require approval' },
+  { value: 'block', label: 'Block' },
+]
+export const DEFAULT_ACTION_LABEL = Object.fromEntries(DEFAULT_ACTION_OPTIONS.map((o) => [o.value, o.label]))
+export const ENVIRONMENT_LABEL = { unknown: 'Unknown', prod: 'Production', dev: 'Dev' }
+
 // key=value textarea <-> object helpers for env / headers entry.
 function objToText(obj) {
   return Object.entries(obj || {})
@@ -48,13 +63,21 @@ export default function McpServerModal({ open, server, onClose, onSaved }) {
         args: (server.args || []).join(' '),
         url: server.url,
         enabled: server.enabled,
+        environment: server.environment || 'unknown',
+        default_action: server.default_action || 'require_approval',
         env: '', // secrets are never returned; leave blank unless changing
         headers: '',
       })
     } else {
       form.resetFields()
       setTransport('stdio')
-      form.setFieldsValue({ transport: 'stdio', scope: 'team', enabled: true })
+      form.setFieldsValue({
+        transport: 'stdio',
+        scope: 'team',
+        enabled: true,
+        environment: 'unknown',
+        default_action: 'require_approval',
+      })
     }
   }, [open, server])
 
@@ -76,6 +99,8 @@ export default function McpServerModal({ open, server, onClose, onSaved }) {
           args,
           url: v.url,
           enabled: v.enabled,
+          environment: v.environment,
+          default_action: v.default_action,
         }
         if (v.env?.trim()) patch.env = textToObj(v.env)
         if (v.headers?.trim()) patch.headers = textToObj(v.headers)
@@ -92,6 +117,8 @@ export default function McpServerModal({ open, server, onClose, onSaved }) {
           env: textToObj(v.env),
           headers: textToObj(v.headers),
           enabled: v.enabled,
+          environment: v.environment,
+          default_action: v.default_action,
         })
       }
       message.success(isEdit ? 'Server updated' : 'Server added')
@@ -217,6 +244,25 @@ export default function McpServerModal({ open, server, onClose, onSaved }) {
             />
           </>
         )}
+
+        <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap' }}>
+          <Form.Item
+            name="environment"
+            label="Database environment"
+            style={{ flex: '1 1 220px' }}
+            extra="For database servers: writes to Unknown or Production need approval; Dev is free (deleting tables still asks)."
+          >
+            <Select options={ENVIRONMENT_OPTIONS} data-testid="mcp-environment" />
+          </Form.Item>
+          <Form.Item
+            name="default_action"
+            label="Default for tools without a policy"
+            style={{ flex: '1 1 220px' }}
+            extra="A tool's own policy (Policies) always wins over this default."
+          >
+            <Select options={DEFAULT_ACTION_OPTIONS} data-testid="mcp-default-action" />
+          </Form.Item>
+        </div>
 
         <Form.Item name="enabled" label="Enabled" valuePropName="checked">
           <Switch />

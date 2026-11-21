@@ -137,7 +137,12 @@ function ProjectModal({ open, project, isAdmin, currentUser, onClose, onSaved })
     setSaving(true)
     try {
       if (isEdit) await api.updateProject(project.id, v)
-      else await api.createProject(v)
+      else {
+        const made = await api.createProject(v)
+        // co-guard's trust suggestion (change it in the project's Guard tab)
+        if (made?.trust_reason)
+          message.info(`Trust: ${made.trust === 'external' ? 'external' : 'own code'} — ${made.trust_reason}`, 8)
+      }
       message.success(isEdit ? 'Project saved' : 'Project created')
       onSaved?.()
       onClose()
@@ -389,6 +394,14 @@ function DiscoverModal({ open, onClose, onImported }) {
     try {
       const created = await api.importProjects(selected)
       message.success(`Added ${created.length} project${created.length === 1 ? '' : 's'}`)
+      const external = created.filter((p) => p.trust === 'external')
+      if (external.length)
+        message.info(
+          `${external.length} came out external (someone else's code) and quarantined: ${external
+            .map((p) => p.name)
+            .join(', ')}. Change it in each project's Guard tab.`,
+          8,
+        )
       onImported?.()
       onClose()
     } catch (e) {
@@ -564,6 +577,8 @@ export default function ProjectsView({ currentUser, onProjectsChanged }) {
           )}
           {!row.memory_enabled && <Tag color="default">memory off</Tag>}
           {row.guard_enabled === false && <Tag color="warning">guard off</Tag>}
+          {row.trust === 'external' && <Tag color="purple">external</Tag>}
+          {row.quarantine && <Tag color="orange">quarantine</Tag>}
         </Space>
       ),
     },

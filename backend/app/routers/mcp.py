@@ -26,6 +26,15 @@ _admin = [Depends(require_admin)]  # writes are admin-only; reads are open
 _VALID_TRANSPORTS = {"stdio", "http"}
 _VALID_SCOPES = {"team", "user", "project", "both"}
 _VALID_ACTIONS = {"auto_approve", "require_approval", "block"}
+# co-guard (Phase 2): unknown counts as prod for db-write; marking a server dev relaxes the guard (admin-only).
+_VALID_ENVIRONMENTS = {"dev", "prod", "unknown"}
+
+
+def _check_guard_fields(environment, default_action) -> None:
+    if environment is not None and environment not in _VALID_ENVIRONMENTS:
+        raise HTTPException(400, f"environment must be one of {sorted(_VALID_ENVIRONMENTS)}")
+    if default_action is not None and default_action not in _VALID_ACTIONS:
+        raise HTTPException(400, f"default_action must be one of {sorted(_VALID_ACTIONS)}")
 
 
 async def _server_visibility(s, p):
@@ -68,6 +77,7 @@ async def create_server(payload: McpServerCreate):
         raise HTTPException(400, "http transport requires a url")
     if payload.scope == "project" and not payload.project:
         raise HTTPException(400, "project scope requires a project name")
+    _check_guard_fields(payload.environment, payload.default_action)
 
     async with SessionLocal() as s:
         dup = (
@@ -85,6 +95,8 @@ async def create_server(payload: McpServerCreate):
             url=payload.url,
             secrets_encrypted=_pack_secrets(payload.env, payload.headers),
             enabled=payload.enabled,
+            environment=payload.environment,
+            default_action=payload.default_action,
         )
         s.add(srv)
         await s.commit()
@@ -138,6 +150,10 @@ async def update_server(server_id: str, payload: McpServerUpdate):
     async with SessionLocal() as s:
         srv = await _get_or_404(s, server_id)
         data = payload.model_dump(exclude_unset=True)
+        for k in ("environment", "default_action"):
+            if k in data and data[k] is None:
+                del data[k]  # required columns; null means "leave it"
+        _check_guard_fields(data.get("environment"), data.get("default_action"))
         # Merge secrets: only overwrite the sub-blob that was provided.
         if "env" in data or "headers" in data:
             sec = decrypt_json(srv.secrets_encrypted)

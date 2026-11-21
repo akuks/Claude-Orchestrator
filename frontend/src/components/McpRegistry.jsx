@@ -26,7 +26,7 @@ import {
   ThunderboltOutlined,
 } from '@ant-design/icons'
 import { api, MCP_STATUS_COLORS } from '../api'
-import McpServerModal from './McpServerModal'
+import McpServerModal, { DEFAULT_ACTION_LABEL, ENVIRONMENT_LABEL } from './McpServerModal'
 
 function ObservabilityPanel({ obs }) {
   if (!obs) return null
@@ -112,6 +112,14 @@ function PolicyDrawer({ server, onClose }) {
         Auto-approve read-only tools, route writes through approval, or block a tool
         entirely. Policies are enforced when a task uses this server.
       </Typography.Paragraph>
+      {server && (
+        <Typography.Paragraph data-testid="policy-default">
+          Tools without a policy here:{' '}
+          <Tag>{DEFAULT_ACTION_LABEL[server.default_action] || server.default_action || 'Require approval'}</Tag>
+          Database environment: <Tag>{ENVIRONMENT_LABEL[server.environment] || server.environment || 'Unknown'}</Tag>
+          <Typography.Text type="secondary">(change both with Edit)</Typography.Text>
+        </Typography.Paragraph>
+      )}
       {policies.length ? (
         <Table
           rowKey="tool_name"
@@ -212,6 +220,8 @@ export default function McpRegistry() {
           <ApiOutlined />
           <b>{n}</b>
           {!row.enabled && <Tag>disabled</Tag>}
+          {row.environment === 'dev' && <Tag color="green">dev DB</Tag>}
+          {row.environment === 'prod' && <Tag color="red">prod DB</Tag>}
         </Space>
       ),
     },

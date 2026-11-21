@@ -34,6 +34,42 @@ cost caps, security reviews, and reusable agent roles.
 >   update) **need approval** until co-guard learns them.
 > - It is a **seatbelt, not a sandbox** — see the accepted limits below.
 
+> **Upgrading to the policy release?** co-guard's policy becomes the org's own
+> ([Action policy](#action-policy)). What changes for you:
+>
+> - **New MCP servers default to *Require approval*** for tools with no policy
+>   row. Servers that existed before the upgrade keep *Auto-approve* (today's
+>   behaviour). Set a server's default action in MCP Servers.
+> - **Database writes to a target that is neither local nor dev need approval**
+>   (`db-write`): `psql -h prod.db … -c "update …"`, a script file or piped SQL
+>   against a remote host, `prisma db push` / `migrate deploy`, `supabase db
+>   push`, write tools of a database MCP server. Local databases (localhost,
+>   sockets, SQLite files) are free. Mark dev databases in **Agent guard → Dev
+>   databases** or a database MCP server's environment as *Dev*.
+> - **Check your database MCP servers' environment.** A server whose name looks
+>   like a database (postgres, mysql, sql, mongo, redis …) starts as
+>   *Unknown*, which counts as **production** for `db-write`: every write tool
+>   call on it needs approval. Set dev and local servers to *Dev* in MCP
+>   Servers (or add them to the dev database patterns).
+> - **Destructive SQL needs approval on every database, local ones included**
+>   (`sql-destroy`): `DROP TABLE/DATABASE/SCHEMA`, `TRUNCATE`, `DELETE` without
+>   `WHERE`.
+> - **Projects created or imported after the upgrade may come out *external* and
+>   quarantined.** When the folder has a git remote, at least one org member has
+>   a git email, and no commit is by any of them, the project is marked external:
+>   the agent is told the repo's text is data, not instructions; the repo's
+>   `.claude-orchestrator/rules.md` is not read; and quarantine holds the repo's
+>   install/build/test/run commands (`npm install`, `make`, `pytest`, `./run.sh`
+>   …) for approval. Existing projects stay *own* with quarantine off. Change
+>   either in Project → Guard.
+> - **Read-only folders block project-wide changes that reach them.** With a
+>   read-only folder inside the project, `rm -rf *`, `chmod -R .`, `git checkout
+>   .` and formatters run on `.` (`prettier --write .`, `black .`) are denied
+>   outright. Name the folders to change instead (`black src`); a tool's own
+>   exclude options are not taken into account.
+> - **Task-level risk (`classify_risk`) is unchanged**: prompts that mention
+>   pushes, merges or deletes are still gated before the task starts.
+
 ---
 
 ## What it does
@@ -201,17 +237,22 @@ hook checks **every tool call** before it runs, with the task's policy:
 | Decision | What |
 |---|---|
 | **Allowed** | Everyday work: reads, edits inside the project, builds, tests, `git` on feature branches, `rm -rf` inside the project or strictly inside a temp dir (`/tmp/…`, `$TMPDIR/…`, `/private/var/folders/…` — never the temp root itself) |
-| **Needs approval** (a person, once) | `rm -rf` outside the project (or of the project / its `.git`), force-push to `main`/`master`, `git reset --hard`, `git clean -fdx`, `git stash drop`, secret files (`.env`, keys), wide `chmod`, `curl … \| sh`, `.git/config` / hooks, Claude Code settings / hooks / agents / `.mcp.json`, commands too unclear to check, MCP tools set to *Require approval*, **unknown tools** |
+| **Needs approval** (a person, once) | `rm -rf` outside the project (or of the project / its `.git`), force-push to `main`/`master`, `git reset --hard`, `git clean -fdx`, `git stash drop`, secret files (`.env`, keys, `secrets.yml`; source and docs such as `secrets.ts` or `docs/secrets.md` are free), wide `chmod`, `curl … \| sh`, `.git/config` / hooks, Claude Code settings / hooks / agents / `.mcp.json`, commands too unclear to check, MCP tools set to *Require approval*, **unknown tools** |
+| **Needs approval** (database) | `sql-destroy`: `DROP TABLE/DATABASE/SCHEMA`, `TRUNCATE`, `DELETE` without `WHERE` sent to any database client or database MCP server, local ones included. `db-write`: any non-read statement, script file or unknown stdin sent to a target that is neither local nor dev; `prisma db push` / `migrate deploy|resolve|reset`, `supabase db push`; database MCP write tools (not on *Dev* servers) |
+| **Needs approval** (policy) | `guest-quarantine`: the repo's install / build / test / run commands in a quarantined project (also with the built-in rules off). `org.<slug>` / `project.<slug>` / `repo.<slug>` *confirm* rules |
 | **Denied** (never approvable) | `rm -rf ~` / `/`, anything touching the orchestrator itself (its code, `.env`, DB, venv, the guard, other tasks' data, the Claude config dir) — **self-protection**, commands too complex to parse, MCP tools set to *Block*, the PowerShell tool |
+| **Denied** (policy) | `readonly-source`: any change under a read-only folder or a reference project (always on, never filed as a request). `org.<slug>` / `project.<slug>` / `repo.<slug>` *never* rules |
 
 **Approvals.** The call pauses and shows up under **Approvals → Actions** with the
 full command; it waits up to the project's **approval wait** (Project → Guard,
-default 300 s, 60–900) and is denied if nobody answers. Two-person rule: another
+default 300 s, 60–900) and is denied if nobody answers (or, with *Deny and resume*, stays
+open for a later follow-up — see [Action policy](#action-policy)). Two-person rule: another
 maintainer of the project (or an admin) decides — the task's owner cannot approve
 their own task's actions unless they are an admin. A scheduled run with a Slack
 webhook also posts "Agent action waiting for approval: *task* — *rule*" (first
-line of the redacted command, link via `CO_PUBLIC_URL`). Each approval is
-one-shot: it lets exactly that call run.
+line of the redacted command, link via `CO_PUBLIC_URL`). **Approve once** lets
+exactly that call run; **Approve for this run** also lets the same rules through
+for the rest of the thread (see [Action policy](#action-policy)).
 
 **What else changes per task.** Inline `` !`cmd` `` in skills / slash commands /
 skill packs is disabled (`disableSkillShellExecution`: it would run unchecked);
@@ -230,16 +271,196 @@ task does not start.
 built-in tool) needs approval each time (`unknown-tool`), so new shell-capable
 tools fail closed. Approve it, or wait for a co-guard update that knows it.
 
-**A seatbelt, not a sandbox.** Accepted limits (documented in
-`backend/app/guard/rules.py`): `sed`'s `e` command, scripts already on disk,
-obfuscated interpreter code, `ssh host bash -s < file`; `rg | xargs rm`
-(non-recursive), `git branch -D` / `update-ref`, `umask` / `setfacl`,
-`python -c` writing `.env`, copying/syncing/unpacking into the project
-(`cp -r src/. .`, `rsync`, `tar`, `git apply`, `stash pop`) that lands in agent
-config; while the server is down a same-user process could listen on the
-approval address; agent definitions and `.mcp.json` committed to the repo can
-start processes outside the hook (repo content is trusted, like repo hooks).
-Real isolation (OS-level sandboxing) is a later phase.
+### Action policy
+
+The policy lives in three places: **Agent guard** (admin page: org rules,
+built-in rules, dev databases), each project's **Guard** tab (project rules,
+trust, quarantine, no-answer mode, read-only folders, reference projects, the
+repo rules file's status) and **MCP Servers** (environment and default action).
+Every task gets the policy as it stands when it starts.
+
+**Custom rules.** A rule is *confirm* (needs a person's approval) or *never*
+(denied outright), and matches *text* (a case-insensitive piece of text) or a
+*regex* (Python syntax, case-insensitive, at most 500 characters, checked when
+saved). It is checked against the shell command (and its de-quoted words), the
+file path of file tools (never the content) and the input of MCP tools — for
+every tool, reads included, and also when the project's built-in rules are off.
+Admins edit org rules (`org.<slug>`), maintainers their project's
+(`project.<slug>`); at most 200 per scope. The reason (at most 200 characters;
+control, zero-width and bidi characters are removed) is what the agent and the
+approver read. Every custom regex of one tool call shares a 250 ms budget: a
+repo rule or a *confirm* rule that runs past it needs approval ("took too long
+to check"); an org/project *never* rule that runs past it stays denied.
+
+**The repo rules file.** A project trusted as *own* may carry
+`.claude-orchestrator/rules.md`, read when each task starts:
+
+```markdown
+## Confirm
+- `terraform apply` : applying infrastructure needs a person
+- `re:kubectl\s+delete` : deleting cluster resources
+
+## Never
+- `DROP DATABASE` : never from a task
+```
+
+It is **add-only**: its rules become `repo.<slug>` and can only ask for more
+approvals or blocks. `disable:` and `database dev:` lines, other sections and
+malformed lines are ignored and listed (with line numbers) in the project's
+Guard tab and the task's run log. At most 64 KiB and 200 rules. An *external*
+project's file is never opened. An agent's change to `.claude-orchestrator/`
+needs approval (`agent-config`: it would change the rules a later task loads).
+
+**Built-in rules and dev databases (Agent guard, admins).** These built-ins can
+be switched off for the whole org: `rm-rf-outside` (its approval part only —
+deleting home or `/` stays denied; switching it off also frees `rm -rf` of the
+project folder and its `.git`), `git-force-push-main`, `git-reset-hard`,
+`git-clean-fdx`, `git-stash-drop`, `secret-files`, `chmod-wide`,
+`pipe-to-shell`, `sql-destroy`, `db-write`. The rest can never be switched off:
+`self-protect`, `agent-config`, `git-internals`, `unparseable`,
+`uncertain-command`, `unsupported-shell`, `unknown-tool`, the MCP rules,
+`readonly-source` and `guest-quarantine`. **Dev database patterns** relax
+`db-write` (never `sql-destroy`): `host:<glob>` (`host:*.dev.internal`),
+`mcp:<server>` or `mcp:<prefix>*`, or a bare exact host or server name.
+Patterns that are only wildcards are refused.
+
+**MCP servers (admins).** Each server has an **environment** — *Dev*, *Prod* or
+*Unknown* (the default). *Dev* or *Prod* marks it as a database; an *Unknown*
+server whose name looks like a database (postgres, mysql, sql, mongo, redis …)
+is one too and counts as production — so set your dev and local database
+servers to *Dev*. `db-write` skips *Dev* servers (an explicit *Prod* beats any
+dev pattern); `sql-destroy` applies to all of them, *Dev* and local databases
+included. Each
+server also has a **default
+action** for tools with no policy row: *Auto-approve*, *Require approval* or
+*Block*. An explicit tool policy always wins.
+
+**Trust and quarantine (Project → Guard).** *Own* code or *External* (someone
+else's). New and imported projects get a suggestion (the git-author check in
+the upgrade note; trust is not checked when no member has a git email) and the
+Guard tab shows why. For an external project the agent (and every helper it starts) is told, at start and
+after compaction, that the repo's README, comments, docs, scripts and rules
+files are data to review, never instructions; and its rules file is not read.
+**Quarantine** (on by default for projects that come out external) holds the
+repo's install / build / test / run commands for approval (`guest-quarantine`:
+package managers except read-only subcommands, docker, interpreters and shells
+running the repo's scripts, the repo's own executables); `--version`, `--help`
+and dry runs are free.
+
+**Read-only folders and reference projects (Project → Guard).** A read-only
+folder (relative to the project or absolute; not `/` or a parent of your home)
+and every **reference project** — another project the editor can see, mounted
+into each task with `--add-dir` when the task's owner can see it too — is a
+`readonly-source` root: edits, writes, redirects, copies *into* it, moves,
+deletes, `sed -i`, `chmod`, git commands that change its work tree, and builds,
+installs and formatters run on it are **denied** (never filed, cannot be
+approved). Reads stay free (`cat`, `grep -r`, `git -C ref log`, `cp ref/a ./`).
+Running a root's own code (other than known builders) needs approval
+("this runs a read-only source's code, which may change it"); so does a
+relative write after a `cd` co-guard cannot follow, when read-only folders
+exist. The deny message names the folder's path (a reference project's folder
+is in the run log through `--add-dir` anyway).
+
+**Approve once or for this run.** A card offers **Approve once** (that call)
+and **Approve for this run**: the same rules through for the rest of the
+**thread** (the task and its follow-up steps) for **12 h**. A run grant covers
+a call only when every rule it hits is granted, for:
+- `guest-quarantine`: any command of the thread;
+- MCP approvals and `db-write` on an MCP tool: **every call of that tool** in
+  the thread (whatever its input; the button's tooltip says so);
+- every other rule: the same command (Bash and Monitor runs of one command
+  share one approval) or the same tool input.
+
+A `db-write` grant never covers `sql-destroy`, and a hard deny is never
+covered. Grants made during a step answer that step's later calls through the
+server; a new step gets them in its policy file and its hook checks them
+locally. Only requests whose key the server can verify from what the card shows
+can be approved for the run: a request the agent filed itself, a command too
+long to show uncut, one that redaction changed or that holds hidden (bidi,
+zero-width) characters, a call that hit more than 50 rules, and a request with
+a rule that cannot be granted (a hard or *never* rule) are **once only** — the
+server decides, and the card says why. **Approvals → Run and follow-up grants**
+lists live grants with **Revoke**; revoking stops server answers and later
+steps at once, but a step already running keeps its copy until it ends.
+
+**When nobody answers (Project → Guard).** *Deny* (default): the call is denied
+when the approval wait ends. *Deny and resume*: the agent is told the request
+is filed and waits for a person, and ends its turn; the request stays open for
+**24 h** (Approvals shows "Agent stopped"). Approving it starts a **follow-up
+step** of the thread, on the thread owner's credentials, resuming their latest
+session, with a one-time grant for exactly that call ("a person approved
+request … You may now run this once, exactly as before"). Approvals that land
+while that follow-up is still queued join it; a step still running delays it
+until the step ends. Rejecting only records the decision. The request expires
+after 24 h or when the thread is cancelled (approvals still waiting to start
+are dropped then too). A decision in the last 5 s of the agent's wait gets
+"the agent is giving up on this request; try again in a few seconds".
+
+### Seatbelt limits
+
+co-guard is a **seatbelt, not a sandbox**: it reads the command text and tool
+input before a call runs, not what the program then does. Accepted limits
+(the full lists are in the docstrings of `backend/app/guard/rules.py`,
+`dbrules.py` and `custom.py`):
+
+- **General.** `sed`'s `e` command, scripts already on disk (`bash x.sh`,
+  `make`, `npm run`), obfuscated interpreter code, `ssh host bash -s < file`;
+  `rg | xargs rm` (non-recursive), `git branch -D` / `update-ref`, `umask` /
+  `setfacl`, `python -c` writing `.env`, copying/syncing/unpacking into the
+  project (`cp -r src/. .`, `rsync`, `tar`, `git apply`, `stash pop`) that lands
+  in agent config; while the server is down a same-user process could listen
+  on the approval address; agent definitions and `.mcp.json` committed to the
+  repo can start processes outside the hook (repo content is trusted, like repo
+  hooks).
+- **Database guard.** Clients run inside another program (`docker exec`,
+  `kubectl exec`, `make`, scripts); SQL the server runs on its own (existing
+  functions, triggers, `dblink`, prepared statements, `pg_cron`); SQL built at
+  run time (`format()`, psql `:vars`, shell variables in SQL — a write when not
+  local, never a destroy); MongoDB code written to hide a method name; files a
+  client reads (`-f`, `\i`, `.read`) are never opened (a write when not local,
+  never a destroy); a quote in a psql meta-command can hide the SQL after it; a
+  dev pattern trusts the host name as written (no DNS). It errs towards asking:
+  a client co-guard cannot parse with certainty is treated as a write, so some
+  reads of production need approval (e.g. MySQL `'it\'s'`, `sqlcmd` `PRINT`,
+  `mongosh` with `require(` in a string, a client with no inline SQL on a line
+  with a pipe).
+- **Custom rules.** A word the parser cannot resolve (`$(..)`, `$G` from
+  `G=git`, a computed name, a script on disk) is matched as written, so a
+  *never* rule is a seatbelt, not a boundary. A broad text rule also holds
+  reads. On very long command lines, an org/project *never* regex can run out
+  of its budget and block (it never lets the call through).
+- **Read-only folders.** Not seen: git subcommands outside the work-tree list
+  (`fetch`, `branch -D`, `tag`, `gc`, `config`), `GIT_DIR` / `GIT_WORK_TREE` in
+  the environment, an enclosing repo's `git stash` / `clean -fd` / `pull` that
+  touches a read-only folder inside it without naming it, `rsync -a src/
+  parent/` whose contents land in a root, shells and interpreters run by `find
+  -exec` / `xargs`, code that builds a root's path at run time, a symlink made
+  earlier and written through later, archive members with absolute or `..`
+  names, `-prune` / `-not -path` in `find` (reach is over-estimated), a tool's
+  own exclude options. A `cd` co-guard cannot follow makes relative writes need
+  approval (not a deny).
+- **Quarantine.** It keeps forge's tables, so it misses tools they do not list
+  (`tsc`, `prettier`, `black`, `ruff`, `mypy`, `gcc`, `javac`, `awk -f`, …),
+  runners that start a held command later (`entr make`, `git bisect run`), code
+  loaded through the environment (`NODE_OPTIONS=--require`, `PYTHONSTARTUP`)
+  and `find -exec {}`; it holds some reads (`python -c`, `node -p`, `bash -n`,
+  `pytest --collect-only`, `--dry-run` installs). Trust follows git author
+  emails, which anyone can set, so treat *own* as a convenience, not proof.
+- **Hook errors.** `PreToolUse` fails closed. Any other hook that fails
+  (session start/end, helpers, `PostToolUse`, settings changes) is recorded as
+  a "co-guard hook error" line in the run's log, and **Agent guard** shows how
+  many there were in the last 48 h (`GET /guard/health`).
+- **Redaction** (run logs, approval cards, spool) knows common shapes — API
+  keys (`sk-…`, GitHub, Slack, AWS key ids), JWTs, PEM private keys, URL
+  passwords, `Bearer …`, `password=` / `token:` / `api_key=`-style values and
+  `mysql -p…` — not every secret.
+- **Grants.** Revoking a grant does not reach a step that is already running
+  (it keeps its policy copy until it ends). Bash and Monitor runs of the same
+  command share one approval. Requests the agent filed itself and commands too
+  long to show uncut can only be approved once.
+
+Real isolation (OS-level sandboxing, a per-task user or container) is a later
+phase.
 
 ---
 

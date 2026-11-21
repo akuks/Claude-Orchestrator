@@ -19,11 +19,17 @@ import {
 import { when } from '../time'
 import { api, RISK_COLORS } from '../api'
 import ActionApprovals from '../guard/ActionApprovals'
+import RunGrants from '../guard/RunGrants'
 
 export default function ApprovalsView({ onChanged, focusId }) {
   const [pending, setPending] = useState([])
   const [loading, setLoading] = useState(false)
   const [busy, setBusy] = useState(null)
+  const [grantSignal, setGrantSignal] = useState(0)
+  const onActionsChanged = useCallback(() => {
+    setGrantSignal((n) => n + 1) // a decision may have made a run grant
+    onChanged?.()
+  }, [onChanged])
 
   const refresh = useCallback(async () => {
     setLoading(true)
@@ -92,7 +98,8 @@ export default function ApprovalsView({ onChanged, focusId }) {
 
   return (
     <>
-      <ActionApprovals onChanged={onChanged} focusId={focusId} />
+      <ActionApprovals onChanged={onActionsChanged} focusId={focusId} />
+      <RunGrants refreshSignal={grantSignal} />
       <Space style={{ marginBottom: 16 }}>
         <Typography.Title level={5} style={{ margin: 0 }}>
           <SafetyOutlined /> Tasks waiting to start ({pending.length})

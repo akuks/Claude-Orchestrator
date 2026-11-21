@@ -88,6 +88,12 @@ def build_config(servers: list[McpServer]) -> dict:
 async def prepare_for_task(project: str | None, config_dir: Path) -> dict | None:
     """Write a per-task MCP config and resolve allow/deny tool lists from policy.
 
+    Also returns co-guard's policy shapes: ``servers`` ({lower-cased server
+    prefix: {name, environment}}, policy ``mcp_servers``) and
+    ``tool_defaults`` ({"mcp__<prefix>__*": default_action}, policy
+    ``mcp_defaults``). Two servers with the same prefix keep the more cautious
+    environment (prod > unknown > dev) and the more restrictive default.
+
     The config holds vault secrets, so it is written to config_dir — a per-task
     location OUTSIDE the agent's working directory (never the project repo) — so
     an agent can't read or accidentally commit it. --mcp-config takes the absolute
@@ -127,12 +133,30 @@ async def prepare_for_task(project: str | None, config_dir: Path) -> dict | None
             disallowed.append(ref)
         elif p.action == "auto_approve":
             allowed.append(ref)
+    env_rank = {"dev": 0, "unknown": 1, "prod": 2}
+    act_rank = {"auto_approve": 0, "require_approval": 1, "block": 2}
+    srv_info: dict[str, dict] = {}
+    tool_defaults: dict[str, str] = {}
+    for srv in servers:
+        prefix = mcp_server_prefix(srv.name).lower()
+        env = getattr(srv, "environment", None)
+        env = env if env in env_rank else "unknown"
+        prev = srv_info.get(prefix)
+        if prev is None or env_rank[env] > env_rank[prev["environment"]]:
+            srv_info[prefix] = {"name": srv.name, "environment": env}
+        act = getattr(srv, "default_action", None)
+        act = act if act in act_rank else "require_approval"
+        key = f"mcp__{prefix}__*"
+        if key not in tool_defaults or act_rank[act] > act_rank[tool_defaults[key]]:
+            tool_defaults[key] = act
     return {
         "config_path": str(path),
         "allowed": allowed,
         "disallowed": disallowed,
         "server_names": [s.name for s in servers],
         "tool_policies": tool_policies,
+        "servers": srv_info,
+        "tool_defaults": tool_defaults,
     }
 
 

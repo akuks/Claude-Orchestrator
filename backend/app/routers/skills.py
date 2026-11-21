@@ -1,4 +1,5 @@
 import asyncio
+import os
 import json
 import re
 import shutil
@@ -59,10 +60,21 @@ def _plugin_meta(path: Path) -> tuple[str | None, str | None]:
     return None, None
 
 
+def _clone_env() -> dict[str, str]:
+    """git clone needs the network, so not gitsafe's no-transport env: https
+    and ssh only (no file://, ext::, git://), no prompts, and no inherited
+    GIT_* variable (GIT_DIR, GIT_CONFIG_PARAMETERS ...) steering it."""
+    env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
+    env.update({"GIT_ALLOW_PROTOCOL": "https:ssh", "GIT_TERMINAL_PROMPT": "0"})
+    return env
+
+
 async def _git_clone(url: str, dest: Path) -> None:
+    # "--": a URL starting with "-" is never read as an option (--upload-pack=...)
     proc = await asyncio.create_subprocess_exec(
-        "git", "clone", "--depth", "1", url, str(dest),
-        stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+        "git", "-c", "core.hooksPath=/dev/null", "clone", "--depth", "1", "--", url, str(dest),
+        stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE, stdin=asyncio.subprocess.DEVNULL,
+        env=_clone_env(),
     )
     _, err = await proc.communicate()
     if proc.returncode != 0:

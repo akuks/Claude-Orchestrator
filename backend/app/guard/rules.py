@@ -5,9 +5,9 @@ Python port of jspark-forge ``scripts/lib/blocklist.js`` and
 (inventory F28-F31, F34-F36, F38, F39), plus MCP tool policies. Bash is
 parsed with :mod:`shell` (the co-guard parser); nothing is ever executed.
 
-RULING R1: this module uses only the Python standard library and the sibling
-``shell.py``. It is copied next to ``shell.py`` into the co-guard plugin and
-must work both as ``app.guard.rules`` and as a standalone file run with
+RULING R1: this module uses only the Python standard library and the siblings
+``shell.py``, ``dbrules.py`` and ``custom.py``. It is copied next to them into the co-guard
+plugin and must work both as ``app.guard.rules`` and as a standalone file run with
 ``python3 -I`` (``python3 -I rules.py < request.json`` prints a verdict).
 
 API
@@ -38,10 +38,55 @@ Policy (a dict, as written by the worker into ``policy.json``)::
                                            #   restrictive matching action wins;
                                            #   an unknown action or a non-dict
                                            #   value means require_approval
+      "mcp_defaults": {"mcp__<prefix>__*": "auto_approve"|"require_approval"|"block"},
+                                           #   server-wide default actions, used only
+                                           #   when no mcp_tools entry matches (same
+                                           #   matching; malformed: require_approval)
       "protected_paths": ["/abs/co-guard", "/abs/_tasks/T1", ...],
                                            #   dirs/files (fnmatch patterns ok)
       "claude_config_dir": "/abs/.claude", # its settings*.json are protected
       "tmpdir": "/abs/tmp",                # optional: one more temp root ($TMPDIR comes from the env)
+      "db_dev": ["host:*.dev.internal", "mcp:pg-dev*", "staging-db"],
+                                           #   dev databases (forge "database dev:"
+                                           #   syntax, see dbrules.py); not a list or
+                                           #   a non-text entry: ignored (nothing dev)
+      "mcp_servers": {"<server prefix, lower-cased>": {"name": str,
+                      "environment": "dev"|"prod"|"unknown"}},
+                                           #   dev/prod marks a database server;
+                                           #   dev skips db-write (not sql-destroy)
+      "custom_rules": [{"id": "org.x"|"project.x"|"repo.x", "kind": "confirm"|"never",
+                        "match": "text"|"regex", "pattern": str, "reason": str}],
+                                           #   org/project/repo rules (custom.py); they
+                                           #   apply even with guard_enabled false
+      "disabled_rules": ["git-reset-hard", ...],
+                                           #   built-ins switched off by an admin: only
+                                           #   ids in DISABLEABLE count, and never a hard
+                                           #   hit (rm -rf ~ stays denied)
+      "quarantine": false,                 #   true: guest-quarantine holds the repo's
+                                           #   install/build/test/run commands (also with
+                                           #   the guard off); missing/null/false is off,
+                                           #   any other value is on (fail safe)
+      "readonly_paths": [{"path": "/abs" | "rel/to/project", "reason": str,
+                          "source": "project"|"reference"}],
+                                           #   readonly-source roots (reason and source
+                                           #   optional); not a list of such entries, a
+                                           #   NUL, or a "~" prefix (the worker writes
+                                           #   absolute paths): hard unparseable (fail
+                                           #   closed)
+      "trust": "own"|"external",           #   read by the hook (SessionStart data line;
+                                           #   anything but "own" is external), not here
+      "on_no_answer": "deny"|"deny_and_resume",
+                                           #   the server's no-answer mode (the hook
+                                           #   follows the POST's resume_until), not here
+      "grants": [{"id": str, "scope": "run"|"once", "rule_id": str,
+                  "key_kind": "rule"|"tool"|"command", "key": str, "expires_at": epoch}],
+                                           #   a person's earlier approvals; checked by the
+                                           #   hook (co_hook.covering_grants) after an
+                                           #   approve verdict, never here; a malformed
+                                           #   entry covers nothing
+      "regex_budget_ms": 250,              #   shared budget for every custom regex in
+                                           #   one evaluate (at most 1000; a non-number
+                                           #   means 250, <= 0 means every regex times out)
       "env_paths": {"CO_POLICY_FILE": "/abs/...", "CO_TASK_DIR": "/abs/...",
                     "CLAUDE_CONFIG_DIR": "/abs/...", "CLAUDE_PLUGIN_ROOT": "/abs/..."}
                                            #   values of the agent's env vars that
@@ -89,6 +134,78 @@ HARD (never approvable):
   ``tool_input``, or write-then-run/ssh re-checks deeper than 6 levels or more
   than 64 per call;
 * ``mcp-block`` (marked hard: never approvable);
+* ``readonly-source`` (always on, also with the guard off; never filed): a
+  change under a ``readonly_paths`` root (real path and as given, case-folded
+  per R9; reason ``this changes <path>, which is read-only (<reason>)``) -
+  Edit/Write/MultiEdit/NotebookEdit, every write target (redirects, ``tee``,
+  cp/ln/rsync/install/dd/curl destinations, ``sed -i``/``perl -i``, ``touch``,
+  ``truncate``, ``mkdir``, chmod/chown, client output files, ``tar -x``/
+  ``unzip`` folders), both ends of ``mv`` and the target of ``chmod -R`` (also
+  as a parent of a root), deletes (``rm``, ``rmdir``, ``find -delete``, ``fd
+  -X rm``, ``rimraf``, ``rsync --delete``; also a parent of a root, or a glob
+  or filter that reaches into one), and git ``commit add rm mv reset checkout
+  restore switch clean stash merge rebase pull apply am cherry-pick revert``
+  run in a root (``-C``, ``--work-tree``, ``--git-dir`` or the tracked cwd) or
+  naming paths under one (rm/mv/checkout/restore/clean; a pathspec glob by
+  its literal folder) - not their ``--dry-run``/``-n`` forms, ``apply
+  --check``, ``stash list|show`` or ``rm --cached`` -, ``git clone`` /
+  ``worktree add`` destinations and ``apply --directory``. Also: hard links
+  (``ln``, ``cp -l``) to a file in a root, ``rsync --remove-source-files``
+  and ``rename`` sources, gzip-family operands and ``-o``, ``sort -o``,
+  ``split`` prefixes, ``tar -c -f``, ``zip`` archives, ``patch`` targets /
+  ``-d`` / ``-o`` (no target: the cwd), ``install -d``, ``pip install
+  --target|-t|--prefix|--root``, ``npm|pnpm|yarn|bun --prefix|--dir|--cwd|-C``
+  for a non-read subcommand, ``make -C``/``-f`` folders, ``openssl -out|-keyout``,
+  ``ssh-keygen -f`` (when it writes), ``setfacl``, ``xattr -w|-d|-c``,
+  ``vim``/``ex``/``emacs``/``ed`` given commands (``-c``, ``+cmd``, ``-s``,
+  ``-es``, ``--batch``, ``--eval`` ...); ``find ROOT -exec|-execdir`` and
+  ``fd .. -x|-X`` with a writer (a deleter, the writers above, ``sed``/``perl
+  -i``) and ``xargs`` writers fed by ``ls``/``find``/``fd``/``echo``/
+  ``printf`` naming a root - for a copy (``cp``/``install``/``rsync``/
+  ``scp``/``ln -s``) the found paths count only as its destination (the last
+  operand, or with ``-t``), so ``find ref -exec cp {} ./copy/ +`` is a read,
+  while ``mv`` and ``cp -l`` sources count; a build/install/test/script run
+  with the cwd in a root (quarantine's tables with the root as "the repo")
+  is hard only for known writers (Rulings P18/P19: package manager
+  install/add/ci/sync/update, JS ``build``/``run build``/``version``/``audit
+  fix``, make/cmake/ninja/meson, cargo build/check/clippy/run/test, go
+  build/generate/install, ``python setup.py``, ``python -m build``, ``pip
+  install -e .``, bare ``tsc``/``npx tsc`` without ``--noEmit``,
+  ``./configure``, autoreconf, docker/podman build, gradle/mvn, dotnet
+  build/publish/restore, swift/bazel/zig build, mix deps.get/compile, git
+  submodule update, poetry/bundle install - not their dry runs) and
+  otherwise a confirmable ``uncertain-command`` ("this runs a read-only
+  source's code, which may change it"); Ruling P19: in-place formatters and
+  fixers (black, ``ruff format``/``check --fix``, isort, ``autopep8 -i``,
+  ``prettier --write`` - also via npx/pnpm/yarn/bun -, ``eslint --fix``,
+  ``gofmt -w``, ``go fmt``, ``goimports -w``, ``cargo fmt``, rustfmt,
+  ``clang-format -i``, ``shfmt -w``, stylua, ``rubocop -a|-A``, swiftformat,
+  ``terraform fmt``; not their check/diff modes) treat their path operands
+  (default ``.``; a glob operand, quoted or not, counts as its literal
+  folder: ``"**/*.js"`` is ``.``) like ``chmod -R`` targets, and builds
+  aimed at a folder by a flag write it (``cmake -B|--build`` - not ``-S``,
+  the source -, ``cargo --manifest-path``, ``go -C``, ``pip install -e
+  DIR``, ``uv --project|--directory``, ``poetry -C|--directory``, ``tsc -p``
+  without ``--noEmit``, ``git -C DIR submodule update``); a non-editable
+  ``pip install DIR`` of a folder in a root is a confirmable
+  ``uncertain-command`` ("pip builds this read-only folder in place"); inline
+  interpreter code that may write (the agent-config pattern) and names a
+  root (as written, normalised or real, case-folded) or runs with the cwd in
+  one. An unknown path counts by its braces (``{../ref,/tmp}/``), a ``for``
+  loop's words, its glob (``vendor/ol?/``, ``../[R]ef/z``, matched per
+  component) or its literal folder (``> ref/$f``); a bare delete/move of a
+  symlink to a root removes only the link. Ruling P15: after a ``cd`` we
+  cannot follow, a relative target is tried against BOTH the project and the
+  start cwd; Ruling P17: when that places it in no root, the change is a
+  confirmable ``uncertain-command`` ("the folder this runs in is unknown, and
+  read-only folders exist") - only when readonly roots exist; absolute
+  targets and reads are unaffected (``git add`` changes no work tree; ``cd
+  "$(mktemp -d)"`` is a fresh temp folder, not unknown). A ``f() { ..; }``
+  body runs in the current shell (its cd counts); ``f() ( .. )`` is scoped
+  like ``( )``. ``command -v X`` is a lookup (free under quarantine). Ruling P16: a ``cd``/``pushd`` inside ``( )`` does not leak out
+  (a redirect after the group uses the outer cwd), ``popd`` pops a tracked
+  stack (empty: unknown), ``cd -`` goes back, and a ``cd`` in a pipeline
+  changes nothing. Reads stay free; over ssh nothing is a root;
 * ``unsupported-shell``: the ``PowerShell`` tool (co-guard parses Bash only).
 
 Tools (Ruling R17, fail closed by name): ``Bash`` and ``Monitor``
@@ -110,8 +227,51 @@ or holds home or the project, nor over ssh), ``git-force-push-main``, ``git-rese
 ``.git/hooks``, ``.git/info/attributes``, ``.gitmodules`` with an
 ``update = !cmd`` key), ``agent-config`` (Rulings R6/R7/R20: writes to a
 ``.claude/settings*.json``, ``.claude/hooks/**``, ``.claude/agents/**``,
-``.claude/skills/**``, ``.claude/commands/**`` or ``.mcp.json``),
-``uncertain-command``, ``mcp-require-approval``, ``unknown-tool``.
+``.claude/skills/**``, ``.claude/commands/**``, ``.mcp.json`` or - Ruling P13,
+the repo rules file a later task loads - ``.claude-orchestrator/**``; also
+deleting or moving it or a folder holding the project's one: ``rm``, ``mv``,
+``git rm``/``git mv``, ``find`` whose filter can reach it),
+``uncertain-command``, ``mcp-require-approval``, ``unknown-tool``,
+``guest-quarantine`` (policy ``quarantine``; always on, never disableable:
+forge ``quarantined()`` ported with its tables - package managers held for
+every subcommand but a read-only list (``READONLY_SUBS``), ``PM_ALWAYS``
+runners, docker/podman except read-only subcommands, ``docker-compose``,
+``java -jar``, interpreters with ``-m/-c/-e/-r`` or a script inside the
+project, shells/``source`` running a script inside the project or fed by a
+pipe or a ``<`` redirect from the project, ``pwsh`` scripts, and the
+project's own executables run by path; versioned names (``python3.11``,
+``node22``); ``--version``/``--help`` alone and ``make -n`` are free; every
+stage, nested and wrapped ones included; "inside" means the project dir,
+real path, case-folded, and an unresolvable path counts as inside),
+``sql-destroy`` and ``db-write`` (database rules, ported in ``dbrules.py``:
+DROP/TRUNCATE/DELETE without WHERE in the SQL a client or a database MCP
+server receives, any target; any non-read statement, script file or unknown
+stdin against a target that is neither local nor dev, prisma/supabase
+commands that write a database, database MCP write tools - checked for
+every stage, nested and wrapped ones included, with ``PGHOST``-style
+variables from the hook's own env (Ruling P6), prefixes (also into
+``bash -c`` bodies) and earlier ``export``s - ``source``/``.``, ``set -a``,
+``export $(..)``, ``read``, ``eval "$x"``, ``env -S`` and env loaders
+(``dotenv``/``env-cmd``/``with-env`` also via npx..., ``op|infisical|doppler
+run --``, ``direnv exec``) make them unknown; ``exec < file`` makes every later
+client's input unknown; shell escapes inside a client (psql ``\\!``, ``\\o |cmd``,
+``COPY .. PROGRAM``, sqlite ``.shell``, mysql ``system``) are checked as
+commands; a client with no inline SQL on a line with a pipe reads unknown
+input; when both fire on one call only ``sql-destroy`` is kept; an
+``mcp-block`` tool gets no database hits).
+
+Custom rules (``custom_rules``, ids ``org.<slug>`` / ``project.<slug>`` /
+``repo.<slug>``; built-in ids never contain a dot): checked for every tool
+against one text - Bash/Monitor: the command with whitespace collapsed; file
+tools: ``<tool> <file_path>`` (never the content); any other tool: ``<tool>
+<compact JSON input, sorted keys>``. ``never`` is hard, ``confirm`` is
+confirmable, and a regex still running when the shared ``regex_budget_ms``
+budget ends is a confirmable hit (also for ``never``) with the reason ``rule
+<id> took too long to check, so it needs approval``. The reason is the rule's
+own (control, zero-width and bidi characters stripped, 200 chars) or ``this
+matches the rule "<pattern>"``. A ``custom_rules`` or ``disabled_rules`` value
+that is not a list of well-formed entries is a hard ``unparseable`` hit with
+the co-guard error reason (fail closed); a missing key is empty.
 
 Paths: write targets, file-tool paths, ``cd`` targets, glob folders and
 delete targets ending in ``/`` or ``/.`` are resolved through every symlink
@@ -190,6 +350,48 @@ patch tools write files whose names it cannot see: ``tar -x``, ``unzip``,
 ``git apply``, ``patch``, ``git stash pop``, ``cp -r evil/. .`` and
 ``rsync -a evil/ .`` can therefore drop ``.claude/`` or ``.mcp.json`` files
 unnoticed. ``"$(dirname "$0")"/run.sh`` stays ``uncertain-command``.
+readonly-source does not see: git subcommands outside forge's list run in a
+root (``fetch``, ``branch -D``, ``tag``, ``gc``, ``config``, ``worktree
+add``), ``GIT_DIR``/``GIT_WORK_TREE`` set in the environment, work-tree
+commands of an enclosing repo that touch a root inside it without naming it
+(``git stash``, ``git clean -fd``, ``git pull`` in the project when
+``vendor/old`` is read-only), ``rsync -a src/ parent/`` whose unnamed
+contents land in a root inside ``parent``, interactive editors (``vi f``,
+``nano f`` - the agent has no terminal), shells and interpreters run by
+``find -exec``/``xargs`` (only their own text is checked, ``{}`` unknown),
+code that builds a root's path at run time, a cd to an unknown folder that
+really is a root (P15/P17: ``cd $D && git commit`` needs approval, it is
+not denied), a symlink created earlier and written through
+later (checked when it is written), and archive members with absolute or
+``..`` names. P13 does not see a nested ``sub/.claude-orchestrator`` reached
+by a ``find`` rooted above it, nor ``git clean -fdx``, ``git stash -u`` or
+``tar -x`` replacing an untracked rules folder.
+
+cwd tracking (P15-P17) is straight-line: a function body is checked where
+it is defined, in that cwd, not where it is called - in both directions
+(``f() { echo > a; }; cd ref; f`` is missed, and a body defined inside a
+root is judged there even when it is called elsewhere); path lists that
+reach ``sed -i`` or ``xargs`` through a pipe or ``$(..)`` from anything but
+``ls``/``find``/``fd``/``echo``/``printf`` (``git ls-files | xargs sed -i``,
+``sed -i .. $(grep -l x -r .)``) are not followed; the GNU ``parallel``
+command template is not parsed as a command; a ``cd`` inside ``if``/loops/``||`` is assumed to
+happen (``while false; do cd /tmp; done`` moves the cwd); in zsh the last
+stage of a pipeline runs in the current shell, so ``true | cd ref`` does
+move it there (co-guard follows bash); and ``find`` reach ignores ``-prune``
+and ``-not -path`` (``find . -path ./vendor -prune -o .. -exec sed -i``
+still reaches ``vendor/old``).
+
+guest-quarantine keeps forge's tables, so it misses tools they do not list
+(``tsc``, ``prettier``, ``black``, ``ruff``, ``mypy``, ``gcc``, ``javac``,
+``java X``, bare ``ant``, ``awk -f``, ``sed -f``, ``Rscript``, ``lua``,
+``julia`` ...), runners that start a held command later (``entr make``,
+``git bisect run make``, ``git submodule foreach make``), code loaded through
+the environment (``NODE_OPTIONS=--require``, ``PYTHONSTARTUP``),
+``python3 /dev/stdin < x.py`` and ``find -exec {}``. It holds some reads:
+``python -c``, ``node -p``/``--check``, ``python -m json.tool``/
+``py_compile``, ``bash -n``, ``docker compose ps|config|logs``, ``just|task
+--list``, ``pytest --collect-only``, ``npm explain|pkg``, ``pip download``,
+``--dry-run`` installs and ``go list``.
 """
 
 from __future__ import annotations
@@ -204,18 +406,26 @@ import re
 import sys
 from dataclasses import asdict, dataclass, field
 
-if __package__:
-    _sh = importlib.import_module(__package__ + ".shell")
-else:  # standalone copy next to shell.py (co-guard plugin, python3 -I)
-    _sh = sys.modules.get("shell")
-    if _sh is None:
-        _spec = importlib.util.spec_from_file_location(
-            "shell", os.path.join(os.path.dirname(os.path.abspath(__file__)), "shell.py"))
-        _sh = importlib.util.module_from_spec(_spec)
-        sys.modules["shell"] = _sh
-        _spec.loader.exec_module(_sh)
+def _sibling(name):
+    """``name``.py from this package, or (standalone copy in the co-guard
+    plugin, python3 -I) the file next to this one."""
+    if __package__:
+        return importlib.import_module(__package__ + "." + name)
+    mod = sys.modules.get(name)
+    if mod is None:
+        spec = importlib.util.spec_from_file_location(
+            name, os.path.join(os.path.dirname(os.path.abspath(__file__)), name + ".py"))
+        mod = importlib.util.module_from_spec(spec)
+        sys.modules[name] = mod
+        spec.loader.exec_module(mod)
+    return mod
 
-__all__ = ["RULES", "Hit", "Verdict", "evaluate", "is_secret_name"]
+
+_sh = _sibling("shell")
+_db = _sibling("dbrules")
+_cu = _sibling("custom")
+
+__all__ = ["RULES", "DISABLEABLE", "Hit", "Verdict", "evaluate", "is_secret_name"]
 
 # ---------------------------------------------------------------------------
 # Rule table (plain reasons ported from forge default-blocklist.json)
@@ -245,9 +455,26 @@ RULES = {
     "mcp-block": (None, "this MCP tool is blocked for this task"),
     "unsupported-shell": (None, "co-guard cannot check this shell (only Bash is supported); use the Bash tool"),
     "unknown-tool": ("co-guard does not know this tool, so a person must approve each call", None),
+    "sql-destroy": (
+        "this deletes database tables or every row of a table (DROP, TRUNCATE, or DELETE without WHERE)", None),
+    "db-write": (
+        "this writes to a production database (an insert, update, schema change, migration, merge, reset or "
+        "restore; reads are never blocked)", None),
+    "guest-quarantine": (
+        "this runs code from a repo you are reviewing (install, build, test or run), and that code can do "
+        "anything your user account can", None),
+    # the real reason names the root: "this changes <path>, which is read-only (<reason>)" (_Ctx.readonly_hit)
+    "readonly-source": (None, "this changes a read-only source"),
 }
 _ALWAYS_ON = frozenset({"self-protect", "unparseable", "mcp-block", "mcp-require-approval", "unsupported-shell",
-                        "unknown-tool"})
+                        "unknown-tool", "guest-quarantine", "readonly-source"})
+# Built-ins an admin may switch off (policy "disabled_rules"); only their confirmable part - a hard hit
+# (rm -rf ~, rm -rf /) always stays. Anything else in disabled_rules is ignored.
+DISABLEABLE = frozenset({"rm-rf-outside", "git-force-push-main", "git-reset-hard", "git-clean-fdx",
+                         "git-stash-drop", "secret-files", "chmod-wide", "pipe-to-shell", "sql-destroy", "db-write"})
+ERROR_REASON = "co-guard error \u2014 action blocked for safety"  # co_hook.ERROR_REASON
+_BUDGET_MAX_MS = 1000  # the hook must answer well inside its own timeout
+_WORD_TEXTS_MAX = 4096  # distinct argv texts kept per call for custom rules
 
 # Ruling R17: tools are checked fail closed, by name.
 _BASH_TOOLS = frozenset({"Bash", "Monitor"})  # tool_input.command is a Bash command line
@@ -339,13 +566,58 @@ _WRITES_TEXT = re.compile(r"write|append|copy|rename|move|unlink|remove|\brm|sym
                           r"\bos\.replace\b|open\s{0,5}\([^)]{0,300}?['\"](?=[rbt]{0,3}[wax+])[rwaxbt+]{1,4}['\"]|"
                           r"system|exec|spawn|popen|subprocess", re.I)
 _AGENT_CODE = re.compile(r"\.claude[\\/]+(settings[^'\"\s]*\.json|hooks\b|agents\b|skills\b|commands\b)"
-                         r"|\.claude['\"]|\.mcp\.json", re.I)
+                         r"|\.claude['\"]|\.mcp\.json|\.claude-orchestrator\b", re.I)
 # Ruling R20: subagent, skill and slash-command definitions can start processes
 # (frontmatter mcpServers, hooks, inline !`cmd`) outside PreToolUse.
 _AGENT_DIRS = frozenset({"hooks", "agents", "skills", "commands"})
 _GITMODULES_EXEC = re.compile(r"(?im)^\s*update\s*=\s*!")
 _STDIN_PATHS = frozenset({"-", "/dev/stdin", "/dev/fd/0", "/proc/self/fd/0"})
 _MAKEFILES = frozenset({"makefile", "gnumakefile"})
+
+# guest-quarantine: forge blocklist.js quarantined() tables, ported as they are
+_PM_READ = "info view show list ls why outdated help search config licenses whoami ping docs repo bugs version"
+_READONLY_SUBS = {k: frozenset(v.split()) for k, v in {
+    "npm": f"{_PM_READ} audit", "pnpm": f"{_PM_READ} audit", "yarn": f"{_PM_READ} audit", "bun": _PM_READ,
+    "pip": "list show freeze help search check config index inspect",
+    "pip3": "list show freeze help search check config index inspect",
+    "uv": "help version tree", "pipx": "list help", "poetry": "show help about search check config env",
+    "pdm": "list show help info config", "conda": "list info search help config env",
+    "mamba": "list info search help config env", "composer": "show info help search licenses outdated why",
+    "gem": "list info help search query environment specification",
+    "cargo": "fmt tree metadata version help search pkgid locate-project", "go": "env fmt version doc help",
+    "dotnet": "help --list-sdks --list-runtimes --info", "deno": "info help fmt lint doc", "swift": "help",
+    "mix": "help", "stack": "help", "cabal": "help list info", "mvn": "", "gradle": "", "ant": "", "bundle": "",
+    "hatch": "version help",
+}.items()}
+_PM_ALWAYS = frozenset({
+    "npx", "pnpx", "bunx", "uvx", "make", "gmake", "cmake", "ninja", "just", "task", "tox", "nox", "rake",
+    "msbuild", "pre-commit", "pytest", "py.test", "jest", "vitest", "mocha", "ava", "tap", "playwright", "cypress",
+    "eslint", "vite", "webpack", "rollup", "next", "nuxt", "turbo", "nx", "lerna", "tsx", "ts-node", "gradlew",
+    "mvnw", "rspec", "sbt", "bazel", "bazelisk", "mill", "lein", "bats", "phpunit", "ctest", "meson", "scons"})
+_DOCKER_READONLY = frozenset({"ps", "images", "image", "inspect", "logs", "version", "info", "stats", "top",
+                              "volume", "network", "search", "login", "logout", "pull"})
+_INTERPRETERS = frozenset({"python", "python3", "py", "node", "nodejs", "ruby", "perl", "php"})
+_SCRIPT_SHELLS = frozenset({"bash", "sh", "zsh", "dash", "ksh", "fish", "source", "."})
+_PS_SHELLS = frozenset({"powershell", "pwsh"})
+_VALUE_FLAGS = re.compile(r"(--loglevel|--prefix|-C|--cwd|--dir|--registry|--workspace|-w|--filter|-F|"
+                          r"--manifest-path|--project|-p|--userconfig|--cache)")
+_FLAGS_ONLY = re.compile(r"(--version|-v|-V|--help|-h)")
+_MAKE_DRY = re.compile(r"(-n|--dry-run|--just-print|--recon|-q|--question)")  # make only (pytest -q runs tests)
+_INTERP_RUNS = re.compile(r"-(m|c|e|-eval|r|-require|-import)")  # python -m/-c, node -e/-r
+_PS_INLINE = re.compile(r"-(c|command|com|comm|comma|comman|encodedcommand|e|ec)", re.I)
+_SCRIPT_EXT = re.compile(r".*\.(sh|bash|ps1|bat|cmd|py|js|mjs|rb|pl)", re.I)
+_BASE_TOOL = re.compile(r"(python|pip|ruby|node|php|perl)\d+(\.\d+)*")  # python3.11 -> python, node22 -> node
+
+# readonly-source: git subcommands that change the work tree (forge GIT_CHANGES)
+_GIT_CHANGES = frozenset({"commit", "add", "rm", "mv", "reset", "checkout", "restore", "switch", "clean", "stash",
+                          "merge", "rebase", "pull", "apply", "am", "cherry-pick", "revert"})
+_RULES_DIR = ".claude-orchestrator"
+_MKTEMP_DIR = re.compile(r"(?:\$\(|`)\s*mktemp\s+(?:-d|--directory)(?:\s+(?:-q|-t|--tmpdir|[\w.-]*X{3,}[\w.-]*))*\s*(?:\)|`)")
+_UNKNOWN_CWD = "the folder this runs in is unknown, and read-only folders exist"  # Ruling P17
+_RUNS_ROOT = "this runs a read-only source's code, which may change it"  # Ruling P18
+_PIP_LOCAL = "pip builds this read-only folder in place"
+_PM_WRITE_SUBS = frozenset({"install", "i", "add", "ci", "sync", "update", "upgrade", "up"})
+_DRY = frozenset({"-n", "--dry-run", "--just-print", "--recon"})
 
 # Long options per command, for GNU-style prefix matching.
 _RM_LONG = ("--recursive", "--force", "--interactive", "--one-file-system", "--no-preserve-root",
@@ -465,11 +737,22 @@ def _glob_could_match(pattern, path):
     return len(pp) == len(tp) and all(fnmatch.fnmatchcase(t, p) for t, p in zip(tp, pp))
 
 
+# forge v0.5.1 (F89) CODE_FILE: a name holding "secret"/"credentials" with one of
+# these extensions is source code or a document (secrets.ts makes tokens, it does
+# not hold them), not a secrets store.
+_CODE_FILE = re.compile(r"\.(?:[cm]?[jt]sx?|py|go|rs|java|kt|kts|cs|rb|php|swift|c|h|cc|cpp|hpp|scala|dart|ex|exs"
+                        r"|vue|svelte|md|mdx)$")
+
+
 def is_secret_name(path):
     """forge isSecretName (.env*, *.pem, *.key, id_rsa*, *credentials*, *secret*)
     plus SSH keys, .netrc, .npmrc, .pypirc, .docker/config.json, .kube/config.
     A template word (example, sample, template, dist) exempts a file only as
-    its LAST suffix (.env.example yes, .env.sample.local no)."""
+    its LAST suffix (.env.example yes, .env.sample.local no). Final wave
+    (forge v0.5.1): the *credentials* / *secret* substring case lets source
+    code and documents through (``_CODE_FILE``: secrets.ts, credentials.py,
+    docs/secrets.md); data files (secrets.yml, credentials.json) and every
+    other name above stay held whatever their extension."""
     parts = [p for p in re.split(r"[\\/]", str(path)) if p]
     if not parts:
         return False
@@ -483,8 +766,12 @@ def is_secret_name(path):
     if base in _SECRET_NAMES or (parent == ".docker" and base == "config.json") or \
             (parent == ".kube" and base == "config"):
         return True
-    return (base.startswith(".env") or base.endswith(".pem") or base.endswith(".key") or base.startswith("id_rsa")
-            or base.startswith(("id_ed25519", "id_ecdsa", "id_dsa")) or "credentials" in base or "secret" in base)
+    if (base.startswith(".env") or base.endswith(".pem") or base.endswith(".key") or base.startswith("id_rsa")
+            or base.startswith(("id_ed25519", "id_ecdsa", "id_dsa"))):
+        return True
+    if _CODE_FILE.search(base):
+        return False
+    return "credentials" in base or "secret" in base
 
 
 def _is_template(path):
@@ -511,10 +798,13 @@ def _git_internal_kind(path):
 
 
 def _agent_config(path):
-    """A .claude/settings*.json, .claude/{hooks,agents,skills,commands}/** or
-    .mcp.json path (R6/R7/R20)."""
+    """A .claude/settings*.json, .claude/{hooks,agents,skills,commands}/**,
+    .mcp.json (R6/R7/R20) or .claude-orchestrator[/**] (the repo rules file a
+    later task loads, Ruling P13) path."""
     parts = path.lower().split("/")
     if parts and parts[-1] == ".mcp.json":
+        return True
+    if ".claude-orchestrator" in parts:
         return True
     for i in range(len(parts) - 1, -1, -1):
         if parts[i] == ".claude":
@@ -522,6 +812,69 @@ def _agent_config(path):
             return (len(rest) == 1 and fnmatch.fnmatchcase(rest[0], "settings*.json")) or \
                 (bool(rest) and rest[0] in _AGENT_DIRS)
     return False
+
+
+def _readonly_entry_ok(e):
+    """{path: non-empty str, reason?: str|None, source?: "project"|"reference"|None}; a NUL anywhere or a
+    ``~`` prefix is malformed (the worker writes absolute paths)."""
+    return (isinstance(e, dict) and isinstance(e.get("path"), str) and bool(e["path"].strip())
+            and "\x00" not in e["path"] and not e["path"].startswith("~")
+            and (e.get("reason") is None or (isinstance(e.get("reason"), str) and "\x00" not in e["reason"]))
+            and e.get("source") in (None, "project", "reference"))
+
+
+def _braces(word, limit=64):
+    """Full bash brace expansion of ``{a,b}`` groups (nested too, not ``${..}``),
+    or None when there is none or it gets too big."""
+    out, todo = [], [word]
+    while todo:
+        w = todo.pop()
+        start = None
+        depth, comma, k = 0, False, 0
+        found = None
+        while k < len(w):
+            c = w[k]
+            if c == "{" and not (k and w[k - 1] == "$"):
+                if depth == 0:
+                    start, comma = k, False
+                depth += 1
+            elif c == "}" and depth:
+                depth -= 1
+                if depth == 0 and comma:
+                    found = (start, k)
+                    break
+            elif c == "," and depth == 1:
+                comma = True
+            k += 1
+        if not found:
+            out.append(w)
+            continue
+        a, b = found
+        parts, depth, last = [], 0, a + 1
+        for j in range(a + 1, b):
+            c = w[j]
+            if c == "{":
+                depth += 1
+            elif c == "}":
+                depth -= 1
+            elif c == "," and depth == 0:
+                parts.append(w[last:j])
+                last = j + 1
+        parts.append(w[last:b])
+        todo += [w[:a] + x + w[b + 1:] for x in parts]
+        if len(out) + len(todo) > limit:
+            return None
+    return out if out != [word] else None
+
+
+def _glob_reaches(pattern, folder, as_ancestor=False):
+    """A path glob (per component, case-folded) could name ``folder`` or
+    something inside it - or, as_ancestor, a parent of it."""
+    pp, fc = pattern.lower().strip("/").split("/"), folder.lower().strip("/").split("/")
+    n = min(len(pp), len(fc))
+    if not all(fnmatch.fnmatchcase(c, g) for c, g in zip(fc[:n], pp[:n])):
+        return False
+    return len(pp) >= len(fc) or as_ancestor
 
 
 def _brace_expand(word):
@@ -542,7 +895,45 @@ class _Ctx:
         project = policy.get("project_dir") or cwd or os.getcwd()
         self.project = _real(os.path.abspath(str(project)))
         self.guard = policy.get("guard_enabled", True) is not False
+        self.policy_errors = []  # malformed custom_rules / disabled_rules: fail closed (hard)
+        disabled = policy.get("disabled_rules", [])
+        if not isinstance(disabled, list) or not all(isinstance(r, str) for r in disabled):
+            self.policy_errors.append("disabled_rules")
+            disabled = []
+        self.disabled = DISABLEABLE.intersection(disabled)
+        try:
+            self.custom = _cu.policy_rules(policy.get("custom_rules", []))
+        except ValueError:
+            self.policy_errors.append("custom_rules")
+            self.custom = []
+        # guest-quarantine: only a literal false (or no value) is off; anything else holds (fail safe)
+        quarantine = policy.get("quarantine")
+        self.quarantine = quarantine is not None and quarantine is not False
+        # readonly-source roots: (forms - normalised and real, case-folded per R9 -, path as given, reason)
+        self.readonly = []
+        ro = policy.get("readonly_paths", [])
+        if not isinstance(ro, list) or not all(_readonly_entry_ok(e) for e in ro):
+            self.policy_errors.append("readonly_paths")
+        else:
+            for e in ro:
+                ab = posixpath.join(self.project, e["path"])  # relative to the project; absolute stays
+                forms = {_norm(ab).lower(), _real(ab).lower()}
+                self.readonly.append((forms, e["path"], _cu.clean_reason(e.get("reason") or "")))
+        budget = policy.get("regex_budget_ms", _cu.REGEX_BUDGET_MS)
+        if isinstance(budget, bool) or not isinstance(budget, (int, float)) or budget != budget:
+            budget = _cu.REGEX_BUDGET_MS
+        self.regex_budget_ms = min(float(budget), _BUDGET_MAX_MS)
         self.mcp_tools = policy.get("mcp_tools", {})
+        self.mcp_defaults = policy.get("mcp_defaults")  # used only when no mcp_tools entry matches
+        # database rules: dev patterns and MCP server environments (malformed -> nothing is dev)
+        db_dev = policy.get("db_dev")
+        self.db_dev = [p for p in db_dev if isinstance(p, str)] if isinstance(db_dev, list) else []
+        servers = policy.get("mcp_servers")
+        self.mcp_servers = servers if isinstance(servers, dict) else {}
+        # PGHOST-style variables: inherited from the hook's env (Ruling P6, the agent's shell has them too),
+        # then set earlier in the command line (None: unknown)
+        self.db_env = {n: os.environ[n] for n in _db.DB_ENV_NAMES if n in os.environ}
+        self.exec_stdin = False  # `exec < file` earlier in the line: every later client reads unknown input
         env = policy.get("env_paths")
         env = {k: str(v) for k, v in env.items() if isinstance(k, str) and v} if isinstance(env, dict) else {}
         cfg = policy.get("claude_config_dir")
@@ -574,6 +965,8 @@ class _Ctx:
         # text naming a protected path (for inline interpreter code)
         self.mentions = sorted({posixpath.dirname(v) if g else v for v, g in self.protected} - {"", "/"})
         self.hits = []
+        self.words = {}  # Ruling P12: de-quoted argv texts of every simple command (custom rules)
+        self.start = self.project  # the call's cwd (evaluate sets it)
         self.remote = False  # inside `ssh host CMD`: nothing is the project
         self.depth = 0
         self.evals = 0
@@ -617,7 +1010,101 @@ class _Ctx:
     def hit(self, rule_id, hard, summary):
         if not self.guard and rule_id not in _ALWAYS_ON:
             return
+        if not hard and rule_id in self.disabled:  # an admin switched it off (never its hard part)
+            return
         self.hits.append(_make_hit(rule_id, hard, summary))
+
+    def readonly_root(self, path, as_ancestor=False, follow=True):
+        """(path as given, reason) of the readonly root ``path`` is (inside),
+        or - as_ancestor: deleting/moving a parent - that is inside ``path``;
+        else None. follow=False: a bare delete/move operand, whose last link
+        is not followed (``rm link`` removes the link). Over ssh nothing
+        here is a root."""
+        if not self.readonly or not path or self.remote:
+            return None
+        cands = {path.lower(), _norm(path).lower(), (_real(path) if follow else _real_last(path)).lower()}
+        for forms, shown, reason in self.readonly:
+            for f in forms:
+                if any(_within(c, f) or (as_ancestor and _inside(f, c)) for c in cands):
+                    return shown, reason
+        return None
+
+    def readonly_hit(self, root, summary):
+        """Hard, always on (also with the guard off), never disableable."""
+        shown, reason = root
+        text = f"this changes {shown}, which is read-only" + (f" ({reason})" if reason else "")
+        self.hits.append(Hit("readonly-source", text, True, _short(summary)))
+
+    def readonly_check(self, path, summary, as_ancestor=False, follow=True):
+        root = self.readonly_root(path, as_ancestor, follow)
+        if root:
+            self.readonly_hit(root, summary)
+        return root
+
+    def readonly_glob(self, pattern, summary, as_ancestor=False):
+        """A glob path (normalised, absolute) that could name a root or
+        something inside it (as_ancestor: also a parent of one)."""
+        if not self.readonly or self.remote:
+            return None
+        for forms, shown, reason in self.readonly:
+            if any(_glob_reaches(pattern, f, as_ancestor) for f in forms):
+                self.readonly_hit((shown, reason), summary)
+                return shown, reason
+        return None
+
+    def readonly_delete(self, path, glob, summary):
+        """Deleting ``path`` (glob None: the path itself, so also a parent of
+        a root; its last link is not followed) or some of its children (a
+        glob - matched against the first component, so ``.??*`` does not
+        reach ``vendor`` - or _SOME)."""
+        if glob is None:
+            return self.readonly_check(path, summary, as_ancestor=True, follow=False)
+        root = self.readonly_root(path)
+        if root is None and self.readonly and not self.remote:
+            low = path.lower()
+            for forms, shown, reason in self.readonly:
+                for f in forms:
+                    if _inside(f, low):
+                        first = f[len(low):].lstrip("/").split("/")[0]
+                        if glob == _SOME or fnmatch.fnmatchcase(first, glob.lower()):
+                            root = (shown, reason)
+        if root:
+            self.readonly_hit(root, summary)
+        return root
+
+    def readonly_cwd(self, cwd):
+        """The root a working folder is in (P15: unknown -> project or start)."""
+        for b in self.bases(cwd):
+            root = self.readonly_root(b)
+            if root:
+                return root
+        return None
+
+    def unknown_cwd(self, before, summary):
+        """Ruling P17: readonly roots exist, the cwd is unknown and P15 placed
+        the change (hits since index ``before``) in no root - a person decides."""
+        if self.readonly and not self.remote and not any(h.rule_id == "readonly-source" for h in self.hits[before:]):
+            self.hits.append(Hit("uncertain-command", _UNKNOWN_CWD, False, _short(summary)))
+
+    def bases(self, cwd):
+        """Ruling P15: folders a relative path may be relative to - the
+        tracked cwd, or (unknown) both the project and the start cwd."""
+        if cwd is not None:
+            return [cwd]
+        return list(dict.fromkeys(b for b in (self.project, self.start) if b))
+
+    def rules_dir(self):
+        """The project's repo rules folder (Ruling P13), case-folded."""
+        return (self.project + "/" + _RULES_DIR).lower()
+
+    def note_words(self, argv, unwrapped):
+        """The de-quoted argv of a simple command (and without its wrappers),
+        for custom rules: `"git" push`, `g\\it push`, `$'git' push` -> `git push`."""
+        if not self.custom:
+            return
+        for words in (argv, unwrapped):
+            if words and len(self.words) < _WORD_TEXTS_MAX:
+                self.words.setdefault(" ".join(" ".join(map(str, words)).split()), None)
 
     # -- paths -------------------------------------------------------------
     def expand(self, word, cwd):
@@ -651,7 +1138,7 @@ class _Ctx:
         w = self.expand(word, cwd)
         if w is None:
             return None
-        if dynamic and ("$" in w or "`" in w or _GLOB.search(w)):
+        if dynamic and ("$" in w or "`" in w or _GLOB.search(w) or ("{" in w and _braces(w))):
             return None
         return _real(w) if follow else _real_last(w)
 
@@ -762,14 +1249,53 @@ def _target_kinds(ctx, word, dyn, cwd):
             out.append((_real(lit.rsplit("/", 1)[0] or "/"), _SOME))
             continue
         if dyn and _GLOB.search(tail):
-            out.append((_real(head), "*" if _BROAD.fullmatch(tail) else tail))
+            out.append((_real(head), tail))  # a broad tail (*, .*, .??*) is judged as the folder by _BROAD
             continue
         out.append((_real(e) if follow else _real_last(e), None))
     return out
 
 
+def _rules_dir_delete(ctx, path, glob, summary):
+    """Ruling P13: deleting or moving the repo rules file (or its folder, or
+    a folder holding the project's one) relaxes what a later task loads -
+    agent-config, like editing it."""
+    parts = path.lower().split("/") + ([glob.lower()] if glob not in (None, _SOME) else [])
+    if any(c == _RULES_DIR or ("claude" in c and _GLOB.search(c) and
+                               fnmatch.fnmatchcase(_RULES_DIR, c)) for c in parts):
+        ctx.hit("agent-config", False, summary)
+    elif glob is None and not ctx.remote and _within(ctx.rules_dir(), path.lower()):
+        ctx.hit("agent-config", False, summary)
+    elif glob not in (None, _SOME) and glob[:1] == "." and not ctx.remote and \
+            fnmatch.fnmatchcase(_RULES_DIR, glob.lower()) and (
+            path.lower() == ctx.project.lower() or os.path.isdir(posixpath.join(path, _RULES_DIR))):
+        ctx.hit("agent-config", False, summary)  # rm -rf .c*, mv .[a-z]* /tmp
+
+
+def _rules_dir_find(ctx, root, names, summary):
+    """P13 for ``find ROOT <filter> -delete``: ROOT is in a rules folder, or
+    reaches the project's one and a -name filter (None: another filter) may
+    match it or something in it."""
+    low = root.lower()
+    if _RULES_DIR in low.split("/"):
+        ctx.hit("agent-config", False, summary)
+        return
+    rd = ctx.rules_dir()
+    if ctx.remote or not _within(rd, low):
+        return
+    cands = [_RULES_DIR, "rules.md"]
+    try:
+        cands += os.listdir(ctx.project + "/" + _RULES_DIR)
+    except OSError:
+        pass
+    if names is None or any(fnmatch.fnmatch(c.lower(), n.lower()) for c in cands for n in names):
+        ctx.hit("agent-config", False, summary)
+
+
 def _protect_delete(ctx, path, glob, summary):
-    """self-protect for deleting/moving `path` (glob: which children)."""
+    """self-protect (and readonly-source) for deleting/moving `path` (glob:
+    which children)."""
+    _rules_dir_delete(ctx, path, glob, summary)
+    ctx.readonly_delete(path, glob, summary)
     if ctx.is_protected(path, as_ancestor=glob is None):
         ctx.hit("self-protect", True, summary)
         return
@@ -830,6 +1356,18 @@ def _classify(ctx, targets, cwd, summary, narrow=False, names=None):
             if ctx.guard_var_unknown(word):
                 ctx.hit("self-protect", True, summary)
             level = level or "confirm"
+            if cwd is None:  # Ruling P15: relative to the project or the start cwd
+                before = len(ctx.hits)
+                for b in ctx.bases(None):
+                    for path, glob in _target_kinds(ctx, word, dyn, b) or ():
+                        if narrow and glob is None:
+                            _rules_dir_find(ctx, path, names, summary)
+                            ctx.readonly_delete(path, _SOME, summary)
+                        else:
+                            _rules_dir_delete(ctx, path, glob, summary)
+                            ctx.readonly_delete(path, glob, summary)
+                if not word.startswith(("/", "~", "$", "`")):
+                    ctx.unknown_cwd(before, summary)
             continue
         for path, glob in kinds:
             if narrow and glob is None:
@@ -837,6 +1375,8 @@ def _classify(ctx, targets, cwd, summary, narrow=False, names=None):
                     level = "hard"
                 glob = _SOME
                 _protect_find(ctx, path, names, summary)
+                _rules_dir_find(ctx, path, names, summary)
+                ctx.readonly_delete(path, _SOME, summary)
             else:
                 _protect_delete(ctx, path, glob, summary)
             whole = glob is None or _BROAD.fullmatch(glob) is not None
@@ -877,6 +1417,328 @@ def _rm_targets(argv, dyn):
     return recursive, targets
 
 
+_PACKERS = frozenset({"gzip", "gunzip", "bzip2", "bunzip2", "xz", "unxz", "zstd", "unzstd", "lz4", "lzma", "unlzma",
+                      "compress", "uncompress", "pigz", "unpigz"})
+_RUN_WRITERS = frozenset({"touch", "chmod", "chown", "chgrp", "mv", "cp", "ln", "install", "truncate", "tee", "dd",
+                          "rsync", "setfacl", "xattr", "patch", "rename", "prename", "perl-rename", "file-rename",
+                          "chattr", "mkdir"}) | _PACKERS
+
+
+_FD_HOLDERS = ("{}", "{/}", "{//}", "{.}", "{/.}")
+
+
+_JS_RUN = frozenset({"npx", "pnpx", "bunx"})
+
+
+def _unrun(argv, dyn):
+    """``npx tool ..``, ``pnpm exec|dlx tool``, ``yarn dlx|exec tool``,
+    ``bun x tool`` -> (tool argv, dyn); anything else unchanged."""
+    argv, dyn = list(argv), list(dyn) + [False] * len(argv)
+    name = _sh.command_name(argv[0]) if argv else ""
+    i = None
+    if name in _JS_RUN:
+        i = 1
+    elif name in ("pnpm", "yarn", "bun", "npm") and len(argv) > 1 and argv[1] in ("exec", "dlx", "x"):
+        i = 2
+    if i is None:
+        return argv, dyn[:len(argv)]
+    while i < len(argv) and argv[i].startswith("-"):
+        i += 2 if argv[i] in ("-p", "--package", "-c", "--call") else 1
+    if i < len(argv) and argv[i] == "--":
+        i += 1
+    if i >= len(argv):
+        return argv, dyn[:len(argv)]
+    return argv[i:], dyn[i:len(argv)]
+
+
+def _pos_skipping(args, dargs, values=(), default=None):
+    """Positional operands with option values left out; ``-`` (stdin) dropped."""
+    out, i = [], 0
+    while i < len(args):
+        a = args[i]
+        if a in values:
+            i += 2
+            continue
+        if a == "--":
+            out += [(w, d) for w, d in zip(args[i + 1:], dargs[i + 1:]) if w != "-"]
+            break
+        if not a.startswith("-"):
+            out.append((a, dargs[i]))
+        i += 1
+    return out or ([(default, False)] if default else [])
+
+
+def _format_targets(name, args, dargs):
+    """Ruling P19: the paths an in-place formatter/fixer rewrites (default
+    ``.``), or [] when it only checks."""
+    has = lambda *opts: any(a in opts or a.split("=", 1)[0] in opts for a in args)  # noqa: E731
+    if name == "black":
+        if has("--check", "--diff", "--version", "--help") or args == ["-"]:
+            return []
+        return _pos_skipping(args, dargs, ("-l", "--line-length", "-t", "--target-version", "--config", "--include",
+                                           "--exclude", "--extend-exclude", "--force-exclude", "-W", "--workers",
+                                           "--required-version", "--stdin-filename", "--python-cell-magics"), ".")
+    if name == "ruff":
+        sub = next((a for a in args if not a.startswith("-")), "")
+        if (sub == "format" and not has("--check", "--diff")) or (sub in ("check", "") and has("--fix")
+                                                                   and not has("--no-fix", "--diff")):
+            k = args.index(sub) + 1 if sub else 0
+            return _pos_skipping(args[k:], dargs[k:], ("--config", "--select", "--ignore", "--extend-select",
+                                                       "--target-version", "--line-length", "--exclude",
+                                                       "--extend-exclude", "--output-format", "--cache-dir",
+                                                       "--stdin-filename", "--per-file-ignores"), ".")
+        return []
+    if name == "isort":
+        if has("--check", "--check-only", "-c", "--diff", "--show-files", "--version"):
+            return []
+        return _pos_skipping(args, dargs, ("-l", "--line-length", "--profile", "--settings-path", "--sp", "-p",
+                                           "--skip", "-s", "--src", "--filter-files"), ".")
+    if name == "autopep8":
+        return _pos_skipping(args, dargs, ("--max-line-length", "--select", "--ignore", "-j", "--jobs", "-a",
+                                           "--global-config")) if has("-i", "--in-place") or any(
+            re.fullmatch(r"-[a-z]*i[a-z]*", a) for a in args) else []
+    if name == "prettier":
+        if not has("--write", "-w"):
+            return []
+        return _pos_skipping(args, dargs, ("--config", "--ignore-path", "--plugin", "--parser", "--log-level",
+                                           "--print-width", "--tab-width", "--trailing-comma", "--cache-location",
+                                           "--end-of-line", "--stdin-filepath"), ".")
+    if name == "eslint":
+        if not has("--fix"):
+            return []
+        return _pos_skipping(args, dargs, ("-c", "--config", "--ext", "--rulesdir", "--ignore-path", "-f",
+                                           "--format", "-o", "--output-file", "--parser", "--max-warnings",
+                                           "--cache-location", "--rule", "--env", "--global", "--plugin",
+                                           "--resolve-plugins-relative-to", "--fix-type"), ".")
+    if name in ("gofmt", "goimports"):
+        return _pos_skipping(args, dargs, ("-r", "-local")) if has("-w") else []
+    if name in ("rustfmt", "stylua", "swiftformat"):
+        if has("--check", "--lint", "--dryrun", "--version", "--help"):
+            return []
+        return _pos_skipping(args, dargs, ("--edition", "--config-path", "--config", "--emit", "-f",
+                                           "--config-path", "--search-parent-directories", "--swiftversion",
+                                           "--rules", "--disable", "--enable"), "." if name != "rustfmt" else None)
+    if name == "clang-format":
+        return _pos_skipping(args, dargs, ("--style", "-style", "--assume-filename", "--lines", "--offset",
+                                           "--length")) if has("-i") else []
+    if name == "shfmt":
+        return _pos_skipping(args, dargs, ("-i", "--indent", "-ln", "--language-dialect", "-f")) \
+            if has("-w", "--write") else []
+    if name == "rubocop":
+        if not (has("-a", "-A", "-x", "--autocorrect", "--auto-correct", "--autocorrect-all", "--auto-correct-all",
+                    "--fix-layout") or any(re.fullmatch(r"-[a-zA-Z]*[aAx][a-zA-Z]*", a) for a in args)):
+            return []
+        return _pos_skipping(args, dargs, ("-c", "--config", "--only", "--except", "-f", "--format", "-o", "--out",
+                                           "--require", "-r"), ".")
+    if name == "terraform":
+        k = next((i for i, a in enumerate(args) if a == "fmt"), None)
+        if k is None or has("-check", "-write=false", "-list=true"):
+            return []
+        return _pos_skipping(args[k + 1:], dargs[k + 1:], default=".")
+    if name == "go" and args[:1] == ["fmt"] or (name == "go" and "fmt" in args[:3] and args[:1] == ["-C"]):
+        k = args.index("fmt")
+        return [(re.sub(r"/\.\.\.$", "", w) or ".", d) for w, d in _pos_skipping(args[k + 1:], dargs[k + 1:],
+                                                                                   default=".")]
+    if name == "cargo" and "fmt" in args[:2]:
+        if has("--check"):
+            return []
+        mp = [args[i + 1] for i, a in enumerate(args[:-1]) if a == "--manifest-path"]
+        return [(posixpath.dirname(mp[0]) or ".", False)] if mp else [(".", False)]
+    if name == "cargo" and "clippy" in args[:2] and has("--fix"):
+        return [(".", False)]
+    return []
+
+
+def _build_dirs(name, args, dargs):
+    """Ruling P19: folders a build is aimed at by a flag (it writes there)."""
+    out = []
+
+    def val(*opts):
+        for i, a in enumerate(args):
+            key, eq, v = a.partition("=")
+            if key in opts and a.startswith("--"):
+                if eq:
+                    out.append((v, dargs[i]))
+                elif i + 1 < len(args):
+                    out.append((args[i + 1], dargs[i + 1]))
+            elif a in opts and i + 1 < len(args):
+                out.append((args[i + 1], dargs[i + 1]))
+            elif not a.startswith("--") and len(a) > 2 and a[:2] in opts:
+                out.append((a[2:], dargs[i]))
+
+    if any(a in _DRY for a in args):
+        return out
+    sub, i = "", 0
+    while i < len(args):  # the subcommand, past this function's own folder options
+        if args[i] in ("-C", "-P", "--project", "--directory", "--manifest-path", "--prefix"):
+            i += 2
+            continue
+        if not args[i].startswith("-"):
+            sub = args[i].lower()
+            break
+        i += 1
+    if name == "cmake":  # only the build folder is written (-S is read)
+        val("-B", "--build")
+    elif name == "cargo" and (sub not in _READONLY_SUBS["cargo"] or sub == "fmt"):
+        for i, a in enumerate(args):
+            if a == "--manifest-path" and i + 1 < len(args):
+                out.append((posixpath.dirname(args[i + 1]) or ".", dargs[i + 1]))
+            elif a.startswith("--manifest-path="):
+                out.append((posixpath.dirname(a.split("=", 1)[1]) or ".", dargs[i]))
+    elif name == "go" and sub in ("build", "generate", "install", "get", "mod", "fmt", "work"):
+        val("-C")
+    elif name in ("pip", "pip3") or (_BASE_TOOL.fullmatch(name) and name.startswith("pip")):
+        if "install" in args:
+            val("-e", "--editable")
+    elif name == "uv" and sub not in _READONLY_SUBS["uv"]:
+        val("--project", "--directory")
+    elif name == "poetry" and sub not in _READONLY_SUBS["poetry"]:
+        val("-C", "--directory", "-P", "--project")
+    elif name == "tsc" and "--noEmit" not in args:
+        start = len(out)
+        val("-p", "--project")
+        out[start:] = [(posixpath.dirname(w) or "." if w.endswith(".json") else w, d) for w, d in out[start:]]
+    elif name == "terraform":
+        for i, a in enumerate(args):
+            if a.startswith("-chdir=") and "fmt" in args:
+                out.append((a.split("=", 1)[1], dargs[i]))
+    return out
+
+
+def _known_writer(word, name, args):
+    """Ruling P18/P19: commands that certainly write where they run -
+    package manager install/add/ci/sync/update (bare yarn/bundle), JS
+    ``build``/``run build``/``version``/``audit fix``, make/cmake/ninja/meson,
+    cargo build/check/clippy/run/test, go build/generate/install, ``python
+    setup.py``, ``python -m build``, bare ``tsc`` (no --noEmit),
+    ./configure, autoreconf, docker/podman build, gradle/mvn, dotnet
+    build/publish/restore, swift/bazel/zig build, mix deps.get/compile, git
+    submodule update (not a dry run)."""
+    cmd = _BASE_TOOL.sub(r"\1", name) if _BASE_TOOL.fullmatch(name) else name
+    if any(a in _DRY for a in args):
+        return False
+    sub, rest = _subcommand_of(args)
+    if cmd in ("make", "gmake", "cmake", "ninja", "autoreconf", "autogen.sh", "bootstrap"):
+        return True
+    if cmd == "cargo":
+        return sub in ("build", "b", "check", "c", "clippy", "run", "r", "test", "t", "install", "bench", "fix",
+                       "update", "generate-lockfile")
+    if cmd == "go":
+        return sub in ("build", "generate", "install", "get") or (sub == "mod" and rest[:1] in (["tidy"], ["vendor"]))
+    if cmd in ("python", "py") and (any(posixpath.basename(a) == "setup.py" for a in args[:3]) or
+                                    args[:2] == ["-m", "build"] or args[:3] == ["-m", "pip", "install"]):
+        return True
+    if cmd == "tsc":
+        return "--noEmit" not in args and not any(a in ("--version", "-v", "--help", "-h") for a in args)
+    if cmd == "meson":
+        return sub in ("setup", "compile", "install", "configure") or (bool(sub) and sub not in ("help", "introspect"))
+    if cmd == "dotnet":
+        return sub in ("build", "publish", "restore", "pack", "test", "run", "new", "add", "tool")
+    if cmd in ("swift", "zig", "bazel", "bazelisk"):
+        return sub in ("build", "test", "run", "package") if cmd != "swift" else sub in ("build", "test", "run")
+    if cmd == "mix":
+        return sub in ("deps.get", "compile", "deps.compile", "deps.update", "release")
+    if cmd == "git":
+        return sub == "submodule" and bool(rest[:1]) and rest[0] in ("update", "add", "init", "sync", "deinit")
+    if cmd in ("npm", "yarn", "pnpm", "bun"):
+        if sub in ("build", "version", "pack", "publish", "rebuild") or (sub == "audit" and "fix" in rest):
+            return True
+        if sub in ("run", "run-script") and rest[:1] and "build" in rest[0]:
+            return True
+        if cmd == "yarn" and sub and "build" in sub:
+            return True
+    if posixpath.basename(word) == "configure":
+        return True
+    if posixpath.basename(word) == "configure":
+        return True
+    if cmd in ("docker", "podman"):
+        return sub in ("build", "buildx") or (sub == "image" and rest[:1] == ["build"])
+    if cmd in ("gradle", "gradlew", "mvn", "mvnw"):
+        return sub not in ("help", "--version") and bool(args)
+    if cmd in _READONLY_SUBS:
+        return sub in _PM_WRITE_SUBS or (not sub and cmd in ("yarn", "bundle"))
+    return False
+
+
+def _is_writer(argv, holders=("{}",), appended=False):
+    """The command (wrappers stripped) changes the files it is given
+    (find -exec / fd -x / xargs): a deleter, a writer, or sed/perl -i.
+    For a copy (cp/install/rsync/scp/ln -s) only the destination is
+    written: the given paths (``holders`` such as ``{}``, or - appended -
+    added after the last word) count only there (cp {} ./copy/ reads them)."""
+    inner = _sh.expand_wrappers(list(argv)) or []
+    if not inner:
+        return False
+    name = _sh.command_name(inner[0])
+    copy = name in ("cp", "install", "rsync", "scp") or (name == "ln" and any(
+        a in ("-s", "--symbolic") or re.fullmatch(r"-[a-zA-Z]*s[a-zA-Z]*", a) for a in inner[1:]))
+    if copy:
+        args = inner[1:]
+        dest, _is_dir, srcs, flags = _copy_parts(name, args, [False] * len(args))
+        if name == "cp" and "-l" in flags:
+            return True  # hard links into the given files
+        tdir = any(a in ("-t", "--target-directory") or a.startswith("--target-directory=") for a in args)
+        if appended and not tdir:
+            return True  # the given path becomes the last operand: the destination
+        return dest is not None and any(h in dest[0] for h in holders)
+    if name in _DELETERS or name in _RUN_WRITERS:
+        return True
+    return name in ("sed", "perl") and any(re.fullmatch(r"-[a-zA-Z]*i.*", a) or a.startswith("--in-place")
+                                           for a in inner[1:])
+
+
+def _exec_part(expr, j):
+    """The words of a find -exec/-execdir/-ok command starting after index j."""
+    part = []
+    for w in expr[j + 1:]:
+        if w in (";", "+"):
+            break
+        part.append(w)
+    return part
+
+
+def _xargs_holder(st):
+    """(holders, appended) for the xargs/parallel in a stage's wrappers: -I R,
+    -iR, --replace[=R] put the input where R is; else it is appended."""
+    argv = list(st.argv)
+    for i, a in enumerate(argv):
+        name = _sh.command_name(a)
+        if name not in ("xargs", "parallel"):
+            continue
+        rest = argv[i + 1:]
+        if name == "parallel":
+            return ("{}", "{/}", "{//}", "{.}", "{/.}", "{#}"), not any(h in w for w in rest for h in ("{",))
+        for k, b in enumerate(rest):
+            if not b.startswith("-"):
+                break
+            if b == "-I" and k + 1 < len(rest):
+                return (rest[k + 1],), False
+            if b.startswith("-I") and len(b) > 2:
+                return (b[2:],), False
+            if b in ("-i", "--replace"):
+                return ("{}",), False
+            if b.startswith("-i") and len(b) > 2:
+                return (b[2:],), False
+            if b.startswith("--replace="):
+                return (b.split("=", 1)[1],), False
+        return (), True
+    return (), True
+
+
+def _run_on_roots(ctx, roots, cwd, names, summary):
+    """find -exec / fd -x with a writer: what the roots cover changes
+    (readonly-source; P13 when a -name filter can reach the rules dir)."""
+    for w, d in roots:
+        for b in ctx.bases(cwd) if not w.startswith("/") else [cwd]:
+            p = ctx.path(w, b, d)
+            if p is None:
+                continue
+            ctx.readonly_delete(p, _SOME, summary)
+            _rules_dir_find(ctx, p, names, summary)
+            if _agent_config(p) or _agent_config(p + "/settings.json"):  # find .claude -exec sed -i ..
+                ctx.hit("agent-config", False, summary)
+
+
 def _find_check(ctx, argv, dyn, cwd, summary):
     args, dargs = argv[1:], dyn[1:]
     i, follow = 0, False
@@ -902,6 +1764,10 @@ def _find_check(ctx, argv, dyn, cwd, summary):
     roots = roots or [(".", False)]
     names = [expr[k + 1] for k, a in enumerate(expr) if a in ("-name", "-iname") and k + 1 < len(expr)]
     only_names = names and not any(a in _FIND_NARROW and a not in ("-name", "-iname") for a in expr)
+    runs_writer = any(a in ("-exec", "-execdir", "-ok", "-okdir") and _is_writer(_exec_part(expr, j))
+                      for j, a in enumerate(expr))
+    if runs_writer:  # find ref -exec sed -i .. {}, find . -name rules.md -exec mv {} /tmp
+        _run_on_roots(ctx, roots, cwd, names if only_names else None, summary)
     if writes:  # N3: a command that may write {} : protect what the roots cover
         for w, d in roots:
             p = ctx.path(w, cwd, d)
@@ -939,12 +1805,16 @@ _FD_VALUE = frozenset({"-e", "--extension", "-t", "--type", "-E", "--exclude", "
 def _fd_check(ctx, argv, dyn, cwd, summary, bash):
     """fd [opts] [pattern] [path...] -x|-X CMD...: CMD runs on what fd finds."""
     args, dargs = argv[1:], dyn[1:]
-    pos, cmd, i, filtered = [], None, 0, False
+    pos, cmd, i, filtered, exts, other = [], None, 0, False, [], False
     while i < len(args):
         a = args[i]
-        if a.split("=", 1)[0] in ("-e", "--extension", "-S", "--size", "--changed-within", "--changed-before",
-                                  "-g", "--glob"):
+        key, eq, val = a.partition("=")
+        if key in ("-e", "--extension", "-S", "--size", "--changed-within", "--changed-before", "-g", "--glob"):
             filtered = True
+            if key in ("-e", "--extension") and (eq or i + 1 < len(args)):
+                exts.append(val if eq else args[i + 1])
+            else:
+                other = True
         if a in ("-x", "--exec", "-X", "--exec-batch"):
             cmd = (args[i + 1:], dargs[i + 1:])
             if ";" in cmd[0]:
@@ -960,11 +1830,22 @@ def _fd_check(ctx, argv, dyn, cwd, summary, bash):
     if not cmd or not cmd[0]:
         return
     inner = cmd[0]
+    if _is_writer(inner, _FD_HOLDERS, appended=not any(h in w for w in inner for h in _FD_HOLDERS)):
+        _run_on_roots(ctx, pos[1:] or [(".", False)], cwd, names_of_fd(exts, other, pos), summary)
     if _sh.command_name(inner[0]) in _DELETERS:
         roots = pos[1:] or [(".", False)]
         pattern = pos[0][0] if pos else ""
-        _classify(ctx, roots, cwd, summary, narrow=filtered or pattern not in ("", ".", "^", ".*"))
+        loose = pattern in ("", ".", "^", ".*")
+        names = ["*." + e.lstrip(".") for e in exts] if exts and not other and loose else None
+        _classify(ctx, roots, cwd, summary, narrow=filtered or not loose, names=names)
     bash.nested_eval(" ".join(_quote(w) for w in inner), cwd)
+
+
+def names_of_fd(exts, other, pos):
+    pattern = pos[0][0] if pos else ""
+    if exts and not other and pattern in ("", ".", "^", ".*"):
+        return ["*." + e.lstrip(".") for e in exts]
+    return None
 
 
 def _quote(w):
@@ -1108,9 +1989,151 @@ def _push_force_main(rest, directory, conf_specs, conf_mirror):
     return any(_is_main(dst, directory) for dst in dsts)
 
 
+def _extract_dest(name, args, dargs):
+    """(folder, dyn) an archive extraction writes into, or None (not an extraction)."""
+    if name in ("unzip", "7z", "7za"):
+        if name != "unzip" and not (args and args[0] in ("x", "e")):
+            return None
+        if name == "unzip" and any(re.fullmatch(r"-[A-Za-z]*[ltvZz][A-Za-z]*", a) for a in args):
+            return None  # lists or tests the archive
+        for i, a in enumerate(args):
+            if name == "unzip" and a == "-d" and i + 1 < len(args):
+                return args[i + 1], dargs[i + 1]
+            if name != "unzip" and a.startswith("-o") and len(a) > 2:
+                return a[2:], dargs[i]
+        return ".", False
+    first = args[0] if args else ""
+    extract = bool(re.fullmatch(r"-?[A-Za-z]*x[A-Za-z]*", first)) or any(
+        a in ("--extract", "--get") or re.fullmatch(r"-[A-Za-z]*x[A-Za-z]*", a) for a in args)
+    if not extract:
+        return None
+    dest = (".", False)
+    for i, a in enumerate(args):
+        if a in ("-C", "--directory") and i + 1 < len(args):
+            dest = (args[i + 1], dargs[i + 1])
+        elif a.startswith("--directory="):
+            dest = (a.split("=", 1)[1], dargs[i])
+    return dest
+
+
+def _git_trees(ctx, args, dyn, cwd):
+    """Folders ``--work-tree`` / ``--git-dir`` name (before the subcommand)."""
+    out, i = [], 0
+    while i < len(args) and args[i].startswith("-"):
+        a = args[i]
+        key, eq, val = a.partition("=")
+        if key in ("--work-tree", "--git-dir"):
+            vd = dyn[i] if eq else (dyn[i + 1] if i + 1 < len(dyn) else True)
+            if not eq:
+                val = args[i + 1] if i + 1 < len(args) else ""
+                i += 1
+            if val and not vd:
+                out.append(ctx.path(val, cwd))
+        elif a in ("-C", "-c", "--namespace", "--exec-path", "--config-env"):
+            i += 1
+        i += 1
+    return [p for p in out if p]
+
+
+_GIT_VALUE_OPTS = frozenset({"-b", "--branch", "-o", "--origin", "--depth", "-c", "--config", "--reference",
+                             "--separate-git-dir", "-u", "--upload-pack", "--template", "-j", "--jobs", "--filter",
+                             "--shallow-since", "--shallow-exclude", "--server-option", "--bundle-uri"})
+
+
+def _git_pathspecs(rest):
+    """The pathspec words of a git rm/mv/checkout/restore/clean."""
+    if "--" in rest:
+        return rest[rest.index("--") + 1:]
+    return [a for a in rest if not a.startswith("-")]  # checkout: a branch name too (no root is named so)
+
+
+def _git_dry(sub, rest):
+    """A form that changes nothing: --dry-run, -n of add/rm/mv/clean, apply --check/--stat."""
+    if "--dry-run" in rest:
+        return True
+    if sub in ("add", "rm", "mv", "clean") and any(re.fullmatch(r"-[a-zA-Z]*n[a-zA-Z]*", a) for a in rest):
+        return True
+    return sub == "apply" and "--apply" not in rest and bool(
+        {"--check", "--stat", "--numstat", "--summary"} & set(rest))
+
+
+def _git_readonly(ctx, argv, dyn, d, sub, rest, summary, bash):
+    """readonly-source (and P13 for rm/mv) for one git command."""
+    if _git_dry(sub, rest) or (sub == "stash" and rest[:1] and rest[0] in ("list", "show")):
+        return
+    bases = [d] if d is not None else ctx.bases(None)  # Ruling P15 (also -C with an unknown value)
+    trees = _git_trees(ctx, argv[1:], dyn[1:], d)
+    cached = sub == "rm" and "--cached" in rest  # the index only; the work tree is untouched
+    specs = _git_pathspecs(rest) if sub in ("rm", "mv", "checkout", "restore", "clean") else []
+    if sub == "checkout" and "--" in rest and not specs and not [a for a in rest if not a.startswith("-")]:
+        return  # "git checkout --": nothing
+    before = len(ctx.hits)
+    if not cached:
+        for folder in bases + trees:
+            ctx.readonly_check(folder, summary)
+    if sub == "apply":
+        for a in rest:
+            if a.startswith("--directory="):
+                bash.check_write(a.split("=", 1)[1], False, "copydir", d)
+    for base in bases:
+        for w in specs:
+            if _GLOB.search(w):  # a pathspec glob: "*" also matches "/"
+                lit = _norm(posixpath.join(base, _GLOB.split(w, maxsplit=1)[0] or "."))
+                if not cached and ctx.readonly:
+                    for forms, shown, reason in ctx.readonly:
+                        if any(f.startswith(lit.lower()) or _within(lit.lower(), f) for f in forms):
+                            ctx.readonly_hit((shown, reason), summary)
+                            break
+                if sub in ("rm", "mv") and not ctx.remote:
+                    pat = _norm(posixpath.join(base, w)).lower()
+                    rd = ctx.rules_dir()
+                    if any(fnmatch.fnmatchcase(c, pat) for c in (rd, rd + "/rules.md")):
+                        ctx.hit("agent-config", False, summary)
+                continue
+            p = ctx.path(w, base, False, follow=False)
+            if p is None:
+                continue
+            if not cached:
+                ctx.readonly_check(p, summary, as_ancestor=True, follow=False)
+            if sub in ("rm", "mv"):  # Ruling P13: git rm/mv of the rules file or a folder holding it
+                _rules_dir_delete(ctx, p, None, summary)
+    if d is None and sub != "add":  # git add changes the index, not the work tree
+        ctx.unknown_cwd(before, summary)
+
+
 def _git_check(ctx, argv, dyn, cwd, summary, bash):
     d, sub, rest, conf = _parse_git(ctx, argv[1:], dyn[1:], cwd)
     rule = None
+    if sub in _GIT_CHANGES:  # readonly-source: a work-tree change run in (or on) a readonly root
+        _git_readonly(ctx, argv, dyn, d, sub, rest, summary, bash)
+    elif sub == "submodule" and rest[:1] and rest[0] in ("update", "add", "init", "sync", "deinit"):
+        for folder in ([d] if d is not None else ctx.bases(None)):
+            ctx.readonly_check(folder, summary)  # Ruling P19: it writes the work tree
+    elif sub == "clone":  # git clone URL [DEST]: DEST is written
+        pos, i = [], 0
+        while i < len(rest):
+            a = rest[i]
+            if a in _GIT_VALUE_OPTS:
+                i += 2
+                continue
+            if not a.startswith("-") or a == "-":
+                pos.append(a)
+            i += 1
+        if pos:
+            dest = pos[1] if len(pos) > 1 else re.sub(r"\.git$", "", pos[0].rstrip("/").rsplit("/", 1)[-1]
+                                                      .rsplit(":", 1)[-1]) or "."
+            bash.check_write(dest, False, "copydir", d)
+    elif sub == "worktree" and rest[:1] == ["add"]:
+        pos, i = [], 1
+        while i < len(rest):
+            if rest[i] in ("-b", "-B", "--reason"):
+                i += 2
+                continue
+            if not rest[i].startswith("-"):
+                pos.append(rest[i])
+            i += 1
+        if pos:
+            bash.check_write(pos[0], False, "copydir", d)
     if sub == "config":
         pos = [a for a in rest if not a.startswith("-")]
         if len(pos) >= 2:
@@ -1162,6 +2185,100 @@ def _git_check(ctx, argv, dyn, cwd, summary, bash):
             rule = "git-stash-drop"
     if rule:
         ctx.hit(rule, False, summary)
+
+
+# ---------------------------------------------------------------------------
+# guest-quarantine (forge quarantined())
+# ---------------------------------------------------------------------------
+def _inside_repo(ctx, word, dynamic, cwd, folder=None):
+    """forge insideRepo: the path is the project (or ``folder``) or inside
+    it (real path, case-folded); a path we cannot resolve counts as inside
+    (fail safe; Ruling P15: after an unknown cd, either the project or the
+    start cwd)."""
+    if not word or word.startswith("-"):
+        return False
+    project = folder or ctx.project_or_none()
+    if project is None:
+        return False
+    if cwd is None and not word.startswith(("/", "~", "$", "`")):
+        return any(_inside_repo(ctx, word, dynamic, b, folder) for b in ctx.bases(None))
+    p = ctx.path(word, cwd, dynamic)
+    return p is None or _within(p.lower(), project.lower())
+
+
+def _subcommand_of(args):
+    i = 0
+    while i < len(args):
+        if _VALUE_FLAGS.fullmatch(args[i]):
+            i += 2
+            continue
+        if not args[i].startswith("-"):
+            return args[i].lower(), args[i + 1:]
+        i += 1
+    return "", []
+
+
+def _quarantined(ctx, st, word, name, args, dargs, cwd, from_pipe, folder=None):
+    """forge quarantined(word, cmd, args, cwd, ctx, fromPipe), plus: a shell or
+    interpreter reading a repo file on stdin (``sh < build.sh``) and any
+    shell spelling co-guard knows (``bash5``) is held too."""
+    cmd = _BASE_TOOL.sub(r"\1", name) if _BASE_TOOL.fullmatch(name) else name
+    if args and all(_FLAGS_ONLY.fullmatch(a) for a in args):
+        return False  # --version, --help
+    if cmd in ("make", "gmake") and any(_MAKE_DRY.fullmatch(a) for a in args):
+        return False  # make -n prints, runs nothing
+    sub, rest = _subcommand_of(args)
+    if cmd in _PM_ALWAYS:
+        return True
+    if cmd in ("docker", "podman", "docker-compose"):
+        if cmd == "docker-compose":
+            return True
+        if sub == "image":
+            return bool(re.fullmatch(r"build|load|import", rest[0] if rest else "", re.I))
+        return bool(sub) and sub not in _DOCKER_READONLY
+    if cmd in _READONLY_SUBS:
+        if not sub:
+            return cmd in ("yarn", "bundle", "gradle", "mvn")  # bare "yarn" installs
+        if cmd in ("conda", "mamba") and sub == "env":
+            return not re.fullmatch(r"list|export|config", rest[0] if rest else "", re.I)
+        if sub == "audit" and "fix" in rest:
+            return True  # npm audit fix installs
+        return sub not in _READONLY_SUBS[cmd]
+    stdin_files = [(t, "$" in t or "`" in t) for op, t in st.redirects if op == "<" and not t.startswith("<(")]
+
+    def fed():  # "cat x.py | python", "sh < build.sh": runs what it is fed
+        return from_pipe or any(_inside_repo(ctx, t, td, cwd, folder) for t, td in stdin_files)
+
+    if cmd in ("java", "kotlin"):
+        return "-jar" in args or any(a.lower().endswith(".jar") and _inside_repo(ctx, a, d, cwd, folder)
+                                     for a, d in zip(args, dargs))
+    if cmd in _INTERPRETERS:
+        if folder and any(a in ("-c", "-e", "--eval") for a in args):
+            return False  # readonly build check: inline code is checked as code
+        if any(_INTERP_RUNS.fullmatch(a) for a in args):
+            return True
+        script = next(((a, d) for a, d in zip(args, dargs) if not a.startswith("-")), None)
+        return _inside_repo(ctx, script[0], script[1], cwd, folder) if script else fed()
+    if cmd in ("source", "."):
+        script = next(((a, d) for a, d in zip(args, dargs) if not a.startswith("-")), None)
+        return _inside_repo(ctx, script[0], script[1], cwd, folder) if script else fed()
+    if cmd in _SCRIPT_SHELLS or _sh.shell_name(cmd):
+        mode, path = _sh.shell_mode(args)
+        if mode == "c":
+            return False  # the -c text is checked as commands
+        if mode == "file" and path:
+            return _inside_repo(ctx, path, "$" in path or "`" in path, cwd, folder)
+        return fed()
+    if cmd in _PS_SHELLS:
+        if any(_PS_INLINE.fullmatch(a) for a in args):
+            return False
+        i = next((k for k, a in enumerate(args) if re.fullmatch(r"-(f|file)", a, re.I)), -1)
+        script = args[i + 1] if 0 <= i < len(args) - 1 else next((a for a in args if not a.startswith("-")), None)
+        return _inside_repo(ctx, script, False, cwd, folder) if script else fed()
+    # the repo's own executable run by path: ./x, scripts/x.sh, gradlew.bat
+    if "/" in word or "\\" in word or _SCRIPT_EXT.fullmatch(word):
+        return _inside_repo(ctx, word, "$" in word or "`" in word, cwd, folder)
+    return False
 
 
 # ---------------------------------------------------------------------------
@@ -1399,8 +2516,15 @@ class _Bash:
         self.git_mirror = False
         self.subst_vars = {}
         self.res_stack = []  # the ParseResult (nesting level) being checked
+        self.text = raw  # the command text at this nesting level
+        # Ruling P16: cwd is scoped - a ( ) subshell's cd does not leak; pushd/popd use a stack
+        self.frames = []  # per open ( ): (cwd, dirstack, oldpwd) when it was entered
+        self.dirstack = []
+        self.oldpwd = None
+        self.cur_cwd = None  # the cwd of the stage being checked
 
     def run(self, command, cwd):
+        self.text = command
         res = _sh.parse(command)
         pctx = getattr(res, "_ctx", None)
         if "TMPDIR" in _TMPDIR_REF.sub("", command) or pctx is None or pctx.poison or "TMPDIR" in pctx.writes:
@@ -1422,23 +2546,48 @@ class _Bash:
         for st in res:
             pipelines.setdefault(st.pipeline, []).append(st)
         self.res_stack.append(res)
+        saved = (self.frames, self.dirstack, self.oldpwd)  # a nesting level ($( ), bash -c) is its own shell
+        self.frames, self.dirstack = [], list(self.dirstack)
         try:
             self._result(res, cwd, outer, pipelines)
         finally:
             self.res_stack.pop()
+            self.frames, self.dirstack, self.oldpwd = saved
 
     def _result(self, res, cwd, outer, pipelines):
         for st in res:
+            while len(self.frames) > st.plow:  # a ( ) closed: back to the cwd it was entered with
+                cwd, self.dirstack, self.oldpwd = self.frames.pop()
+            while len(self.frames) < st.sub:
+                self.frames.append((cwd, list(self.dirstack), self.oldpwd))
             here = outer | _argv_tokens(pipelines.get(st.pipeline, [st]))
-            for sub in st.nested:
-                self.result(sub, cwd, here)
             argv = _sh.expand_wrappers(st)
+            if st.nested:
+                # PGHOST=x bash -c 'psql ...': the nested commands inherit the stage's database variables
+                env, overlay = self.ctx.db_env, self.db_prefix(st, argv)
+                saved = {k: env[k] for k in overlay if k in env}
+                env.update(overlay)
+                try:
+                    for sub in st.nested:
+                        self.result(sub, cwd, here)
+                finally:
+                    for k in overlay:
+                        if k in saved:
+                            env[k] = saved[k]
+                        else:
+                            env.pop(k, None)
             off = len(st.argv) - len(argv) if argv else 0
             dyn = list(st.dynamic[off:]) if argv else []
             dyn += [False] * (len(argv or ()) - len(dyn))
             self.note_vars(st, argv, dyn)
+            self.note_db_env(st, argv, dyn)
+            self.ctx.note_words(st.argv, argv)
+            self.cur_cwd = cwd
             self.stage(st, argv, dyn, cwd, pipelines.get(st.pipeline, [st]), outer)
-            cwd = self.after_cd(argv, dyn, cwd)
+            # a cd in a pipeline runs in a subshell (bash; zsh runs the last stage here - a documented limit),
+            # unless it opens a ( ) group there: then it applies to the group (restored when it closes)
+            if len(pipelines.get(st.pipeline, [st])) == 1 or st.sub > st.plow:
+                cwd = self.after_cd(argv, dyn, cwd)
 
     def note_vars(self, st, argv, dyn):
         for name, val in st.env.items():
@@ -1467,6 +2616,148 @@ class _Bash:
                 if re.fullmatch(r"[A-Za-z_]\w*", a):
                     self.nonliteral.add(a)
 
+    def db_unknown(self):
+        """Every database variable may now hold anything (``source .env``,
+        ``set -a``, ``export $(...)``, ``eval "$x"``)."""
+        for n in _db.DB_ENV_NAMES:
+            self.ctx.db_env[n] = None
+
+    def note_db_env(self, st, argv, dyn=()):
+        """``export PGHOST=x`` / ``PGHOST=x`` on its own: later commands in the
+        line connect there (forge noteDbEnv). A value from a substitution, a
+        sourced file or a dynamic export is unknown (None)."""
+        env = self.ctx.db_env
+        if st.argv and not argv and _sh.command_name(st.argv[0]) == "exec" and (
+                st.heredocs or any(op in ("<", "<>", "<<<") for op, _t in st.redirects)):
+            self.ctx.exec_stdin = True  # exec < x.sql; psql -h prod
+        if not st.argv:
+            for k, v in st.env.items():
+                name = _db.db_env_name(k)
+                if name:
+                    env[name] = v
+            return
+        if not argv:
+            return
+        name = _sh.command_name(argv[0])
+        args, dargs = argv[1:], list(dyn[1:]) + [False] * len(argv)
+        if name in ("source", "."):
+            self.db_unknown()
+        elif name == "set" and any(re.fullmatch(r"-[a-zA-Z]*a[a-zA-Z]*", a) for a in args) or (
+                name == "set" and "allexport" in args):
+            self.db_unknown()
+        elif name == "eval" and any(dargs[:len(args)]):
+            self.db_unknown()
+        elif name in ("read", "mapfile", "readarray"):
+            for a in args:
+                n = _db.db_env_name(a)
+                if n:
+                    env[n] = None
+        elif name in ("export", "declare", "typeset", "local", "readonly"):
+            for a, d in zip(args, dargs):
+                m = re.match(r"([A-Za-z_]\w*)=(.*)\Z", a, re.S)
+                if m:
+                    n = _db.db_env_name(m.group(1))
+                    if n:
+                        env[n] = None if d else m.group(2)
+                elif d:
+                    self.db_unknown()  # export $(cat .env | xargs)
+                else:
+                    n = _db.db_env_name(a)
+                    if n and n not in env:
+                        env[n] = None  # export PGHOST: whatever it holds
+
+    def db_prefix(self, st, argv):
+        """The stage's own database variables: prefix assignments and the
+        ones wrappers take (``env PGHOST=x psql``, ``sudo PGHOST=x psql``)."""
+        out = {}
+        for k, v in st.env.items():
+            n = _db.db_env_name(k)
+            if n:
+                out[n] = v
+        off = len(st.argv) - len(argv) if argv else len(st.argv)
+        if st.argv[:1] and _sh.command_name(st.argv[0]) == "env" and any(
+                a.startswith(("-S", "--split-string")) or re.fullmatch(r"-[a-zA-Z]*S.*", a) for a in st.argv[1:off or None]):
+            out.update({x: None for x in _db.DB_ENV_NAMES})  # env -S '...': a command line we do not follow
+        for w, d in zip(st.argv[:off], list(st.dynamic[:off]) + [False] * off):
+            m = re.match(r"([A-Za-z_]\w*)=(.*)\Z", w, re.S)
+            n = m and _db.db_env_name(m.group(1))
+            if n:
+                out[n] = None if d else m.group(2)
+            elif d and not m:
+                out.update({x: None for x in _db.DB_ENV_NAMES})  # env $(cat .env) psql
+        return out
+
+    def db_stdin(self, st, pipeline):
+        """(stdin, feed) for a database client stage: ("literal", text) for a
+        literal heredoc / here-string / echo-printf-cat feed, ("unknown",
+        None) for a file, a non-literal feed or xargs input, else ("none",
+        None)."""
+        texts, unknown = [], False
+        for op, t in st.redirects:
+            if op in ("<", "<>", "<&"):
+                unknown = True
+            elif op == "<<<":
+                if "$" in t or "`" in t:
+                    unknown = True
+                else:
+                    texts.append(t)
+        for _dl, quoted, body in st.heredocs:
+            if quoted or ("$" not in body and "`" not in body):
+                texts.append(body)
+            else:
+                unknown = True
+        piped = st.index > 0 and not texts and not unknown
+        if piped or "xargs" in st.wrappers or "parallel" in st.wrappers:
+            prev = [x for x in pipeline if x.index == st.index - 1]
+            text = None
+            if prev:
+                pargv = _sh.expand_wrappers(prev[0]) or []
+                pdyn = prev[0].dynamic[len(prev[0].argv) - len(pargv):]
+                text = _literal_output(prev[0], pargv, pdyn)
+            if isinstance(text, str):
+                texts.append(text)
+            else:
+                unknown = True
+        if not texts and not unknown and (self.compound_input(st) or self.ctx.exec_stdin):
+            unknown = True  # { psql; } < x.sql, exec < x.sql; psql
+        if unknown:
+            return "unknown", None
+        if texts:
+            return "literal", "\n".join(texts)
+        return "none", None
+
+    def db_check(self, st, argv, name, args, pipeline, cwd, prefix=None, depth=0):
+        """sql-destroy / db-write for SQL and NoSQL clients and ORM CLIs;
+        shell escapes inside a client are checked as commands."""
+        ctx = self.ctx
+        prefix = self.db_prefix(st, argv) if prefix is None else prefix
+        inner = _env_runner(name, args) if depth < 3 else None
+        if inner is not None:  # dotenv -e .env.prod -- psql ..., op run -- ..., direnv exec . ...
+            if inner:
+                unknown = {x: None for x in _db.DB_ENV_NAMES}
+                self.db_check(st, inner, _sh.command_name(inner[0]), inner[1:], pipeline, cwd,
+                              dict(prefix, **unknown), depth + 1)
+            return
+        if name in _db.DB_CLIENT_SPECS:
+            stdin, feed = self.db_stdin(st, pipeline)
+            piped = "|" in self.text.replace("||", "")
+            f = _db.client_finding(name, args, prefix_env=prefix, line_env=ctx.db_env, stdin=stdin, feed=feed,
+                                   patterns=ctx.db_dev, remote=ctx.remote, piped=piped)
+            if f.destroy:
+                ctx.hit("sql-destroy", False, self.raw)
+            if f.write:
+                ctx.hit("db-write", False, self.raw)
+            for cmd in f.shell:  # psql \! / \o |cmd / COPY ... PROGRAM, sqlite .shell, mysql system ...
+                self.nested_eval(cmd, cwd)
+                if ctx.evals > _MAX_EVALS or ctx.depth >= _MAX_DEPTH:
+                    break  # unparseable already recorded once
+            if f.uncertain:  # psql \\! with no command, sqlite .once -x, an unknown dot-command ...
+                ctx.hit("uncertain-command", False, self.raw)
+            for path in f.outputs:  # psql -o / \\o FILE, sqlite .output, mysql tee, sqlcmd :out ...
+                self.check_write(path, "$" in path or "`" in path, "redirect", cwd)
+        if _db.cli_write(name, args, ctx.db_dev):
+            ctx.hit("db-write", False, self.raw)
+
     def bind(self, targets):
         """Replace "$d" bound by `for d in ...` / `set -- ...` with its words."""
         out = []
@@ -1479,15 +2770,41 @@ class _Bash:
                 out.append((w, d))
         return out
 
+    def cwd_at(self, depth, cwd):
+        """The cwd at ( ) depth ``depth`` (a redirect after a group closed)."""
+        return self.frames[depth][0] if depth < len(self.frames) else cwd
+
     def after_cd(self, argv, dyn, cwd):
-        if not argv or _sh.command_name(argv[0]) not in ("cd", "pushd", "chdir"):
+        name = _sh.command_name(argv[0]) if argv else ""
+        if name not in ("cd", "pushd", "chdir", "popd"):
             return cwd
+        raw_args = argv[1:]
         args = [(a, d) for a, d in zip(argv[1:], dyn[1:]) if not (a.startswith("-") and len(a) > 1)]
+        if name == "popd":
+            if [a for a in raw_args if a != "-n"]:
+                self.dirstack = []
+                return None  # popd +N: we do not follow
+            return self.dirstack.pop() if self.dirstack else None
+        if name == "pushd":
+            if not args:  # swap the top two
+                if not self.dirstack:
+                    return None
+                top = self.dirstack.pop()
+                self.dirstack.append(cwd)
+                return top
+            if re.fullmatch(r"[+-]\d+", args[0][0]) or "-n" in raw_args:
+                self.dirstack = []
+                return None
+            self.dirstack.append(cwd)
+            return self.ctx.path(args[0][0], cwd, args[0][1])
+        old, self.oldpwd = self.oldpwd, cwd
         if not args:
             return self.ctx.home
         word, d = args[0]
         if word == "-":
-            return None
+            return old
+        if d and _MKTEMP_DIR.fullmatch(word):  # cd "$(mktemp -d)": a fresh temp folder, no root
+            return _real(posixpath.join(self.ctx.tmpdir or "/tmp", "co-guard-mktemp.XXXXXX"))
         return self.ctx.path(word, cwd, d)
 
     # -- files a stage writes ---------------------------------------------------
@@ -1504,8 +2821,12 @@ class _Bash:
             if not (kind == "copy" and src is not None and _is_template(src)):
                 ctx.hit("secret-files", False, raw)
         p = ctx.path(word, cwd, d, follow=kind != "move-src" or word.endswith(("/", "/.")))
+        self.readonly_write(word, p, kind, cwd)
         if p is None:
+            self.unknown_write(word, d, kind, cwd)
             return None
+        if kind == "move-src":  # Ruling P13: moving the rules file (or a folder holding it) away
+            _rules_dir_delete(ctx, p, None, raw)
         if kind in ("copy", "link", "copydir") and ctx.is_protected_dest(p):
             ctx.hit("self-protect", True, raw)
         if ctx.is_protected(p, as_ancestor=kind in ("move-src", "chmod-r")):
@@ -1535,8 +2856,75 @@ class _Bash:
         self.written[p] = content
         return p
 
+    def unknown_write(self, word, d, kind, cwd):
+        """P13 for a path we could not resolve: a moved glob source
+        (``mv .claude-orc* /tmp``), and (Ruling P15) a relative path after an
+        unknown cd, tried against the project and the start cwd."""
+        ctx = self.ctx
+        if kind == "move-src":
+            for path, glob in _target_kinds(ctx, word, d, cwd) or ():
+                _rules_dir_delete(ctx, path, glob, self.raw)
+        if cwd is None and not word.startswith(("/", "~", "$", "`")):
+            for b in ctx.bases(None):
+                p = ctx.path(word, b, d, follow=kind != "move-src")
+                if p is None:
+                    if kind == "move-src":
+                        for path, glob in _target_kinds(ctx, word, d, b) or ():
+                            _rules_dir_delete(ctx, path, glob, self.raw)
+                elif kind == "move-src":
+                    _rules_dir_delete(ctx, p, None, self.raw)
+                elif _agent_config(p) or (kind == "copydir" and _agent_config(p + "/settings.json")):
+                    ctx.hit("agent-config", False, self.raw)
+
+    def readonly_write(self, word, p, kind, cwd, depth=0):
+        """readonly-source for one changed path (every write kind; a moved
+        source or a chmod -R target also as a parent of a root; a moved
+        link is not followed). An unknown path counts by its braces, the
+        words a ``for`` loop binds it to, its glob (``vendor/ol?/``) or its
+        literal folder (``> ref/$f``) - unless it starts with an unknown
+        variable - and (Ruling P15) after an unknown cd, a relative path is
+        tried against the project and the start cwd."""
+        ctx = self.ctx
+        if not ctx.readonly or depth > 4:
+            return
+        anc = kind in ("move-src", "chmod-r")
+        follow = kind != "move-src" or word.endswith(("/", "/."))
+        if p is not None:
+            ctx.readonly_check(p, self.raw, as_ancestor=anc, follow=follow)
+            if not (_GLOB.search(word) or ("{" in word and _braces(word))):
+                return  # else also as a pattern (a redirect target is not marked dynamic)
+        if cwd is None and not word.startswith(("/", "~", "$", "`")):
+            before = len(ctx.hits)
+            for b in ctx.bases(None):
+                self.readonly_write(word, ctx.path(word, b, True, follow), kind, b, depth + 1)
+            ctx.unknown_cwd(before, self.raw)
+            return
+        alts = _braces(word) if "{" in word else None
+        if alts:
+            for w in alts:
+                self.readonly_write(w, ctx.path(w, cwd, True, follow), kind, cwd, depth + 1)
+            return
+        words = self.bind([(word, True)])
+        if words != [(word, True)]:
+            for w, d in words:
+                self.readonly_write(w, ctx.path(w, cwd, d, follow), kind, cwd, depth + 1)
+            return
+        e = ctx.expand(word, cwd)
+        if not e or (word[:1] in ("$", "`") and cwd and e == posixpath.join(cwd, word)):
+            return
+        head = re.split(r"[$`]", e, maxsplit=1)[0]
+        if _GLOB.search(head):  # ../Re?/x, vendor/*/f, ../[R]ef/z
+            pat = _norm(head if head == e else head.rsplit("/", 1)[0] + "/*")
+            ctx.readonly_glob(pat, self.raw, as_ancestor=anc)
+            return
+        p = _real(head if head.endswith("/") else (posixpath.dirname(head) or "/"))
+        ctx.readonly_check(p, self.raw, as_ancestor=anc)
+
     def writes(self, st, argv, dyn, cwd, pipeline):
-        for op, t in st.redirects:
+        stage_cwd = cwd
+        for k, (op, t) in enumerate(st.redirects):
+            # Ruling P16: "(cd ref && ls) > out.txt" - the redirect belongs to the group, in the outer cwd
+            cwd = self.cwd_at(st.rdepth.get(k, st.sub), stage_cwd)
             if op in _WRITE_OPS and t and not t.isdigit() and t != "-":
                 d = "$" in t or "`" in t
                 content = _literal_output(st, argv, dyn) if argv else None
@@ -1548,6 +2936,7 @@ class _Bash:
                 if p and append and had:
                     self.written[p] = old + "\n" + content if isinstance(old, str) and isinstance(content, str) \
                         else None
+        cwd = stage_cwd
         if not argv:
             return
         name, args, dargs = _sh.command_name(argv[0]), argv[1:], dyn[1:]
@@ -1593,6 +2982,15 @@ class _Bash:
         elif name == "touch":
             for a, d in pos:
                 self.check_write(a, d, "touch", cwd)
+        elif name in ("tar", "bsdtar", "gtar", "unzip", "7z", "7za"):  # only readonly-source: extracting into a root
+            dest = _extract_dest(name, args, dargs)
+            if dest:
+                self.readonly_write(dest[0], self.ctx.path(dest[0], cwd, dest[1]), "copydir", cwd)
+        elif name == "mkdir":  # only readonly-source: a new folder is a change
+            vals = {v for v, _d in _short_opt_value(args, dargs, "m", ("--mode", "--context"))}
+            for a, d in pos:
+                if a not in vals:
+                    self.readonly_write(a, self.ctx.path(a, cwd, d), "mkdir", cwd)
         elif name in ("chmod", "chown", "chgrp", "chattr"):
             recursive = any(re.fullmatch(r"-[a-zA-Z]*R[a-zA-Z]*", a) or "--recursive" in _long(a, _CHMOD_LONG)
                             for a in args)
@@ -1601,6 +2999,224 @@ class _Bash:
         elif name in ("curl", "wget"):
             for a, d in _downloads(name, args, dargs):
                 self.check_write(a, d, "fetch", cwd, _FETCHED)
+        self.direct_writes(name, args, dargs, cwd)
+
+    def pip_local(self, args, dargs, cwd):
+        """``pip install DIR`` (not editable) builds that folder in place: a
+        confirmable uncertain-command when it is in a root."""
+        ctx = self.ctx
+        if "install" not in args or any(a in ("-e", "--editable") or a.startswith("--editable=") for a in args):
+            return
+        k = args.index("install")
+        for w, d in _pos_skipping(args[k + 1:], dargs[k + 1:], (
+                "-r", "--requirement", "-c", "--constraint", "-t", "--target", "--prefix", "--root", "-i",
+                "--index-url", "--extra-index-url", "-f", "--find-links", "--python-version", "--platform",
+                "--src", "--upgrade-strategy", "--implementation", "--abi", "--only-binary", "--no-binary",
+                "--progress-bar", "--log", "--cache-dir", "--trusted-host", "--proxy", "--timeout", "--retries")):
+            if d or not ("/" in w or w in (".", "..")):
+                continue
+            p = ctx.path(w, cwd)
+            root = p and ctx.readonly_root(p)
+            if root:
+                ctx.hits.append(Hit("uncertain-command", _PIP_LOCAL, False, _short(self.raw)))
+                return
+
+    def readonly_runs(self, st, argv, dyn, name, args, dargs, cwd):
+        """A build/install/test/script run inside a root (quarantine's tables,
+        the root as "the repo"; inline -c/-e code is checked as code).
+        Ruling P18: a known writer (_known_writer) is a hard readonly-source
+        hit; anything else is a confirmable uncertain-command."""
+        ctx = self.ctx
+        run, _rd = _unrun(argv, dyn)  # npx tsc, pnpm exec prettier ...
+        rname, rargs = _sh.command_name(run[0]), run[1:]
+        for b in ctx.bases(cwd):
+            for forms, shown, reason in ctx.readonly:
+                folder = next((f for f in sorted(forms) if _within(b.lower(), f)), None)
+                if not folder:
+                    continue
+                if _known_writer(run[0], rname, rargs) or _known_writer(argv[0], name, args):
+                    ctx.readonly_hit((shown, reason), self.raw)  # Ruling P18/P19: hard for known writers
+                    return
+                if _quarantined(ctx, st, argv[0], name, args, dargs, b, st.index > 0, folder=folder):
+                    ctx.hits.append(Hit("uncertain-command", _RUNS_ROOT, False, _short(self.raw)))
+                    return
+
+    def xargs_writer(self, st, cwd, pipeline):
+        """An xargs writer fed paths by ls/find/fd/echo/printf: readonly-source
+        when they name a root, P13 when a find can reach the rules folder."""
+        ctx = self.ctx
+        for x in pipeline:
+            if x.index >= st.index:
+                continue
+            a2 = _sh.expand_wrappers(x) or []
+            if not a2:
+                continue
+            n2 = _sh.command_name(a2[0])
+            d2 = list(x.dynamic[len(x.argv) - len(a2):]) + [False] * len(a2)
+            words = [(w, d) for w, d in zip(a2[1:], d2[1:]) if not w.startswith("-")]
+            if n2 == "find":
+                k = next((i for i, w in enumerate(a2[1:]) if w.startswith("-") or w in ("(", "!")), len(a2) - 1)
+                words = list(zip(a2[1:k + 1], d2[1:k + 1])) or [(".", False)]
+            elif n2 in ("fd", "fdfind"):
+                words = words[1:] or [(".", False)]
+            elif n2 == "ls":
+                words = words or [(".", False)]
+            elif n2 not in ("echo", "printf", "realpath", "readlink"):
+                continue
+            expr = a2[1:]
+            names = [expr[k + 1] for k, a in enumerate(expr) if a in ("-name", "-iname") and k + 1 < len(expr)]
+            only = names and not any(a in _FIND_NARROW and a not in ("-name", "-iname") for a in expr)
+            for w, d in words:
+                p = ctx.path(w, cwd, d)
+                if p is not None and n2 in ("find", "fd", "fdfind", "ls"):
+                    ctx.readonly_delete(p, _SOME, self.raw)  # what it lists, inside p
+                    if n2 == "find":
+                        _rules_dir_find(ctx, p, names if only else None, self.raw)
+                else:
+                    self.readonly_write(w, p, "edit", cwd)
+
+    def direct_writes(self, name, args, dargs, cwd):
+        """Other common writers of the files they name (all write rules:
+        readonly-source, agent-config, self-protect, secret-files ...)."""
+        ctx = self.ctx
+        pos = [(a, d) for a, d in zip(args, dargs) if not a.startswith("-")]
+
+        def opt(longs, letters=""):  # values of --x V / --x=V (also -out V) / -X V / -XV
+            out = []
+            for i, a in enumerate(args):
+                key, eq, val = a.partition("=")
+                if key in longs:
+                    if eq:
+                        out.append((val, dargs[i]))
+                    elif i + 1 < len(args):
+                        out.append((args[i + 1], dargs[i + 1]))
+                elif letters and len(a) >= 2 and a[0] == "-" and a[1] != "-" and a[1] in letters:
+                    if len(a) > 2:
+                        out.append((a[2:], dargs[i]))
+                    elif i + 1 < len(args):
+                        out.append((args[i + 1], dargs[i + 1]))
+            return out
+
+        def values_skipped(value_short, value_long=()):
+            """Positionals with option values (-X V, --x V) left out."""
+            out, i = [], 0
+            while i < len(args):
+                a = args[i]
+                if a in value_short or a in value_long:
+                    i += 2
+                    continue
+                if a == "--":
+                    out += list(zip(args[i + 1:], dargs[i + 1:]))
+                    break
+                if not a.startswith("-") or a == "-":
+                    out.append((a, dargs[i]))
+                i += 1
+            return out
+
+        if name in _PACKERS:  # gzip f replaces f with f.gz; -c / -l / -t write only stdout or nothing
+            if not any(re.fullmatch(r"-[a-zA-Z0-9]*[clt][a-zA-Z0-9]*", a) or a in ("--stdout", "--to-stdout",
+                                                                                  "--list", "--test")
+                       for a in args):
+                for a, d in values_skipped(("-o", "-S", "-T", "-b"), ("--suffix", "--output")):
+                    self.check_write(a, d, "edit", cwd)
+            for a, d in opt(("--output",), "o"):
+                self.check_write(a, d, "redirect", cwd)
+        elif name == "sort":
+            for a, d in opt(("--output",), "o"):
+                self.check_write(a, d, "redirect", cwd)
+        elif name == "split":
+            rest = values_skipped(("-a", "-b", "-C", "-l", "-n", "-t"), ("--additional-suffix", "--filter"))
+            self.check_write(rest[1][0] if len(rest) > 1 else "x", rest[1][1] if len(rest) > 1 else False,
+                             "redirect", cwd)
+        elif name in ("tar", "bsdtar", "gtar"):
+            first = args[0] if args else ""
+            create = bool(re.fullmatch(r"-?[A-Za-z]*[cruA][A-Za-z]*", first)) or any(
+                a in ("--create", "--append", "--update", "--concatenate") or
+                re.fullmatch(r"-[A-Za-z]*[cruA][A-Za-z]*", a) for a in args)
+            if create and not re.fullmatch(r"-?[A-Za-z]*[xt][A-Za-z]*", first):
+                for i, a in enumerate(args):
+                    if a.startswith("--file="):
+                        self.check_write(a.split("=", 1)[1], dargs[i], "redirect", cwd)
+                    elif (re.fullmatch(r"-[A-Za-z]*f", a) or (i == 0 and re.fullmatch(r"[A-Za-z]*f", a))) and \
+                            i + 1 < len(args) and args[i + 1] != "-":
+                        self.check_write(args[i + 1], dargs[i + 1], "redirect", cwd)
+        elif name == "zip":
+            rest = values_skipped(("-b", "-n", "-t", "-tt", "-P", "-Z", "-O", "--out"), ())
+            if rest and not any(a in ("-sf", "--show-files") for a in args):
+                self.check_write(rest[0][0], rest[0][1], "redirect", cwd)
+            for a, d in opt(("--out",), "O"):
+                self.check_write(a, d, "redirect", cwd)
+        elif name == "patch":
+            if "--dry-run" in args or "-C" in args:
+                return
+            dirs = opt(("--directory",), "d")
+            outs = opt(("--output",), "o")
+            for a, d in dirs:
+                self.check_write(a, d, "copydir", cwd)
+            for a, d in outs:
+                self.check_write(a, d, "redirect", cwd)
+            rest = values_skipped(("-d", "-o", "-i", "-p", "-r", "-B", "-z", "-F", "-D", "-V", "-Y"),
+                                  ("--directory", "--output", "--input", "--strip", "--reject-file", "--prefix",
+                                   "--suffix", "--fuzz", "--ifdef"))
+            if rest:
+                self.check_write(rest[0][0], rest[0][1], "edit", cwd)
+            elif not dirs and not outs:
+                self.readonly_write(".", ctx.path(".", cwd), "copydir", cwd)  # the files the diff names
+        elif name in ("pip", "pip3") or (_BASE_TOOL.fullmatch(name) and name.startswith("pip")):
+            if any(a in ("install", "download", "wheel") for a in args):
+                for a, d in opt(("--target", "--prefix", "--root", "--dest", "--wheel-dir"), "td"):
+                    self.check_write(a, d, "copydir", cwd)
+        elif name in _READONLY_SUBS and name in ("npm", "pnpm", "yarn", "bun"):
+            sub, _rest = _subcommand_of(args)
+            if not sub or sub not in _READONLY_SUBS[name]:
+                for a, d in opt(("--prefix", "--dir", "--cwd"), "C"):
+                    self.readonly_write(a, ctx.path(a, cwd, d), "copydir", cwd)
+        elif name in ("make", "gmake"):
+            if not any(_MAKE_DRY.fullmatch(a) for a in args):
+                for a, d in opt(("--directory",), "C"):
+                    self.readonly_write(a, ctx.path(a, cwd, d), "copydir", cwd)
+                for a, d in opt(("--file", "--makefile"), "f"):
+                    folder = posixpath.dirname(a) or "."
+                    self.readonly_write(folder, ctx.path(folder, cwd, d), "copydir", cwd)
+        elif name == "openssl":
+            for a, d in opt(("-out", "-keyout")):
+                self.check_write(a, d, "redirect", cwd)
+        elif name == "ssh-keygen":
+            if not any(re.fullmatch(r"-[a-zA-Z]*[lyFBLQ][a-zA-Z]*", a) for a in args):
+                for i, a in enumerate(args[:-1]):
+                    if a == "-f":
+                        self.check_write(args[i + 1], dargs[i + 1], "redirect", cwd)
+                        self.check_write(args[i + 1] + ".pub", dargs[i + 1], "redirect", cwd)
+        elif name == "setfacl":
+            rec = any(re.fullmatch(r"-[a-zA-Z]*R[a-zA-Z]*", a) or a == "--recursive" for a in args)
+            for a, d in values_skipped(("-m", "-M", "-x", "-X", "--set", "--set-file", "--modify", "--modify-file",
+                                        "--remove", "--remove-file")):
+                if "=" not in a or not a.startswith("--"):
+                    self.check_write(a, d, "chmod-r" if rec else "chmod", cwd)
+        elif name == "xattr":
+            flags = "".join(a[1:] for a in args if re.fullmatch(r"-[a-zA-Z]+", a))
+            skip = 2 if "w" in flags else (1 if "d" in flags else (0 if "c" in flags else None))
+            if skip is not None:
+                for a, d in pos[skip:]:
+                    self.check_write(a, d, "chmod-r" if "r" in flags else "chmod", cwd)
+        elif name in ("rename", "prename", "perl-rename", "file-rename"):
+            if not any(a in ("-n", "--no-act", "--nono", "--dry-run") for a in args):
+                files = pos[1:] if pos and re.match(r"(s|y|tr)\W", pos[0][0]) else pos[2:]
+                for a, d in files:
+                    self.check_write(a, d, "move-src", cwd)
+        elif name in _VIM or name in ("emacs", "ed", "red"):
+            batch = name in ("ex", "ed", "red") or any(
+                a in ("-c", "--cmd", "-s", "-S", "-e", "-E", "-es", "-Es", "--batch", "-batch", "--eval", "-l",
+                      "--load", "-f", "--funcall", "--script", "-x") or a.startswith(("+", "--eval="))
+                for a in args)
+            if batch:
+                vals = ("-c", "--cmd", "-S", "-u", "-U", "-i", "-T", "-w", "-W", "-t", "-q", "--eval", "-l", "--load",
+                        "-f", "--funcall", "--script")
+                if name in _VIM and name != "ex" and not any(a in ("-e", "-E", "-es", "-Es") for a in args):
+                    vals += ("-s",)  # vim -s scriptin (in ex mode -s is "silent")
+                for a, d in values_skipped(vals):
+                    if not a.startswith("+"):
+                        self.check_write(a, d, "edit", cwd)
 
     def copy_like(self, name, args, dargs, cwd):
         ctx, raw = self.ctx, self.raw
@@ -1618,13 +3234,19 @@ class _Bash:
                 if (p and (ctx.is_protected(p, as_ancestor=True) or ctx.is_protected_dest(p)
                            or p == ctx.home)) or (d and ctx.guard_var_unknown(s)):
                     ctx.hit("self-protect", True, raw)
-        if name == "mv":
-            for s, d in srcs:
+        if name == "mv" or (name == "rsync" and "--remove-source-files" in flags):
+            for s, d in srcs:  # rsync --remove-source-files deletes what it copied: a move
                 self.check_write(s, d, "move-src", cwd)
+        if (name == "ln" and not flags & {"-s", "--symbolic"}) or (name == "cp" and "-l" in flags):
+            for s, d in srcs:  # a hard link to a file in a root: writing through it changes the root
+                self.readonly_write(s, ctx.path(s, cwd, d), "link", cwd)
         if name == "rsync" and "--delete" in flags and dest:
             _classify(ctx, [(dest[0] if dest[0].endswith("/") else dest[0] + "/", dest[1])], cwd, raw)
         if name == "install" and _mode_option(args) and _mode_wide(_mode_option(args)):
             ctx.hit("chmod-wide", False, raw)
+        if name == "install" and "-d" in flags:  # install -d DIR...: creates them
+            for s, d in srcs:
+                self.check_write(s, d, "copydir", cwd)
         if dest is None:
             return
         dword, dd = dest
@@ -1632,6 +3254,8 @@ class _Bash:
         if dd and ctx.guard_var_unknown(dword):
             ctx.hit("self-protect", True, raw)
         if dpath is None:
+            self.readonly_write(dword, None, "copy", cwd)  # cp x vendor/ol?/, cp x {../Ref,/tmp}/
+            self.unknown_write(dword, dd, "copy", cwd)
             return
         if is_dir is None:
             is_dir = False
@@ -1676,6 +3300,34 @@ class _Bash:
         if not argv:
             return
 
+        # database rules (sql-destroy, db-write)
+        self.db_check(st, argv, name, args, pipeline, cwd)
+
+        # guest-quarantine: the reviewed repo's install/build/test/run commands (every stage)
+        lookup = bool(st.argv[:1]) and _sh.command_name(st.argv[0]) == "command" and any(
+            re.fullmatch(r"-[pvV]*[vV][pvV]*", a) for a in st.argv[1:3])  # command -v make: a lookup
+        if ctx.quarantine and not lookup and _quarantined(ctx, st, argv[0], name, args, dargs, cwd, st.index > 0):
+            ctx.hit("guest-quarantine", False, raw)
+
+        if ctx.readonly and not ctx.remote and not lookup:
+            self.readonly_runs(st, argv, dyn, name, args, dargs, cwd)
+            run, rdyn = _unrun(argv, dyn)
+            rname, rargs, rdargs = _sh.command_name(run[0]), run[1:], rdyn[1:]
+            for w, d in _format_targets(rname, rargs, rdargs):  # Ruling P19: like chmod -R targets
+                if _GLOB.search(w):  # "**/*.js" (quoted too): the formatter expands it - its literal folder
+                    head = _GLOB.split(w, maxsplit=1)[0]
+                    w, d = (head if head.endswith("/") else (posixpath.dirname(head) or ".")), False
+                self.readonly_write(w, ctx.path(w, cwd, d), "chmod-r", cwd)
+            if rname in ("pip", "pip3") or (_BASE_TOOL.fullmatch(rname) and rname.startswith("pip")):
+                self.pip_local(rargs, rdargs, cwd)
+            elif _interp_kind(rname) == "python" and rargs[:2] == ["-m", "pip"]:
+                self.pip_local(rargs[2:], rdargs[2:], cwd)
+            for w, d in _build_dirs(rname, rargs, rdargs):  # builds aimed at a folder by a flag
+                self.readonly_write(w, ctx.path(w, cwd, d), "copydir", cwd)
+        if ("xargs" in st.wrappers or "parallel" in st.wrappers) and not ctx.remote and \
+                _is_writer(argv, *_xargs_holder(st)):
+            self.xargs_writer(st, cwd, pipeline)
+
         # a protected path (or an unknown guard variable) in the arguments of a non-reader
         if name not in _READERS or name in ("cd", "pushd"):
             for a, d in zip(args, dargs):
@@ -1708,9 +3360,20 @@ class _Bash:
                     _classify(ctx, targets, cwd, raw)
             else:
                 for word, d in targets:
-                    for path, _g in _target_kinds(ctx, word, d, cwd) or ():
+                    kinds = _target_kinds(ctx, word, d, cwd)
+                    for path, g in kinds or ():
                         if ctx.is_protected(path):
                             ctx.hit("self-protect", True, raw)
+                        _rules_dir_delete(ctx, path, g, raw)
+                        ctx.readonly_delete(path, g, raw)
+                    if kinds is None and cwd is None:  # Ruling P15
+                        before = len(ctx.hits)
+                        for b in ctx.bases(None):
+                            for path, g in _target_kinds(ctx, word, d, b) or ():
+                                _rules_dir_delete(ctx, path, g, raw)
+                                ctx.readonly_delete(path, g, raw)
+                        if not word.startswith(("/", "~", "$", "`")):
+                            ctx.unknown_cwd(before, raw)
         rim = _rimraf_targets(name, args)
         if rim is not None and name != "rimraf":
             _classify(ctx, self.bind([(a, False) for a in rim if not a.startswith("-")]), cwd, raw)
@@ -1813,10 +3476,10 @@ class _Bash:
             if _dangerous(toks) or (first_unknown and any(_DANGEROUS_ARGS.fullmatch(a) for a in argv[1:])):
                 ctx.hit("uncertain-command", False, raw)
 
-    def compound_stdin(self, st, kind, cwd):
-        """Input redirected onto the compound commands around ``st``: only
-        the closers of the groups that contain it (Stage.depth falls below
-        ``st``'s level), innermost first."""
+    def closers(self, st):
+        """The closing stages of the compound commands around ``st`` (only
+        the groups that contain it: Stage.depth falls below ``st``'s level),
+        innermost first. Input redirected onto them reaches ``st``."""
         res = self.res_stack[-1] if self.res_stack else []
         floor = st.depth
         after = False
@@ -1829,10 +3492,20 @@ class _Bash:
             a2 = _sh.expand_wrappers(s2)
             if s2.depth > s2.low or (a2 and _sh.command_name(a2[0]) not in _COMPOUND_CLOSERS):
                 break  # st's group closed earlier (and maybe another one opened): nothing reaches st
-            self.feed(kind, s2, cwd)
+            yield s2
             floor = s2.low
             if floor <= 0:
                 break
+
+    def compound_stdin(self, st, kind, cwd):
+        """Input redirected onto the compound commands around ``st``."""
+        for s2 in self.closers(st):
+            self.feed(kind, s2, cwd)
+
+    def compound_input(self, st):
+        """Some stdin redirect sits on a compound command around ``st``."""
+        return any(s2.heredocs or any(op in ("<", "<<<", "<>", "<&") for op, _t in s2.redirects)
+                   for s2 in self.closers(st))
 
     def feed(self, kind, s2, cwd):
         """Check the stdin text a closer stage redirects in, as ``kind``
@@ -1938,6 +3611,17 @@ class _Bash:
             ctx.hit("self-protect", True, raw)
         if _AGENT_CODE.search(code) and _WRITES_TEXT.search(code):
             ctx.hit("agent-config", False, raw)
+        if ctx.readonly and not ctx.remote and _WRITES_TEXT.search(code):
+            # code that names a root (as written, normalised or real) and may write, or runs inside one
+            for forms, shown, reason in ctx.readonly:
+                names = set(forms) | {shown.lower(), _norm(shown).lower()}
+                if any(n not in ("", "/", ".") and re.search(re.escape(n) + r"(?![\w.-])", low) for n in names):
+                    ctx.readonly_hit((shown, reason), raw)
+                    break
+            else:
+                root = ctx.readonly_cwd(self.cur_cwd)
+                if root:
+                    ctx.readonly_hit(root, raw)
 
     def run_text(self, content, cwd, kind=None):
         if content is _FETCHED:
@@ -2145,6 +3829,34 @@ def _reads_stdin(name, args):
     return False
 
 
+_DOTENV = frozenset({"dotenv", "dotenvx", "dotenv-cli", "env-cmd", "with-env"})
+_RUN_SECRETS = frozenset({"op", "infisical", "doppler", "dotenvx", "varlock", "teller", "chamber", "aws-vault"})
+_JS_RUNNERS = frozenset({"npx", "pnpx", "bunx", "pnpm", "yarn", "npm", "bun"})
+_ENV_CMD_VALUE = frozenset({"-f", "--file", "-e", "--environments", "-r", "--rc-file", "-c", "--path", "-v"})
+
+
+def _env_runner(name, args):
+    """The command a program that loads an environment runs (its argv), []
+    when it names none we can see, None when ``name`` is no such program."""
+    args = [str(a) for a in args]
+    if name in _JS_RUNNERS:  # npx dotenv -e x -- psql
+        for k, a in enumerate(args):
+            if not a.startswith("-") and a not in ("exec", "dlx", "x", "run"):
+                base = _sh.command_name(re.sub(r"@[^/@]*$", "", a))
+                return _env_runner(base, args[k + 1:]) if base in _DOTENV | {"dotenv-cli"} else None
+        return None
+    if name in _RUN_SECRETS and args[:1] in (["run"], ["exec"]) or name in _DOTENV:
+        if "--" in args:
+            return args[args.index("--") + 1:]
+        if name in ("env-cmd", "with-env", "aws-vault", "chamber"):
+            k = 1 if name in ("aws-vault", "chamber") and args[:1] == ["exec"] else 0
+            while k < len(args) and args[k].startswith("-"):
+                k += 2 if args[k] in _ENV_CMD_VALUE else 1
+            return args[k:]
+        return []
+    if name == "direnv" and args[:1] == ["exec"]:
+        return args[2:]
+    return None
 _COMPOUND_CLOSERS = frozenset({"}", "fi", "done", "esac", ")"})
 
 _OTHER_INTERP = frozenset({"pwsh", "powershell", "rscript", "tclsh", "wish", "osascript"})
@@ -2401,9 +4113,17 @@ _MCP_RANK = {"auto_approve": 0, "require_approval": 1, "block": 2}
 
 
 def _mcp_action(ctx, tool_name):
-    """Most restrictive action among the matching entries; an unknown action
-    or a malformed table means require_approval; no entry means allow."""
-    tools = ctx.mcp_tools
+    """Most restrictive action among the matching ``mcp_tools`` entries; when
+    none matches, the same over ``mcp_defaults`` (server-wide defaults); an
+    unknown action or a malformed table means require_approval; no entry in
+    either means allow."""
+    act = _mcp_table_action(ctx.mcp_tools, tool_name)
+    if act is None:
+        act = _mcp_table_action(ctx.mcp_defaults, tool_name)
+    return act
+
+
+def _mcp_table_action(tools, tool_name):
     if tools is None:
         return None
     if not isinstance(tools, dict):
@@ -2428,6 +4148,7 @@ def _file_tool(ctx, tool_name, tool_input, cwd):
     if not raw:
         return
     p = ctx.path(raw, cwd or ctx.project, False)
+    ctx.readonly_check(p, raw)
     if ctx.is_protected(p) or (ctx.guard_var_unknown(raw)):
         ctx.hit("self-protect", True, raw)
     if is_secret_name(raw) or (p and is_secret_name(p)):
@@ -2445,6 +4166,56 @@ def _file_tool(ctx, tool_name, tool_input, cwd):
             ctx.hit("git-internals", False, raw)
 
 
+def _rule_texts(ctx, tool_name, tool_input, cwd):
+    """What custom rules match (Ruling P12; a rule hits when ANY text matches):
+    Bash/Monitor - the command with backslash-newlines removed and whitespace
+    collapsed, plus the de-quoted argv of every simple command (nested and
+    unwrapped ones included, collected while the Bash rules ran); file tools -
+    ``<tool> <path>`` for the raw, the normalised absolute and the real path;
+    others - ``<tool> <compact sorted JSON>`` and forge's newline-joined values
+    (as they are, and with whitespace collapsed inside each value)."""
+    if tool_name in _BASH_TOOLS:
+        command = tool_input.get("command")
+        command = str(command if command is not None else "")
+        return [" ".join(command.replace("\\\n", "").split())] + list(ctx.words)
+    if tool_name in _FILE_TOOLS:
+        raw = str(tool_input.get("file_path") or tool_input.get("notebook_path") or "")
+        texts = [f"{tool_name} {raw}"]
+        if raw:
+            ab = ctx.expand(raw, cwd)
+            if ab:
+                texts.append(f"{tool_name} {_norm(ab)}")
+                texts.append(f"{tool_name} {_real(ab)}")
+        return texts
+    try:
+        text = json.dumps(tool_input, sort_keys=True, separators=(",", ":"), ensure_ascii=False, default=str)
+    except (TypeError, ValueError, RecursionError):
+        text = "<input>"
+    return [f"{tool_name} {text}", f"{tool_name}\n{_cu.values_text(tool_input)}",
+            f"{tool_name}\n{_cu.values_text(tool_input, collapse=True)}"]
+
+
+def _custom(ctx, tool_name, tool_input, cwd):
+    """Org/project/repo rules (custom.py); they apply even with the guard off."""
+    if not ctx.custom:
+        return
+    texts = _rule_texts(ctx, tool_name, tool_input, cwd)
+    summary = _short(texts[0])
+    for rule, how in _cu.match_rules(texts, ctx.custom, ctx.regex_budget_ms):
+        rid = rule["id"]
+        never = rule["kind"] == "never"
+        if how == "timeout":  # never a pass (Ruling P11: only a repo never rule becomes confirmable)
+            if never and not _cu.is_repo_rule(rule):
+                ctx.hits.append(Hit(rid, f"rule {rid} took too long to check, so it is blocked", True, summary))
+            else:
+                ctx.hits.append(Hit(rid, f"rule {rid} took too long to check, so it needs approval", False,
+                                    summary))
+            continue
+        reason = (_cu.clean_reason(rule.get("reason"))
+                  or f'this matches the rule "{_cu.clean_reason(rule["pattern"])}"')
+        ctx.hits.append(Hit(rid, reason, never, summary))
+
+
 def _order(hits):
     seen, out = set(), []
     for h in sorted(hits, key=lambda h: not h.hard):
@@ -2460,6 +4231,10 @@ def evaluate(tool_name, tool_input, policy, cwd):
     tool_name = str(tool_name or "")
     ctx = _Ctx(policy, cwd)
     start = _real(os.path.abspath(str(cwd))) if cwd else ctx.project
+    ctx.start = start
+    for key in ctx.policy_errors:
+        ctx.hits.append(Hit("unparseable", f"{ERROR_REASON} (the task policy's {key} is malformed)", True,
+                            _short(tool_name)))
     if not isinstance(tool_input, dict):
         ctx.hit("unparseable", True, f"{tool_name}: malformed tool input")
     elif tool_name in _BASH_TOOLS:
@@ -2481,15 +4256,25 @@ def evaluate(tool_name, tool_input, policy, cwd):
         summary = f"{tool_name} {text}"
         if action == "block":
             ctx.hit("mcp-block", True, summary)
-        elif action == "require_approval":
-            ctx.hit("mcp-require-approval", False, summary)
+        else:
+            if action == "require_approval":
+                ctx.hit("mcp-require-approval", False, summary)
+            f = _db.mcp_finding(tool_name, tool_input, ctx.mcp_servers, ctx.db_dev)
+            if f.destroy:
+                ctx.hit("sql-destroy", False, summary)
+            if f.write:
+                ctx.hit("db-write", False, summary)
     else:  # Ruling R17: a tool co-guard does not know (maybe a new shell) - a person decides
         try:
             text = json.dumps(tool_input, sort_keys=True, default=str)
         except (TypeError, ValueError, RecursionError):
             text = "<input>"
         ctx.hit("unknown-tool", False, f"{tool_name} {text}")
+    if isinstance(tool_input, dict):
+        _custom(ctx, tool_name, tool_input, start)
     hits = _order(ctx.hits)
+    if any(h.rule_id == "sql-destroy" for h in hits):  # it already holds the statement: one approval, not two
+        hits = [h for h in hits if h.rule_id != "db-write"]
     if any(h.hard or h.rule_id == "mcp-block" for h in hits):
         decision = "deny"
     elif hits:

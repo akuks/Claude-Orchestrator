@@ -285,8 +285,9 @@ def orchestrator_paths(project_dir: str, cwd: str) -> list[str]:
 
 
 def build_policy(*, task_id: str, project, workspace: Path, cwd: Path, claude_config_dir: str | None,
-                 mcp_tools: dict | None) -> dict:
-    """The per-task policy (rules.py module docstring)."""
+                 mcp_tools: dict | None, extra: dict | None = None) -> dict:
+    """The per-task policy (rules.py module docstring). ``extra`` (the Phase 2
+    keys from ``policy_inputs.gather``) is merged over the base keys."""
     home = real_home()
     project_dir = str(Path(getattr(project, "directory", None) or workspace).resolve())
     cwd_s = str(Path(cwd).resolve())
@@ -312,7 +313,7 @@ def build_policy(*, task_id: str, project, workspace: Path, cwd: Path, claude_co
                  "CLAUDE_PLUGIN_ROOT": str(proot.resolve() if proot.exists() else proot)}
     if claude_config_dir:
         env_paths["CLAUDE_CONFIG_DIR"] = str(claude_config_dir)
-    return {
+    policy = {
         "task_id": task_id,
         "api_base": guard_api_base(),
         "project_dir": project_dir,
@@ -326,6 +327,9 @@ def build_policy(*, task_id: str, project, workspace: Path, cwd: Path, claude_co
         "env_paths": env_paths,
         "protected_paths": list(dict.fromkeys(protected)),
     }
+    if extra:
+        policy.update(extra)
+    return policy
 
 
 def write_policy(task_id: str, policy: dict) -> Path:

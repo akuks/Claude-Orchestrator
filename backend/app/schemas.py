@@ -117,6 +117,9 @@ class McpServerCreate(BaseModel):
     env: dict[str, str] = Field(default_factory=dict)
     headers: dict[str, str] = Field(default_factory=dict)
     enabled: bool = True
+    # co-guard: dev | prod | unknown; action for tools with no policy row
+    environment: str = "unknown"
+    default_action: str = "require_approval"
 
 
 class McpServerUpdate(BaseModel):
@@ -128,6 +131,8 @@ class McpServerUpdate(BaseModel):
     env: Optional[dict[str, str]] = None
     headers: Optional[dict[str, str]] = None
     enabled: Optional[bool] = None
+    environment: Optional[str] = None
+    default_action: Optional[str] = None
 
 
 class McpToolInfo(BaseModel):
@@ -150,6 +155,8 @@ class McpServerOut(BaseModel):
     tools: list
     has_env: bool = False
     has_headers: bool = False
+    environment: str = "unknown"
+    default_action: str = "require_approval"
     last_checked_at: Optional[datetime]
     created_at: datetime
 
@@ -247,6 +254,20 @@ class ProjectUpdate(BaseModel):
     # co-guard (maintainer-editable); null means "leave it".
     guard_enabled: Optional[bool] = None
     approval_wait_seconds: Optional[int] = Field(None, ge=60, le=900)
+    # co-guard policy (Phase 2, maintainer-editable, validated by the route).
+    trust: Optional[str] = None
+    quarantine: Optional[bool] = None
+    on_no_answer: Optional[str] = None
+    readonly_paths: Optional[list["ReadonlyPathIn"]] = None
+    reference_project_ids: Optional[list[str]] = None
+
+
+class ReadonlyPathIn(BaseModel):
+    path: str = Field(max_length=1000)
+    reason: Optional[str] = Field(None, max_length=2000)
+
+
+ProjectUpdate.model_rebuild()
 
 
 class ProjectOut(BaseModel):
@@ -268,6 +289,13 @@ class ProjectOut(BaseModel):
     automation_owner_id: Optional[str] = None
     guard_enabled: bool = True
     approval_wait_seconds: int = 300
+    trust: str = "own"
+    quarantine: bool = False
+    on_no_answer: str = "deny"
+    readonly_paths: list = []
+    reference_project_ids: list = []
+    # create/import only: why suggest_trust chose `trust`
+    trust_reason: Optional[str] = None
     task_count: int = 0
     total_cost_usd: float = 0.0
     my_role: Optional[str] = None
@@ -276,6 +304,11 @@ class ProjectOut(BaseModel):
     @classmethod
     def _env_default(cls, v):
         return v or {}  # existing rows store NULL
+
+    @field_validator("readonly_paths", "reference_project_ids", mode="before")
+    @classmethod
+    def _list_default(cls, v):
+        return v if isinstance(v, list) else []
 
     model_config = {"from_attributes": True}
 

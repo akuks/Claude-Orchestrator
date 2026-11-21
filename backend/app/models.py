@@ -2,6 +2,7 @@ import uuid
 from datetime import datetime, timezone
 
 from sqlalchemy import (
+    Boolean,
     Index,
     UniqueConstraint,
     text,
@@ -12,6 +13,8 @@ from sqlalchemy import (
     Integer,
     String,
     Text,
+    false,
+    true,
 )
 from sqlalchemy.orm import Mapped, mapped_column, relationship, validates
 
@@ -176,6 +179,17 @@ class Project(Base):
     # that needs a person's approval waits for one (60-900 s).
     guard_enabled: Mapped[bool] = mapped_column(default=True)
     approval_wait_seconds: Mapped[int] = mapped_column(Integer, default=300)
+    # co-guard policy (Phase 2): "own" | "external" (an external repo's text is
+    # data: the data line is added and its rules file is never read);
+    # quarantine holds the repo's install/build/test/run commands;
+    # on_no_answer "deny" | "deny_and_resume"; readonly_paths [{path, reason}]
+    # (absolute, or relative to `directory`); reference_project_ids: other
+    # projects mounted read-only. Lists are never NULL.
+    trust: Mapped[str] = mapped_column(String(16), default="own", server_default="own")
+    quarantine: Mapped[bool] = mapped_column(Boolean, default=False, server_default=false())
+    on_no_answer: Mapped[str] = mapped_column(String(20), default="deny", server_default="deny")
+    readonly_paths: Mapped[list] = mapped_column(JSON, default=list, server_default="[]")
+    reference_project_ids: Mapped[list] = mapped_column(JSON, default=list, server_default="[]")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
 
 
@@ -213,6 +227,85 @@ class ActionApproval(Base):
     decided_by: Mapped[str | None] = mapped_column(String(32), nullable=True)
     decided_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     decision_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Phase 2: the hook's grant_key of the call (sha256 hex); resume_until set
+    # when the project's on_no_answer is deny_and_resume; delivery "inline" |
+    # "resume" | "dropped" (approved while a step was active, and that step was
+    # cancelled: no follow-up); scope of the approval "once" | "run"; the follow-up task an
+    # approval in the resume phase created or joined; the grants it made.
+    grant_key: Mapped[str] = mapped_column(String(64), default="", server_default="")
+    resume_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    delivery: Mapped[str] = mapped_column(String(16), default="inline", server_default="inline")
+    scope: Mapped[str | None] = mapped_column(String(8), nullable=True)
+    followup_task_id: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    grant_ids: Mapped[list] = mapped_column(JSON, default=list, server_default="[]")
+
+
+class ActionRule(Base):
+    """A custom co-guard rule (Phase 2): scope "org" (admins) or "project"
+    (its maintainers). kind "confirm" (needs approval) | "never" (hard deny);
+    match "text" (case-insensitive substring) | "regex". Its policy id is
+    ``<scope>.<slug>``; the slug never changes after creation."""
+
+    __tablename__ = "action_rules"
+    __table_args__ = (
+        UniqueConstraint("scope", "project_id", "slug", name="uq_action_rules_slug"),
+        # NULLs are distinct in a unique constraint: org slugs need their own index.
+        Index(
+            "uq_action_rules_org_slug", "scope", "slug", unique=True,
+            sqlite_where=text("project_id IS NULL"), postgresql_where=text("project_id IS NULL"),
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=_uuid)
+    scope: Mapped[str] = mapped_column(String(16))
+    project_id: Mapped[str | None] = mapped_column(String(32), nullable=True, index=True)
+    slug: Mapped[str] = mapped_column(String(64))
+    kind: Mapped[str] = mapped_column(String(16))
+    match: Mapped[str] = mapped_column(String(16))
+    pattern: Mapped[str] = mapped_column(Text)
+    reason: Mapped[str] = mapped_column(Text, default="", server_default="")
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True, server_default=true())
+    created_by: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now, onupdate=_now)
+
+
+class GuardOrgSettings(Base):
+    """The org's co-guard settings (a single row, id 1): built-ins switched
+    off (only rules.DISABLEABLE) and dev database patterns."""
+
+    __tablename__ = "guard_org_settings"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, default=1, autoincrement=False)
+    disabled_rules: Mapped[list] = mapped_column(JSON, default=list, server_default="[]")
+    dev_db_patterns: Mapped[list] = mapped_column(JSON, default=list, server_default="[]")
+    updated_by: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now, onupdate=_now)
+
+
+class ActionGrant(Base):
+    """A person's approval that covers later calls (Phase 2). scope "run": the
+    whole thread (root_id) until expires_at; "once": one call of task_id.
+    key_kind "rule" (key "*"), "tool" (an MCP tool name) or "command" (the
+    call's grant_key). One row per rule id."""
+
+    __tablename__ = "action_grants"
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=_uuid)
+    root_id: Mapped[str] = mapped_column(String(32), index=True)
+    task_id: Mapped[str | None] = mapped_column(String(32), nullable=True, index=True)
+    approval_id: Mapped[str | None] = mapped_column(String(32), nullable=True, index=True)
+    scope: Mapped[str] = mapped_column(String(8))
+    rule_id: Mapped[str] = mapped_column(String(100))
+    key_kind: Mapped[str] = mapped_column(String(16))
+    key: Mapped[str] = mapped_column(String(200))
+    created_by: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    revoked_by: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    used_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    use_count: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
 
 
 class TaskSummary(Base):
@@ -364,6 +457,14 @@ class McpServer(Base):
     tools: Mapped[list] = mapped_column(JSON, default=list)
     last_checked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+    # co-guard (Phase 2): "dev" | "prod" | "unknown" (unknown counts as prod for
+    # db-write); default_action for tools with no policy row: auto_approve |
+    # require_approval | block. Servers that existed before 0007 keep
+    # auto_approve (their old behaviour); new ones need approval.
+    environment: Mapped[str] = mapped_column(String(16), default="unknown", server_default="unknown")
+    default_action: Mapped[str] = mapped_column(
+        String(20), default="require_approval", server_default="auto_approve"
+    )
 
     policies: Mapped[list["McpToolPolicy"]] = relationship(
         back_populates="server", cascade="all, delete-orphan"

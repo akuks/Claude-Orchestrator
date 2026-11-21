@@ -18,7 +18,7 @@ from starlette.websockets import WebSocketDisconnect
 
 from app.database import SessionLocal
 from app.main import app
-from app.models import ActionApproval, Finding, McpCall, Task
+from app.models import ActionApproval, ActionGrant, Finding, McpCall, Task
 from conftest import login_as
 from test_lockdown import OPEN_ROUTES, _all_http_routes, _all_ws_routes
 
@@ -48,6 +48,9 @@ NOT_PROJECT_BOUND = {
     ("DELETE", "/me/credentials/claude"): "removes the caller's own Claude credential only",
     ("DELETE", "/me/credentials/github"): "removes the caller's own GitHub token only",
     ("POST", "/me/credentials/test"): "probes the caller's own credentials, no project data",
+    # co-guard policy (Phase 2): org-wide, readable by every person by spec.
+    ("GET", "/guard/builtins"): "the static built-in rule table (ids, reasons), no stored data",
+    ("GET", "/guard/org-settings"): "org-wide disabled built-ins and dev DB patterns, no project data",
 }
 
 # Admin-only routes with no project binding: the outsider must get 403.
@@ -64,6 +67,7 @@ ADMIN_ONLY = {
     ("GET", "/admin/org-fallback"),
     ("PUT", "/admin/org-fallback"),
     ("DELETE", "/admin/org-fallback"),
+    ("PUT", "/guard/org-settings"),
 }
 
 # Writes that silently skip ids the caller may not decide: 200 with an empty list.
@@ -169,7 +173,16 @@ def world(client, tmp_path_factory):
         task_id=running_id, project_id=pid, rule_ids=["git-reset-hard"], tool="Bash",
         summary=f"cov-action-{tag}", status="pending", created_at=now, expires_at=now + timedelta(hours=1),
     ))
+    (grant_id,) = _add(ActionGrant(
+        root_id=running_id, task_id=running_id, approval_id=approval_id, scope="run", rule_id="git-reset-hard",
+        key_kind="command", key="a" * 64, created_at=now, expires_at=now + timedelta(hours=1),
+    ))
     team = _ok(client.post("/teams", json={"name": f"cov-team-{tag}"}))
+    # A P custom rule: GET /guard/rules (org list, or ?project_id=P) must not leak it.
+    rule = _ok(client.post("/guard/rules", json={
+        "scope": "project", "project_id": pid, "name": f"cov-rule-{tag}", "pattern": f"cov-pattern-{tag}",
+        "reason": f"cov-reason-{tag}",
+    }))
 
     outsider = login_as(f"cov-out-{tag}@test.local")
     ids = {
@@ -188,6 +201,9 @@ def world(client, tmp_path_factory):
         "user_id": outsider.user_id,
         "team_id": team["id"],
         "approval_id": approval_id,
+        "rule_id": rule["id"],
+        "grant_id": grant_id,
+        "root_id": running_id,
     }
     # Strings that must never appear in a list the outsider gets back. Agents,
     # templates and workflows are global by spec, so their ids aren't secret.
@@ -197,6 +213,7 @@ def world(client, tmp_path_factory):
         server["id"], f"cov-mcp-{tag}", run["id"], f"cov-run-{tag}",
         done_id, f"cov-done-{tag}", f"cov-model-{tag}",
         running_id, f"cov-running-{tag}", approval_id, f"cov-action-{tag}",
+        rule["id"], f"cov-pattern-{tag}", f"cov-reason-{tag}", grant_id,
     }
     return {
         "ids": ids, "secrets": secrets, "outsider": outsider, "project": p,
@@ -232,6 +249,8 @@ def _bodies(world) -> dict:
         ("POST", "/guard/approvals"): {"task_id": i["task_id"], "rule_ids": ["git-reset-hard"], "tool": "Bash"},
         ("POST", "/guard/report"): {"task_id": i["task_id"], "event": "PreToolUse", "decision": "deny"},
         ("POST", "/guard/approvals/{approval_id}/reject"): {"reason": "x"},
+        ("POST", "/guard/rules"): {"scope": "project", "project_id": i["project_id"], "pattern": "x"},
+        ("PATCH", "/guard/rules/{rule_id}"): {"enabled": False, "pattern": "hijack"},
         ("POST", "/approvals/approve"): {"task_ids": [i["task_id"]]},
         ("PATCH", "/findings/{finding_id}"): {"status": "accepted"},
         ("POST", "/agents"): {"name": f"cov-a-{_uid()}", "system_prompt": "x", "default_prompt": "x",
@@ -261,6 +280,10 @@ def _bodies(world) -> dict:
         ("PATCH", "/teams/{team_id}"): {"name": f"cov-t-{_uid()}"},
         ("PUT", "/teams/{team_id}/members"): {"user_ids": [i["user_id"]]},
     }
+
+
+def out_404(r) -> bool:
+    return r.status_code == 404
 
 
 def _leaks(text: str, secrets: set[str]) -> set[str]:
@@ -332,6 +355,12 @@ def test_every_project_bound_route_enforces_membership(client, world):
     assert me["role"] == "member"
     act = client.get(f"/guard/approvals/{ids['approval_id']}").json()
     assert act["status"] == "pending" and act["decided_by"] is None
+    grants = client.get("/guard/grants", params={"root_id": ids["root_id"]}).json()
+    assert [(g["id"], g["revoked_at"]) for g in grants] == [(ids["grant_id"], None)]
+    assert out_404(world["outsider"].get("/guard/grants", params={"root_id": ids["root_id"]}))
+    rules = client.get("/guard/rules", params={"project_id": ids["project_id"]}).json()
+    assert [(r["id"], r["enabled"], r["pattern"].startswith("cov-pattern-")) for r in rules] == [
+        (ids["rule_id"], True, True)]
 
 
 def test_body_borne_project_refs_refused(client, world):

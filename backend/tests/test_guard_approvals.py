@@ -216,7 +216,10 @@ def test_stored_fields_are_redacted_and_bounded(world, task):
                 reason="https://u:pw@github.com/x", cwd="/w" * 2000, rule_ids=["r"] * 50).json()
     row = _get(ActionApproval, out["id"])
     assert CO_TOKEN_SHAPE not in row.summary and len(row.summary) <= 8000
-    assert "pw@" not in row.reason and len(row.cwd) <= 1000 and len(row.rule_ids) <= 20
+    assert "pw@" not in row.reason and len(row.cwd) <= 1000 and len(row.rule_ids) <= 50
+    # Phase 2 (fix round 1, M2; final wave: 50): at most 50 rule ids, each shaped like a rule id
+    assert _file(agent, tid, rule_ids=["r"] * 51).status_code == 422
+    assert _file(agent, tid, rule_ids=["Not A Rule"]).status_code == 422
 
 
 # ---- reading --------------------------------------------------------------------------

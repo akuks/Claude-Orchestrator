@@ -75,7 +75,7 @@ describe('ActionApprovals cards', () => {
     expect(el.textContent).toContain('this throws away your uncommitted work')
     expect(el.textContent).toContain('/work/proj')
     expect(el.textContent).toContain('Owen')
-    expect(btn(c, 'Approve')).toBeTruthy()
+    expect(btn(c, 'Approve once')).toBeTruthy()
     expect(btn(c, 'Reject')).toBeTruthy()
   })
 
@@ -86,14 +86,14 @@ describe('ActionApprovals cards', () => {
     expect(q(c, 'action-countdown-r1').textContent).toContain('1:59')
     await tick(119_000)
     expect(q(c, 'action-state-r1').textContent).toBe('Expired')
-    expect(btn(c, 'Approve')).toBeUndefined()
+    expect(btn(c, 'Approve once')).toBeUndefined()
   })
 
   it('hides the buttons when the viewer cannot decide', async () => {
     api.listActionApprovals.mockImplementation(async () => [card({ can_decide: false })])
     const c = await mount()
     expect(q(c, 'action-card-r1')).not.toBeNull()
-    expect(btn(c, 'Approve')).toBeUndefined()
+    expect(btn(c, 'Approve once')).toBeUndefined()
     expect(btn(c, 'Reject')).toBeUndefined()
   })
 
@@ -102,14 +102,14 @@ describe('ActionApprovals cards', () => {
     api.approveAction.mockImplementation(() => new Promise((r) => { finish = r }))
     const onChanged = vi.fn()
     const c = await mount({ onChanged })
-    await click(btn(c, 'Approve'))
+    await click(btn(c, 'Approve once'))
     expect(btn(c, 'Reject').disabled).toBe(true)
-    expect(api.approveAction).toHaveBeenCalledWith('r1')
+    expect(api.approveAction).toHaveBeenCalledWith('r1', 'once')
     api.listActionApprovals.mockImplementation(async () => [])
     await act(async () => finish(card({ status: 'approved', decided_by: 'me', can_decide: false })))
     await flush()
     expect(q(c, 'action-state-r1').textContent).toBe('Approved')
-    expect(btn(c, 'Approve')).toBeUndefined()
+    expect(btn(c, 'Approve once')).toBeUndefined()
     expect(onChanged).toHaveBeenCalled()
   })
 
@@ -132,16 +132,16 @@ describe('ActionApprovals cards', () => {
   it('a 409 "expired" shows the Expired state', async () => {
     api.approveAction.mockImplementation(async () => { throw conflict('expired') })
     const c = await mount()
-    await click(btn(c, 'Approve'))
+    await click(btn(c, 'Approve once'))
     await flush()
     expect(q(c, 'action-state-r1').textContent).toBe('Expired')
-    expect(btn(c, 'Approve')).toBeUndefined()
+    expect(btn(c, 'Approve once')).toBeUndefined()
   })
 
   it('a 409 "already approved" shows that outcome', async () => {
     api.approveAction.mockImplementation(async () => { throw conflict('already approved') })
     const c = await mount()
-    await click(btn(c, 'Approve'))
+    await click(btn(c, 'Approve once'))
     await flush()
     expect(q(c, 'action-state-r1').textContent).toBe('Approved')
   })
@@ -184,7 +184,7 @@ describe('ActionApprovals cards', () => {
     api.approveAction.mockImplementation(async () => { throw conflict('already decided') })
     api.getActionApproval.mockImplementation(async () => card({ status: 'rejected', can_decide: false }))
     const c = await mount()
-    await click(btn(c, 'Approve'))
+    await click(btn(c, 'Approve once'))
     await flush()
     expect(api.getActionApproval).toHaveBeenCalledWith('r1')
     expect(q(c, 'action-state-r1').textContent).toBe('Rejected')
@@ -198,9 +198,9 @@ describe('ActionApprovals cards', () => {
     expect(btn(c, 'Show all')).toBeUndefined()
     expect(q(c, 'action-truncated-r1')).toBeNull()
     api.approveAction.mockImplementation(async () => card({ status: 'approved' }))
-    await click(btn(c, 'Approve'))
+    await click(btn(c, 'Approve once'))
     await flush()
-    expect(api.approveAction).toHaveBeenCalledWith('r1') // no confirmation needed
+    expect(api.approveAction).toHaveBeenCalledWith('r1', 'once') // no confirmation needed
   })
 
   it('a clamped summary (>20 lines) needs expanding or a confirmation before Approve', async () => {
@@ -209,7 +209,7 @@ describe('ActionApprovals cards', () => {
     api.approveAction.mockImplementation(async () => card({ status: 'approved' }))
     const c = await mount()
     expect(q(c, 'action-summary-r1').className).toContain('clamped')
-    await click(btn(c, 'Approve'))
+    await click(btn(c, 'Approve once'))
     await flush()
     expect(api.approveAction).not.toHaveBeenCalled()
     expect(document.body.textContent).toContain("You haven't seen the whole command")
@@ -226,7 +226,7 @@ describe('ActionApprovals cards', () => {
     const c = await mount()
     await click(btn(c, 'Show all'))
     expect(btn(c, 'Show less')).toBeTruthy()
-    await click(btn(c, 'Approve'))
+    await click(btn(c, 'Approve once'))
     await flush()
     expect(api.approveAction).toHaveBeenCalledTimes(1)
   })
@@ -237,7 +237,7 @@ describe('ActionApprovals cards', () => {
     api.approveAction.mockImplementation(async () => card({ status: 'approved' }))
     const c = await mount()
     expect(q(c, 'action-truncated-r1')).toBeTruthy()
-    await click(btn(c, 'Approve'))
+    await click(btn(c, 'Approve once'))
     await flush()
     expect(api.approveAction).not.toHaveBeenCalled()
     await click(btn(document.body, 'Approve anyway'))
@@ -251,7 +251,7 @@ describe('ActionApprovals cards', () => {
     api.approveAction.mockImplementation(async () => card({ status: 'approved' }))
     const c = await mount()
     expect(q(c, 'action-truncated-r1').textContent).toContain(TRUNCATED_WARNING)
-    await click(btn(c, 'Approve'))
+    await click(btn(c, 'Approve once'))
     await flush()
     expect(api.approveAction).not.toHaveBeenCalled()
   })
@@ -262,12 +262,189 @@ describe('ActionApprovals cards', () => {
     api.approveAction.mockImplementation(async () => card({ status: 'approved' }))
     const c = await mount()
     expect(q(c, 'action-truncated-r1').textContent).toContain("Command too long to show in full — you can't fully review it")
-    await click(btn(c, 'Approve'))
+    await click(btn(c, 'Approve once'))
     await flush()
     expect(api.approveAction).not.toHaveBeenCalled()
     expect(document.body.textContent).toMatch(/can't fully review it/)
     await click(btn(document.body, 'Approve anyway'))
     await flush()
     expect(api.approveAction).toHaveBeenCalledTimes(1)
+  })
+})
+
+describe('ActionApprovals: approve scope, resume phase, hidden characters', () => {
+  const KEY = 'b'.repeat(64)
+  const runCard = (over = {}) =>
+    card({ run_keys: [{ rule_id: 'git-reset-hard', key_kind: 'command', key: KEY }], can_approve_run: true, ...over })
+
+  it('offers Approve once and Approve for this run; run sends scope "run"', async () => {
+    api.listActionApprovals.mockImplementation(async () => [runCard()])
+    api.approveAction.mockImplementation(async () => runCard({ status: 'approved', scope: 'run', grant_ids: ['g1'], can_decide: false }))
+    const c = await mount()
+    const run = btn(c, 'Approve for this run')
+    expect(run.disabled).toBe(false)
+    await click(run)
+    await flush()
+    expect(api.approveAction).toHaveBeenCalledWith('r1', 'run')
+    expect(q(c, 'action-state-r1').textContent).toBe('Approved')
+    expect(q(c, 'action-run-note-r1').textContent).toMatch(/this thread, 12 h/)
+  })
+
+  it('Approve once sends scope "once"', async () => {
+    api.listActionApprovals.mockImplementation(async () => [runCard()])
+    api.approveAction.mockImplementation(async () => runCard({ status: 'approved', scope: 'once' }))
+    const c = await mount()
+    await click(btn(c, 'Approve once'))
+    expect(api.approveAction).toHaveBeenCalledWith('r1', 'once')
+  })
+
+  it('an agent-filed or cut request (no verified key) offers Approve once only, with the reason', async () => {
+    api.listActionApprovals.mockImplementation(async () => [
+      card({ run_keys: [{ rule_id: 'git-reset-hard', key_kind: 'command', key: '' }], can_approve_run: false, run_reason: null }),
+    ])
+    const c = await mount()
+    expect(btn(c, 'Approve for this run').disabled).toBe(true)
+    expect(btn(c, 'Approve once').disabled).toBe(false)
+    await act(async () => {
+      q(c, 'action-run-r1').dispatchEvent(new MouseEvent('mouseover', { bubbles: true }))
+      await vi.advanceTimersByTimeAsync(300)
+    })
+    expect(document.body.textContent).toMatch(/can't be approved for the whole run/)
+  })
+
+  it('no run_keys at all → run disabled too', async () => {
+    const c = await mount()
+    expect(btn(c, 'Approve for this run').disabled).toBe(true)
+  })
+
+  it('the server decides: a card with a verified key but a rule that cannot be granted stays once-only, with its reason', async () => {
+    api.listActionApprovals.mockImplementation(async () => [
+      runCard({
+        rule_ids: ['git-reset-hard', 'readonly-source'],
+        can_approve_run: false,
+        run_reason: 'readonly-source can only be approved once (server)',
+      }),
+    ])
+    const c = await mount()
+    expect(btn(c, 'Approve for this run').disabled).toBe(true)
+    await act(async () => {
+      q(c, 'action-run-r1').dispatchEvent(new MouseEvent('mouseover', { bubbles: true }))
+      await vi.advanceTimersByTimeAsync(300)
+    })
+    expect(document.body.textContent).toContain('readonly-source can only be approved once (server)')
+  })
+
+  it('a tool-keyed run grant says it covers every call of the tool', async () => {
+    api.listActionApprovals.mockImplementation(async () => [
+      card({
+        tool: 'mcp__db__q',
+        rule_ids: ['mcp-require-approval'],
+        can_approve_run: true,
+        run_keys: [{ rule_id: 'mcp-require-approval', key_kind: 'tool', key: 'mcp__db__q' }],
+      }),
+    ])
+    const c = await mount()
+    await act(async () => {
+      q(c, 'action-run-r1').dispatchEvent(new MouseEvent('mouseover', { bubbles: true }))
+      await vi.advanceTimersByTimeAsync(300)
+    })
+    expect(document.body.textContent).toContain('every call of the tool mcp__db__q in this thread for 12 h')
+  })
+
+  it('a quarantine card explains the run grant', async () => {
+    api.listActionApprovals.mockImplementation(async () => [
+      card({
+        rule_ids: ['guest-quarantine'],
+        can_approve_run: true,
+        run_keys: [{ rule_id: 'guest-quarantine', key_kind: 'rule', key: '*' }],
+      }),
+    ])
+    const c = await mount()
+    await act(async () => {
+      q(c, 'action-run-r1').dispatchEvent(new MouseEvent('mouseover', { bubbles: true }))
+      await vi.advanceTimersByTimeAsync(300)
+    })
+    expect(document.body.textContent).toContain("Lets this repo's code run in this thread for 12 h")
+  })
+
+  it('the resume phase shows the badge (no countdown) and stays decidable past expires_at', async () => {
+    api.listActionApprovals.mockImplementation(async () => [
+      runCard({ delivery: 'resume', expires_at: '2026-11-21T09:00:00Z', resume_until: '2026-11-22T09:00:00Z' }),
+    ])
+    api.approveAction.mockImplementation(async () =>
+      runCard({ status: 'approved', delivery: 'resume', followup_task_id: 'f1', can_decide: false }),
+    )
+    const c = await mount()
+    expect(q(c, 'action-resume-r1').textContent).toBe('Agent stopped — approving starts a follow-up')
+    expect(q(c, 'action-countdown-r1')).toBeNull()
+    expect(q(c, 'action-resume-left-r1').textContent).toContain('23 h')
+    await click(btn(c, 'Approve once'))
+    await flush()
+    expect(api.approveAction).toHaveBeenCalledWith('r1', 'once')
+    expect(q(c, 'action-followup-r1').querySelector('a[href="#/tasks/f1"]')).not.toBeNull()
+  })
+
+  it('a deferred resume approval says the follow-up starts when the step ends', async () => {
+    api.listActionApprovals.mockImplementation(async () => [card({ delivery: 'resume', resume_until: '2026-11-22T09:00:00Z' })])
+    api.approveAction.mockImplementation(async () => card({ status: 'approved', delivery: 'resume', followup_task_id: null }))
+    const c = await mount()
+    await click(btn(c, 'Approve once'))
+    await flush()
+    expect(q(c, 'action-followup-r1').textContent).toMatch(/current step ends/)
+  })
+
+  it('an inline request with resume_until says what happens if nobody answers, then moves to the resume phase', async () => {
+    api.listActionApprovals.mockImplementation(async () => [card({ resume_until: '2026-11-22T09:59:00Z' })])
+    const c = await mount()
+    expect(q(c, 'action-resume-note-r1').textContent).toMatch(/24 h/)
+    expect(q(c, 'action-resume-r1')).toBeNull()
+    await tick(126_000) // past expires_at (10:02:05)
+    expect(q(c, 'action-resume-r1')).not.toBeNull()
+    expect(q(c, 'action-state-r1')).toBeNull() // not expired
+  })
+
+  it('bidi / zero-width characters are shown as markers with a warning chip and need a confirmation', async () => {
+    api.listActionApprovals.mockImplementation(async () => [card({ summary: 'echo safe‮;rm -rf x​', cwd: '/w⁦' })])
+    api.approveAction.mockImplementation(async () => card({ status: 'approved' }))
+    const c = await mount()
+    const sum = q(c, 'action-summary-r1').textContent
+    expect(sum).toBe('echo safe⟦U+202E⟧;rm -rf x⟦U+200B⟧')
+    expect(q(c, 'action-hidden-r1').textContent).toContain('hidden characters')
+    expect(q(c, 'action-card-r1').textContent).toContain('/w⟦U+2066⟧')
+    await click(btn(c, 'Approve once'))
+    await flush()
+    expect(api.approveAction).not.toHaveBeenCalled()
+    expect(document.body.textContent).toContain('hidden characters')
+    await click(btn(document.body, 'Approve anyway'))
+    await flush()
+    expect(api.approveAction).toHaveBeenCalledWith('r1', 'once')
+  })
+
+  it('no chip for ordinary text', async () => {
+    const c = await mount()
+    expect(q(c, 'action-hidden-r1')).toBeNull()
+  })
+
+  it('fix round 1: the resume badge comes at expires_at, not when decisions close (margin stays pending)', async () => {
+    api.listActionApprovals.mockImplementation(async () => [card({ resume_until: '2026-11-22T09:59:00Z' })])
+    const c = await mount()
+    await tick(118_000) // 10:01:58: inside the 5 s margin (closes 10:02:00, expires 10:02:05)
+    await tick(4_000) // 10:02:02
+    expect(q(c, 'action-resume-r1')).toBeNull()
+    expect(q(c, 'action-state-r1')).toBeNull() // not expired
+    expect(btn(c, 'Approve once')).toBeTruthy()
+    await tick(4_000) // 10:02:06: past expires_at
+    expect(q(c, 'action-resume-r1')).not.toBeNull()
+  })
+
+  it('fix round 1: the hidden-characters chip and Reject use the night-safe danger token', async () => {
+    api.listActionApprovals.mockImplementation(async () => [card({ summary: 'a\u200bb' })])
+    const c = await mount()
+    expect(q(c, 'action-hidden-r1').className).toContain('co-guard-hidden-chip')
+    expect(btn(c, 'Reject').className).toContain('co-guard-reject')
+    const { readFileSync } = await import('node:fs')
+    const css = readFileSync(`${process.cwd()}/src/guard/guard.css`, 'utf8')
+    expect(css).toMatch(/\.co-guard-hidden-chip\.ant-tag \{[^}]*var\(--co-danger-text\)/)
+    expect(css).toMatch(/\.co-guard-reject\.ant-btn[^{]*\{[^}]*var\(--co-danger-text\)/)
   })
 })

@@ -1,6 +1,8 @@
+import asyncio
 import json
 import os
 import re
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -20,7 +22,10 @@ from ..access import (
     user_is_maintainer,
     visible_project_ids,
 )
-from ..models import McpServer, Project, ProjectMember, Task, TaskSummary, Team, User
+from ..guard import custom as guard_custom
+from ..guard import policy_store
+from ..guard import trust as guard_trust
+from ..models import ActionRule, McpServer, Project, ProjectMember, Task, TaskSummary, Team, User, UserCredential
 from ..schemas import (
     MemberIn,
     MemberOut,
@@ -50,9 +55,22 @@ MAINTAINER_FIELDS = {
     "automation_owner_id",
     "guard_enabled",
     "approval_wait_seconds",
+    "trust",
+    "quarantine",
+    "on_no_answer",
+    "readonly_paths",
+    "reference_project_ids",
 }
 ADMIN_FIELDS = {"directory", "env", "archived"}
 MASK = "••••"
+# co-guard policy fields (Phase 2)
+TRUST_VALUES = ("own", "external")
+ON_NO_ANSWER_VALUES = ("deny", "deny_and_resume")
+READONLY_MAX = 50
+REFERENCES_MAX = 20
+IMPORT_TRUST_BUDGET = 30  # seconds of trust checks per import; later folders get R_TIME_LIMIT
+_NULL_MEANS_LEAVE = ("name", "guard_enabled", "approval_wait_seconds", "trust", "quarantine", "on_no_answer",
+                     "readonly_paths", "reference_project_ids")
 
 
 def _require_admin(request: Request) -> None:
@@ -68,6 +86,100 @@ async def _require_unique_name(s, name: str, exclude_id: str | None = None) -> N
         stmt = stmt.where(Project.id != exclude_id)
     if (await s.execute(stmt.limit(1))).first() is not None:
         raise HTTPException(409, f"A project named '{name}' already exists")
+
+
+async def _member_emails(s) -> list[str]:
+    """Every active org member's git email (the trust heuristic's "us")."""
+    rows = await s.execute(
+        select(UserCredential.git_email)
+        .join(User, User.id == UserCredential.user_id)
+        .where(User.active.is_(True), UserCredential.git_email.is_not(None))
+    )
+    return [e for e in rows.scalars() if e]
+
+
+async def _suggest_trust(directory: str, emails: list[str]) -> tuple[str, str]:
+    return await asyncio.to_thread(guard_trust.suggest_trust, directory, emails)
+
+
+def _covers(folder: str, path: str) -> bool:
+    """`folder` is `path` or one of its ancestors (case-folded, R9)."""
+    f, x = folder.casefold(), path.casefold()
+    return f == "/" or x == f or x.startswith(f.rstrip("/") + "/")
+
+
+_CONTROL = re.compile("[\x00-\x1f\x7f-\x9f]")
+_PROJECT_ID = re.compile(r"[0-9a-f]{32}")
+
+
+def _root_problem(full: str, directory: str) -> str | None:
+    """Why `full` (absolute) cannot be a read-only root of the project in
+    `directory`, checked in normalised and real form: /, home or above it, or
+    the project folder or above it (every change would be blocked)."""
+    home = os.path.normpath(str(Path.home()))
+    homes = {home, os.path.realpath(home)}
+    projects = {os.path.normpath(directory), os.path.realpath(directory)}
+    for form in {os.path.normpath(full), os.path.realpath(full)}:
+        if form in ("/", "//") or any(_covers(form, h) for h in homes):
+            return "is / or your home folder or above it"
+        if any(_covers(form, d) for d in projects):
+            return "is the project folder or above it; every change would be blocked"
+    return None
+
+
+def _readonly_paths(entries: list, directory: str) -> list[dict]:
+    """Validated readonly_paths, stored as given ({path, reason}). A relative
+    path resolves against the project folder (as the hook does). Entries are
+    ReadonlyPathIn objects or stored dicts (re-checked when the folder moves)."""
+    if len(entries) > READONLY_MAX:
+        raise HTTPException(400, f"at most {READONLY_MAX} read-only paths")
+    out, seen = [], set()
+    for e in entries:
+        path = e.get("path") if isinstance(e, dict) else e.path
+        reason = e.get("reason") if isinstance(e, dict) else e.reason
+        raw = (path if isinstance(path, str) else "").strip()
+        if not raw:
+            raise HTTPException(400, "a read-only path is empty")
+        if _CONTROL.search(raw):
+            raise HTTPException(400, "a read-only path contains a control character")
+        if reason is not None and _CONTROL.search(str(reason)):
+            raise HTTPException(400, f"the reason for read-only path {raw!r} contains a control character")
+        if raw.startswith("~"):
+            raise HTTPException(400, f"write the read-only path {raw!r} in full (no ~)")
+        full = raw if os.path.isabs(raw) else os.path.join(directory, raw)
+        why = _root_problem(full, directory)
+        if why:
+            raise HTTPException(400, f"read-only path {raw!r} {why}")
+        if raw in seen:
+            continue
+        seen.add(raw)
+        out.append({"path": raw, "reason": guard_custom.clean_reason(reason)})
+    return out
+
+
+async def _reference_ids(s, principal, project_id: str, ids: list[str], directory: str,
+                         *, check_access: bool = True) -> list[str]:
+    """Other projects the editor can see (an unknown and an invisible id get
+    the same answer), whose folders pass the read-only root checks against
+    this project's `directory`. check_access=False (the folder moved; the ids
+    are stored ones): only the folder checks, and ids gone since are skipped."""
+    out = list(dict.fromkeys(ids))
+    if len(out) > REFERENCES_MAX:
+        raise HTTPException(400, f"at most {REFERENCES_MAX} reference projects")
+    for rid in out:
+        if not isinstance(rid, str) or not _PROJECT_ID.fullmatch(rid):
+            raise HTTPException(400, f"{str(rid)[:80]!r} is not a project id")
+        if rid == project_id:
+            raise HTTPException(400, "a project cannot reference itself")
+        ref = await s.get(Project, rid)
+        if check_access and (ref is None or await project_role(s, principal, rid) is None):
+            raise HTTPException(400, f"unknown project: {rid}")
+        if ref is None:
+            continue
+        why = _root_problem(ref.directory, directory)
+        if why:
+            raise HTTPException(400, f"reference project {ref.name!r}: its folder {why}")
+    return out
 
 
 def _slugify(name: str) -> str:
@@ -131,6 +243,7 @@ async def create_project(payload: ProjectCreate, request: Request):
             directory.mkdir(parents=True, exist_ok=True)
         except OSError as exc:
             raise HTTPException(400, f"Could not create/access directory: {exc}")
+        trust, trust_reason = await _suggest_trust(str(directory.resolve()), await _member_emails(s))
         project = Project(
             name=payload.name,
             slug=slug,
@@ -143,11 +256,15 @@ async def create_project(payload: ProjectCreate, request: Request):
             auto_review_prs=payload.auto_review_prs,
             env=payload.env,
             created_by=request.state.principal.user.id,
+            trust=trust,
+            quarantine=trust == "external",
         )
         s.add(project)
         await s.commit()
         await s.refresh(project)
-        return _to_out(project, role="maintainer", admin=True)
+        out = _to_out(project, role="maintainer", admin=True)
+        out.trust_reason = trust_reason
+        return out
 
 
 @router.get("", response_model=list[ProjectOut])
@@ -281,7 +398,10 @@ async def import_projects(payload: ImportRequest, request: Request):
     """Bulk-create projects from a list of directories (skips already-added)."""
     _require_admin(request)
     created: list[Project] = []
+    reasons: dict[str, str] = {}
     async with SessionLocal() as s:
+        emails = await _member_emails(s)
+        trust_started = time.monotonic()
         rows = (await s.execute(select(Project))).scalars().all()
         existing_dirs = {os.path.normpath(p.directory) for p in rows}
         existing_slugs = {p.slug for p in rows}
@@ -298,6 +418,10 @@ async def import_projects(payload: ImportRequest, request: Request):
             while slug in existing_slugs:
                 slug = f"{base}-{i}"
                 i += 1
+            if time.monotonic() - trust_started >= IMPORT_TRUST_BUDGET:
+                trust, reasons[d] = "external", guard_trust.R_TIME_LIMIT
+            else:  # each check is bounded by trust.GIT_TIMEOUT (5 s)
+                trust, reasons[d] = await _suggest_trust(d, emails)
             project = Project(
                 name=name,
                 slug=slug,
@@ -305,6 +429,8 @@ async def import_projects(payload: ImportRequest, request: Request):
                 default_model=settings.default_model,
                 memory_enabled=settings.memory_enabled_default,
                 created_by=request.state.principal.user.id,
+                trust=trust,
+                quarantine=trust == "external",
             )
             s.add(project)
             existing_dirs.add(d)
@@ -314,7 +440,12 @@ async def import_projects(payload: ImportRequest, request: Request):
         await s.commit()
         for p in created:
             await s.refresh(p)
-    return [_to_out(p, role="maintainer", admin=True) for p in created]
+    outs = []
+    for p in created:
+        out = _to_out(p, role="maintainer", admin=True)
+        out.trust_reason = reasons.get(p.directory)
+        outs.append(out)
+    return outs
 
 
 async def _get_or_404(s, project_id: str) -> Project:
@@ -338,7 +469,7 @@ async def get_project(project_id: str, request: Request):
 async def update_project(project_id: str, payload: ProjectUpdate, request: Request):
     principal = request.state.principal
     data = payload.model_dump(exclude_unset=True)
-    for k in ("name", "guard_enabled", "approval_wait_seconds"):
+    for k in _NULL_MEANS_LEAVE:
         if k in data and data[k] is None:
             del data[k]  # required columns; null means "leave it"
     async with SessionLocal() as s:
@@ -349,6 +480,10 @@ async def update_project(project_id: str, payload: ProjectUpdate, request: Reque
             raise HTTPException(403, "Admin only")
         if "default_model" in data and data["default_model"] not in VALID_MODELS:
             raise HTTPException(400, "Invalid model")
+        if "trust" in data and data["trust"] not in TRUST_VALUES:
+            raise HTTPException(400, f"trust must be one of: {', '.join(TRUST_VALUES)}")
+        if "on_no_answer" in data and data["on_no_answer"] not in ON_NO_ANSWER_VALUES:
+            raise HTTPException(400, f"on_no_answer must be one of: {', '.join(ON_NO_ANSWER_VALUES)}")
         project = await _get_or_404(s, project_id)
         if data.get("automation_owner_id") is not None and not await user_is_maintainer(
             s, data["automation_owner_id"], project_id
@@ -362,7 +497,21 @@ async def update_project(project_id: str, payload: ProjectUpdate, request: Reque
                 d.mkdir(parents=True, exist_ok=True)
             except OSError as exc:
                 raise HTTPException(400, f"Could not access directory: {exc}")
+            dir_changed = str(d.resolve()) != project.directory
             project.directory = str(d.resolve())
+        else:
+            dir_changed = False
+        # A moved folder re-checks the stored paths and references (M3).
+        if "readonly_paths" in data:
+            data["readonly_paths"] = _readonly_paths(payload.readonly_paths, project.directory)
+        elif dir_changed:
+            _readonly_paths(list(project.readonly_paths or []), project.directory)
+        if "reference_project_ids" in data:
+            data["reference_project_ids"] = await _reference_ids(
+                s, principal, project_id, data["reference_project_ids"], project.directory)
+        elif dir_changed:
+            await _reference_ids(s, principal, project_id, list(project.reference_project_ids or []),
+                                 project.directory, check_access=False)
         if data.get("name") and data["name"] != project.name:
             # Project-scoped MCP servers reference the project by name; carry
             # them along so runtime matching and visibility follow the rename.
@@ -386,6 +535,7 @@ async def delete_project(project_id: str, request: Request):
     async with SessionLocal() as s:
         project = await _get_or_404(s, project_id)
         await s.execute(delete(ProjectMember).where(ProjectMember.project_id == project_id))
+        await s.execute(delete(ActionRule).where(ActionRule.project_id == project_id))
         await s.delete(project)
         await s.commit()
 
@@ -498,6 +648,21 @@ def _read_servers(project: Project) -> list[dict]:
             }
         )
     return out
+
+
+@router.get("/{project_id}/guard/rules-file")
+async def get_rules_file(project_id: str, request: Request):
+    """The repo's add-only co-guard rules file as the worker reads it; an
+    external project's file is never read (``read`` false)."""
+    async with SessionLocal() as s:
+        await require_project_role(s, request.state.principal, project_id)
+        project = await _get_or_404(s, project_id)
+    if project.trust != "own":
+        path = Path(project.directory) / policy_store.RULES_FILE
+        return {"path": str(path), "present": os.path.lexists(path), "read": False,
+                "confirm": [], "never": [], "errors": []}
+    out = await asyncio.to_thread(policy_store.read_repo_rules, project.directory)
+    return {**out, "read": True}
 
 
 @router.get("/{project_id}/servers", response_model=list[ServerEntry])

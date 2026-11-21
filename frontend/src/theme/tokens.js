@@ -57,6 +57,7 @@ export const palette = {
     successText: '#047857',
     warningText: '#b45309',
     infoText: '#4f46e5',
+    dangerText: '#be123c',
     link: '#c2410c',
     linkHover: '#9a3412',
     placeholder: '#7d6272',
@@ -95,6 +96,7 @@ export const palette = {
     successText: status.success,
     warningText: status.warning,
     infoText: status.info,
+    dangerText: '#fb7185', // status.danger is too dark on the night surfaces
     hover: 'rgba(249,115,22,.10)',
     activeBg: 'rgba(249,115,22,.16)',
     activeBorder: 'rgba(249,115,22,.50)',
@@ -233,6 +235,7 @@ export function cssVars(mode) {
     '--co-success-text': p.successText,
     '--co-warning-text': p.warningText,
     '--co-info-text': p.infoText,
+    '--co-danger-text': p.dangerText,
     '--co-warning': status.warning,
     '--co-danger': status.danger,
     '--co-info': status.info,

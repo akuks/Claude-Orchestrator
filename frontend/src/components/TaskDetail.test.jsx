@@ -126,6 +126,37 @@ describe('TaskDetail: co-guard lines', () => {
     expect(waiting.querySelector('b')).toBeNull()
     expect(api.taskActionApprovals).toHaveBeenCalledWith('a')
   })
+
+  it('granted and filed lines (Phase 2), plain text, the filed one linked when decidable', async () => {
+    globalThis.WebSocket = FakeSocket
+    api.taskActionApprovals.mockImplementation(async () => [
+      { id: 'r7', status: 'pending', delivery: 'resume', tool: 'Bash', summary: 'psql -h prod -c "delete from t"', rule_ids: ['sql-destroy'], can_decide: true, expires_at: '2020-01-01T00:00:00Z' },
+    ])
+    view = await render(<TaskDetail inline taskId="a" />)
+    await flush()
+    let seq = 1
+    for (const payload of [
+      { event: 'PreToolUse', decision: 'granted', grant_ids: ['g1'], tool: 'Bash', summary: '<i>git reset --hard</i>', rule_ids: ['git-reset-hard'] },
+      { event: 'PreToolUse', decision: 'deny', tool: 'Bash', summary: 'echo ok\u202e ;rm -rf x', rule_ids: [], reason: 'r' },
+      { event: 'PreToolUse', decision: 'deny', status: 'filed', request_id: 'r7', tool: 'Bash', summary: 'psql -h prod', rule_ids: ['sql-destroy'] },
+    ])
+      await send({ seq: seq++, type: 'guard', payload })
+    await flush()
+    const c = view.container
+    const granted = line(c, 'granted')
+    expect(granted.length).toBe(1)
+    expect(granted[0].textContent).toContain('<i>git reset --hard</i>')
+    expect(granted[0].querySelector('i')).toBeNull()
+    expect(granted[0].textContent).toContain('allowed by an earlier approval (grant g1)')
+    expect(granted[0].querySelector('.anticon')).not.toBeNull()
+    const filed = line(c, 'filed')
+    expect(filed.length).toBe(1)
+    expect(filed[0].textContent).toMatch(/the agent stopped/)
+    expect(filed[0].querySelector('a[href="#/approvals/r7"]')).not.toBeNull()
+    expect(line(c, 'waiting')[0].textContent).toMatch(/approving starts a follow-up/)
+    // bidi controls cannot reorder a run-log line
+    expect(line(c, 'blocked')[0].textContent).toContain('echo ok⟦U+202E⟧ ;rm -rf x')
+  })
 })
 
 describe('TaskDetail: approvals enrichment refetch', () => {

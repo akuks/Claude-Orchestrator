@@ -26,12 +26,30 @@ from .config import settings
 from .constants import Priority, Status
 from .database import SessionLocal
 from .events import broker
+from .guard import grants as guard_grants
+from .guard import policy_inputs
 from .guard import runtime as guard_runtime
 from .guard.plugin import ensure_plugin
 from .models import Agent, Artifact, McpCall, Project, SkillPack, Task, TaskEvent, User
 from .redaction import redact, redact_obj, secrets_from_env
 
 _MAX_TOOL_RESULT_CHARS = 2000
+
+
+def _guard_project(proj: Project, directory: str | None) -> SimpleNamespace:
+    """The project's guard and policy settings for this run (``directory``
+    None: an ad-hoc thread step keeps its own workspace as the project dir)."""
+    return SimpleNamespace(
+        id=proj.id,
+        directory=directory,
+        guard_enabled=getattr(proj, "guard_enabled", True),
+        approval_wait_seconds=getattr(proj, "approval_wait_seconds", 300),
+        trust=getattr(proj, "trust", "own"),
+        quarantine=getattr(proj, "quarantine", False),
+        on_no_answer=getattr(proj, "on_no_answer", "deny"),
+        readonly_paths=list(getattr(proj, "readonly_paths", None) or []),
+        reference_project_ids=list(getattr(proj, "reference_project_ids", None) or []),
+    )
 
 
 def _now() -> datetime:
@@ -332,6 +350,10 @@ class WorkerManager:
                 await broker.publish(
                     task_id, {"seq": 0, "type": "completed", "payload": {"status": Status.CANCELLED}}
                 )
+                try:  # co-guard: drop follow-ups deferred on this step
+                    await guard_grants.after_task_finished(task_id, submit=self.submit)
+                except Exception:  # noqa: BLE001
+                    pass
                 return
             task.status = Status.RUNNING
             task.started_at = _now()
@@ -353,18 +375,14 @@ class WorkerManager:
             workspace = Path(task.workspace_dir or (settings.workspaces_dir / task_id))
             # Per-project environment (toolchain scoping) for this task's subprocess.
             project_env = {}
-            # co-guard: the project's guard settings (columns arrive in Task 4).
+            # co-guard: the project's guard and policy settings.
             guard_project = None
             if task.project_id:
                 proj = await s.get(Project, task.project_id)
                 if proj and proj.env:
                     project_env = dict(proj.env)
                 if proj is not None:
-                    guard_project = SimpleNamespace(
-                        directory=proj.directory,
-                        guard_enabled=getattr(proj, "guard_enabled", True),
-                        approval_wait_seconds=getattr(proj, "approval_wait_seconds", 300),
-                    )
+                    guard_project = _guard_project(proj, proj.directory)
             else:
                 # An ad-hoc step of a project thread (follow-up / dispatched
                 # child): the thread root's guard settings, as approvals use
@@ -373,11 +391,7 @@ class WorkerManager:
                 eff = await effective_project_id(s, task)
                 proj = await s.get(Project, eff) if eff else None
                 if proj is not None:
-                    guard_project = SimpleNamespace(
-                        directory=None,
-                        guard_enabled=getattr(proj, "guard_enabled", True),
-                        approval_wait_seconds=getattr(proj, "approval_wait_seconds", 300),
-                    )
+                    guard_project = _guard_project(proj, None)
             # Coordinator: inject the live agent registry + how to delegate — but
             # NOT inside a workflow, where the workflow owns the orchestration and a
             # coordinator agent is used only as a planning step.
@@ -397,6 +411,13 @@ class WorkerManager:
                     if Path(p.local_path).exists():
                         plugin_dirs.append(p.local_path)
             await s.commit()
+        # Re-read the prompt now that the task is marked running: a co-guard
+        # resume approval may have joined this queued follow-up (its update
+        # applies only while the task is still queued).
+        async with SessionLocal() as s:
+            fresh = await s.get(Task, task_id)
+            if fresh is not None:
+                prompt = fresh.prompt
 
         # Build the subprocess environment from scratch (app.agent_env): the
         # allowlisted base + project env + the task creator's own credentials
@@ -457,11 +478,13 @@ class WorkerManager:
 
         # co-guard: per-task policy + spool dir (outside the cwd), env, and the
         # settings that could switch its hooks off (Ruling R6 follow-up).
-        guard_plugin, setting_sources = await self._prepare_guard(
-            task_id, guard_project, workspace, sub_env, mcp, emit
+        guard_plugin, setting_sources, guard_inputs = await self._prepare_guard(
+            task_id, guard_project, workspace, sub_env, mcp, emit, owner_id=task_owner
         )
         if guard_plugin is None:
             return
+        # external projects: forge's data line (also re-added by the SessionStart hook)
+        system_prompt = "\n\n".join(filter(None, [system_prompt, guard_inputs.data_line]))
 
         # Repo-backed project tasks: skip artifact diffing (git tracks changes and
         # scanning a whole repo is slow/noisy). Sandbox tasks still collect outputs.
@@ -521,6 +544,9 @@ class WorkerManager:
         if kb_index:
             # Let the agent Read the snapshot even outside bypassPermissions mode.
             cmd += ["--add-dir", kb_log["dir"]]
+        # reference projects: readable (read-only under co-guard's readonly-source)
+        for ref_dir in guard_inputs.add_dirs:
+            cmd += ["--add-dir", ref_dir]
         if mcp:
             # Ruling R23: strict only when the orchestrator supplies MCP servers, so
             # tasks keep the MCP servers of admin-installed skill packs. Subagent
@@ -738,14 +764,18 @@ class WorkerManager:
     GUARD_REPORT_CAP = 500  # live /guard/report events per run (the spool still has the rest)
 
     _GUARD_KEYS = (
-        "event", "decision", "rule_ids", "tool", "summary", "reason", "status", "request_id",
+        "event", "decision", "rule_ids", "grant_ids", "tool", "summary", "reason", "status", "request_id",
         "tool_use_id", "agent_id", "agent_type", "source", "ts",
+        "hook_event", "error",  # guard_error records (a hook other than PreToolUse failed)
     )
 
-    async def _prepare_guard(self, task_id, guard_project, workspace, sub_env, mcp, emit):
+    async def _prepare_guard(self, task_id, guard_project, workspace, sub_env, mcp, emit, owner_id=None):
         """Write the task's policy (0600) into a fresh CO_TASK_DIR, add the
-        guard env and return (plugin dir, --setting-sources value or None);
-        (None, None) when the task must not start (it is then finished)."""
+        guard env and return (plugin dir, --setting-sources value or None,
+        policy_inputs.PolicyInputs); (None, None, None) when the task must not
+        start (it is then finished). The Phase 2 keys come from
+        ``policy_inputs.gather``; what it skipped is logged as ``guard``
+        events."""
         for k in guard_runtime.HOOK_DISABLING_ENV:  # bare/safe mode would skip plugin hooks
             sub_env.pop(k, None)
         root = guard_runtime.plugin_root()
@@ -757,18 +787,23 @@ class WorkerManager:
             if settings.guard_verify_api and not await asyncio.to_thread(guard_runtime.verify_api_base, api_base):
                 raise guard_runtime.GuardConfigError(
                     f"co-guard approval address not verified ({api_base} did not prove it is this server)")
-        except (OSError, RuntimeError, guard_runtime.GuardConfigError) as e:
+            # once grants a previous attempt used (its spool is about to be wiped) stay spent
+            await self._spend_spool_grants(task_id, strict=True)
+            inputs = await self._gather_policy(task_id, guard_project, owner_id, mcp)
+        except Exception as e:  # noqa: BLE001 - no policy, no task (fail closed)
             msg = f"co-guard could not be set up; task not started: {e}"
             await emit("error", {"message": msg})
             await self._finish(task_id, Status.FAILED, error=msg)
-            return None, None
+            return None, None, None
         config_dir = sub_env.get("CLAUDE_CONFIG_DIR")
         blockers = guard_runtime.hook_blockers(workspace, config_dir)
         if blockers["user"]:
             msg = "co-guard: the user's Claude settings switch hooks off (disableAllHooks); task not started"
             await emit("error", {"message": msg})
             await self._finish(task_id, Status.FAILED, error=msg)
-            return None, None
+            return None, None, None
+        for ev in inputs.events:
+            await emit("guard", ev)
         tdir = guard_runtime.make_task_dir(task_id)
         policy = guard_runtime.build_policy(
             task_id=task_id,
@@ -777,6 +812,7 @@ class WorkerManager:
             cwd=workspace,
             claude_config_dir=config_dir,
             mcp_tools=(mcp or {}).get("tool_policies"),
+            extra=inputs.policy,
         )
         policy_file = guard_runtime.write_policy(task_id, policy)
         sub_env.update(
@@ -801,7 +837,14 @@ class WorkerManager:
                     "files": blockers["project"],
                 },
             )
-        return str(root.resolve()), sources
+        return str(root.resolve()), sources, inputs
+
+    @staticmethod
+    async def _gather_policy(task_id, guard_project, owner_id, mcp):
+        async with SessionLocal() as s:
+            task = await s.get(Task, task_id)
+            proj = await s.get(Project, guard_project.id) if guard_project is not None else None
+            return await policy_inputs.gather(s, task=task, project=proj, owner_id=owner_id, mcp=mcp)
 
     # Ruling R21: co-guard's hook appends {"event":"PreToolUse","tool_use_id":..,
     # "seen":true} to the spool BEFORE it evaluates a call. Every tool_result in
@@ -930,10 +973,10 @@ class WorkerManager:
         survives a cut, and both sources key alike), then bounded."""
         payload = redact_obj({k: rec[k] for k in cls._GUARD_KEYS if k in rec}, secrets or [])
         for k, v in list(payload.items()):
-            if isinstance(v, str):
+            if k in ("rule_ids", "grant_ids"):
+                payload[k] = [str(x)[:64] for x in v][:guard_grants.MAX_GRANT_IDS] if isinstance(v, list) else []
+            elif isinstance(v, str):
                 payload[k] = v[:2000]
-            elif k == "rule_ids":
-                payload[k] = [str(x)[:64] for x in v][:20] if isinstance(v, list) else []
             elif not isinstance(v, (int, float, bool)) and v is not None:
                 payload[k] = str(v)[:2000]
         return payload
@@ -946,7 +989,9 @@ class WorkerManager:
         # one approval answers exactly one call.
         if payload.get("decision") == "approved" and payload.get("request_id"):
             return json.dumps({"approved": payload["request_id"], "event": payload.get("event")})
-        return json.dumps({k: v for k, v in payload.items() if k != "ts"}, sort_keys=True, default=str)
+        # A null and a missing key are the same record (the spool keeps agent_id: null).
+        return json.dumps({k: v for k, v in payload.items() if k != "ts" and v is not None}, sort_keys=True,
+                          default=str)
 
     async def report_guard(self, task_id: str, rec: dict) -> bool:
         """POST /guard/report: emit the hook's record now as a `guard` event of
@@ -968,6 +1013,7 @@ class WorkerManager:
         live = self._guard_live.get(task_id)
         reported = live["reported"] if live else Counter()
         try:
+            await self._spend_spool_grants(task_id)  # every granted line, durably (retries wipe the spool)
             for rec in guard_runtime.read_spool(task_id):
                 if rec.get("seen") is True:
                     continue  # watchdog bookkeeping, not an event
@@ -978,9 +1024,35 @@ class WorkerManager:
                 if reported[key] > 0:
                     reported[key] -= 1
                     continue
+                if payload.get("decision") == "granted":
+                    await self._count_grant_use(task_id, payload.get("grant_ids"))
                 await emit("guard", payload)
         finally:
             guard_runtime.remove_task_dir(task_id)
+
+    @staticmethod
+    async def _spend_spool_grants(task_id: str, strict: bool = False) -> None:
+        """Spend the once grants the spool's granted lines used. ``strict``
+        (before a run): a failure stops the task (fail closed)."""
+        try:
+            async with SessionLocal() as s:
+                await guard_grants.mark_spool_used(s, task_id)
+        except Exception:  # noqa: BLE001 - never blocks a finish
+            if strict:
+                raise
+
+    @staticmethod
+    async def _count_grant_use(task_id: str, grant_ids) -> None:
+        """An unreported granted record: one more use of each grant it names."""
+        try:
+            async with SessionLocal() as s:
+                task = await s.get(Task, task_id)
+                grants = await guard_grants.valid_use(s, task, grant_ids) if task is not None else None
+                if grants:
+                    await guard_grants.record_use(s, grants, count=True)
+                    await s.commit()
+        except Exception:  # noqa: BLE001
+            pass
 
     async def _consume_stdout(self, proc, emit, result, ctx) -> None:
         # Read raw chunks and split on newlines ourselves. A single stream-json
@@ -1131,6 +1203,7 @@ class WorkerManager:
         if error:
             error = redact(error, secrets or [])
         context_store.cleanup(task_id)  # drop this task's knowledge snapshot
+        await self._spend_spool_grants(task_id)  # a spool not ingested (error paths): its once grants stay spent
         guard_runtime.remove_task_dir(task_id)  # co-guard policy + spool (normally gone already)
         async with SessionLocal() as s:
             await auth.revoke_task_tokens(s, task_id)
@@ -1168,3 +1241,8 @@ class WorkerManager:
                     )
                 )
             await s.commit()
+        # co-guard deny-and-resume: follow-ups deferred while this step was active
+        try:
+            await guard_grants.after_task_finished(task_id, submit=self.submit)
+        except Exception:  # noqa: BLE001 - never breaks a finish
+            pass

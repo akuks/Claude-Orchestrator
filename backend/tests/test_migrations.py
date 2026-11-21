@@ -1,4 +1,5 @@
 import asyncio
+import json
 import os
 import sqlite3
 import uuid
@@ -10,6 +11,8 @@ from sqlalchemy.orm import Session
 
 from app import models
 from app.database import _alembic_cfg, _baseline_metadata, run_migrations
+
+HEAD = "0007"  # the latest revision
 
 
 def _tables(db) -> set[str]:
@@ -47,7 +50,7 @@ def test_fresh_db_migrates_to_head(tmp_path):
     run_migrations(url)
     tables = _tables(tmp_path / "fresh.db")
     assert {"tasks", "projects", "context_docs", "alembic_version"} <= tables
-    assert _alembic_version(tmp_path / "fresh.db") == "0006"
+    assert _alembic_version(tmp_path / "fresh.db") == HEAD
 
 
 def test_legacy_db_is_stamped_not_recreated(tmp_path):
@@ -80,7 +83,7 @@ def test_legacy_db_missing_table_and_column_is_repaired(tmp_path):
         row = c.execute("SELECT id, prompt, read_only FROM tasks").fetchall()
     assert "read_only" in cols
     assert row == [("t1", "hi", 0)]
-    assert _alembic_version(db) == "0006"
+    assert _alembic_version(db) == HEAD
     assert "users" in _tables(db)
 
 
@@ -181,7 +184,7 @@ def test_migration_0006(scratch_url):
         assert idx["uq_action_approvals_pending_key"]["unique"]
         return sc.exec_driver_sql("SELECT version_num FROM alembic_version").scalar()
 
-    assert _inspect(url, check_head) == "0006"
+    assert _inspect(url, check_head) == HEAD
     command.downgrade(_alembic_cfg(url), "0005")
 
     def check_down(sc, insp):
@@ -221,3 +224,108 @@ def test_migration_0006(scratch_url):
         return "no error"
 
     assert _inspect(url, partial_unique) == "IntegrityError"
+
+
+def test_migration_0007(scratch_url):
+    """0007_policy: new tables and columns; rows that existed before it get
+    the defaults (a project is `own`, an MCP server keeps `auto_approve`)."""
+    from alembic import command
+
+    url = scratch_url
+    run_migrations(url)
+
+    def check_head(sc, insp):
+        tables = set(insp.get_table_names())
+        assert {"action_rules", "guard_org_settings", "action_grants"} <= tables
+        assert {"id", "scope", "project_id", "slug", "kind", "match", "pattern", "reason", "enabled",
+                "created_by", "created_at", "updated_at"} <= {c["name"] for c in insp.get_columns("action_rules")}
+        assert {"id", "disabled_rules", "dev_db_patterns", "updated_by", "updated_at"} <= {
+            c["name"] for c in insp.get_columns("guard_org_settings")}
+        assert {"id", "root_id", "task_id", "approval_id", "scope", "rule_id", "key_kind", "key", "created_by",
+                "created_at", "expires_at", "revoked_at", "revoked_by", "used_at", "use_count"} <= {
+            c["name"] for c in insp.get_columns("action_grants")}
+        assert {"trust", "quarantine", "on_no_answer", "readonly_paths", "reference_project_ids"} <= {
+            c["name"] for c in insp.get_columns("projects")}
+        assert {"environment", "default_action"} <= {c["name"] for c in insp.get_columns("mcp_servers")}
+        assert {"grant_key", "resume_until", "delivery", "scope", "followup_task_id", "grant_ids"} <= {
+            c["name"] for c in insp.get_columns("action_approvals")}
+        grant_idx = {tuple(i["column_names"]) for i in insp.get_indexes("action_grants")}
+        assert ("root_id",) in grant_idx and ("task_id",) in grant_idx
+        assert ("project_id",) in {tuple(i["column_names"]) for i in insp.get_indexes("action_rules")}
+        return sc.exec_driver_sql("SELECT version_num FROM alembic_version").scalar()
+
+    assert _inspect(url, check_head) == "0007"
+    command.downgrade(_alembic_cfg(url), "0006")
+
+    def check_down(sc, insp):
+        tables = set(insp.get_table_names())
+        assert not ({"action_rules", "guard_org_settings", "action_grants"} & tables)
+        assert "trust" not in {c["name"] for c in insp.get_columns("projects")}
+        assert "default_action" not in {c["name"] for c in insp.get_columns("mcp_servers")}
+        assert "grant_key" not in {c["name"] for c in insp.get_columns("action_approvals")}
+        sc.exec_driver_sql(
+            "INSERT INTO projects (id, name, slug, directory, default_model, env, memory, memory_enabled,"
+            " archived, auto_review_prs, created_at, guard_enabled, approval_wait_seconds) VALUES ('p7', 'seven',"
+            " 'seven', '/x', 'sonnet', '{}', '', true, false, false, CURRENT_TIMESTAMP, true, 300)")
+        sc.exec_driver_sql(
+            "INSERT INTO mcp_servers (id, name, transport, scope, args, enabled, status, tools, created_at)"
+            " VALUES ('s7', 'db7', 'stdio', 'team', '[]', true, 'unknown', '[]', CURRENT_TIMESTAMP)")
+        sc.exec_driver_sql(
+            "INSERT INTO tasks (id, title, prompt, status, priority, tags, model, max_turns, attempt, allow_remote,"
+            " read_only, requires_approval, risk, created_at) VALUES ('t7', 't', 'p', 'running', 'normal', '[]',"
+            " '', 25, 0, true, false, false, 'info', CURRENT_TIMESTAMP)")
+        sc.exec_driver_sql(
+            "INSERT INTO action_approvals (id, task_id, rule_ids, tool, summary, cwd, reason, command_hash,"
+            " status, created_at, expires_at) VALUES ('a7', 't7', '[]', '', '', '', '', '', 'pending',"
+            " CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)")
+        return sc.exec_driver_sql("SELECT version_num FROM alembic_version").scalar()
+
+    assert _inspect(url, check_down) == "0006"
+    command.upgrade(_alembic_cfg(url), "head")
+
+    def check_defaults(sc, insp):
+        q = sc.exec_driver_sql
+        proj = tuple(q("SELECT trust, quarantine, on_no_answer, readonly_paths, reference_project_ids"
+                       " FROM projects WHERE id='p7'").fetchone())
+        srv = tuple(q("SELECT environment, default_action FROM mcp_servers WHERE id='s7'").fetchone())
+        appr = tuple(q("SELECT grant_key, resume_until, delivery, scope, followup_task_id, grant_ids"
+                       " FROM action_approvals WHERE id='a7'").fetchone())
+        return proj, srv, appr
+
+    proj, srv, appr = _inspect(url, check_defaults)
+
+    def as_list(v):
+        return json.loads(v) if isinstance(v, str) else v
+
+    assert proj[0] == "own" and bool(proj[1]) is False and proj[2] == "deny"
+    assert as_list(proj[3]) == [] and as_list(proj[4]) == []
+    assert srv == ("unknown", "auto_approve")
+    assert appr[0] == "" and appr[1] is None and appr[2] == "inline" and appr[3] is None and appr[4] is None
+    assert as_list(appr[5]) == []
+
+    def new_rows(sc, insp):
+        q = sc.exec_driver_sql
+        q("INSERT INTO guard_org_settings (id, updated_at) VALUES (1, CURRENT_TIMESTAMP)")
+        settings_row = tuple(q("SELECT disabled_rules, dev_db_patterns FROM guard_org_settings").fetchone())
+        rule = ("INSERT INTO action_rules (id, scope, project_id, slug, kind, match, pattern, reason, enabled,"
+                " created_at, updated_at) VALUES ('{id}', '{scope}', {pid}, 'x', 'confirm', 'text', 'p', '',"
+                " true, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)")
+        q(rule.format(id="r1", scope="project", pid="'p7'"))
+        q(rule.format(id="r2", scope="org", pid="NULL"))
+        errors = []
+        for rid, scope, pid in (("r3", "project", "'p7'"), ("r4", "org", "NULL")):
+            try:
+                with sc.begin_nested():
+                    q(rule.format(id=rid, scope=scope, pid=pid))
+                errors.append("no error")
+            except Exception as e:  # noqa: BLE001
+                errors.append(type(e).__name__)
+        q("INSERT INTO action_grants (id, root_id, scope, rule_id, key_kind, key, created_at, expires_at)"
+          " VALUES ('g1', 't7', 'run', 'db-write', 'tool', 'mcp__db__q', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)")
+        use = q("SELECT use_count FROM action_grants WHERE id='g1'").scalar()
+        return settings_row, errors, use
+
+    settings_row, errors, use = _inspect(url, new_rows)
+    assert [as_list(v) for v in settings_row] == [[], []]
+    assert errors == ["IntegrityError", "IntegrityError"]  # one slug per (scope, project); org slugs too
+    assert use == 0
