@@ -27,7 +27,12 @@ remote's lazy fetch of a missing object), so every such call goes through
 * a subcommand allowlist (``ValueError`` otherwise): ``rev-parse``, plain
   ``remote`` (or ``-v``), ``for-each-ref``, ``log``/``rev-list`` with only
   ``ALLOWED_LOG_OPTIONS`` (no patches or diffs, no ``%G`` signature
-  formats), ``config --get <key>`` and ``--version``.
+  formats), ``config --get <key>`` and ``--version``;
+* the resume snapshot's read-only extras, each exact: ``status`` with exactly
+  ``--porcelain=v1 -z --untracked-files=all --no-renames`` (any order, nothing
+  else), ``merge-base --is-ancestor <hex> <hex>``, ``symbolic-ref -q --short
+  HEAD``, and for ``log``/``rev-list`` positional revisions that are ``HEAD``,
+  a hex sha or ``<hex>..<hex>`` (hex is 7-40 lowercase digits).
 
 It only reads metadata. Commands that need the network or write (clone,
 fetch, push, checkout ...) are refused; they are out of scope here.
@@ -36,6 +41,7 @@ fetch, push, checkout ...) are refused; they are out of scope here.
 from __future__ import annotations
 
 import os
+import re
 import shutil
 import subprocess
 from dataclasses import dataclass
@@ -88,6 +94,11 @@ class GitResult:
 ALLOWED_LOG_OPTIONS = ("--all", "-i", "--fixed-strings", "--no-merges", "--count", "--max-count=", "--format=",
                        "--author=")
 
+STATUS_OPTIONS = ("--porcelain=v1", "-z", "--untracked-files=all", "--no-renames")
+_HEX = r"[0-9a-f]{7,40}"
+_REV_RE = re.compile(rf"^(HEAD|{_HEX}(\.\.{_HEX})?)$")
+_SHA_RE = re.compile(rf"^{_HEX}$")
+
 
 def check_args(args) -> None:
     """ValueError unless ``args`` is an allowed read-only git command."""
@@ -102,10 +113,18 @@ def check_args(args) -> None:
         return
     if cmd == "for-each-ref" and all(a.startswith(("--count=", "--format=", "refs/")) for a in rest):
         return
+    if cmd == "status" and sorted(rest) == sorted(STATUS_OPTIONS):
+        return
+    if cmd == "merge-base" and len(rest) == 3 and rest[0] == "--is-ancestor" and all(_SHA_RE.match(a) for a in rest[1:]):
+        return
+    if cmd == "symbolic-ref" and rest == ["-q", "--short", "HEAD"]:
+        return
     if cmd == "config" and len(rest) == 2 and rest[0] == "--get":
         return
     if cmd in ("log", "rev-list"):
         for a in rest:
+            if _REV_RE.match(a):
+                continue
             exact = a in ALLOWED_LOG_OPTIONS and not a.endswith("=")
             valued = any(o.endswith("=") and a.startswith(o) for o in ALLOWED_LOG_OPTIONS)
             if not (exact or valued):
