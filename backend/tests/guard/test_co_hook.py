@@ -1558,17 +1558,24 @@ def test_hook_single_answer_matrix(plugin, tmp_path, stub):
     assert _post(run, 1) is None
 
 
-def test_co_hook_has_no_app_imports():
+def test_plugin_lib_has_no_app_imports():
+    """Every file the plugin generator copies (the guard lib and co_hook) imports only the stdlib."""
     import ast
+    import pathlib
 
-    src = open(co_hook.__file__, encoding="utf-8").read()
-    for node in ast.walk(ast.parse(src)):
-        if isinstance(node, ast.Import):
-            names = [a.name for a in node.names]
-        elif isinstance(node, ast.ImportFrom):
-            assert node.level == 0, "no relative imports"
-            names = [node.module]
-        else:
-            continue
-        for n in names:
-            assert n.split(".")[0] in sys.stdlib_module_names, n
+    from app.guard import plugin as plugin_mod
+
+    files = [pathlib.Path(co_hook.__file__)] + [pathlib.Path(co_hook.__file__).parent / f"{n}.py"
+                                                for n in plugin_mod.LIB_MODULES]
+    assert len(files) == 5
+    for f in files:
+        for node in ast.walk(ast.parse(f.read_text(encoding="utf-8"))):
+            if isinstance(node, ast.Import):
+                names = [a.name for a in node.names]
+            elif isinstance(node, ast.ImportFrom):
+                assert node.level == 0, f"{f.name}: no relative imports"
+                names = [node.module]
+            else:
+                continue
+            for n in names:
+                assert n.split(".")[0] in sys.stdlib_module_names or n == "__future__", (f.name, n)
