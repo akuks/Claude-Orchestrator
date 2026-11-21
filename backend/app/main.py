@@ -15,6 +15,7 @@ from .config import settings
 from .credentials import credential_status
 from .constants import Status
 from .database import SessionLocal, init_db
+from .guard import grants as guard_grants
 from .guard import runtime as guard_runtime
 from .guard.plugin import ensure_plugin
 from .models import Task
@@ -78,6 +79,12 @@ async def _approval_timeout_loop():
                     t.completed_at = datetime.now(timezone.utc)
                     t.decision_reason = "Auto-rejected (approval timed out)"
                 await s.commit()
+                ended = [t.id for t in stale]
+            for tid in ended:  # co-guard (Ruling P24): drop the thread's deferred follow-ups
+                try:
+                    await guard_grants.after_task_finished(tid, submit=app.state.worker.submit)
+                except Exception:  # noqa: BLE001
+                    pass
         except Exception:  # noqa: BLE001
             continue
 

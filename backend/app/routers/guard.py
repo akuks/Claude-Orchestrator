@@ -111,7 +111,7 @@ import asyncio
 import json
 import re
 from datetime import datetime, timedelta, timezone
-from typing import Literal, Optional
+from typing import Annotated, Any, Literal, Optional
 
 from fastapi import APIRouter, Body, Depends, Header, HTTPException, Query, Request, Response
 from pydantic import BaseModel, Field
@@ -127,6 +127,7 @@ from ..access import (
     project_role,
     require_project_role,
     require_task,
+    task_visibility_clause,
 )
 from ..constants import Status
 from ..database import SessionLocal
@@ -136,6 +137,7 @@ from ..guard import grants as guard_grants
 from ..guard import policy_store
 from ..guard import rules as guard_rules
 from ..guard import runtime as guard_runtime
+from ..guard import co_hook
 from ..guard.co_hook import SUMMARY_MAX as HOOK_SUMMARY_MAX
 from ..models import ActionApproval, ActionGrant, ActionRule, GuardOrgSettings, Project, Task
 from ..redaction import redact
@@ -342,9 +344,13 @@ def _card(a: ActionApproval, task_title: str, status: str, can_decide: bool,
 # ---- filing (agent) ----------------------------------------------------------------------
 
 
+RULE_ID_RE = r"^[a-z0-9-]+(\.[a-z0-9-]+)?$"
+MAX_COVERED_PER_TASK = 1000  # Ruling P25: auto-approved (covered) rows, apart from the human-facing cap
+
+
 class FileBody(BaseModel):
     task_id: str
-    rule_ids: list[str] = []
+    rule_ids: list[Annotated[str, Field(pattern=RULE_ID_RE, max_length=100)]] = Field([], max_length=20)
     tool: str = ""
     summary: str = ""
     cwd: str = ""
@@ -352,20 +358,46 @@ class FileBody(BaseModel):
     command_hash: str = ""
     # Phase 2: the hook's grant_key of the call (sha256 hex), or none
     grant_key: str = Field("", pattern=r"^([0-9a-f]{64})?$")
+    # non-shell tools: the call's input, so the server can check grant_key (never stored)
+    tool_input: Any = None
     # seconds left before the hook's own deadline (not part of the content)
     wait_left: Optional[float] = None
 
 
+def _verified_key(body: FileBody, tool: str, summary: str, secrets: list[str]) -> str:
+    """Ruling P23: the grant_key only when it stands for what the card shows.
+    Bash/Monitor: the key is the hash of the stored summary (so it was neither
+    cut nor changed by redaction). Other tools: the key is the hash of the
+    sent ``tool_input`` and the stored summary is that input's redacted, cut
+    ``full_summary``. Otherwise "" - the request can be approved once only."""
+    key = body.grant_key
+    if not key or tool != body.tool:
+        return ""
+    if tool in co_hook.SHELL_TOOLS:
+        ok = co_hook.grant_key(tool, {"command": summary}) == key
+    else:
+        if body.tool_input is None:
+            return ""
+        try:
+            ok = (co_hook.grant_key(tool, body.tool_input) == key and summary == _cut(
+                redact(co_hook.full_summary(tool, body.tool_input), secrets), SUMMARY_LIMIT))
+        except Exception:  # noqa: BLE001 - an input we cannot check is not verified
+            ok = False
+    return key if ok else ""
+
+
 def _content(body: FileBody, secrets: list[str]) -> dict:
     """The request's stored form: redacted first, then bounded."""
+    tool = _cut(redact(body.tool, secrets), 200)
+    summary = _cut(redact(body.summary, secrets), SUMMARY_LIMIT)
     return {
         "rule_ids": [redact(str(r), secrets)[:64] for r in body.rule_ids][:20],
-        "tool": _cut(redact(body.tool, secrets), 200),
-        "summary": _cut(redact(body.summary, secrets), SUMMARY_LIMIT),
+        "tool": tool,
+        "summary": summary,
         "cwd": _cut(redact(body.cwd, secrets), 1000),
         "reason": _cut(redact(body.reason, secrets), 2000),
         "command_hash": body.command_hash[:128],
-        "grant_key": body.grant_key,
+        "grant_key": _verified_key(body, tool, summary, secrets),
     }
 
 
@@ -408,6 +440,15 @@ def _replay(a: ActionApproval, content: dict, response: Response) -> dict:
     return _filed(a)
 
 
+COVERED_REASON = "covered by run grant "
+
+
+def _is_covered_row():
+    """SQL: an auto-approved row of a call a run grant covered."""
+    return and_(ActionApproval.status == "approved", ActionApproval.scope == "run",
+                func.coalesce(ActionApproval.decision_reason, "").like(COVERED_REASON + "%"))
+
+
 async def _covered(s, task: Task, content: dict, key: str | None, project_id, now: datetime):
     """An ``approved`` row for a call the thread's live run grants cover (no
     notification), or None. Not committed."""
@@ -420,7 +461,7 @@ async def _covered(s, task: Task, content: dict, key: str | None, project_id, no
     a = ActionApproval(
         task_id=task.id, project_id=project_id, requested_by=task.created_by, idempotency_key=key,
         status="approved", created_at=now, expires_at=now, decided_by=grants[0].created_by, decided_at=now,
-        decision_reason=f"covered by run grant {', '.join(ids)}", scope="run", grant_ids=ids, **content,
+        decision_reason=COVERED_REASON + ", ".join(ids), scope="run", grant_ids=ids, **content,
     )
     s.add(a)
     await guard_grants.record_use(s, grants, count=True, now=now)
@@ -447,23 +488,26 @@ async def file_request(
             prior = await _find_pending(s, task.id, key)
             if prior is not None and await _settle(s, prior, task) == "pending":
                 return _replay(prior, content, response)
+        is_covered = _is_covered_row()
         counts = (
             await s.execute(
                 select(
-                    func.count(ActionApproval.id),
+                    func.count(ActionApproval.id).filter(~is_covered),
                     func.count(ActionApproval.id).filter(
                         ActionApproval.status == "pending", ActionApproval.expires_at > now
                     ),
+                    func.count(ActionApproval.id).filter(is_covered),
                 ).where(ActionApproval.task_id == task.id)
             )
         ).one()
-        if counts[0] >= MAX_TOTAL_PER_TASK or counts[1] >= MAX_PENDING_PER_TASK:
-            raise HTTPException(429, "Too many approval requests for this task")
         project_id = await effective_project_id(s, task)
-        covered = await _covered(s, task, content, key, project_id, now)
+        covered = await _covered(s, task, content, key, project_id, now) \
+            if counts[2] < MAX_COVERED_PER_TASK else None
         if covered is not None:
             await s.commit()
             return _filed(covered)
+        if counts[0] >= MAX_TOTAL_PER_TASK or counts[1] >= MAX_PENDING_PER_TASK:
+            raise HTTPException(429, "Too many approval requests for this task")
         project = await s.get(Project, project_id) if project_id else None
         wait = float(_wait_seconds(task.id, project))
         if body.wait_left is not None and body.wait_left == body.wait_left:  # not NaN
@@ -562,7 +606,7 @@ async def get_request(approval_id: str, request: Request):
             if a is None or a.task_id != p.token.task_id:
                 raise HTTPException(404, "Not found")
             st = await _settle(s, a, task)
-            if a.delivery != "inline" and st == "approved":
+            if a.delivery == "resume" and st == "approved":
                 # approved in the resume phase: that answer is the follow-up's
                 # once grant, never a late answer to a hook still polling
                 st = "pending"
@@ -592,7 +636,7 @@ async def _decide(request: Request, approval_id: str, status: str, reason: str |
     (``grants.create_resume_followup``); a reject only records."""
     p = request.state.principal
     spawned: list = []
-    async with guard_grants.FOLLOWUP_LOCK:
+    async with guard_grants.followup_lock():
         async with SessionLocal() as s:
             a = await s.get(ActionApproval, approval_id)
             task = await s.get(Task, a.task_id) if a is not None else None
@@ -709,8 +753,11 @@ async def report(request: Request, rec: dict = Body(...)):
                 return {"accepted": False}
             rec = {k: rec[k] for k in ("event", "decision", "grant_ids", "tool", "rule_ids", "summary",
                                        "tool_use_id") if k in rec}
-            # spent now (the spool ingestion spends it again, idempotently, if this is lost)
-            await guard_grants.record_use(s, grants, count=False)
+            # spent now, each on its own: a once grant already spent is a re-use (the
+            # spool ingestion spends it again, idempotently, if this report is lost)
+            if not await guard_grants.spend_once(s, grants):
+                await s.rollback()
+                return {"accepted": False}
             await s.commit()
     w = _worker(request)
     accepted = False
@@ -780,13 +827,23 @@ async def list_grants(request: Request, root_id: Optional[str] = None, include_i
         if root_id is not None:
             task = await require_task(s, p, root_id)  # 404 when invisible
             stmt = stmt.where(ActionGrant.root_id == (task.root_id or task.id))
+        else:
+            # visibility in SQL, before the LIMIT: the grant's task, else (gone) its thread root
+            visible = select(Task.id).where(await task_visibility_clause(s, p))
+            stmt = stmt.where(or_(
+                ActionGrant.task_id.in_(visible),
+                and_(or_(ActionGrant.task_id.is_(None), ActionGrant.task_id.not_in(select(Task.id))),
+                     ActionGrant.root_id.in_(visible)),
+            ))
         if not include_inactive:
             stmt = stmt.where(ActionGrant.revoked_at.is_(None), ActionGrant.expires_at > now,
                               or_(ActionGrant.scope == "run", ActionGrant.used_at.is_(None)))
         rows = (await s.execute(stmt.order_by(ActionGrant.created_at.desc()).limit(LIST_LIMIT))).scalars().all()
+        ids = {i for g in rows for i in (g.task_id, g.root_id) if i}
+        tasks = {t.id: t for t in (await s.execute(select(Task).where(Task.id.in_(ids)))).scalars()} if ids else {}
         out, cache = [], {}
         for g in rows:
-            t = await _grant_task(s, g)
+            t = tasks.get(g.task_id) or tasks.get(g.root_id)
             if t is None:
                 continue
             if t.id not in cache:

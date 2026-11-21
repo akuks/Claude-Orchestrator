@@ -537,6 +537,13 @@ def request_approval(policy, payload, verdict, summary, deadline, info=None):
         "grant_key": grant_key(tool, payload.get("tool_input")),
     }
     _fit(body, redact(summary, None))  # redact the whole text first, then cut
+    if tool not in SHELL_TOOLS:
+        # Ruling P23: the server checks a non-shell grant_key against the input
+        # (never stored). Left out when it does not fit: the request is then
+        # approvable once only.
+        body["tool_input"] = payload.get("tool_input")
+        if len(json.dumps(body, default=str).encode()) > BODY_BUDGET:
+            del body["tool_input"]
     idem = hashlib.sha256((command_hash + ":" + str(payload.get("tool_use_id") or "")).encode()).hexdigest()
     poll = poll_seconds(policy)
     req_id = None

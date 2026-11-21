@@ -277,6 +277,12 @@ async def cancel_task(task_id: str, request: Request):
         if task.status in Status.TERMINAL:
             raise HTTPException(409, f"Task already {task.status}")
     await request.app.state.worker.cancel(task_id)
+    try:  # co-guard (Ruling P24): a step that is already cancelled drops the thread's deferred follow-ups
+        from ..guard import grants as guard_grants
+
+        await guard_grants.after_task_finished(task_id, submit=request.app.state.worker.submit)
+    except Exception:  # noqa: BLE001
+        pass
     async with SessionLocal() as s:
         task = await require_task(s, p, task_id)
         return TaskOut.model_validate(task)

@@ -12,7 +12,11 @@ A grant (``ActionGrant``) is a person's approval that covers later calls:
 
 A call is covered only when EVERY confirmable rule id has a live grant of
 that rule with the right key. Hard-only rules (``rules.RULES`` with no
-confirmable reason) are never grantable.
+confirmable reason) are never grantable, nor are org/project rules that are
+not stored ``confirm`` rules (``grantable_ids``); repo rules are (a repo never
+rule that timed out is confirmable). A ``command`` key is only ever the
+request's VERIFIED grant_key (Ruling P23, ``routers/guard._verified_key``):
+a request without one is approvable once, inline, and never resumes.
 
 Deny-and-resume: a person approving a request in its resume phase gets a
 follow-up task of the request's thread (``create_resume_followup``): it runs
@@ -28,9 +32,17 @@ grant per request. At most one follow-up per thread at a time:
   (``followup_task_id`` stays empty) and ``after_task_finished`` - called by
   the worker's ``_finish`` - spawns one follow-up for every deferred approval
   once no step is active; a step that ended cancelled drops them
-  (``delivery`` ``dropped``: no follow-up runs on a cancelled thread).
+  (``delivery`` ``dropped``: no follow-up runs on a cancelled thread), and
+  so does a deferred approval past its ``resume_until`` (Ruling P24). Every
+  path that ends or cancels a step calls it: the worker's ``_finish`` and
+  cancelled-while-queued shortcut, the task reject and auto-reject, and the
+  cancel endpoint.
 
-``FOLLOWUP_LOCK`` serialises the join / defer / spawn choice in this server
+The follow-up resumes the latest finished step the thread owner created that
+has a session; with none it starts a fresh session on the owner's
+credentials.
+
+``followup_lock()`` serialises the join / defer / spawn choice in this server
 process; the join is also a conditional ``UPDATE ... WHERE status='queued'``
 and the worker re-reads the prompt after it marks a task running, so a join
 that loses the race to the worker falls back to deferring.
@@ -41,12 +53,13 @@ from __future__ import annotations
 import asyncio
 import json
 import re
+import weakref
 from datetime import datetime, timedelta, timezone
 
 from sqlalchemy import and_, or_, select, update
 
 from ..constants import Status
-from ..models import ActionApproval, ActionGrant, Task
+from ..models import ActionApproval, ActionGrant, ActionRule, Task
 from ..redaction import redact
 from . import co_hook
 from . import rules as guard_rules
@@ -57,7 +70,16 @@ RESUME_WINDOW = 86400  # s: a deny_and_resume request stays decidable for 24 h
 FOLLOWUP_SUMMARY_MAX = 4000
 MAX_GRANT_IDS = co_hook.MAX_GRANT_IDS
 
-FOLLOWUP_LOCK = asyncio.Lock()
+_LOCKS: "weakref.WeakKeyDictionary" = weakref.WeakKeyDictionary()
+
+
+def followup_lock() -> asyncio.Lock:
+    """The process's follow-up lock (one per event loop: the server has one)."""
+    loop = asyncio.get_running_loop()
+    lock = _LOCKS.get(loop)
+    if lock is None:
+        lock = _LOCKS[loop] = asyncio.Lock()
+    return lock
 
 _HEX64 = re.compile(r"[0-9a-f]{64}")
 
@@ -85,6 +107,31 @@ def grantable(rule_id: str) -> bool:
         return True
     entry = guard_rules.RULES.get(rule_id)
     return entry is not None and entry[0] is not None
+
+
+async def grantable_ids(s, rule_ids, project_id) -> set[str]:
+    """The rule ids a person may grant: ``grantable`` built-ins and repo
+    rules, plus org/project rules that exist as ``confirm`` rules (an org or
+    project ``never`` rule, or one since removed, is not grantable)."""
+    out = set()
+    for rid in dict.fromkeys(r for r in (rule_ids or []) if isinstance(r, str)):
+        if not grantable(rid):
+            continue
+        scope, _, slug = rid.partition(".")
+        if scope in ("org", "project") and slug:
+            where = [ActionRule.scope == scope, ActionRule.slug == slug, ActionRule.kind == "confirm"]
+            if scope == "project":
+                if not project_id:
+                    continue
+                where.append(ActionRule.project_id == project_id)
+            else:
+                where.append(ActionRule.project_id.is_(None))
+            if (await s.execute(select(ActionRule.id).where(*where).limit(1))).first() is None:
+                continue
+        elif "." in rid and scope != "repo":
+            continue
+        out.add(rid)
+    return out
 
 
 def scope_keys(rule_ids, tool, grant_key) -> list[tuple[str, str, str]]:
@@ -139,18 +186,20 @@ async def create_run_grants(s, approval: ActionApproval, task: Task, decider_id)
     missing (a request filed without a ``grant_key``)."""
     now = _now()
     out = []
+    ok = await grantable_ids(s, approval.rule_ids, approval.project_id)
     for rid, kind, key in scope_keys(approval.rule_ids, approval.tool, approval.grant_key):
-        if not grantable(rid):
+        if rid not in ok:
             continue
         if kind == "command" and not is_hex_key(key):
-            raise ValueError("this request has no grant key, so it can only be approved once")
+            # Ruling P23: no verified grant key - the command a run grant would cover is not what the card shows
+            raise ValueError("this request can't be approved for the whole run")
         g = ActionGrant(root_id=task.root_id or task.id, task_id=task.id, approval_id=approval.id, scope="run",
                         rule_id=rid, key_kind=kind, key=key, created_by=decider_id, created_at=now,
                         expires_at=now + timedelta(seconds=RUN_GRANT_TTL))
         s.add(g)
         out.append(g)
     if not out:
-        raise ValueError("none of this request's rules can be approved for the run")
+        raise ValueError("this request can't be approved for the whole run")
     await s.flush()
     return out
 
@@ -183,14 +232,23 @@ async def valid_use(s, task: Task, grant_ids, now: datetime | None = None) -> li
     return out
 
 
-async def record_use(s, grants: list[ActionGrant], *, count: bool, now: datetime | None = None) -> None:
-    """Spend once grants (``used_at``, first use only) and, with ``count``,
-    add one use to every grant. Not committed."""
+async def spend_once(s, grants: list[ActionGrant], now: datetime | None = None) -> bool:
+    """Spend each once grant on its own (``used_at`` from NULL); False when
+    one was already spent (the record re-uses it). Not committed."""
     now = now or _now()
-    once = [g.id for g in grants if g.scope == "once"]
-    if once:
-        await s.execute(update(ActionGrant).where(ActionGrant.id.in_(once), ActionGrant.used_at.is_(None))
-                        .values(used_at=now))
+    fresh = True
+    for g in grants:
+        if g.scope == "once":
+            res = await s.execute(update(ActionGrant).where(ActionGrant.id == g.id, ActionGrant.used_at.is_(None))
+                                  .values(used_at=now))
+            fresh = fresh and res.rowcount == 1
+    return fresh
+
+
+async def record_use(s, grants: list[ActionGrant], *, count: bool, now: datetime | None = None) -> None:
+    """Spend once grants (``used_at``, first use only - idempotent) and, with
+    ``count``, add one use to every grant. Not committed."""
+    await spend_once(s, grants, now)
     if count:
         ids = [g.id for g in grants]
         await s.execute(update(ActionGrant).where(ActionGrant.id.in_(ids))
@@ -281,18 +339,21 @@ async def _active_step(s, root_id: str) -> bool:
     return row is not None
 
 
-def _once_grants(a: ActionApproval, followup_id: str, root_id: str, decider_id) -> list[ActionGrant]:
+async def _once_grants(s, a: ActionApproval, followup_id: str, root_id: str, decider_id) -> list[ActionGrant]:
     """One once grant per grantable rule id of the request (the hook needs a
     grant whose rule_id equals each hit), all keyed by the call's grant_key."""
     now = _now()
+    ok = await grantable_ids(s, a.rule_ids, a.project_id)
+    if not is_hex_key(a.grant_key):
+        return []
     return [ActionGrant(root_id=root_id, task_id=followup_id, approval_id=a.id, scope="once", rule_id=rid,
                         key_kind="command", key=a.grant_key, created_by=decider_id, created_at=now,
                         expires_at=now + timedelta(seconds=RESUME_WINDOW))
-            for rid in dict.fromkeys(r for r in (a.rule_ids or []) if isinstance(r, str)) if grantable(rid)]
+            for rid in dict.fromkeys(r for r in (a.rule_ids or []) if isinstance(r, str)) if rid in ok]
 
 
 async def _attach(s, a: ActionApproval, followup_id: str, root_id: str, decider_id) -> None:
-    grants = _once_grants(a, followup_id, root_id, decider_id)
+    grants = await _once_grants(s, a, followup_id, root_id, decider_id)
     for g in grants:
         s.add(g)
     await s.flush()
@@ -300,16 +361,19 @@ async def _attach(s, a: ActionApproval, followup_id: str, root_id: str, decider_
     a.grant_ids = list(dict.fromkeys(list(a.grant_ids or []) + [g.id for g in grants]))
 
 
-async def _latest_session_step(s, root_id: str) -> Task | None:
+async def _latest_session_step(s, root_id: str, owner) -> Task | None:
+    """The latest finished step of the thread the owner created that has a
+    session (Claude sessions belong to an account)."""
     return (await s.execute(
-        select(Task).where(or_(Task.root_id == root_id, Task.id == root_id), Task.status.in_(Status.TERMINAL))
+        select(Task).where(or_(Task.root_id == root_id, Task.id == root_id), Task.status.in_(Status.TERMINAL),
+                           Task.created_by == owner, Task.session_id.is_not(None))
         .order_by(Task.created_at.desc()).limit(1)
     )).scalar_one_or_none()
 
 
 async def _spawn(s, approvals: list[ActionApproval], root: Task, decider_id) -> Task:
-    parent = await _latest_session_step(s, root.id) or root
     owner = root.created_by
+    parent = await _latest_session_step(s, root.id, owner) or root
     blocks = "\n\n".join(followup_block(a) for a in approvals)
     child = Task(
         title=_cut(f"co-guard follow-up: approved request {approvals[0].id}"
@@ -324,7 +388,7 @@ async def _spawn(s, approvals: list[ActionApproval], root: Task, decider_id) -> 
         parent_task_id=parent.id,
         root_id=root.id,
         # the owner's own session only (Claude sessions belong to an account)
-        resume_session_id=parent.session_id if parent.session_id and parent.created_by == owner else None,
+        resume_session_id=parent.session_id if parent.created_by == owner else None,
         workspace_dir=parent.workspace_dir,
         status=Status.QUEUED,
         created_by=owner,
@@ -351,7 +415,7 @@ async def create_resume_followup(s, approval: ActionApproval, decider_id, *, spa
     """Join the thread's queued follow-up, defer (None) while a step is
     active, or create a new queued follow-up (appended to ``spawned`` - the
     caller submits it to the worker after committing). Call under
-    ``FOLLOWUP_LOCK``; not committed."""
+    ``followup_lock()``; not committed."""
     task = await s.get(Task, approval.task_id)
     if task is None:
         return None
@@ -375,13 +439,23 @@ async def create_resume_followup(s, approval: ActionApproval, decider_id, *, spa
 
 
 async def _deferred(s, root_id: str) -> list[ActionApproval]:
+    """The thread's deferred resume approvals still inside their window;
+    older ones are dropped (Ruling P24). Not committed."""
     steps = select(Task.id).where(or_(Task.root_id == root_id, Task.id == root_id))
-    return list((await s.execute(
+    rows = list((await s.execute(
         select(ActionApproval)
         .where(ActionApproval.task_id.in_(steps), ActionApproval.status == "approved",
                ActionApproval.delivery == "resume", ActionApproval.followup_task_id.is_(None))
         .order_by(ActionApproval.decided_at, ActionApproval.created_at)
     )).scalars().all())
+    now = _now()
+    live = []
+    for a in rows:
+        if a.resume_until is None or _aware(a.resume_until) <= now:
+            a.delivery = "dropped"
+        else:
+            live.append(a)
+    return live
 
 
 async def after_task_finished(task_id: str, submit=None) -> str | None:
@@ -391,7 +465,7 @@ async def after_task_finished(task_id: str, submit=None) -> str | None:
     new task. Returns the new follow-up's id, if any."""
     from ..database import SessionLocal
 
-    async with FOLLOWUP_LOCK:
+    async with followup_lock():
         async with SessionLocal() as s:
             task = await s.get(Task, task_id)
             if task is None:
@@ -399,6 +473,7 @@ async def after_task_finished(task_id: str, submit=None) -> str | None:
             root = await _thread_root(s, task)
             pending = await _deferred(s, root.id)
             if not pending:
+                await s.commit()  # stale ones dropped
                 return None
             if task.status == Status.CANCELLED:
                 for a in pending:
@@ -406,6 +481,7 @@ async def after_task_finished(task_id: str, submit=None) -> str | None:
                 await s.commit()
                 return None
             if await _active_step(s, root.id):
+                await s.commit()
                 return None
             decider = pending[0].decided_by
             child = await _spawn(s, pending, root, decider)

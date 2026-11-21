@@ -163,7 +163,20 @@ async def reject(task_id: str, body: RejectBody, request: Request):
         task.completed_at = _now()
         await s.commit()
         await s.refresh(task)
-        return TaskOut.model_validate(task)
+        out = TaskOut.model_validate(task)
+    await _guard_step_ended(request, out.id)
+    return out
+
+
+async def _guard_step_ended(request: Request, task_id: str) -> None:
+    """co-guard deny-and-resume (Ruling P24): a rejected step is cancelled -
+    drop the thread's deferred follow-ups."""
+    from ..guard import grants as guard_grants
+
+    try:
+        await guard_grants.after_task_finished(task_id, submit=request.app.state.worker.submit)
+    except Exception:  # noqa: BLE001 - never breaks the decision
+        pass
 
 
 @router.post("/approve", response_model=list[TaskOut])
