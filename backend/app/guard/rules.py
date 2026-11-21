@@ -155,7 +155,10 @@ HARD (never approvable):
   component) or its literal folder (``> ref/$f``); a bare delete/move of a
   symlink to a root removes only the link. Ruling P15: after a ``cd`` we
   cannot follow, a relative target is tried against BOTH the project and the
-  start cwd. Ruling P16: a ``cd``/``pushd`` inside ``( )`` does not leak out
+  start cwd; Ruling P17: when that places it in no root, the change is a
+  confirmable ``uncertain-command`` ("the folder this runs in is unknown, and
+  read-only folders exist") - only when readonly roots exist; absolute
+  targets and reads are unaffected. Ruling P16: a ``cd``/``pushd`` inside ``( )`` does not leak out
   (a redirect after the group uses the outer cwd), ``popd`` pops a tracked
   stack (empty: unknown), ``cd -`` goes back, and a ``cd`` in a pipeline
   changes nothing. Reads stay free; over ssh nothing is a root;
@@ -313,8 +316,8 @@ contents land in a root inside ``parent``, interactive editors (``vi f``,
 ``nano f`` - the agent has no terminal), shells and interpreters run by
 ``find -exec``/``xargs`` (only their own text is checked, ``{}`` unknown),
 code that builds a root's path at run time, a cd to an unknown folder that
-really is a root (P15 tries the project and the start cwd only: ``cd $D &&
-git commit`` is allowed), a symlink created earlier and written through
+really is a root (P15/P17: ``cd $D && git commit`` needs approval, it is
+not denied), a symlink created earlier and written through
 later (checked when it is written), and archive members with absolute or
 ``..`` names. P13 does not see a nested ``sub/.claude-orchestrator`` reached
 by a ``find`` rooted above it, nor ``git clean -fdx``, ``git stash -u`` or
@@ -551,6 +554,7 @@ _BASE_TOOL = re.compile(r"(python|pip|ruby|node|php|perl)\d+(\.\d+)*")  # python
 _GIT_CHANGES = frozenset({"commit", "add", "rm", "mv", "reset", "checkout", "restore", "switch", "clean", "stash",
                           "merge", "rebase", "pull", "apply", "am", "cherry-pick", "revert"})
 _RULES_DIR = ".claude-orchestrator"
+_UNKNOWN_CWD = "the folder this runs in is unknown, and read-only folders exist"  # Ruling P17
 
 # Long options per command, for GNU-style prefix matching.
 _RM_LONG = ("--recursive", "--force", "--interactive", "--one-file-system", "--no-preserve-root",
@@ -997,6 +1001,12 @@ class _Ctx:
                 return root
         return None
 
+    def unknown_cwd(self, before, summary):
+        """Ruling P17: readonly roots exist, the cwd is unknown and P15 placed
+        the change (hits since index ``before``) in no root - a person decides."""
+        if self.readonly and not self.remote and not any(h.rule_id == "readonly-source" for h in self.hits[before:]):
+            self.hits.append(Hit("uncertain-command", _UNKNOWN_CWD, False, _short(summary)))
+
     def bases(self, cwd):
         """Ruling P15: folders a relative path may be relative to - the
         tracked cwd, or (unknown) both the project and the start cwd."""
@@ -1268,6 +1278,7 @@ def _classify(ctx, targets, cwd, summary, narrow=False, names=None):
                 ctx.hit("self-protect", True, summary)
             level = level or "confirm"
             if cwd is None:  # Ruling P15: relative to the project or the start cwd
+                before = len(ctx.hits)
                 for b in ctx.bases(None):
                     for path, glob in _target_kinds(ctx, word, dyn, b) or ():
                         if narrow and glob is None:
@@ -1276,6 +1287,8 @@ def _classify(ctx, targets, cwd, summary, narrow=False, names=None):
                         else:
                             _rules_dir_delete(ctx, path, glob, summary)
                             ctx.readonly_delete(path, glob, summary)
+                if not word.startswith(("/", "~", "$", "`")):
+                    ctx.unknown_cwd(before, summary)
             continue
         for path, glob in kinds:
             if narrow and glob is None:
@@ -1687,6 +1700,7 @@ def _git_readonly(ctx, argv, dyn, d, sub, rest, summary, bash):
     specs = _git_pathspecs(rest) if sub in ("rm", "mv", "checkout", "restore", "clean") else []
     if sub == "checkout" and "--" in rest and not specs and not [a for a in rest if not a.startswith("-")]:
         return  # "git checkout --": nothing
+    before = len(ctx.hits)
     if not cached:
         for folder in bases + trees:
             ctx.readonly_check(folder, summary)
@@ -1716,6 +1730,8 @@ def _git_readonly(ctx, argv, dyn, d, sub, rest, summary, bash):
                 ctx.readonly_check(p, summary, as_ancestor=True, follow=False)
             if sub in ("rm", "mv"):  # Ruling P13: git rm/mv of the rules file or a folder holding it
                 _rules_dir_delete(ctx, p, None, summary)
+    if d is None:
+        ctx.unknown_cwd(before, summary)
 
 
 def _git_check(ctx, argv, dyn, cwd, summary, bash):
@@ -2504,8 +2520,10 @@ class _Bash:
             if not (_GLOB.search(word) or ("{" in word and _braces(word))):
                 return  # else also as a pattern (a redirect target is not marked dynamic)
         if cwd is None and not word.startswith(("/", "~", "$", "`")):
+            before = len(ctx.hits)
             for b in ctx.bases(None):
                 self.readonly_write(word, ctx.path(word, b, True, follow), kind, b, depth + 1)
+            ctx.unknown_cwd(before, self.raw)
             return
         alts = _braces(word) if "{" in word else None
         if alts:
@@ -2931,10 +2949,13 @@ class _Bash:
                         _rules_dir_delete(ctx, path, g, raw)
                         ctx.readonly_delete(path, g, raw)
                     if kinds is None and cwd is None:  # Ruling P15
+                        before = len(ctx.hits)
                         for b in ctx.bases(None):
                             for path, g in _target_kinds(ctx, word, d, b) or ():
                                 _rules_dir_delete(ctx, path, g, raw)
                                 ctx.readonly_delete(path, g, raw)
+                        if not word.startswith(("/", "~", "$", "`")):
+                            ctx.unknown_cwd(before, raw)
         rim = _rimraf_targets(name, args)
         if rim is not None and name != "rimraf":
             _classify(ctx, self.bind([(a, False) for a in rim if not a.startswith("-")]), cwd, raw)
