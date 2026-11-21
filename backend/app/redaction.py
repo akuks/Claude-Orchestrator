@@ -59,24 +59,40 @@ TOKEN_SHAPES = re.compile(
 )
 # user:password in URL-style values (postgres://u:p@host, https://x:tok@github.com).
 URL_USERINFO = re.compile(r"://[^/\s:@]+:[^/\s@]+@")
-# Labelled secrets: the label stays, the value (group 2's place) becomes MASK.
+# Labelled secrets: the label (group 1) stays, the value becomes MASK.
 # Forge's LABELLED set, widened to keys that CONTAIN a secret word
 # (DB_PASSWORD=, aws_secret_access_key:, accessToken:) but not where the word
-# runs on (max_tokens, tokenizer, passwords); PWD=/OLDPWD= (the working
-# directory) and values that are only a shell reference ($VAR, ${VAR}, $(...))
-# are left alone. Every repeat is bounded (linear time on long input).
+# runs on (max_tokens, tokenizer, passwords), narrowed so code and prose
+# survive (redact() also runs on result_text, memory and summaries): no
+# "pwd" (the working directory), never "==", and the value rules below.
+# Every repeat is bounded (linear time on long input).
 _VALUE_END = r"""[\s&;'",]"""
+# The value after a label: quoted -> everything to the closing quote (any
+# length, but not a bare $VAR / $( reference); unquoted -> at least 8
+# characters, not purely numeric, not none/null/true/false, and no code
+# (a "(", "[" or "." means an expression, not a secret), nor a $VAR / $(.
+# Group 2 is the opening quote (it does not take part when unquoted).
+_LABEL_VALUE = (
+    r"""(?(2)(?!\$\{?[A-Za-z_][A-Za-z0-9_]*\}?\2|\$\()[^'"\n]{1,500}?(?=\2)"""
+    rf"""|(?!(?:none|null|true|false)(?={_VALUE_END}|\Z))(?!\d+(?={_VALUE_END}|\Z))"""
+    rf"""(?!\$\{{?[A-Za-z_][A-Za-z0-9_]*\}}?(?={_VALUE_END}|\Z)|\$\()(?=[^\s&;'",]{{8}})"""
+    rf"""[^\s&;'",(\[.]+(?={_VALUE_END}|\Z))"""
+)
 LABELLED = (
     re.compile(r"(\bBearer\s+)[A-Za-z0-9._~+/=\-]{6,}", re.IGNORECASE),
+    # key=value / key: value / "key": "value" / "key is: value"; never "=="
     re.compile(
-        r"((?<![A-Za-z0-9_.\-])(?!(?-i:(?:OLD)?PWD)=)[A-Za-z0-9_.\-]{0,40}?"
-        r"(?:password|passwd|pwd|secret|token|api[_-]?key)(?![a-z])[A-Za-z0-9_.\-]{0,40}"
-        r"""["']?(?:\s+is)?\s*[:=]\s*["']?)"""
-        rf"(?!\$\{{?[A-Za-z_][A-Za-z0-9_]*\}}?(?={_VALUE_END}|\Z)|\$\()[^\s&;'\",]+",
+        r"((?<![A-Za-z0-9_.\-])[A-Za-z0-9_.\-]{0,40}?"
+        r"(?:password|passwd|secret|token|api[_-]?key)(?![a-z])[A-Za-z0-9_.\-]{0,40}"
+        r"""["']?(?:\s+is)?\s*[:=](?!=)\s*(["'])?)""" + _LABEL_VALUE,
         re.IGNORECASE,
     ),
-    # mysql -p<password> (not -p alone, not --port)
-    re.compile(r"""((?:^|\s)(?:mysql|mysqldump|mariadb)\b[^\n]*?\s-p)(?=\S)(?!ort\b)[^\s'"]+""", re.IGNORECASE),
+    # --password <value>, --api-key <value> (a space, not "=")
+    re.compile(r"""((?<![\w-])--(?:password|passwd|api[_-]?key)\s+(["'])?)(?!-)""" + _LABEL_VALUE,
+               re.IGNORECASE),
+    # mysql -p<password>, -p'<password>' (not -p alone, not --port)
+    re.compile(r"""((?:^|\s)(?:mysql|mysqldump|mariadb)\b[^\n]*?\s-p(["'])?)"""
+               r"""(?(2)[^'"\n]{1,500}?(?=\2)|(?!ort\b)[^\s'"]+)""", re.IGNORECASE),
 )
 
 

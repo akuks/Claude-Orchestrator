@@ -160,16 +160,32 @@ _TOKEN_SHAPES = re.compile("|".join((
 )))
 _URL_USERINFO = re.compile(r"://[^/\s:@]+:[^/\s@]+@")
 _VALUE_END = r"""[\s&;'",]"""
+# The value after a label: quoted -> everything to the closing quote (any
+# length, but not a bare $VAR / $( reference); unquoted -> at least 8
+# characters, not purely numeric, not none/null/true/false, and no code
+# (a "(", "[" or "." means an expression, not a secret), nor a $VAR / $(.
+# Group 2 is the opening quote (it does not take part when unquoted).
+_LABEL_VALUE = (
+    r"""(?(2)(?!\$\{?[A-Za-z_][A-Za-z0-9_]*\}?\2|\$\()[^'"\n]{1,500}?(?=\2)"""
+    rf"""|(?!(?:none|null|true|false)(?={_VALUE_END}|\Z))(?!\d+(?={_VALUE_END}|\Z))"""
+    rf"""(?!\$\{{?[A-Za-z_][A-Za-z0-9_]*\}}?(?={_VALUE_END}|\Z)|\$\()(?=[^\s&;'",]{{8}})"""
+    rf"""[^\s&;'",(\[.]+(?={_VALUE_END}|\Z))"""
+)
 _LABELLED = (
     re.compile(r"(\bBearer\s+)[A-Za-z0-9._~+/=\-]{6,}", re.IGNORECASE),
+    # key=value / key: value / "key": "value" / "key is: value"; never "=="
     re.compile(
-        r"((?<![A-Za-z0-9_.\-])(?!(?-i:(?:OLD)?PWD)=)[A-Za-z0-9_.\-]{0,40}?"
-        r"(?:password|passwd|pwd|secret|token|api[_-]?key)(?![a-z])[A-Za-z0-9_.\-]{0,40}"
-        r"""["']?(?:\s+is)?\s*[:=]\s*["']?)"""
-        rf"(?!\$\{{?[A-Za-z_][A-Za-z0-9_]*\}}?(?={_VALUE_END}|\Z)|\$\()[^\s&;'\",]+",
+        r"((?<![A-Za-z0-9_.\-])[A-Za-z0-9_.\-]{0,40}?"
+        r"(?:password|passwd|secret|token|api[_-]?key)(?![a-z])[A-Za-z0-9_.\-]{0,40}"
+        r"""["']?(?:\s+is)?\s*[:=](?!=)\s*(["'])?)""" + _LABEL_VALUE,
         re.IGNORECASE,
     ),
-    re.compile(r"""((?:^|\s)(?:mysql|mysqldump|mariadb)\b[^\n]*?\s-p)(?=\S)(?!ort\b)[^\s'"]+""", re.IGNORECASE),
+    # --password <value>, --api-key <value> (a space, not "=")
+    re.compile(r"""((?<![\w-])--(?:password|passwd|api[_-]?key)\s+(["'])?)(?!-)""" + _LABEL_VALUE,
+               re.IGNORECASE),
+    # mysql -p<password>, -p'<password>' (not -p alone, not --port)
+    re.compile(r"""((?:^|\s)(?:mysql|mysqldump|mariadb)\b[^\n]*?\s-p(["'])?)"""
+               r"""(?(2)[^'"\n]{1,500}?(?=\2)|(?!ort\b)[^\s'"]+)""", re.IGNORECASE),
 )
 _SECRET_NAME = re.compile(r"TOKEN|SECRET|PASSWORD|PASSWD|API_KEY|PRIVATE_KEY|ACCESS_KEY|CREDENTIAL|DSN"
                           r"|DATABASE_URL|(?<![A-Z])AUTH(?![A-Z])|_KEY$", re.IGNORECASE)
