@@ -3028,6 +3028,7 @@ def ro(env, tmp_path):
 
 
 def rfmt(env, text):
+    text = text.replace("{RR}", os.path.relpath(env.R, env.P)).replace("{RP}", os.path.relpath(env.R.parent, env.P))
     return env.fmt(text.replace("{R}", str(env.R)).replace("{V}", str(env.V)))
 
 
@@ -3162,8 +3163,9 @@ def test_readonly_over_ssh_is_another_machine(ro):
     assert "readonly-source" not in ids(rbash(ro, "ssh host 'echo x > {R}/a.txt'"))
 
 
-def test_readonly_never_filed(ro, tmp_path):
-    """A readonly hit with confirmable ones is a deny, so the hook never files it (it files only 'approve')."""
+def test_readonly_deny_outranks_confirmable_hits(ro, tmp_path):
+    """A readonly hit with confirmable ones is a deny (the hook files only 'approve'; that it files nothing is
+    test_co_hook.py::test_readonly_source_is_never_filed)."""
     v = rbash(ro, "npm install && cp x {R}/ && git reset --hard", quarantine=True)
     assert v.decision == "deny" and hard_ids(v) == {"readonly-source"}
     assert {"guest-quarantine", "git-reset-hard"} <= ids(v)
@@ -3172,6 +3174,7 @@ def test_readonly_never_filed(ro, tmp_path):
 @pytest.mark.parametrize("value", [
     None, "x", {"path": "/a"}, [1], [{"reason": "r"}], [{"path": 3}], [{"path": ""}],
     [{"path": "/a", "reason": 4}], [{"path": "/a", "source": "repo"}], [{"path": "/a"}, "x"],
+    [{"path": "/a\x00b"}], [{"path": "~/ref"}], [{"path": "~"}], [{"path": "/a", "reason": "x\x00"}],
 ])
 @pytest.mark.parametrize("guard_enabled", [True, False])
 def test_readonly_malformed_fails_closed(env, value, guard_enabled):
@@ -3218,3 +3221,155 @@ def test_p13_other_moves_stay_free(env, cmd):
     (env.P / ".claude-orchestrator").mkdir()
     (env.P / ".claude-orchestrator" / "rules.md").write_text("## Never\n")
     assert "agent-config" not in ids(bash(env, cmd))
+
+
+
+# ---- Task 3 fix round 1 (review C1, I2-I6, minors; Rulings P15, P16) ------------------------
+@pytest.fixture
+def ro2(ro):
+    (ro.P / "reflink").symlink_to(ro.R)
+    (ro.P / ".claude-orchestrator").mkdir()
+    (ro.P / ".claude-orchestrator" / "rules.md").write_text("## Never\n")
+    (ro.P / "scripts").mkdir()
+    (ro.P / "scripts" / "x.sh").write_text("echo\n")
+    (ro.P / "x.py").write_text("print(1)\n")
+    return ro
+
+
+FIX1_DENIED = [
+    # C1 / P15: an unknown cd - relative targets are tried against the project and the start cwd
+    'cd "$(git rev-parse --show-toplevel)" && sed -i s/a/b/ vendor/old/x',
+    'cd "$(git rev-parse --show-toplevel)" && git checkout -- vendor/old',
+    'cd "$(git rev-parse --show-toplevel)" && rm vendor/old/x', "cd $D && cp x.py vendor/old/",
+    "cd - ; echo x > vendor/old/f", "cd $D && echo x > {RR}/a.txt", "cd $D && rm -rf vendor/old",
+    "cd $D && find . -name '*.o' -delete", "cd $D && git rm vendor/old/x", "cd $D && mkdir vendor/old/n",
+    "cd $D && touch vendor/*/z",
+    # I2 / P16: a subshell's cd does not leak; pushd/popd use a stack
+    "(cd /tmp && ls); cp x.py vendor/old/", "pushd /tmp; popd; cp x.py vendor/old/", "(cd /tmp); echo x > vendor/old/f",
+    "pushd /tmp && pushd /opt && popd && popd && touch vendor/old/z", "(cd {R}; echo x > a.txt)",
+    "{{ cd {R}; }}; echo x > a.txt", "cd /tmp; cd -; touch vendor/old/z",
+    # I3: inline interpreter code that writes into a root
+    "python -c \"open('{R}/a.txt','w').write('x')\"",
+    "python3 -c \"import pathlib; pathlib.Path('{R}/a.txt').write_text('x')\"",
+    "node -e \"require('fs').writeFileSync('{R}/a.txt','x')\"", "cd {R} && python -c \"open('a.txt','w')\"",
+    "python3 -c \"open('vendor/old/a','w')\"", "python3 - <<'EOF'\nopen('{R}/a','w')\nEOF",
+    # I4: glob and brace targets
+    "cp x vendor/ol?/", "cp x vendor/*/", "echo x > vendor/*/f", "cp x {RP}/leg*/", "touch {RP}/[l]egacy/z",
+    "cp x {{{RR},/tmp}}/", "cp x {{/tmp,{R}}}/", "touch {{{R},/tmp}}/z", "echo x > {{{RR},/tmp}}/q",
+    "echo x > {RP}/leg*/a.txt", "mv vendor/* /tmp", "chmod -R 755 vendor/o*",
+    # I6: common direct writers
+    "git clone https://x/y {R}/clone", "cd {R} && git clone https://x/y", "gzip {R}/a.txt", "gunzip {R}/a.txt.gz",
+    "xz -d {R}/a.xz", "sort -o {R}/a.txt x.py", "split -b 1 x.py {R}/pre", "tar -cf {R}/out.tar src",
+    "tar czf {R}/o.tgz src", "zip {R}/out.zip x.py", "patch {R}/a.txt < x.diff", "patch -d {R} -p1 < x.diff",
+    "cd {R} && patch -p1 < x.diff", "git apply --directory={R} x.diff", "install -d {R}/newdir",
+    "pip install --target {R} requests", "pip install -t {R} requests", "npm --prefix {R} install", "make -C {R}",
+    "make -f {R}/Makefile", "cd {R} && make", "cd {R} && npm install", "cd {R} && pytest", "cd {R} && ./configure",
+    "openssl genrsa -out {R}/k.pem", "ssh-keygen -t ed25519 -f {R}/key", "setfacl -m u:x:rw {R}/a.txt",
+    "xattr -w k v {R}/a.txt", "find {R} -exec touch {{}} +", "find {R} -type f -exec chmod 600 {{}} \;",
+    "find {R} -name '*.txt' -exec sed -i s/a/b/ {{}} \;", "find {R} -exec mv {{}} /tmp \;",
+    "find . -name '*.c' -exec rm {{}} +", "fd . {R} -x sed -i s/a/b/", "ls {R}/*.txt | xargs sed -i s/a/b/",
+    "find {R} -name '*.c' | xargs rm", "vim -c wq {R}/a.txt", "nvim +wq {R}/a.txt",
+    "emacs --batch {R}/a.txt -f save-buffer", "ex -s {R}/a.txt", "ln {R}/a.txt hard", "cp -l {R}/a.txt hard",
+    "rsync -a --remove-source-files {R}/ /tmp/x/", "rename s/a/b/ {R}/a.txt", "git worktree add {R}/wt",
+    "git worktree add -b x {R}/wt2",
+    # minor 8: a trailing slash follows the link
+    "rm -rf reflink/",
+]
+
+FIX1_FREE = [
+    # P16 false positives that must stay free
+    "(cd {R} && grep -r foo .) > out.txt", "(cd {R} && git log) > notes.md", "(cd {R}; ls) | tee listing.txt",
+    "pushd {R} >/dev/null && git log -1 && popd >/dev/null && echo done > status.txt", "(cd vendor/old && ls) > x.txt",
+    "cd {R}; cd - ; echo x > y", "cd {R} | true; echo x > y", "(cd {R}) ; echo x > y",
+    "(cd {R} && cat a.txt) | tee copy.txt", "true && (cd {R}) && touch z",
+    # reads near the new checks
+    "cd {R} && ls", "cd {R} && python -c \"print(1)\"", "python3 -c \"print(open('vendor/old/a').read())\"",
+    "python3 {R}/tool.py --help", "find {R} -name '*.c' -exec wc -l {{}} +", "find {R} -exec sed -n p {{}} \;",
+    "gzip -c {R}/a.txt > /tmp/a.gz", "gzip -l {R}/a.gz", "tar -tf {R}/x.tar", "tar -cf out.tar {R}",
+    "zip -r out.zip {R}", "ssh-keygen -l -f {R}/key.pub", "xattr -p k {R}/a.txt", "sort {R}/a.txt > sorted.txt",
+    "npm --prefix {R} ls", "make -n -C {R}", "patch --dry-run -d {R} -p1 < x.diff", "git clone https://x/y /tmp/c",
+    "cp -a {R}/a.txt /tmp/", "ln -s {R}/a.txt link", "diff -r {R} src", "git diff --no-index {R}/a.txt x.py",
+    "du -sh {R}", "ls {R} | xargs echo", "find {R} -name '*.c' | xargs wc -l", "cd {R} && git status",
+    # P15 tries the project and the start cwd only (documented)
+    "cd $D && git commit -m x", "cd $D && echo x > notes.txt",
+    # minor 7: forms that change nothing
+    "git -C {R} stash list", "git -C {R} stash show", "git rm --cached vendor/old/x", "git rm -n vendor/old/x",
+    "git -C {R} clean -n", "git -C {R} add --dry-run .", "git -C {R} apply --check x.diff", "git -C {R} checkout --",
+    # minor 8: a bare delete/move of a link to a root removes the link only
+    "rm reflink", "mv reflink x", "unlink reflink", "rm -f reflink",
+    # minor 9: globs that cannot match a root inside the project
+    "rm -rf .??*", "rm -rf .*", "rm -rf src/*",
+]
+
+
+@pytest.mark.parametrize("cmd", FIX1_DENIED)
+def test_fix1_readonly_denied(ro2, cmd):
+    v = rbash(ro2, cmd)
+    assert v.decision == "deny" and "readonly-source" in hard_ids(v), v
+
+
+@pytest.mark.parametrize("cmd", FIX1_FREE)
+def test_fix1_readonly_free(ro2, cmd):
+    assert "readonly-source" not in ids(rbash(ro2, cmd))
+
+
+def test_fix1_p15_uses_the_start_cwd_too(ro2):
+    # the call started inside a root: after an unknown cd, a relative write may still land there
+    assert rbash(ro2, "cd $D && echo x > f", cwd="{V}").decision == "deny"
+    assert rbash(ro2, "cd $D && git commit -m x", cwd="{R}").decision == "deny"
+    assert "readonly-source" not in ids(rbash(ro2, "cd $D && git commit -m x"))
+
+
+@pytest.mark.parametrize("cmd", [
+    "mv .claude-orchestrator/* /tmp", "mv .claude-orc* /tmp", "find . -name rules.md -exec mv {{}} /tmp \;",
+    "rsync -a --remove-source-files .claude-orchestrator/ /tmp/x", "git rm '*.md'",
+    "rename s/rules/x/ .claude-orchestrator/rules.md", "rm -rf .c*", "rm -rf .[a-z]*", "rm -rf .??*",
+    "cd $D && echo x > .claude-orchestrator/rules.md", "cd - && mv .claude-orchestrator /tmp",
+    "(cd /tmp); mv .claude-orchestrator x", "cd $D && rm .claude-orchestrator/rules.md",
+    "find . -name rules.md | xargs rm",
+])
+def test_fix1_p13_globs_exec_and_unknown_cwd(env, cmd):
+    (env.P / ".claude-orchestrator").mkdir()
+    (env.P / ".claude-orchestrator" / "rules.md").write_text("## Never\n")
+    v = bash(env, cmd)
+    assert "agent-config" in ids(v) and "agent-config" not in hard_ids(v), v
+
+
+@pytest.mark.parametrize("cmd", [
+    "git rm 'src/*.md'", "rm -rf *", "rm -rf .cache", "mv .c-other /tmp", "find src -name rules.md -exec mv {{}} /tmp \;",
+    "rename s/a/b/ notes.txt",
+])
+def test_fix1_p13_other_globs_stay_free(env, cmd):
+    (env.P / ".claude-orchestrator").mkdir()
+    (env.P / ".claude-orchestrator" / "rules.md").write_text("## Never\n")
+    assert "agent-config" not in ids(bash(env, cmd))
+
+
+@pytest.mark.parametrize("cmd", [
+    "sort -o .claude/settings.json x.py", "gzip .claude/settings.json", "patch .claude/settings.json < x.diff",
+    "tar -cf .claude/settings.json src", "zip .claude/settings.json x.py", "split -b 1 x.py .claude/agents/pre",
+    "pip install --target .claude/hooks x", "xattr -w k v .claude/settings.json", "install -d .claude/agents/x",
+    "git apply --directory=.claude x.diff", "vim -c wq .claude/settings.json",
+    "find .claude -name '*.json' -exec sed -i s/a/b/ {{}} \;", "git clone https://x/y .claude/agents",
+])
+def test_fix1_new_writers_feed_agent_config(env, cmd):
+    v = bash(env, cmd)
+    assert "agent-config" in ids(v), v
+
+
+@pytest.mark.parametrize("cmd,held", [
+    ("(cd /tmp && ls); python x.py", True), ("pushd /tmp; popd; python x.py", True),
+    ("(cd /tmp); ./scripts/x.sh", True), ("cd $D && python x.py", True), ("cd - && bash scripts/x.sh", True),
+    ("cd /tmp && python x.py", False), ("(cd /tmp && python x.py)", False), ("pushd /tmp && python x.py", False),
+])
+def test_fix1_quarantine_follows_scoped_and_unknown_cwd(env, cmd, held):
+    assert ("guest-quarantine" in ids(qbash(env, cmd))) is held
+
+
+def test_fix1_shell_records_subshell_depth():
+    from app.guard import shell
+    r = shell.parse("(cd /tmp && ls) > out; (x; (y)); z")
+    got = [(st.argv[0], st.sub, st.plow, st.rdepth) for st in r]
+    assert got == [("cd", 1, 0, {}), ("ls", 1, 1, {0: 0}), ("x", 1, 0, {}), ("y", 2, 1, {}), ("z", 0, 0, {})]
+    r = shell.parse("(cd x; echo a > f)")
+    assert r[1].rdepth == {0: 1}  # a redirect inside the group stays inside
