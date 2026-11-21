@@ -3263,7 +3263,7 @@ FIX1_DENIED = [
     "tar czf {R}/o.tgz src", "zip {R}/out.zip x.py", "patch {R}/a.txt < x.diff", "patch -d {R} -p1 < x.diff",
     "cd {R} && patch -p1 < x.diff", "git apply --directory={R} x.diff", "install -d {R}/newdir",
     "pip install --target {R} requests", "pip install -t {R} requests", "npm --prefix {R} install", "make -C {R}",
-    "make -f {R}/Makefile", "cd {R} && make", "cd {R} && npm install", "cd {R} && pytest", "cd {R} && ./configure",
+    "make -f {R}/Makefile", "cd {R} && make", "cd {R} && npm install", "cd {R} && ./configure",
     "openssl genrsa -out {R}/k.pem", "ssh-keygen -t ed25519 -f {R}/key", "setfacl -m u:x:rw {R}/a.txt",
     "xattr -w k v {R}/a.txt", "find {R} -exec touch {{}} +", "find {R} -type f -exec chmod 600 {{}} \;",
     "find {R} -name '*.txt' -exec sed -i s/a/b/ {{}} \;", "find {R} -exec mv {{}} /tmp \;",
@@ -3414,3 +3414,91 @@ def test_p17_a_root_hit_stays_hard(ro2):
     v = rbash(ro2, "cd $D && echo x > vendor/old/f")
     assert v.decision == "deny" and "readonly-source" in hard_ids(v)
     assert P17_REASON not in [h.reason for h in v.hits]
+
+
+
+# ---- Task 3 fix round 2 (re-review I1, I2 / Ruling P18, minors M1, M4, M7) -----------------------
+R2_COPY_OUT_FREE = [
+    "find {R} -name '*.c' -exec cp {{}} ./copy/ \;", "cd {R} && find . -name '*.c' -exec cp {{}} {P}/copy/ \;",
+    "find {R} -name '*.c' | xargs -I{{}} cp {{}} ./copy/", "find . -name '*.tmp' | xargs -I{{}} cp {{}} /tmp/",
+    "fd -e py -x cp {{}} /tmp/", "find . -name '*.py' | xargs cp -t /tmp/bk", "find . -name '*.py' -exec cp {{}} /tmp/ \;",
+    "find {R} -name '*.c' -exec ln -s {{}} /tmp/ \;", "find {R} -type f | xargs -i cp {{}} /tmp/x/",
+    "find {R} -name '*.c' -exec install -m 644 {{}} /tmp/ \;",
+]
+R2_STILL_DENIED = [
+    "find {R} -exec mv {{}} /tmp \;", "find . -name '*.c' -exec cp {{}} {R}/ \;", "find . -name '*.c' | xargs -I{{}} cp {{}} {R}/",
+    "fd -e c -x cp {{}} {R}/", "find {R} -exec cp -l {{}} /tmp/ \;", "find . -name x -exec cp /tmp/y {{}} \;",
+    "find {R} -name x | xargs cp /tmp/y", "find {R} -exec sed -i s/a/b/ {{}} +", "find {R} -name '*.c' | xargs rm",
+]
+
+
+@pytest.mark.parametrize("cmd", R2_COPY_OUT_FREE)
+def test_fix2_copy_out_of_a_root_is_a_read(ro2, cmd):
+    assert "readonly-source" not in ids(rbash(ro2, cmd)), rbash(ro2, cmd)
+
+
+@pytest.mark.parametrize("cmd", R2_STILL_DENIED)
+def test_fix2_writes_through_find_and_xargs_stay_hard(ro2, cmd):
+    v = rbash(ro2, cmd)
+    assert v.decision == "deny" and "readonly-source" in hard_ids(v), v
+
+
+RUNS_ROOT = "this runs a read-only source's code, which may change it"
+
+
+@pytest.mark.parametrize("cmd", [
+    "cd {R} && python tool.py --help", "cd {R} && pytest --collect-only", "cd {R} && go list ./...",
+    "cd {R} && npx tsc --noEmit", "cd {R} && bash -n x.sh", "cd {R} && npm test", "cd {R} && cargo build --dry-run",
+    "cd {R} && ./run.sh", "cd {R} && pytest",
+])
+def test_p18_running_reference_code_asks(ro2, cmd):
+    v = rbash(ro2, cmd)
+    assert v.decision == "approve" and "readonly-source" not in ids(v), v
+    h = [h for h in v.hits if h.rule_id == "uncertain-command"]
+    assert h and not h[0].hard and h[0].reason == RUNS_ROOT, v
+
+
+@pytest.mark.parametrize("cmd", [
+    "cd {R} && npm install", "cd {R} && make", "cd {R} && npm ci", "cd {R} && yarn", "cd {R} && pnpm add x",
+    "cd {R} && uv sync", "cd {R} && pip install -e .", "cd {R} && cmake ..", "cd {R} && ninja",
+    "cd {R} && cargo build", "cd {R} && cargo test", "cd {R} && ./configure", "cd {R} && docker build .",
+    "cd {R} && mvn package", "cd {R} && gradle build", "npm --prefix {R} install", "pip install --target {R} x",
+])
+def test_p18_known_writers_in_a_root_are_hard(ro2, cmd):
+    v = rbash(ro2, cmd)
+    assert v.decision == "deny" and "readonly-source" in hard_ids(v), v
+
+
+@pytest.mark.parametrize("cmd", ["cd {R} && make -n", "cd {R} && npm ls", "cd {R} && go version",
+                                 "cd {R} && python --version", "cd {R} && command -v make", "cd {R} && git log"])
+def test_p18_reads_in_a_root_stay_free(ro2, cmd):
+    assert rbash(ro2, cmd).decision == "allow", rbash(ro2, cmd)
+
+
+@pytest.mark.parametrize("cmd,denied", [
+    ("f() {{ cd {R}; }}; f; echo x > a.txt", True),  # M1: a { } body runs in the current shell
+    ("f() ( cd {R} ); f; echo x > a.txt", False),  # f() ( ) is a subshell
+    ("ls | (cd {R}; cat > a.txt)", True),  # a group opened in a pipeline keeps its own cd
+    ("cd {R} | true; echo x > y", False),
+    ("( cd /tmp ; ( cd {R} ) ; echo x > a.txt )", False), ("(cd /tmp; (cd {P}; echo x > vendor/old/f))", True),
+])
+def test_fix2_function_bodies_and_pipeline_groups(ro2, cmd, denied):
+    v = rbash(ro2, cmd)
+    assert ("readonly-source" in hard_ids(v)) is denied, v
+
+
+@pytest.mark.parametrize("cmd", ['cd "$(mktemp -d)" && echo x > a.txt && git init', "cd `mktemp -d -t x.XXXX` && touch a",
+                                 "cd $D && git add src", "cd $(mktemp -d) && mkdir out"])
+def test_fix2_m4_mktemp_and_git_add_raise_no_p17(ro2, cmd):
+    assert rbash(ro2, cmd).decision == "allow", rbash(ro2, cmd)
+
+
+def test_fix2_m4_mktemp_elsewhere_is_still_unknown(ro2):
+    v = rbash(ro2, "cd $(mktemp -d -p {R}) && echo x > a")
+    assert v.decision == "approve" and "uncertain-command" in ids(v), v
+
+
+@pytest.mark.parametrize("cmd,held", [("command -v make", False), ("command -V npm", False), ("command -pv pytest", False),
+                                      ("type make", False), ("which pytest", False), ("command make", True)])
+def test_fix2_m7_lookups_are_free_under_quarantine(env, cmd, held):
+    assert ("guest-quarantine" in ids(qbash(env, cmd))) is held
