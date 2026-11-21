@@ -62,7 +62,7 @@ def test_sql_destructive_positive(text):
     "select 'delete from t'", "update t set a = 1", "drop view v", "",
 ])
 def test_sql_destructive_negative(text):
-    assert not db.sql_destructive(text)
+    assert not db.sql_destructive(text, "pg")
 
 
 # ---------------------------------------------------------------------------
@@ -103,7 +103,7 @@ def test_sql_writes_positive(text):
 
 @pytest.mark.parametrize("text", SQL_READS)
 def test_sql_writes_negative(text):
-    assert not db.sql_writes(text)
+    assert not db.sql_writes(text, "pg")
 
 
 # ---------------------------------------------------------------------------
@@ -489,7 +489,10 @@ def test_mcp_finding_odd_inputs():
     deep = {"sql": "drop table x"}
     for _ in range(50):
         deep = {"a": deep}
-    assert db.mcp_finding("mcp__postgres__query", deep, {}, []) == Finding(False, False)  # beyond depth 6
+    assert db.mcp_finding("mcp__postgres__query", deep, {}, []) == Finding(True, True)  # read at any depth
+    for _ in range(80):
+        deep = {"a": deep}
+    assert db.mcp_finding("mcp__postgres__query", deep, {}, []) == Finding(False, True)  # too deep: unknown
 
 
 # ---------------------------------------------------------------------------
@@ -508,3 +511,315 @@ def test_dbrules_is_stdlib_only():
             continue
         for n in names:
             assert n.split(".")[0] in sys.stdlib_module_names or n == "__future__", n
+
+
+
+# ===========================================================================
+# Task 1 fix round 1 (review findings C1-C3, I1-I4, M1-M5; Rulings P4-P7)
+# ===========================================================================
+# C1: short-option clusters, attached values, long-option prefixes; P7 unknown options
+@pytest.mark.parametrize("argv,want", [
+    (["psql", "-h", "prod", "-Atc", "DELETE FROM users"], Finding(True, True)),
+    (["psql", "-h", "prod", "-qc", "DROP TABLE users"], Finding(True, True)),
+    (["psql", "-h", "prod", "-Xqc", "insert into t values(1)"], Finding(False, True)),
+    (["psql", "-Xh", "prod", "-c", "insert into t values(1)"], Finding(False, True)),
+    (["psql", "-qh", "prod", "-c", "insert into t values(1)"], Finding(False, True)),
+    (["psql", "-h", "localhost", "-1c", "drop table x"], Finding(True, False)),
+    (["psql", "--ho=prod", "-c", "insert into t values(1)"], Finding(False, True)),
+    (["psql", "-h", "prod", "--comm=insert into t values(1)"], Finding(False, True)),
+    (["psql", "-h", "localhost", "--comm=drop table x"], Finding(True, False)),
+    (["psql", "-dpostgres://prod/db", "-c", "insert into t values(1)"], Finding(False, True)),
+    (["psql", "-dhost=prod", "-c", "insert into t values(1)"], Finding(False, True)),
+    (["psql", "-h", "prod", "-fx.sql"], Finding(False, True)),
+    (["psql", "-h", "prod", "-f-"], Finding(False, True)),
+    (["psql", "-h", "localhost", "-c", "insert into t values(1)", "-hprod"], Finding(False, True)),
+    (["psql", "-c", "insert into t values(1)", "--", "postgres://prod/db"], Finding(False, True)),
+    (["mysql", "-h", "prod", "-Be", "DELETE FROM users"], Finding(True, True)),
+    (["mysql", "-h", "prod", "-NBe", "insert into t values(1)"], Finding(False, True)),
+    (["mysql", "-h", "prod", "--exec=insert into t values(1)"], Finding(False, True)),
+    (["mysql", "-h", "prod", "-psecret", "-e", "insert into t values(1)"], Finding(False, True)),
+    (["clickhouse-client", "-h", "prod", "-nq", "insert into t values(1)"], Finding(False, True)),
+    (["clickhouse", "client", "-h", "prod", "-q", "insert into t values(1)"], Finding(False, True)),
+    (["sqlcmd", "-Sprod", "-Q", "insert into t values(1)"], Finding(False, True)),
+    (["sqlite3", "-bail", "app.db", "drop table t"], Finding(True, False)),
+    (["sqlite3", "--readonly", "app.db", "drop table t"], Finding(True, False)),
+    # P7: an option we do not know makes the target unknown and every positional SQL
+    (["psql", "-Z", "-h", "localhost", "insert into t values(1)"], Finding(False, True)),
+    (["psql", "--frobnicate", "drop table x"], Finding(True, True)),
+    (["pgcli", "-h", "localhost", "-e", "insert into t values(1)"], Finding(False, True)),
+])
+def test_fix1_option_parsing(argv, want):
+    assert cf(argv) == want
+
+
+@pytest.mark.parametrize("argv", [
+    ["psql", "-h", "prod", "-At", "-c", "select 1"], ["psql", "-Atc", "select 1", "-h", "prod"],
+    ["mysql", "-h", "prod", "-NBe", "select 1"], ["psql", "-h", "prod", "--csv", "-c", "select 1"],
+    ["mysql", "-h", "prod", "--skip-column-names", "-e", "show tables"], ["mysql", "-p", "-h", "prod", "-e", "select 1"],
+    ["clickhouse-client", "-h", "prod", "--max_threads=8", "-q", "select 1"],
+    ["cockroach", "sql", "--insecure", "--host", "prod", "-e", "select 1"], ["cockroach", "start", "--insecure"],
+    ["redis-cli", "-h", "prod", "--scan", "--pattern", "x*"], ["redis-cli", "-h", "prod", "--bigkeys"],
+    ["redis-cli", "-h", "prod", "SUBSCRIBE", "ch"], ["redis-cli", "-h", "prod", "MONITOR"],
+    ["psql", "-h", "0", "-c", "select 1"],
+])
+def test_fix1_reads_stay_free(argv):
+    assert not cf(argv).write
+
+
+@pytest.mark.parametrize("argv", [["psql", "-h", "0", "-c", "insert into t values(1)"],
+                                  ["psql", "-h", "2130706433", "-c", "insert into t values(1)"]])
+def test_fix1_numeric_hosts_are_hosts(argv):
+    assert cf(argv).write
+
+
+# C2: lexings
+@pytest.mark.parametrize("text,dialect", [
+    ("select a$b$c; drop table x; select $b$", "pg"),
+    ("select a$b$c; drop table x; select $b$ $b$", None),
+    ("select 1 as a$b$; DROP TABLE users; select $b$ $b$", "pg"),
+    ("select 1 as $x$; DROP TABLE users", "mysql"),
+    ("select 1 as $x$; DROP TABLE users", None),
+    ("select 'a\\'; drop table x; -- '", "mysql"),  # NO_BACKSLASH_ESCAPES lexing
+    ("select '\\''; DROP TABLE users; select 'x'", None),
+    ("select 1 # it's\n; DROP TABLE users", "mysql"),
+    ("select 1 # it's\n; DROP TABLE users", None),
+    ("/*!50000DROP TABLE x*/", "mysql"),
+    ("/*!DROP*/ TABLE x", "mysql"),
+    ("DELETE FROM t#where", "mysql"),
+    ("select 1 /* /* nested */ drop table x */", "mysql"),  # MySQL does not nest comments
+])
+def test_fix1_lexings_destroy(text, dialect):
+    assert db.sql_destructive(text, dialect)
+
+
+@pytest.mark.parametrize("text,dialect", [
+    ("select E'\\''; insert into t values(1); select 'x'", "pg"),
+    ("select a$b$c; insert into t values(1); select $b$ $b$", "pg"),
+    ("select 1 as x$y$; insert into t values(1); select $y$ $y$", "pg"),
+    ("select $x$ $x$, $1$y$; insert into t values(1); --$y$", None),
+    ("select x$a$ from t; delete from t where id=1; select $a$", "pg"),
+    ("select a$b$c; insert into t values(1); select $b$", "mysql"),
+    ("select 1 # '\n; insert into t values(1)", "mysql"),
+    ('select "a\\""; insert into t values(1); select ""', "mysql"),
+    ("select '\\''; insert into t values(1); select '", "mysql"),  # unterminated in one lexing
+    ("select 'a\\'b'", "mysql"),  # P7: unterminated under NO_BACKSLASH_ESCAPES, so unknown
+    ("select 'never closed", "pg"), ("select $q$ never closed", "pg"), ("select /* never closed", "pg"),
+    ('select "setval"(1)', "pg"), ("select pg_catalog.setval('s', 1)", "pg"),
+    ("select query_to_xml('delete from t', true, true, '')", "pg"), ("select lo_from_bytea(0, 'x')", "pg"),
+    ("select pg_logical_emit_message(true,'x','y')", "pg"), ("select lo_import('/etc/passwd')", "pg"),
+    ("select pg_reload_conf ()", "pg"),
+])
+def test_fix1_lexings_write(text, dialect):
+    assert db.sql_writes(text, dialect)
+
+
+@pytest.mark.parametrize("text,dialect", [
+    ("select E'\\'; drop table x; --'", "pg"),  # one E'' string
+    ("select 1 /* /* nested */ drop table x */", "pg"),
+    ("select 'C:\\temp'", "pg"), ("select $$drop table x$$", "pg"),
+    ("select 'it''s; drop table x'", "mysql"), ("select `drop table x` from t", "mysql"),
+])
+def test_fix1_lexings_no_destroy(text, dialect):
+    assert not db.sql_destructive(text, dialect)
+
+
+@pytest.mark.parametrize("text,dialect", [
+    ("select 1 as a$b, 2", "pg"), ("select $1, $2 from t", "pg"), ("select `insert` from t", "mysql"),
+    ("select into_col from t", "mysql"), ("select * from t where a = 'drop table x'", "mysql"),
+    ("select 1 # comment", "mysql"), ("select 1 -- c", "mysql"),
+])
+def test_fix1_lexings_reads(text, dialect):
+    assert not db.sql_writes(text, dialect)
+
+
+def test_fix1_sql_strip_keeps_length():
+    for text in ["select 'a''b' -- x\n; drop", "select $q$x$q$, \"id\" /* c */", "/*!1 x */"]:
+        assert len(db.sql_strip(text)) == len(text)
+
+
+# M1 / M2 / P4: destroy shapes
+@pytest.mark.parametrize("text", [
+    "DELETE t FROM t", "DELETE t1, t2 FROM t1 JOIN t2", "DELETE FROM t USING u",
+    "WITH d AS (select 1 where true) DELETE FROM t", "DELETE FROM t RETURNING (select 1 where true)",
+    "WITH d AS (DELETE FROM t RETURNING *) SELECT * FROM d", "drop owned by me", "drop extension x cascade",
+    "drop type x cascade", "drop materialized view x", "drop view v cascade", "drop function f() cascade",
+    "TRUNCATE ONLY x", "truncate t1, t2", "explain analyze delete from t", "DELETE users",
+    "DO $$ BEGIN DROP TABLE x; END $$", "DO $$ BEGIN EXECUTE $q$DROP TABLE x$q$; END $$",
+    "CREATE FUNCTION f() RETURNS void AS 'DROP TABLE x' LANGUAGE sql",
+    "select 'drop table x' \\gexec", "select format('drop table %I', 'x') \\gexec",
+    "select $$drop table x$$ \\gexec", "select $q$x$q$; DO $$ BEGIN EXECUTE $q$TRUNCATE t$q$; END $$",
+    "PREPARE p AS DELETE FROM t", "\\set x 'drop table t'",
+    "select dblink_exec('host=prod', 'drop table t')",
+])
+def test_fix1_destroy_shapes(text):
+    assert db.sql_destructive(text, "pg")
+
+
+@pytest.mark.parametrize("text", [
+    "explain delete from t", "EXPLAIN (costs off) DELETE FROM t",
+    "create table t (a int references u on delete cascade)", "grant delete on t to bob",
+    "create trigger x after delete on t for each row execute function f()",
+    "DELETE FROM t WHERE id = 1 RETURNING *", "WITH d AS (DELETE FROM t WHERE id = 1 RETURNING *) SELECT 1",
+    "DELETE FROM t WHERE true OR 1=1", "drop index i", "drop view v", "select 'drop table x'",
+    "DO $$ BEGIN PERFORM 1; END $$",
+])
+def test_fix1_not_destroy_shapes(text):
+    assert not db.sql_destructive(text, "pg")
+
+
+# I1: shell escapes
+@pytest.mark.parametrize("argv,cmd", [
+    (["psql", "-h", "localhost", "-c", "\\! rm -rf ~"], "rm -rf ~"),
+    (["psql", "-h", "localhost", "-c", "\\o |rm -rf ~"], "rm -rf ~"),
+    (["psql", "-h", "localhost", "-c", "select 1 \\g |rm -rf ~"], "rm -rf ~"),
+    (["psql", "-h", "localhost", "-c", "\\w |sh"], "sh"),
+    (["psql", "-h", "localhost", "-o", "|rm -rf ~", "-c", "select 1"], "rm -rf ~"),
+    (["psql", "-h", "localhost", "-c", "\\copy t to program 'rm -rf ~'"], "rm -rf ~"),
+    (["psql", "-h", "localhost", "-c", "copy t from program 'rm -rf ~'"], "rm -rf ~"),
+    (["psql", "-h", "localhost", "-c", "COPY t TO PROGRAM $$rm -rf ~$$"], "rm -rf ~"),
+    (["sqlite3", "app.db", ".shell rm -rf ~"], "rm -rf ~"),
+    (["sqlite3", "app.db", ".system rm -rf ~"], "rm -rf ~"),
+    (["sqlite3", "app.db", ".once |rm -rf ~"], "rm -rf ~"),
+    (["duckdb", "x.db", "-c", ".shell rm -rf ~"], "rm -rf ~"),
+    (["mysql", "-h", "localhost", "-e", "system rm -rf ~"], "rm -rf ~"),
+    (["mysql", "-h", "localhost", "-e", "select 1; \\! rm -rf ~"], "rm -rf ~"),
+    (["mysql", "-h", "localhost", "--pager=rm -rf ~", "-e", "select 1"], "rm -rf ~"),
+])
+def test_fix1_shell_escapes(argv, cmd):
+    f = cf(argv)
+    assert cmd in f.shell
+    assert not f.write  # local target
+
+
+def test_fix1_shell_escape_on_a_remote_target_is_a_write():
+    assert cf(["psql", "-h", "prod", "-c", "\\! ls"]).write
+    assert cf(["psql", "-h", "prod", "-c", "select 1 \\g |sh"]).write
+    assert not cf(["psql", "-h", "prod", "-c", "select '\\! ls'"]).shell  # inside a string
+
+
+# I2: target overrides
+@pytest.mark.parametrize("argv", [
+    ["psql", "postgres://u:p@localhost/db?host=prod.example.com", "-c", "insert into t values(1)"],
+    ["psql", "postgres:///db?host=prod.example.com", "-c", "insert into t values(1)"],
+    ["psql", "postgresql://u:p@localhost/db?hostaddr=10.0.0.5", "-c", "insert into t values(1)"],
+    ["psql", "host='prod'", "-c", "insert into t values(1)"],
+    ["psql", "host=\"prod\"", "-c", "insert into t values(1)"],
+    ["psql", "host = prod", "-c", "insert into t values(1)"],
+    ["psql", "HOST=prod", "-c", "insert into t values(1)"],
+    ["psql", "host=", "-c", "insert into t values(1)"],
+    ["psql", "-h", "localhost", "-c", "\\c postgres://prod/db", "-c", "insert into t values(1)"],
+    ["psql", "-h", "localhost", "-c", "\\connect host=prod", "-c", "insert into t values(1)"],
+    ["mysql", "-h", "localhost", "-e", "connect db prod; insert into t values(1)"],
+    ["mysql", "-h", "localhost", "-e", "\\r db prod\ninsert into t values(1)"],
+    ["mysql", "--defaults-file=/etc/prod.cnf", "-e", "insert into t values(1)"],
+    ["mysql", "--defaults-extra-file", "/etc/prod.cnf", "-e", "insert into t values(1)"],
+    ["mysql", "--defaults-group-suffix=_prod", "-e", "insert into t values(1)"],
+    ["duckdb", "app.db", "-c", "attach 'postgres:host=prod' as p (type postgres); insert into p.t values(1)"],
+    ["psql", "-h", "localhost", "-c", "select dblink_exec('host=prod', 'insert into t values(1)')"],
+])
+def test_fix1_target_overrides(argv):
+    assert cf(argv).write
+
+
+@pytest.mark.parametrize("argv", [
+    ["psql", "postgresql:///db?host=/var/run/postgresql", "-c", "insert into t values(1)"],
+    ["psql", "dbname=x", "-c", "insert into t values(1)"],
+    ["sqlite3", "app.db", "attach '/tmp/x.db' as e; insert into e.t values(1)"],
+    ["psql", "-h", "prod", "-c", "\\conninfo"],
+])
+def test_fix1_target_overrides_negative(argv):
+    assert not cf(argv).write
+
+
+# C3: a pipe the parser flattened
+def test_fix1_piped_client_without_inline_sql():
+    assert cf(["psql", "-h", "prod"], piped=True).write
+    assert cf(["redis-cli", "-h", "prod"], piped=True).write
+    assert cf(["mongosh", "mongodb://prod/db"], piped=True).write
+    assert not cf(["psql", "-h", "prod", "-c", "select 1"], piped=True).write
+    assert not cf(["psql", "-h", "localhost"], piped=True).write
+    assert not cf(["redis-cli", "-h", "prod", "--scan"], piped=True).write
+
+
+# I3: migration CLIs
+@pytest.mark.parametrize("argv", [
+    ["npx", "-p", "prisma", "prisma", "db", "push"], ["npx", "--package", "prisma", "prisma", "db", "push"],
+    ["npx", "--package=prisma", "prisma", "db", "push"], ["npx", "-p", "prisma@5", "prisma", "db", "push"],
+    ["npx", "-c", "prisma db push"], ["npx", "prisma", "--schema", "x", "db", "push"],
+    ["supabase", "--db-url", "postgres://u:p@prod/db", "db", "reset"],
+    ["supabase", "db", "--db-url", "postgres://u:p@prod/db", "reset"],
+    ["supabase", "db", "reset", "--db-url", "$DB_URL"], ["supabase", "--workdir", "x", "db", "push"],
+    ["supabase", "db", "push", "--db-url", "postgres://u@localhost,prod/x"],
+])
+def test_fix1_cli_write(argv):
+    assert db.cli_write(argv[0], argv[1:])
+
+
+@pytest.mark.parametrize("argv", [
+    ["supabase", "db", "reset", "--linked=false"], ["npx", "prisma", "migrate", "dev", "--name", "x"],
+    ["supabase", "--db-url", "postgres://u@localhost/db", "db", "reset"],
+])
+def test_fix1_cli_no_write(argv):
+    assert not db.cli_write(argv[0], argv[1:])
+
+
+# M2 / M3: redis, mongo
+@pytest.mark.parametrize("text", [
+    'db.x["drop"]()', "db.x.drop.call(db.x)", "db.x.drop.apply(db.x)", "db.dropDatabase ()",
+    'eval("db.x.dr"+"op()")', "db.x.mapReduce(m, r, {out: 'y'})", 'db.getCollection("x")["deleteMany"]({})',
+])
+def test_fix1_mongo_writes(text):
+    assert db.mongo_writes(text)
+
+
+def test_fix1_mongo_run_command_reads():
+    assert not db.mcp_finding("mcp__mongodb__run_command", {"command": {"ping": 1}}, {}, []).write
+    assert not db.mcp_finding("mcp__mongodb__run_command", {"command": {"buildInfo": 1}}, {}, []).write
+    assert not db.mcp_finding("mcp__mongodb__run_command", {"command": {"serverStatus": 1}}, {}, []).write
+    assert db.mcp_finding("mcp__mongodb__run_command", {"command": {"dropDatabase": 1}}, {}, []).write
+    assert db.mcp_finding("mcp__mongodb__run_command", {"command": {"aggregate": "x", "pipeline": [{"$out": "y"}]}},
+                          {}, []).write
+
+
+# I4 / P4: MCP sql-destroy backstop
+@pytest.mark.parametrize("name,inp,destroy", [
+    ("mcp__warehouse__run_query", {"sql": "TRUNCATE t"}, True),
+    ("mcp__acme__query", {"statement": "DELETE FROM users"}, True),
+    ("mcp__linear__query", {"query": "DELETE FROM users"}, True),
+    ("mcp__acme__execute", {"queries": ["select 1", "drop table x"]}, True),
+    ("mcp__acme__raw", {"sql": "drop schema s"}, True),
+    ("mcp__github__search_code", {"query": "DROP TABLE users"}, False),
+    ("mcp__notion__search", {"query": "drop table"}, False),
+    ("mcp__context7__get-library-docs", {"query": "drop database"}, False),
+    ("mcp__github__create_issue", {"body": "DROP TABLE users"}, False),
+    ("mcp__acme__run_query", {"note": "DROP TABLE users"}, False),
+])
+def test_fix1_mcp_destroy_backstop(name, inp, destroy):
+    assert db.mcp_finding(name, inp, {}, []).destroy is destroy
+
+
+@pytest.mark.parametrize("inp", [
+    {"input": "DROP TABLE users"}, {"text": "DROP TABLE users"}, {"sqlQuery": "DROP TABLE users"},
+    {"query_text": "DROP TABLE users"}, {"query": {"text": "DROP TABLE users"}},
+    {"query": ["select 1", "DROP TABLE users"]},
+    {"a": {"b": {"c": {"d": {"e": {"f": {"g": {"query": "DROP TABLE users"}}}}}}}},
+])
+def test_fix1_mcp_sql_fields(inp):
+    f = db.mcp_finding("mcp__supabase__execute_sql", inp, {"supabase": {"environment": "prod"}}, [])
+    assert f.destroy and f.write
+
+
+# M5 / P5
+def test_fix1_prod_beats_dev_patterns():
+    prod = {"supabase": {"environment": "prod"}}
+    for pats in (["supabase"], ["mcp:supa*"], ["mcp:supabase"]):
+        assert db.mcp_finding("mcp__supabase__execute_sql", {"query": "insert into t values(1)"}, prod, pats).write
+    assert not db.mcp_finding("mcp__supabase__execute_sql", {"query": "insert into t values(1)"}, {},
+                              ["supabase"]).write
+
+
+@pytest.mark.parametrize("p", ["*", "host:*", "mcp:*", "host:**", "host:*.*", "mcp:**"])
+def test_fix1_wildcard_only_patterns(p):
+    assert db.check_dev_pattern(p)
+    assert not db.dev_host([p], "prod.example.com")
+    assert not db.dev_server([p], "supabase")

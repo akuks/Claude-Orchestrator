@@ -66,6 +66,8 @@ def env(tmp_path, monkeypatch):
     # $TMPDIR comes from the hook's environment: unset here, so "$TMPDIR/x" is
     # unresolved whatever the runner's TMPDIR is (temp-dir tests set it)
     monkeypatch.delenv("TMPDIR", raising=False)
+    for name in rules._db.DB_ENV_NAMES:  # Ruling P6: the hook's own env seeds the database variables
+        monkeypatch.delenv(name, raising=False)
     return Env(tmp_path)
 
 
@@ -2231,3 +2233,246 @@ def test_standalone_db_rules(tmp_path):
     assert out.returncode == 0, out.stderr
     res = json.loads(out.stdout)
     assert res["decision"] == "approve" and [h["rule_id"] for h in res["hits"]] == ["db-write"]
+
+
+
+# ===========================================================================
+# Task 1 fix round 1: every review probe is a regression test (Rulings P4-P7)
+# ===========================================================================
+FIX1_HELD = [
+    # C1 clusters / prefixes / attached values
+    ('psql -h prod -Atc "DELETE FROM users"', "sql-destroy"),
+    ('psql -h prod -qc "DROP TABLE users"', "sql-destroy"),
+    ('psql -h prod -Xqc "insert into t values(1)"', "db-write"),
+    ('mysql -h prod -Be "DELETE FROM users"', "sql-destroy"),
+    ('mysql -h prod -NBe "insert into t values(1)"', "db-write"),
+    ('mysql -h prod --exec="insert into t values(1)"', "db-write"),
+    ('clickhouse-client -h prod -nq "insert into t values(1)"', "db-write"),
+    ('psql -Xh prod -c "insert into t values(1)"', "db-write"),
+    ('psql --ho=prod -c "insert into t values(1)"', "db-write"),
+    ('psql -h prod --comm="insert into t values(1)"', "db-write"),
+    ('psql -h localhost --comm="drop table x"', "sql-destroy"),
+    ('psql -dpostgres://prod/db -c "insert into t values(1)"', "db-write"),
+    ('psql -d"host=prod" -c "insert into t values(1)"', "db-write"),
+    ("psql -h prod -fx.sql", "db-write"),
+    ('psql -h localhost -qc "drop table x"', "sql-destroy"),
+    ('psql -h localhost -1c "drop table x"', "sql-destroy"),
+    ('psql -h prod -c "insert into t values(1)" -h prod', "db-write"),
+    ('psql -h localhost -c "insert into t values(1)" -hprod', "db-write"),
+    ('pgcli -h prod -e "insert into t values(1)"', "db-write"),
+    # C2 lexer
+    ("psql -h localhost -c 'select a$b$c; drop table x; select $b$ $b$'", "sql-destroy"),
+    ("psql -h prod -c 'select a$b$c; insert into t values(1); select $b$ $b$'", "db-write"),
+    ("psql -h prod -c 'select 1 as x$y$; insert into t values(1); select $y$ $y$'", "db-write"),
+    ("psql -h prod -c 'select x$a$ from t; delete from t where id=1; select $a$'", "db-write"),
+    ("mysql -h prod -e 'select a$b$c; insert into t values(1); select $b$'", "db-write"),
+    ("mysql -h prod -e 'select 1 as $x$; DROP TABLE users'", "sql-destroy"),
+    ("mysql -h prod -e \"select 1 # '\n; insert into t values(1)\"", "db-write"),
+    ("mysql -h prod -e \"select 1 # it's\n; DROP TABLE users\"", "sql-destroy"),
+    ('mysql -h prod -e "select \\"a\\\\\\"\\"; insert into t values(1); select \\"\\""', "db-write"),
+    ('psql -h prod -c "select E\'\\\\\'\'; insert into t values(1); select \'x\'"', "db-write"),
+    ('mysql -h localhost -e "select \'\\\\\'\'; drop table users; select \'x\'"', "sql-destroy"),
+    ("psql -h prod -c 'select 1 as a$b$; DROP TABLE users; select $b$ $b$'", "sql-destroy"),
+    ('mysql -h localhost -e "/*!DROP*/ TABLE x"', "sql-destroy"),
+    ('mysql -h localhost -e "DELETE FROM t#where"', "sql-destroy"),
+    ('psql -h prod -c "select query_to_xml(\'delete from t\', true, true, \'\')"', "db-write"),
+    ('psql -h prod -c \'select "setval"(1)\'', "db-write"),
+    ('psql -h prod -c "select lo_from_bytea(0, \'x\')"', "db-write"),
+    ('psql -h prod -c "select pg_logical_emit_message(true,\'x\',\'y\')"', "db-write"),
+    # C3 pipes through compound commands
+    ("{{ cat x.sql; }} | psql -h prod", "db-write"),
+    ("{{ echo a; cat x.sql; }} | psql -h prod", "db-write"),
+    ("if true; then cat x.sql; fi | psql -h prod", "db-write"),
+    ('for f in *.sql; do cat "$f"; done | psql -h prod', "db-write"),
+    ("(cat x.sql) | psql -h prod", "db-write"),
+    ("cat x.sql | {{ psql -h prod; }}", "db-write"),
+    ("cat x.sql | (psql -h prod)", "db-write"),
+    ("cat x.sql | if true; then psql -h prod; fi", "db-write"),
+    ("cat x.sql | {{ echo hi; psql -h prod; }}", "db-write"),
+    ("cat x.sql | redis-cli -h prod", "db-write"),
+    ("{{ cat cmds; }} | redis-cli -h prod", "db-write"),
+    ("{{ cat x.js; }} | mongosh mongodb://prod/db", "db-write"),
+    # I1 shell escapes on a remote target
+    ("psql -h prod -c 'select 1 \\g |sh'", "db-write"),
+    ("psql -h prod -c '\\o |sh'", "db-write"),
+    ('psql -h prod -c "\\\\w |sh"', "db-write"),
+    ("psql -h prod -c \"\\copy t to program 'ls'\"", "db-write"),
+    ("psql -h prod -c \"copy t to program 'ls'\"", "db-write"),
+    # I2 target overrides
+    ('psql "postgres://u:p@localhost/db?host=prod.example.com" -c "insert into t values(1)"', "db-write"),
+    ('psql "postgres:///db?host=prod.example.com" -c "insert into t values(1)"', "db-write"),
+    ('psql "postgresql://u:p@localhost/db?hostaddr=10.0.0.5" -c "insert into t values(1)"', "db-write"),
+    ('psql "host=\'prod\'" -c "insert into t values(1)"', "db-write"),
+    ('psql -h localhost -c "\\\\c postgres://prod/db" -c "insert into t values(1)"', "db-write"),
+    ('psql -h localhost -c "\\\\connect host=prod" -c "insert into t values(1)"', "db-write"),
+    ('mysql -h localhost -e "connect db prod; insert into t values(1)"', "db-write"),
+    ('mysql --defaults-file=/etc/prod.cnf -e "insert into t values(1)"', "db-write"),
+    ('mysql --defaults-extra-file=/etc/x.cnf -e "insert into t values(1)"', "db-write"),
+    ('mysql --defaults-group-suffix=_prod -e "insert into t values(1)"', "db-write"),
+    ("duckdb app.db -c \"attach 'postgres:host=prod' as p (type postgres); insert into p.t values(1)\"", "db-write"),
+    ("psql -h localhost -c \"select dblink_exec('host=prod', 'drop table t')\"", "sql-destroy"),
+    # I2b database variables set dynamically
+    ('source .env.production && psql -c "insert into t values(1)"', "db-write"),
+    ('. ./.env && psql -c "insert into t values(1)"', "db-write"),
+    ('set -a; . .env; set +a; psql -c "insert into t values(1)"', "db-write"),
+    ('export $(cat .env | xargs) && psql -c "insert into t values(1)"', "db-write"),
+    ('eval "$(cat .env)"; psql -c "insert into t values(1)"', "db-write"),
+    ('dotenv -e .env.prod -- psql -c "insert into t values(1)"', "db-write"),
+    ('read PGHOST < h; export PGHOST; psql -c "insert into t values(1)"', "db-write"),
+    ('export PGHOST; psql -c "insert into t values(1)"', "db-write"),
+    ('X=$(cat h); export PGHOST=$X; psql -c "insert into t values(1)"', "db-write"),
+    ('export "PGHOST=prod"; psql -c "insert into t values(1)"', "db-write"),
+    ('declare -x PGHOST=prod; psql -c "insert into t values(1)"', "db-write"),
+    ("PGHOST=prod bash -c 'psql -c \"insert into t values(1)\"'", "db-write"),
+    ("PGHOST=prod sh -c 'psql -c \"insert into t values(1)\"'", "db-write"),
+    ('export PGDATABASE=postgres://prod/db; psql -c "insert into t values(1)"', "db-write"),
+    # I3 migration CLIs
+    ("npx -p prisma prisma db push", "db-write"),
+    ("npx --package=prisma prisma db push", "db-write"),
+    ("npx -p prisma@5 prisma db push", "db-write"),
+    ("supabase --db-url postgres://u:p@prod/db db reset", "db-write"),
+    ("supabase db --db-url postgres://u:p@prod/db reset", "db-write"),
+    ('supabase db reset --db-url "$DB_URL"', "db-write"),
+    ("supabase --workdir x db push", "db-write"),
+    ("npx prisma --schema x db push", "db-write"),
+    # I4 / P4 backstops
+    ('psql -h localhost -c "DO \\$\\$ BEGIN DROP TABLE x; END \\$\\$"', "sql-destroy"),
+    ("psql -h localhost -c 'DO $$ BEGIN EXECUTE $q$DROP TABLE x$q$; END $$'", "sql-destroy"),
+    ("psql -h localhost -c 'select $$drop table x$$ \\gexec'", "sql-destroy"),
+    ("psql -h localhost -c \"select 'drop table x' \\gexec\"", "sql-destroy"),
+    ("psql -h localhost -c \"select format('drop table %I', 'x') \\gexec\"", "sql-destroy"),
+    ("psql -h localhost -c 'select $q$x$q$; DO $$ BEGIN EXECUTE $q$TRUNCATE t$q$; END $$'", "sql-destroy"),
+    ("psql -h localhost -c \"CREATE FUNCTION f() RETURNS void AS 'DROP TABLE x' LANGUAGE sql; SELECT f()\"",
+     "sql-destroy"),
+    ("psql -h localhost -c \"\\\\set x 'drop table t'\" -c \":x\"", "sql-destroy"),
+    # M1
+    ('psql -h localhost -c "DELETE t FROM t"', "sql-destroy"),
+    ('psql -h localhost -c "DELETE FROM t USING u"', "sql-destroy"),
+    ('psql -h localhost -c "DELETE FROM t RETURNING (select 1 where true)"', "sql-destroy"),
+    ('psql -h localhost -c "WITH d AS (select 1 where true) DELETE FROM t"', "sql-destroy"),
+    ('psql -h localhost -c "WITH d AS (DELETE FROM t RETURNING *) SELECT * FROM d"', "sql-destroy"),
+    ('psql -h localhost -c "drop owned by me"', "sql-destroy"),
+    ('psql -h localhost -c "drop materialized view x"', "sql-destroy"),
+    ('psql -h localhost -c "drop extension x cascade"', "sql-destroy"),
+    ('psql -h localhost -c "drop type x cascade"', "sql-destroy"),
+    ('mysql -h localhost -e "/*!50000DROP TABLE x*/"', "sql-destroy"),
+    ('psql -h localhost -c "PREPARE p AS DELETE FROM t"', "sql-destroy"),
+    # mongo / redis
+    ("mongosh mongodb://prod/db --eval 'db.x[\"drop\"]()'", "db-write"),
+    ("mongosh mongodb://prod/db --eval 'db.x.drop.call(db.x)'", "db-write"),
+    ("mongosh mongodb://prod/db --eval 'db.getCollection(\"x\")[\"deleteMany\"]({{}})'", "db-write"),
+    ("mongosh mongodb://prod/db --eval 'db.x.mapReduce(m, r, {{out: \"y\"}})'", "db-write"),
+    ("redis-cli -h prod --eval s.lua", "db-write"),
+    ('redis-cli -u "$REDIS_URL" FLUSHALL', "db-write"),
+    ("psql -h 0 -c \"insert into t values(1)\"", "db-write"),
+]
+FIX1_FREE = [
+    'psql -h prod -At -c "select 1"',
+    'mysql -h prod -NBe "select 1"',
+    "psql -h prod -c 'select $1, $2 from t'",
+    "psql -h prod <<'SQL'\nselect $$x$$\nSQL",
+    'psql -h prod -c "explain delete from t"',
+    "redis-cli -h prod --scan --pattern 'x*'",
+    "redis-cli -h prod SUBSCRIBE ch",
+    "redis-cli -h prod MONITOR",
+    "psql -h localhost -c 'create table t (a int references u on delete cascade)'",
+    'psql -h prod -c "\\\\c otherdb" -c "select 1"',
+    'psql -h prod -c "select * from t" | grep x',
+    "npx dotenv -e .env.prod -- npx prisma migrate dev",
+    "supabase db reset --linked=false",
+    'mysql -h prod -e "select \\`insert\\` from t"',
+    "psql -h prod -c \"select * from t where type = 'insert'\"",
+]
+
+
+@pytest.mark.parametrize("cmd,rule", FIX1_HELD)
+def test_fix1_held(env, cmd, rule):
+    v = bash(env, cmd)
+    assert v.decision != "allow", v
+    assert rule in ids(v), v
+
+
+@pytest.mark.parametrize("cmd", FIX1_FREE)
+def test_fix1_free(env, cmd):
+    v = bash(env, cmd)
+    assert not db_hits(v), v
+
+
+# I1: shell escapes run the shell checks, whatever the target
+@pytest.mark.parametrize("cmd", [
+    "psql -h localhost -c '\\! rm -rf ~'",
+    "psql -h localhost -c '\\o |rm -rf ~'",
+    "psql -h localhost -c 'select 1 \\g |rm -rf ~'",
+    "psql -h localhost -o '|rm -rf ~' -c 'select 1'",
+    "psql -h localhost -c \"copy t from program 'rm -rf ~'\"",
+    "psql -h prod -c '\\copy t to program $$rm -rf ~$$'",
+    "sqlite3 app.db \".shell rm -rf ~\"",
+    "sqlite3 app.db '.system rm -rf ~'",
+    "mysql -h localhost -e 'system rm -rf ~'",
+    "mysql -h localhost -e 'select 1; \\! rm -rf ~'",
+])
+def test_fix1_shell_escapes_are_commands(env, cmd):
+    v = bash(env, cmd)
+    assert v.decision == "deny" and "rm-rf-outside" in hard_ids(v), v
+
+
+def test_fix1_shell_escape_review_test(env):
+    v = bash(env, "psql -h localhost -c '\\! rm -rf ~'")
+    assert v.decision == "deny"
+
+
+# MCP: P4 backstop, P5, M2
+@pytest.mark.parametrize("name,inp,servers,want", [
+    ("mcp__warehouse__run_query", {"sql": "TRUNCATE t"}, {}, {"sql-destroy"}),
+    ("mcp__acme__query", {"statement": "DELETE FROM users"}, {"acme": {"environment": "unknown"}}, {"sql-destroy"}),
+    ("mcp__linear__query", {"query": "DELETE FROM users"}, {}, {"sql-destroy"}),
+    ("mcp__github__search_code", {"query": "DROP TABLE users"}, {}, set()),
+    ("mcp__notion__search", {"query": "drop table"}, {}, set()),
+    ("mcp__supabase__execute_sql", {"input": "DROP TABLE users"}, {"supabase": {"environment": "prod"}},
+     {"sql-destroy"}),
+    ("mcp__supabase__execute_sql", {"query": {"text": "DROP TABLE users"}}, {"supabase": {"environment": "prod"}},
+     {"sql-destroy"}),
+    ("mcp__postgres__query", {"sql": "select a$b$c; insert into t values(1); select $b$ $b$"}, {}, {"db-write"}),
+    ("mcp__postgres__query", {"sql": "select 1 as a$b$; DROP TABLE users; select $b$ $b$"}, {}, {"sql-destroy"}),
+    ("mcp__mysql__query", {"sql": "select 1 as $x$; DROP TABLE users"}, {}, {"sql-destroy"}),
+    ("mcp__postgres__query", {"sql": "DO $$ BEGIN DROP TABLE users; END $$"}, {"postgres": {"environment": "dev"}},
+     {"sql-destroy"}),
+    ("mcp__mongodb__run_command", {"command": {"ping": 1}}, {}, set()),
+    ("mcp__mongodb__run_command", {"command": {"dropDatabase": 1}}, {}, {"db-write"}),
+])
+def test_fix1_mcp(env, name, inp, servers, want):
+    assert db_hits(tool(env, name, inp, mcp_servers=servers)) == want
+
+
+def test_fix1_prod_beats_dev_pattern(env):
+    servers = {"supabase": {"name": "Supabase", "environment": "prod"}}
+    for db_dev in (["supabase"], ["mcp:supa*"]):
+        v = tool(env, "mcp__supabase__execute_sql", {"query": "insert into t values(1)"}, mcp_servers=servers,
+                 db_dev=db_dev)
+        assert db_hits(v) == {"db-write"}
+
+
+@pytest.mark.parametrize("db_dev", [["host:*"], ["*"], ["mcp:*"]])
+def test_fix1_wildcard_dev_patterns_are_ignored(env, db_dev):
+    assert db_hits(bash(env, 'psql -h prod -c "insert into t values(1)"', db_dev=db_dev)) == {"db-write"}
+    assert db_hits(tool(env, "mcp__postgres__query", {"sql": "insert into t values(1)"}, db_dev=db_dev)) == \
+        {"db-write"}
+
+
+# P6: the hook's own environment seeds the database variables
+def test_fix1_hook_env_seeds_db_env(env, monkeypatch):
+    monkeypatch.setenv("DATABASE_URL", "postgres://u@prod.example.com/app")
+    assert db_hits(bash(env, 'psql "$DATABASE_URL" -c "insert into t values(1)"')) == {"db-write"}
+    assert db_hits(bash(env, 'psql -c "insert into t values(1)"')) == {"db-write"}
+    monkeypatch.setenv("DATABASE_URL", "postgres://u@localhost/app")
+    assert not db_hits(bash(env, 'psql -c "insert into t values(1)"'))
+    monkeypatch.delenv("DATABASE_URL")
+    monkeypatch.setenv("PGHOST", "prod.example.com")
+    assert db_hits(bash(env, 'psql -c "insert into t values(1)"')) == {"db-write"}
+    assert not db_hits(bash(env, 'PGHOST=localhost psql -c "insert into t values(1)"'))
+
+
+def test_fix1_nested_prefix_does_not_leak(env):
+    assert db_hits(bash(env, "PGHOST=prod bash -c 'psql -c \"insert into t values(1)\"'")) == {"db-write"}
+    v = bash(env, "PGHOST=prod bash -c 'echo hi'; psql -c \"insert into t values(1)\"")
+    assert not db_hits(v), v
