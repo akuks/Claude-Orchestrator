@@ -1556,6 +1556,26 @@ def test_hook_single_answer_matrix(plugin, tmp_path, stub):
     run = Run(plugin, tmp_path / "d", stub.base, notes=True, notes_after=1)
     (run.tdir / "spool.jsonl").mkdir()
     assert _post(run, 1) is None
+    # SessionStart compact (with and without handoff.md), SubagentStart, a broken policy, a bad payload (F30)
+    def raw(run, event, payload):
+        p = subprocess.run([sys.executable, "-I", "-S", str(plugin / "hooks" / "co_hook.py"), event],
+                           input=json.dumps(payload), capture_output=True, text=True, env=run.env,
+                           cwd=str(run.project), timeout=60)
+        assert p.returncode == 0, p.stderr
+        return p.stdout.strip().splitlines()
+
+    with_file = Run(plugin, tmp_path / "sa", stub.base, trust="external", notes=True)
+    _handoff(with_file)
+    assert len(raw(with_file, "SessionStart", {"source": "compact"})) == 1
+    without = Run(plugin, tmp_path / "sb", stub.base, trust="external", notes=True)
+    assert len(raw(without, "SessionStart", {"source": "compact"})) == 1
+    sub = Run(plugin, tmp_path / "sc", stub.base, trust="external", helper_context="h")
+    assert len(raw(sub, "SubagentStart", {"agent_id": "a"})) == 1
+    broken = Run(plugin, tmp_path / "sd", stub.base, trust="external", notes=True)
+    (broken.tdir / "policy.json").write_text("{nope")
+    assert len(raw(broken, "SessionStart", {"source": "compact"})) == 1
+    assert len(raw(broken, "SubagentStart", {"agent_id": "a"})) == 1
+    assert len(raw(broken, "SessionStart", "not-a-dict")) == 1  # bad payload: still one answer
 
 
 def test_plugin_lib_has_no_app_imports():
@@ -1651,14 +1671,34 @@ def test_compact_injects_handoff(plugin, tmp_path, stub, trust):
     assert co_hook.CARRY_LINE in _ctx_of(_sess(run4, source="compact"))
 
 
-def test_compact_handoff_is_cut_and_redacted(plugin, tmp_path, stub):
-    run = Run(plugin, tmp_path, stub.base, trust="own")
+def test_compact_handoff_is_redacted_cleaned_then_cut(plugin, tmp_path, stub):
+    mx = co_hook.COMPACT_HANDOFF_MAX
     tok = "ghp_" + "a" * 36
-    body = HANDOFF + "\n" + "x" * (co_hook.COMPACT_HANDOFF_MAX - len(HANDOFF) - 60) + " " + tok + " tail " + "y" * 500
-    _handoff(run, body)
+    ant = "sk-ant-" + "b" * 40
+    # a token well inside the cut is masked; hidden characters are stripped
+    run = Run(plugin, tmp_path / "in", stub.base, trust="own")
+    _handoff(run, HANDOFF + f"\nTask: rtl\u202eword zero\u200bwidth {tok} and {ant}\nNext: go")
     ctx = _ctx_of(_sess(run, source="compact"))
-    assert tok not in ctx and "ghp_" not in ctx
-    assert len(ctx) <= len(co_hook.CARRY_LINE) + co_hook.COMPACT_HANDOFF_MAX + 4
+    assert tok not in ctx and ant not in ctx and "***" in ctx
+    assert "\u202e" not in ctx and "\u200b" not in ctx and "rtlword" in ctx and "zerowidth" in ctx
+    # a token that straddles char 8000 of the file: no prefix of it survives (redact first, then cut)
+    for secret in (tok, ant):
+        for into in (1, 4, 8, len(secret) - 1):  # how many chars of the secret fall inside the cut
+            run = Run(plugin, tmp_path / f"s{secret[:4]}{into}", stub.base, trust="own")
+            head = HANDOFF + "\n"
+            body = head + "x" * (mx - len(head) - into) + secret + " tail " + "y" * 200
+            assert body.index(secret) < mx < body.index(secret) + len(secret)
+            _handoff(run, body)
+            ctx = _ctx_of(_sess(run, source="compact"))
+            assert secret[:6] not in ctx and secret[:4] not in ctx.replace(co_hook.CARRY_LINE, "")[-mx:]
+            assert "ghp_" not in ctx and "sk-ant-" not in ctx and "aaaa" not in ctx and "bbbb" not in ctx
+            assert len(ctx) <= len(co_hook.CARRY_LINE) + mx + 4
+
+
+def test_hook_hidden_chars_equal_the_apps():
+    from app import redaction
+
+    assert co_hook.HIDDEN_CHARS.pattern == redaction.HIDDEN_CHARS.pattern
 
 
 @pytest.mark.parametrize("trust", ["own", "external"])
@@ -1703,23 +1743,3 @@ def test_startup_and_resume_unchanged(plugin, tmp_path, stub):
     assert stub.requests == []
 
 
-def test_hook_single_answer_matrix_sessions(plugin, tmp_path, stub):
-    def raw(run, event, payload):
-        p = subprocess.run([sys.executable, "-I", "-S", str(plugin / "hooks" / "co_hook.py"), event],
-                           input=json.dumps(payload), capture_output=True, text=True, env=run.env,
-                           cwd=str(run.project), timeout=60)
-        assert p.returncode == 0, p.stderr
-        return p.stdout.strip().splitlines()
-
-    with_file = Run(plugin, tmp_path / "a", stub.base, trust="external", notes=True)
-    _handoff(with_file)
-    assert len(raw(with_file, "SessionStart", {"source": "compact"})) == 1
-    without = Run(plugin, tmp_path / "b", stub.base, trust="external", notes=True)
-    assert len(raw(without, "SessionStart", {"source": "compact"})) == 1
-    sub = Run(plugin, tmp_path / "c", stub.base, trust="external", helper_context="h")
-    assert len(raw(sub, "SubagentStart", {"agent_id": "a"})) == 1
-    broken = Run(plugin, tmp_path / "d", stub.base, trust="external", notes=True)
-    (broken.tdir / "policy.json").write_text("{nope")
-    assert len(raw(broken, "SessionStart", {"source": "compact"})) == 1
-    assert len(raw(broken, "SubagentStart", {"agent_id": "a"})) == 1
-    assert len(raw(broken, "SessionStart", "not-a-dict")) == 1  # bad payload: still one answer
