@@ -405,3 +405,98 @@ def test_custom_is_stdlib_only():
             continue
         for n in names:
             assert n.split(".")[0] in sys.stdlib_module_names or n == "__future__", n
+
+
+# ===========================================================================
+# Fix round 1 (review I1-I3, M2, M3; Rulings P11, P12)
+# ===========================================================================
+def test_p11_org_rules_run_before_repo_rules_whatever_the_list_order():
+    slow = R("repo.slow", SLOW, "regex", kind="never")
+    org = R("org.drop", r"drop\s+table", "regex", kind="never")
+    got = match_rules("psql -c 'drop table x' " + SLOW_TEXT, [slow, org], 250)
+    assert got == [(org, "match"), (slow, "timeout")]
+
+
+def test_p11_each_source_has_its_own_budget():
+    org_slow = R("org.slow", SLOW, "regex", kind="never")
+    proj = R("project.b", "b$", "regex")
+    repo_fast = R("repo.fast", "b$", "regex")
+    repo_slow = R("repo.slow", SLOW, "regex")
+    t0 = time.monotonic()
+    got = {r["id"]: v for r, v in match_rules(SLOW_TEXT, [repo_fast, repo_slow, org_slow, proj], 60)}
+    assert time.monotonic() - t0 < 0.6
+    # org + project share one budget (spent by org.slow); the repo budget is separate
+    assert got == {"org.slow": "timeout", "project.b": "timeout", "repo.fast": "match", "repo.slow": "timeout"}
+
+
+def test_p12_a_rule_hits_when_any_text_matches():
+    rules = [R("org.t", "git push"), R("org.r", r"^git\s+push$", "regex")]
+    got = match_rules(['"git" push', "git push"], rules, 250)
+    assert [(r["id"], v) for r, v in got] == [("org.t", "match"), ("org.r", "match")]
+    assert match_rules(["git pull", "ls"], rules, 250) == []
+
+
+def test_values_text_is_forge_mcp_text():
+    v = {"b": ["x", {"c": 1, "d": None}], "a": True, "e": "multi\nline"}
+    assert custom.values_text(v) == "x\n1\ntrue\nmulti\nline"
+    assert custom.values_text({"s": "delete\n  from\tusers"}, collapse=True) == "delete from users"
+    deep = cur = {}
+    for _ in range(150):
+        cur["k"] = {}
+        cur = cur["k"]
+    cur["v"] = "hidden"
+    assert "hidden" not in custom.values_text(deep)  # past 100 levels: not walked (the JSON form still has it)
+
+
+def test_i3_sigalrm_blocked_in_the_mask_is_unblocked_then_restored():
+    old_mask = signal.pthread_sigmask(signal.SIG_BLOCK, [signal.SIGALRM])
+    try:
+        t0 = time.monotonic()
+        got = match_rules(SLOW_TEXT, [R("repo.slow", SLOW, "regex", kind="never")], 50)
+        assert time.monotonic() - t0 < 0.6
+        assert got[0][1] == "timeout"
+        assert signal.SIGALRM in signal.pthread_sigmask(signal.SIG_BLOCK, [])  # still blocked afterwards
+        assert signal.SIGALRM not in signal.sigpending()
+        assert match_rules("abc", [R("org.r", "b", "regex")], 250)[0][1] == "match"
+        assert signal.getitimer(signal.ITIMER_REAL) == (0.0, 0.0)
+    finally:
+        signal.pthread_sigmask(signal.SIG_SETMASK, old_mask)
+
+
+def test_i3_a_pending_blocked_alarm_is_left_alone_and_every_regex_times_out():
+    import os
+    fired = []
+    old_handler = signal.signal(signal.SIGALRM, lambda *_a: fired.append(1))
+    old_mask = signal.pthread_sigmask(signal.SIG_BLOCK, [signal.SIGALRM])
+    try:
+        os.kill(os.getpid(), signal.SIGALRM)
+        assert signal.SIGALRM in signal.sigpending()
+        got = match_rules("abc", [R("org.r", "b", "regex"), R("org.t", "b")], 250)
+        assert [v for _r, v in got] == ["timeout", "match"]
+        assert signal.SIGALRM in signal.sigpending() and fired == []
+    finally:
+        signal.pthread_sigmask(signal.SIG_SETMASK, old_mask)
+        signal.signal(signal.SIGALRM, old_handler)
+    assert fired == [1]  # the owner's alarm reached the owner's handler
+
+
+@pytest.mark.parametrize("ch", ["؜", "­", "᠎", "͏", "⁦", "⁯", "\U000e0001"])
+def test_m2_clean_reason_strips_format_characters(ch):
+    assert clean_reason(f"de{ch}lete{ch} it") == "delete it"
+
+
+@pytest.mark.parametrize("ch", ["​", "‍", "‮", "⁦", "﻿", "­", "؜", "͏",
+                                "᠎"])
+def test_m3_patterns_with_invisible_characters_are_rejected(ch):
+    for match in ("text", "regex"):
+        assert "invisible" in validate_pattern(match, f"git{ch} push")
+    out = parse_rules_md(f"## Never\n- `git{ch} push` : x\n")
+    assert out["never"] == [] and out["errors"][0]["line"] == 2
+
+
+def test_m3_bom_and_cr_only_line_endings():
+    out = parse_rules_md("﻿## Never\n- `rm -rf`\n")
+    assert [r["pattern"] for r in out["never"]] == ["rm -rf"]
+    out = parse_rules_md("## Never\r- `x` : y\r## Confirm\r- `z`\r")
+    assert [(r["pattern"], r["line"]) for r in out["never"]] == [("x", 2)]
+    assert [(r["pattern"], r["line"]) for r in out["confirm"]] == [("z", 4)]

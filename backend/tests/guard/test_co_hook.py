@@ -868,3 +868,30 @@ def test_malformed_custom_policy_denies_in_the_hook(run, key, value):
     (run.tdir / "policy.json").write_text(json.dumps(run.policy))
     out = run(bash("ls"))
     assert decision(out) == "deny" and ERROR in reason(out) and key in reason(out)
+
+
+def test_redos_with_sigalrm_blocked_in_the_inherited_mask_still_answers(plugin, tmp_path):
+    """Review I3: an inherited mask that blocks SIGALRM must not let a slow regex hang the hook."""
+    import signal as _signal
+    stub = Stub(post_status=403)
+    try:
+        run = Run(plugin, tmp_path, stub.base, custom_rules=[_slow_rule()])
+        t0 = time.monotonic()
+        p = subprocess.run([sys.executable, "-I", "-S", str(plugin / "hooks" / "co_hook.py"), "PreToolUse"],
+                           input=json.dumps(bash("echo " + "a" * 40 + "b")), capture_output=True, text=True,
+                           timeout=60, env=run.env, cwd=str(run.project),
+                           preexec_fn=lambda: _signal.pthread_sigmask(_signal.SIG_BLOCK, [_signal.SIGALRM]))
+        assert time.monotonic() - t0 < 1.0
+        out = json.loads(p.stdout)
+        assert "rule repo.slow took too long to check" in reason(out)
+        assert [b["rule_ids"] for _m, q, _a, b in stub.requests if q == "/guard/approvals"] == [["repo.slow"]]
+    finally:
+        stub.close()
+
+
+def test_org_never_rule_timeout_denies_in_the_hook(run, stub):
+    run.policy["custom_rules"] = [dict(_slow_rule(), id="org.slow")]
+    (run.tdir / "policy.json").write_text(json.dumps(run.policy))
+    out = run(bash("echo " + "a" * 40 + "b"))
+    assert decision(out) == "deny" and "rule org.slow took too long to check, so it is blocked" in reason(out)
+    assert "/guard/approvals" not in stub.paths("POST")

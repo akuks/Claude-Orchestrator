@@ -2805,3 +2805,113 @@ def test_regex_budget_is_restored_after_evaluate(env):
     bash(env, "echo " + "a" * 40 + "b", custom_rules=[crule("repo.slow", "(a+)+$", "never", "regex")],
          regex_budget_ms=20)
     assert signal.getitimer(signal.ITIMER_REAL) == (0.0, 0.0) and signal.getsignal(signal.SIGALRM) == old
+
+
+# ---------------------------------------------------------------------------
+# Task 2 fix round 1 (review I1-I4, M1; Rulings P11-P13)
+# ---------------------------------------------------------------------------
+SLOW_CMD = "echo " + "a" * 40 + "b"
+
+
+@pytest.mark.parametrize("rid,kind,hard,word", [
+    ("org.slow", "never", True, "is blocked"),
+    ("project.slow", "never", True, "is blocked"),
+    ("org.slow", "confirm", False, "needs approval"),
+    ("repo.slow", "never", False, "needs approval"),
+    ("repo.slow", "confirm", False, "needs approval"),
+])
+def test_p11_timeout_hardness_by_source(env, rid, kind, hard, word):
+    v = bash(env, SLOW_CMD, custom_rules=[crule(rid, "(a+)+$", kind, "regex")], regex_budget_ms=40)
+    assert [(h.rule_id, h.hard) for h in v.hits] == [(rid, hard)]
+    assert v.hits[0].reason == f"rule {rid} took too long to check, so it {word}"
+    assert v.decision == ("deny" if hard else "approve")
+
+
+def test_p11_a_slow_repo_rule_listed_first_does_not_relax_an_org_never_rule(env):
+    rules_ = [crule("repo.slow", "(a+)+$", "never", "regex"), crule("repo.slow2", "(a+)+$", "confirm", "regex"),
+              crule("org.drop", r"drop\s+table", "never", "regex")]
+    v = bash(env, "psql -h localhost -c 'drop table x'; " + SLOW_CMD, custom_rules=rules_)
+    assert v.decision == "deny" and ("org.drop", True) in [(h.rule_id, h.hard) for h in v.hits], v
+
+
+def test_p11_padding_against_several_org_never_rules_still_denies(env):
+    rules_ = [crule(f"org.n{i}", rf"\bterraform\s+destroy{i}\b", "never", "regex") for i in range(10)]
+    rules_.append(crule("org.force", r"git\s+push\s+--force", "never", "regex"))
+    cmd = "git push --force origin feature # " + "terraform " * 100_000
+    t0 = time.monotonic()
+    v = bash(env, cmd, custom_rules=rules_)
+    assert v.decision == "deny" and any(h.hard and h.rule_id.startswith("org.") for h in v.hits), v
+    assert time.monotonic() - t0 < 10
+
+
+P12_SPELLINGS = ["git  push", "git\tpush", "git \\\n push", "g\\it push", '"git" push', "'git' push", "g''it push",
+                 "$'git' push", "\\git push", "command git push", "env git push", "sudo git push",
+                 "bash -c 'git push'", "sh -c \"g''it push\"", "echo ok && 'git' push origin x",
+                 "x=$('git' push)"]
+
+
+@pytest.mark.parametrize("cmd", P12_SPELLINGS)
+@pytest.mark.parametrize("match,pattern", [("text", "git push"), ("regex", r"^git\s+push\b")])
+def test_p12_never_rules_see_through_shell_spelling(env, cmd, match, pattern):
+    v = bash(env, cmd, custom_rules=[crule("org.push", pattern, "never", match)])
+    assert v.decision == "deny" and "org.push" in hard_ids(v), v
+
+
+@pytest.mark.parametrize("cmd", ["git pull", "echo 'git push'", "echo git && push", "grep -r 'git push' ."])
+def test_p12_regex_on_argv_does_not_hit_other_commands(env, cmd):
+    v = bash(env, cmd, custom_rules=[crule("org.push", r"^git\s+push\b", "never", "regex")])
+    assert "org.push" not in ids(v), v
+
+
+def test_p12_file_tools_match_raw_normalised_and_real_paths(env, tmp_path):
+    rules_ = [crule("org.etc", r"^Write /etc/", "never", "regex"),
+              crule("org.real", "Write {}/target/".format(os.path.realpath(tmp_path)), "never")]
+    for p in ("/etc/hosts", "//etc/hosts", "/./etc/hosts", "/tmp/../etc/hosts"):
+        assert tool(env, "Write", {"file_path": p, "content": "x"}, custom_rules=rules_).decision == "deny", p
+    (tmp_path / "target").mkdir()
+    (tmp_path / "link").symlink_to(tmp_path / "target")
+    v = tool(env, "Write", {"file_path": str(tmp_path / "link" / "f.txt"), "content": "x"}, custom_rules=rules_)
+    assert ids(v) == {"org.real"} and v.decision == "deny", v
+    v = tool(env, "Write", {"file_path": "../proj/../../work/proj/f.txt", "content": "x"},
+             custom_rules=[crule("org.f", "Write {}/f.txt".format(env.P), "never")])
+    assert v.decision == "deny", v
+
+
+def test_p12_mcp_matches_json_and_forge_values(env):
+    pol = dict(mcp_tools={"mcp__pg__query": "auto_approve"})
+    rules_ = [crule("org.q", 'DROP TABLE "users"', "never"), crule("org.nl", "delete from users", "never")]
+    v = tool(env, "mcp__pg__query", {"sql": 'DROP TABLE "users"'}, custom_rules=rules_, **pol)
+    assert "org.q" in hard_ids(v), v
+    v = tool(env, "mcp__pg__query", {"sql": "delete\nfrom   users"}, custom_rules=rules_, **pol)
+    assert "org.nl" in hard_ids(v), v
+    v = tool(env, "mcp__pg__query", {"sql": "select 1", "note": "delete"}, custom_rules=rules_, **pol)
+    assert v.decision == "allow", v
+
+
+@pytest.mark.parametrize("name,inp", [
+    ("Write", {"file_path": "{P}/.claude-orchestrator/rules.md", "content": "## Never\n"}),
+    ("Edit", {"file_path": "{P}/.claude-orchestrator/rules.md", "old_string": "a", "new_string": "b"}),
+    ("Write", {"file_path": "{P}/.Claude-Orchestrator/new.md", "content": "x"}),
+    ("MultiEdit", {"file_path": "{P}/sub/.claude-orchestrator/rules.md", "edits": []}),
+])
+def test_p13_repo_rules_file_is_agent_config(env, name, inp):
+    v = tool(env, name, inp)
+    assert v.decision == "approve" and ids(v) == {"agent-config"}, v
+
+
+@pytest.mark.parametrize("cmd", [
+    "echo '- `x`' >> .claude-orchestrator/rules.md", "printf x > {P}/.claude-orchestrator/rules.md",
+    "tee .claude-orchestrator/rules.md < /dev/null", "cp /tmp/evil.md .claude-orchestrator/rules.md",
+    "mv /tmp/evil .claude-orchestrator", "sed -i 's/Never/x/' .claude-orchestrator/rules.md",
+    "rm .claude-orchestrator/rules.md", "rm -rf .claude-orchestrator",
+    "git checkout HEAD~1 -- .claude-orchestrator/rules.md",
+])
+def test_p13_shell_writes_into_the_rules_dir_are_agent_config(env, cmd):
+    v = bash(env, cmd)
+    assert v.decision == "approve" and "agent-config" in ids(v), v
+
+
+@pytest.mark.parametrize("cmd", ["cat .claude-orchestrator/rules.md", "grep -r Never .claude-orchestrator",
+                                 "rm -rf build/*", "echo x > notes.md"])
+def test_p13_reads_stay_free(env, cmd):
+    assert "agent-config" not in ids(bash(env, cmd))
