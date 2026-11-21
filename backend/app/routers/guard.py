@@ -65,6 +65,7 @@ stops at its own deadline, so a later approval could land on a call that was
 already denied.
 """
 
+import asyncio
 import json
 import re
 from datetime import datetime, timedelta, timezone
@@ -543,6 +544,18 @@ async def report(request: Request, rec: dict = Body(...)):
 RULES_PER_SCOPE = guard_custom.RULES_PER_SCOPE
 RULE_SCOPES = ("org", "project")
 DEV_PATTERNS_MAX = 200
+# Control characters (incl. NUL, tab and newline) are refused, not cleaned: a
+# pattern or reason is one line of text (a regex can say \s or \n).
+_CONTROL = re.compile("[\x00-\x1f\x7f-\x9f]")
+# The cap is counted and the row added under this lock (one server process)
+# and, on Postgres, a transaction advisory lock per scope (fix round 1, M8).
+_RULE_WRITE_LOCK = asyncio.Lock()
+
+
+def _no_control(field: str, value: str | None) -> None:
+    if value is not None and _CONTROL.search(value):
+        raise HTTPException(400, f"the {field} contains a control character (tab, newline ...); "
+                                 "patterns and reasons are one line of text")
 
 
 def _person(p) -> None:
@@ -655,29 +668,39 @@ async def create_rule(body: RuleIn, request: Request):
     project_id = body.project_id if body.scope == "project" else None
     async with SessionLocal() as s:
         await _may_write_rule(s, p, body.scope, project_id)
+        for field, value in (("pattern", body.pattern), ("reason", body.reason), ("name", body.name)):
+            _no_control(field, value)
         _check_rule(body.kind, body.match, body.pattern)
-        reason = guard_custom.clean_reason(body.reason)
-        same = _same_scope(body.scope, project_id)
-        count = (await s.execute(select(func.count(ActionRule.id)).where(same))).scalar_one()
-        if count >= RULES_PER_SCOPE:
-            raise HTTPException(409, f"at most {RULES_PER_SCOPE} rules per scope")
-        taken = set((await s.execute(select(ActionRule.slug).where(same))).scalars())
-        name = guard_custom.clean_reason(body.name) if body.name else ""
-        now = _now()
-        rule = ActionRule(
-            scope=body.scope, project_id=project_id,
-            slug=guard_custom.unique_slug(name or reason or body.pattern, taken),
-            kind=body.kind, match=body.match, pattern=body.pattern, reason=reason, enabled=body.enabled,
-            created_by=p.user.id, created_at=now, updated_at=now,
-        )
-        s.add(rule)
-        try:
-            await s.commit()
-        except IntegrityError:
-            await s.rollback()
-            raise HTTPException(409, "a rule with this name was just added; try again")
-        await s.refresh(rule)
-        return _rule_out(rule)
+        await s.rollback()  # the counted read below starts a fresh transaction, under the locks
+        async with _RULE_WRITE_LOCK:
+            return await _insert_rule(s, p, body, project_id)
+
+
+async def _insert_rule(s, p, body: RuleIn, project_id: str | None) -> RuleOut:
+    if s.get_bind().dialect.name == "postgresql":
+        await s.execute(select(func.pg_advisory_xact_lock(func.hashtext(f"co-rules:{body.scope}:{project_id}"))))
+    reason = guard_custom.clean_reason(body.reason)
+    same = _same_scope(body.scope, project_id)
+    count = (await s.execute(select(func.count(ActionRule.id)).where(same))).scalar_one()
+    if count >= RULES_PER_SCOPE:
+        raise HTTPException(409, f"at most {RULES_PER_SCOPE} rules per scope")
+    taken = set((await s.execute(select(ActionRule.slug).where(same))).scalars())
+    name = guard_custom.clean_reason(body.name) if body.name else ""
+    now = _now()
+    rule = ActionRule(
+        scope=body.scope, project_id=project_id,
+        slug=guard_custom.unique_slug(name or reason or body.pattern, taken),
+        kind=body.kind, match=body.match, pattern=body.pattern, reason=reason, enabled=body.enabled,
+        created_by=p.user.id, created_at=now, updated_at=now,
+    )
+    s.add(rule)
+    try:
+        await s.commit()
+    except IntegrityError:
+        await s.rollback()
+        raise HTTPException(409, "a rule with this name was just added; try again")
+    await s.refresh(rule)
+    return _rule_out(rule)
 
 
 async def _rule_for_write(s, p, rule_id: str) -> ActionRule:
@@ -695,6 +718,8 @@ async def update_rule(rule_id: str, body: RulePatch, request: Request):
     async with SessionLocal() as s:
         rule = await _rule_for_write(s, p, rule_id)
         data = {k: v for k, v in body.model_dump(exclude_unset=True).items() if v is not None}
+        for field in ("pattern", "reason"):
+            _no_control(field, data.get(field))
         kind, match, pattern = data.get("kind", rule.kind), data.get("match", rule.match), data.get(
             "pattern", rule.pattern)
         _check_rule(kind, match, pattern)

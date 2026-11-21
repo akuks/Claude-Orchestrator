@@ -2,6 +2,7 @@ import asyncio
 import json
 import os
 import re
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -67,6 +68,7 @@ TRUST_VALUES = ("own", "external")
 ON_NO_ANSWER_VALUES = ("deny", "deny_and_resume")
 READONLY_MAX = 50
 REFERENCES_MAX = 20
+IMPORT_TRUST_BUDGET = 30  # seconds of trust checks per import; later folders get R_TIME_LIMIT
 _NULL_MEANS_LEAVE = ("name", "guard_enabled", "approval_wait_seconds", "trust", "quarantine", "on_no_answer",
                      "readonly_paths", "reference_project_ids")
 
@@ -106,50 +108,77 @@ def _covers(folder: str, path: str) -> bool:
     return f == "/" or x == f or x.startswith(f.rstrip("/") + "/")
 
 
-def _readonly_paths(entries: list, directory: str) -> list[dict]:
-    """Validated readonly_paths, stored as given ({path, reason}). A relative
-    path resolves against the project folder (as the hook does); neither its
-    normalised nor its real form may be /, home or above it, or the project
-    folder or above it (that would block every change)."""
-    if len(entries) > READONLY_MAX:
-        raise HTTPException(400, f"at most {READONLY_MAX} read-only paths")
+_CONTROL = re.compile("[\x00-\x1f\x7f-\x9f]")
+_PROJECT_ID = re.compile(r"[0-9a-f]{32}")
+
+
+def _root_problem(full: str, directory: str) -> str | None:
+    """Why `full` (absolute) cannot be a read-only root of the project in
+    `directory`, checked in normalised and real form: /, home or above it, or
+    the project folder or above it (every change would be blocked)."""
     home = os.path.normpath(str(Path.home()))
     homes = {home, os.path.realpath(home)}
     projects = {os.path.normpath(directory), os.path.realpath(directory)}
+    for form in {os.path.normpath(full), os.path.realpath(full)}:
+        if form in ("/", "//") or any(_covers(form, h) for h in homes):
+            return "is / or your home folder or above it"
+        if any(_covers(form, d) for d in projects):
+            return "is the project folder or above it; every change would be blocked"
+    return None
+
+
+def _readonly_paths(entries: list, directory: str) -> list[dict]:
+    """Validated readonly_paths, stored as given ({path, reason}). A relative
+    path resolves against the project folder (as the hook does). Entries are
+    ReadonlyPathIn objects or stored dicts (re-checked when the folder moves)."""
+    if len(entries) > READONLY_MAX:
+        raise HTTPException(400, f"at most {READONLY_MAX} read-only paths")
     out, seen = [], set()
     for e in entries:
-        raw = e.path.strip()
+        path = e.get("path") if isinstance(e, dict) else e.path
+        reason = e.get("reason") if isinstance(e, dict) else e.reason
+        raw = (path if isinstance(path, str) else "").strip()
         if not raw:
             raise HTTPException(400, "a read-only path is empty")
-        if "\x00" in raw:
-            raise HTTPException(400, "a read-only path contains a NUL character")
+        if _CONTROL.search(raw):
+            raise HTTPException(400, "a read-only path contains a control character")
+        if reason is not None and _CONTROL.search(str(reason)):
+            raise HTTPException(400, f"the reason for read-only path {raw!r} contains a control character")
         if raw.startswith("~"):
             raise HTTPException(400, f"write the read-only path {raw!r} in full (no ~)")
         full = raw if os.path.isabs(raw) else os.path.join(directory, raw)
-        for form in {os.path.normpath(full), os.path.realpath(full)}:
-            if form in ("/", "//") or any(_covers(form, h) for h in homes):
-                raise HTTPException(400, f"read-only path {raw!r} is / or your home folder or above it")
-            if any(_covers(form, d) for d in projects):
-                raise HTTPException(
-                    400, f"read-only path {raw!r} is the project folder or above it; every change would be blocked")
+        why = _root_problem(full, directory)
+        if why:
+            raise HTTPException(400, f"read-only path {raw!r} {why}")
         if raw in seen:
             continue
         seen.add(raw)
-        out.append({"path": raw, "reason": guard_custom.clean_reason(e.reason)})
+        out.append({"path": raw, "reason": guard_custom.clean_reason(reason)})
     return out
 
 
-async def _reference_ids(s, principal, project_id: str, ids: list[str]) -> list[str]:
+async def _reference_ids(s, principal, project_id: str, ids: list[str], directory: str,
+                         *, check_access: bool = True) -> list[str]:
     """Other projects the editor can see (an unknown and an invisible id get
-    the same answer)."""
+    the same answer), whose folders pass the read-only root checks against
+    this project's `directory`. check_access=False (the folder moved; the ids
+    are stored ones): only the folder checks, and ids gone since are skipped."""
     out = list(dict.fromkeys(ids))
     if len(out) > REFERENCES_MAX:
         raise HTTPException(400, f"at most {REFERENCES_MAX} reference projects")
     for rid in out:
+        if not isinstance(rid, str) or not _PROJECT_ID.fullmatch(rid):
+            raise HTTPException(400, f"{str(rid)[:80]!r} is not a project id")
         if rid == project_id:
             raise HTTPException(400, "a project cannot reference itself")
-        if await s.get(Project, rid) is None or await project_role(s, principal, rid) is None:
+        ref = await s.get(Project, rid)
+        if check_access and (ref is None or await project_role(s, principal, rid) is None):
             raise HTTPException(400, f"unknown project: {rid}")
+        if ref is None:
+            continue
+        why = _root_problem(ref.directory, directory)
+        if why:
+            raise HTTPException(400, f"reference project {ref.name!r}: its folder {why}")
     return out
 
 
@@ -372,6 +401,7 @@ async def import_projects(payload: ImportRequest, request: Request):
     reasons: dict[str, str] = {}
     async with SessionLocal() as s:
         emails = await _member_emails(s)
+        trust_started = time.monotonic()
         rows = (await s.execute(select(Project))).scalars().all()
         existing_dirs = {os.path.normpath(p.directory) for p in rows}
         existing_slugs = {p.slug for p in rows}
@@ -388,7 +418,10 @@ async def import_projects(payload: ImportRequest, request: Request):
             while slug in existing_slugs:
                 slug = f"{base}-{i}"
                 i += 1
-            trust, reasons[d] = await _suggest_trust(d, emails)
+            if time.monotonic() - trust_started >= IMPORT_TRUST_BUDGET:
+                trust, reasons[d] = "external", guard_trust.R_TIME_LIMIT
+            else:  # each check is bounded by trust.GIT_TIMEOUT (5 s)
+                trust, reasons[d] = await _suggest_trust(d, emails)
             project = Project(
                 name=name,
                 slug=slug,
@@ -464,12 +497,21 @@ async def update_project(project_id: str, payload: ProjectUpdate, request: Reque
                 d.mkdir(parents=True, exist_ok=True)
             except OSError as exc:
                 raise HTTPException(400, f"Could not access directory: {exc}")
+            dir_changed = str(d.resolve()) != project.directory
             project.directory = str(d.resolve())
+        else:
+            dir_changed = False
+        # A moved folder re-checks the stored paths and references (M3).
         if "readonly_paths" in data:
             data["readonly_paths"] = _readonly_paths(payload.readonly_paths, project.directory)
+        elif dir_changed:
+            _readonly_paths(list(project.readonly_paths or []), project.directory)
         if "reference_project_ids" in data:
             data["reference_project_ids"] = await _reference_ids(
-                s, principal, project_id, data["reference_project_ids"])
+                s, principal, project_id, data["reference_project_ids"], project.directory)
+        elif dir_changed:
+            await _reference_ids(s, principal, project_id, list(project.reference_project_ids or []),
+                                 project.directory, check_access=False)
         if data.get("name") and data["name"] != project.name:
             # Project-scoped MCP servers reference the project by name; carry
             # them along so runtime matching and visibility follow the rename.
