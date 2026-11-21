@@ -275,6 +275,9 @@ class Stage:
     index: int = 0
     depth: int = 0  # open compound commands (if/while/for/case/{ ...) after this stage's words
     low: int = 0  # fewest open compound commands since the previous stage (a group closed in between)
+    sub: int = 0  # open ( ) subshells where this stage starts (Ruling P16: a cd inside does not leak out)
+    plow: int = 0  # fewest open ( ) subshells since the previous stage started (one closed in between)
+    rdepth: dict = field(default_factory=dict)  # redirect index -> open ( ) subshells when it was read
 
     def mark(self, reason):
         self.uncertain = True
@@ -790,6 +793,7 @@ class _Level:
         self.stage = self._new_stage()
         self.pending = None
         self.parens = 0
+        self.pmin = 0  # fewest open ( ) since the current stage started
         self.heredocs = []
         self.case_depth = 0
         self.compound = 0  # open if/while/for/case/{ ... (assignments there are not straight-line)
@@ -807,6 +811,7 @@ class _Level:
         st._procsub = {}  # word text -> ParseResult of a <( ) / >( ) word
         st._rdyn = set()  # redirect targets that are not literal
         st._fdx = set()  # indexes of input redirects on an fd other than 0 (3<<< x is not stdin)
+        st._sub = None  # ( ) depth at the stage's first word
         return st
 
     def _reset_word(self):
@@ -816,7 +821,15 @@ class _Level:
         self.dyn = False
 
     # -- words ---------------------------------------------------------------
+    def _start(self):
+        st = self.stage
+        if st._sub is None:
+            st._sub = self.parens
+            st.plow = min(self.pmin, self.parens)
+            self.pmin = self.parens
+
     def add(self, text, quoted=False, dyn=False):
+        self._start()
         self.dangling = False
         self.buf.append(text)
         if not quoted:
@@ -865,6 +878,7 @@ class _Level:
             dyn = True
         if self.pending:
             self.stage.redirects.append((self.pending, text))
+            self.stage.rdepth[len(self.stage.redirects) - 1] = self.parens
             self._note_fd()
             if dyn:
                 self.stage._rdyn.add(text)
@@ -935,6 +949,8 @@ class _Level:
             st.index = len(self.pipeline)
             st.depth = self.compound
             st.low = min(self.low, self.compound)
+            self._start()
+            st.sub = st._sub
             self.low = self.compound
             self.pipeline.append(st)
             self.result.append(st)
@@ -1870,9 +1886,10 @@ def _lex(s, start, nested, ctx, vars_):
             i += 1
             continue
         if c == ")":
+            lv.end_word()  # a redirect target ending here belongs inside the group
             if lv.parens:
                 lv.parens -= 1
-            lv.end_word()
+                lv.pmin = min(lv.pmin, lv.parens)
             i += 1
             continue
         if c in _WS:
