@@ -7,6 +7,7 @@ import {
   HomeOutlined,
   SafetyCertificateOutlined,
   SafetyOutlined,
+  SecurityScanOutlined,
   TeamOutlined,
   UnorderedListOutlined,
   UserOutlined,
@@ -25,6 +26,7 @@ const ICONS = {
   mcp: <ApiOutlined />,
   users: <UserOutlined />,
   teams: <TeamOutlined />,
+  guard: <SecurityScanOutlined />,
 }
 
 // Pages without their own rail item light up their parent.

@@ -203,8 +203,25 @@ export const api = {
   // Every request of one task (run log enrichment).
   taskActionApprovals: (taskId) => req('GET', `/guard/approvals${qs({ task_id: taskId, status: 'all' })}`),
   getActionApproval: (id) => req('GET', `/guard/approvals/${encodeURIComponent(id)}`),
-  approveAction: (id) => req('POST', `/guard/approvals/${encodeURIComponent(id)}/approve`),
+  // scope: "once" (this call) | "run" (these rules, this thread, 12 h).
+  approveAction: (id, scope = 'once') =>
+    req('POST', `/guard/approvals/${encodeURIComponent(id)}/approve`, { scope }),
   rejectAction: (id, reason) => req('POST', `/guard/approvals/${encodeURIComponent(id)}/reject`, { reason: reason || null }),
+
+  // Run grants (approve-for-this-run); without rootId: every grant the viewer can see.
+  listGrants: (rootId) => req('GET', `/guard/grants${qs({ root_id: rootId })}`),
+  revokeGrant: (id) => req('POST', `/guard/grants/${encodeURIComponent(id)}/revoke`),
+
+  // ---- co-guard action policy (Phase 2) ----
+  // Org rules, or a project's rules with projectId.
+  listGuardRules: (projectId) => req('GET', `/guard/rules${qs({ project_id: projectId })}`),
+  createGuardRule: (payload) => req('POST', '/guard/rules', payload),
+  updateGuardRule: (id, payload) => req('PATCH', `/guard/rules/${encodeURIComponent(id)}`, payload),
+  deleteGuardRule: (id) => req('DELETE', `/guard/rules/${encodeURIComponent(id)}`),
+  guardBuiltins: () => req('GET', '/guard/builtins'),
+  guardOrgSettings: () => req('GET', '/guard/org-settings'),
+  saveGuardOrgSettings: (payload) => req('PUT', '/guard/org-settings', payload),
+  projectRulesFile: (id) => req('GET', `/projects/${encodeURIComponent(id)}/guard/rules-file`),
 
   streamUrl: (id, lastSeq = 0) => {
     const proto = window.location.protocol === 'https:' ? 'wss' : 'ws'

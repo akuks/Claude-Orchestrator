@@ -51,7 +51,7 @@ describe('parseHash', () => {
 
   it('knows every page in the route list', () => {
     expect(PAGES).toEqual([
-      'home', 'tasks', 'runs', 'projects', 'automation', 'approvals', 'mcp', 'usage', 'security', 'users', 'teams',
+      'home', 'tasks', 'runs', 'projects', 'automation', 'approvals', 'mcp', 'usage', 'security', 'users', 'teams', 'guard',
     ])
   })
 })
@@ -187,6 +187,8 @@ describe('redirectIfForbidden', () => {
     expect(nav).toHaveBeenCalledWith({ page: 'home' }, { replace: true })
     redirectIfForbidden({ page: 'teams' }, false, nav)
     expect(nav).toHaveBeenCalledTimes(2)
+    redirectIfForbidden({ page: 'guard' }, false, nav) // Settings → Agent guard
+    expect(nav).toHaveBeenCalledTimes(3)
   })
 
   it('leaves admins and ordinary pages alone', () => {

@@ -13,6 +13,7 @@ export const NAV_PAGES = [
   { page: 'mcp', label: 'MCP Servers', keywords: 'mcp' },
   { page: 'users', label: 'Users', adminOnly: true },
   { page: 'teams', label: 'Teams', adminOnly: true },
+  { page: 'guard', label: 'Agent guard', keywords: 'settings co-guard rules policy built-in dev database', adminOnly: true },
 ]
 
 export function visiblePages(isAdmin) {

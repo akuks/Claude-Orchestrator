@@ -130,3 +130,16 @@ describe('runs and credentials in the palette', () => {
     expect(buildCommands({ actions: actions() }).some((x) => x.id === 'action:credentials')).toBe(false)
   })
 })
+
+describe('Agent guard page (Phase 2)', () => {
+  it('is in the palette for admins only and opens #/guard', () => {
+    const nav = vi.fn()
+    const admin = buildCommands({ isAdmin: true, actions: { navigate: nav } })
+    const hit = searchCommands(admin, 'agent guard')[0]
+    expect(hit.id).toBe('page:guard')
+    hit.run()
+    expect(nav).toHaveBeenLastCalledWith({ page: 'guard' })
+    expect(searchCommands(admin, 'policy rules').map((c) => c.id)).toContain('page:guard')
+    expect(buildCommands({ isAdmin: false, actions: { navigate: nav } }).map((c) => c.id)).not.toContain('page:guard')
+  })
+})
