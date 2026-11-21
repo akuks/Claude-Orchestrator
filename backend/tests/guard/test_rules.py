@@ -2567,3 +2567,59 @@ def test_fix2_free(env, cmd):
 
 def test_fix2_exec_stdin_does_not_leak(env):
     assert not db_hits(bash(env, "psql -h prod"))
+
+
+# ===========================================================================
+# Task 1 fix round 3
+# ===========================================================================
+FIX3_HELD = [
+    ('sqlite3 app.db ".  shell rm -rf ~"', "rm-rf-outside"),
+    ('sqlite3 app.db ". sh rm -rf ~"', "rm-rf-outside"),
+    ("sqlcmd -S localhost <<'EOF'\n:!! rm -rf ~\nGO\nEOF", "rm-rf-outside"),
+    ('sqlcmd -S localhost -Q ":!! rm -rf ~"', "rm-rf-outside"),
+    ("sqlcmd -S localhost <<'EOF'\n:connect prod\nINSERT INTO t VALUES(1)\nGO\nEOF", "db-write"),
+    ('sqlcmd -S prod -Q ":r x.sql"', "db-write"),
+    ('sqlcmd -S prod -Q "COMMIT INSERT INTO t VALUES(1)"', "db-write"),
+    ('sqlcmd -S prod -Q "FETCH NEXT FROM c INSERT INTO t VALUES(1)"', "db-write"),
+    ("mongosh --nodb --eval \"require('child_process').execSync('rm -rf ~')\"", "uncertain-command"),
+    ("sqlite3 app.db \"select edit('x', 'rm -rf ~')\"", "uncertain-command"),
+    ("mysql --loose-login_path=prod -e 'insert into t values(1)'", "db-write"),
+    ('psql -h localhost -o .git/hooks/pre-commit -c "select 1"', "git-internals"),
+    ('psql -h localhost -c "\\\\o .git/hooks/pre-commit" -c "select 1"', "git-internals"),
+    ("psql -h localhost -c \"\\\\copy (select 'x') to '.claude/settings.json'\"", "agent-config"),
+    ("psql -h localhost -c \"COPY t TO '.env'\"", "secret-files"),
+    ('sqlite3 app.db ".output .git/hooks/pre-commit" "select 1"', "git-internals"),
+    ('sqlite3 app.db ".once .mcp.json" "select 1"', "agent-config"),
+    ("sqlite3 app.db \"vacuum into '.git/hooks/post-merge'\"", "git-internals"),
+    ('mysql -h localhost -e "tee .git/hooks/pre-commit; select 1"', "git-internals"),
+    ('mysql -h localhost --tee=.env -e "select 1"', "secret-files"),
+    ("mysql -h localhost -e \"SELECT 'x' INTO OUTFILE '.git/hooks/pre-commit'\"", "git-internals"),
+    ('sqlcmd -S localhost -Q ":out .claude/settings.json"', "agent-config"),
+    ('sqlcmd -S localhost -o .env -Q "select 1"', "secret-files"),
+]
+
+
+@pytest.mark.parametrize("cmd,rule", FIX3_HELD)
+def test_fix3_held(env, cmd, rule):
+    v = bash(env, cmd)
+    assert v.decision != "allow", v
+    assert rule in ids(v), v
+
+
+def test_fix3_client_output_into_guard_files_is_self_protect(env):
+    v = bash(env, "psql -h localhost -o {T}/policy.json -c 'select 1'")
+    assert v.decision == "deny" and "self-protect" in hard_ids(v), v
+
+
+@pytest.mark.parametrize("cmd", [
+    'psql -h localhost -o out.txt -c "select 1"', 'sqlite3 app.db ".output out.csv" "select 1"',
+    'mysql -h prod -e "USE app"', 'psql -h prod -c "SET search_path TO app"', "op run -- psql -c 'select 1'",
+])
+def test_fix3_free(env, cmd):
+    v = bash(env, cmd)
+    assert v.decision == "allow", v
+
+
+def test_fix3_server_side_copy_is_not_a_local_file(env):
+    v = bash(env, "psql -h prod -c \"COPY t TO '.env'\"")  # written on the server
+    assert ids(v) == {"db-write"}, v

@@ -945,3 +945,82 @@ def test_fix2_pg_dollar_belt_holds_write_words_in_dollar_bodies():
     assert db.sql_destructive("select $$DROP TABLE x$$", "pg")
     assert db.sql_writes("select $$insert into t$$", "pg")
     assert not db.sql_writes("select $$x$$", "pg")
+
+
+# ===========================================================================
+# Task 1 fix round 3
+# ===========================================================================
+@pytest.mark.parametrize("argv,cmd", [
+    (["sqlite3", "app.db", ".  shell rm -rf ~"], "rm -rf ~"),
+    (["sqlite3", "app.db", ". sh rm -rf ~"], "rm -rf ~"),
+    (["sqlite3", "app.db", ".SHELL rm -rf ~"], "rm -rf ~"),
+    (["sqlcmd", "-S", "localhost", "-Q", ":!! rm -rf ~"], "rm -rf ~"),
+    (["sqlcmd", "-S", "localhost", "-Q", "!! rm -rf ~"], "rm -rf ~"),
+])
+def test_fix3_escapes(argv, cmd):
+    assert cmd in cf(argv).shell
+
+
+def test_fix3_sqlcmd_heredoc_escape():
+    assert "rm -rf ~" in cf(["sqlcmd", "-S", "localhost"], stdin="literal", feed=":!! rm -rf ~\nGO\n").shell
+
+
+@pytest.mark.parametrize("argv,kw", [
+    (["sqlcmd", "-S", "localhost"], {"stdin": "literal", "feed": ":connect prod\nINSERT INTO t VALUES(1)\nGO"}),
+    (["sqlcmd", "-S", "localhost", "-Q", ":setvar SQLCMDSERVER prod\nINSERT INTO t VALUES(1)"], {}),
+    (["sqlcmd", "-S", "prod", "-Q", ":r x.sql"], {}),
+    (["sqlcmd", "-S", "prod", "-Q", "COMMIT INSERT INTO t VALUES(1)"], {}),
+    (["sqlcmd", "-S", "prod", "-Q", "FETCH NEXT FROM c INSERT INTO t VALUES(1)"], {}),
+    (["mysql", "--loose-login_path=prod", "-e", "insert into t values(1)"], {}),
+    (["mysql", "--login_path=prod", "-e", "insert into t values(1)"], {}),
+    (["mysql", "-h", "prod", "--init_command=insert into t values(1)"], {}),
+])
+def test_fix3_writes(argv, kw):
+    assert cf(argv, **kw).write
+
+
+@pytest.mark.parametrize("argv", [
+    ["mongosh", "--nodb", "--eval", "require('child_process').execSync('rm -rf ~')"],
+    ["mongosh", "--eval", "process.exit(1)"],
+    ["mongosh", "--eval", "const cp = await import('node:child_process')"],
+    ["sqlite3", "app.db", "select edit('x', 'rm -rf ~')"],
+    ["sqlcmd", "-S", "localhost", "-Q", ":ed"],
+])
+def test_fix3_uncertain(argv):
+    assert cf(argv).uncertain
+
+
+@pytest.mark.parametrize("argv,path", [
+    (["psql", "-h", "localhost", "-o", ".git/hooks/pre-commit", "-c", "select 1"], ".git/hooks/pre-commit"),
+    (["psql", "-h", "localhost", "-L", "x.log", "-c", "select 1"], "x.log"),
+    (["psql", "-h", "prod", "--output=out.txt", "-c", "select 1"], "out.txt"),
+    (["psql", "-h", "localhost", "-c", "\\o .git/hooks/pre-commit"], ".git/hooks/pre-commit"),
+    (["psql", "-h", "localhost", "-c", "\\w q.sql"], "q.sql"),
+    (["psql", "-h", "localhost", "-c", "select 1 \\g 'out.txt'"], "out.txt"),
+    (["psql", "-h", "prod", "-c", "\\copy (select 'x') to '.claude/settings.json'"], ".claude/settings.json"),
+    (["psql", "-h", "localhost", "-c", "COPY t TO '/tmp/x.csv'"], "/tmp/x.csv"),
+    (["sqlite3", "app.db", ".output .git/hooks/pre-commit"], ".git/hooks/pre-commit"),
+    (["sqlite3", "app.db", ".once out.txt"], "out.txt"),
+    (["sqlite3", "app.db", ".save copy.db"], "copy.db"),
+    (["sqlite3", "app.db", ".backup main bak.db"], "bak.db"),
+    (["sqlite3", "app.db", "vacuum into '.env'"], ".env"),
+    (["sqlite3", "app.db", "attach '.git/hooks/x' as h"], ".git/hooks/x"),
+    (["mysql", "-h", "localhost", "-e", "tee .git/hooks/pre-commit; select 1"], ".git/hooks/pre-commit"),
+    (["mysql", "-h", "localhost", "-e", "\\T out.log"], "out.log"),
+    (["mysql", "-h", "localhost", "--tee=out.log", "-e", "select 1"], "out.log"),
+    (["mysql", "-h", "localhost", "-e", "SELECT * FROM t INTO OUTFILE '/tmp/x'"], "/tmp/x"),
+    (["sqlcmd", "-S", "localhost", "-Q", ":out .env"], ".env"),
+    (["sqlcmd", "-S", "localhost", "-o", "out.txt", "-Q", "select 1"], "out.txt"),
+])
+def test_fix3_outputs(argv, path):
+    assert path in cf(argv).outputs
+
+
+@pytest.mark.parametrize("argv", [
+    ["psql", "-h", "prod", "-c", "COPY t TO '/tmp/x.csv'"],  # written on the server, not here
+    ["mysql", "-h", "prod", "-e", "SELECT * FROM t INTO OUTFILE '/tmp/x'"],
+    ["psql", "-h", "localhost", "-c", "\\copy t to stdout"], ["psql", "-h", "localhost", "-o", "|cat", "-c", "select 1"],
+    ["sqlite3", "app.db", ".tables"], ["sqlcmd", "-S", "localhost", "-Q", ":out stdout"],
+])
+def test_fix3_no_local_outputs(argv):
+    assert not cf(argv).outputs
