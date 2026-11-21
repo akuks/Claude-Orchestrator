@@ -865,7 +865,7 @@ def test_every_rule_id_is_known():
     expected = {"rm-rf-outside", "git-force-push-main", "git-reset-hard", "git-clean-fdx", "git-stash-drop",
                 "secret-files", "chmod-wide", "pipe-to-shell", "self-protect", "mcp-require-approval",
                 "mcp-block", "unparseable", "uncertain-command", "git-internals", "agent-config",
-                "unsupported-shell", "unknown-tool"}
+                "unsupported-shell", "unknown-tool", "sql-destroy", "db-write"}
     assert set(RULES) == expected
 
 
@@ -889,6 +889,7 @@ def _isolated(tmp_path):
     d.mkdir()
     shutil.copy(SHELL_PY, d / "shell.py")
     shutil.copy(RULES_PY, d / "rules.py")
+    shutil.copy(RULES_PY.with_name("dbrules.py"), d / "dbrules.py")
     return d
 
 
@@ -1942,3 +1943,291 @@ def test_tmpdir_comes_from_the_hooks_environment(tmp_path, monkeypatch):
     assert bash(e, "rm -rf $TMPDIR/x").decision == "allow"
     monkeypatch.delenv("TMPDIR")
     assert bash(e, "rm -rf $TMPDIR/x").decision == "approve"
+
+
+# ===========================================================================
+# Phase 2 Task 1: database rules (sql-destroy, db-write; forge F32/F33)
+# ===========================================================================
+def db_hits(v):
+    return ids(v) & {"sql-destroy", "db-write"}
+
+
+SQL_DESTROY_POS = [
+    'psql -c "DROP TABLE users"',
+    'mysql -e "drop database shop"',
+    'mariadb -e "drop schema s"',
+    'sqlite3 app.db "DELETE FROM sessions"',
+    'psql -c "TRUNCATE orders"',
+    'echo "DROP SCHEMA public CASCADE;" | psql mydb',
+    "printf 'truncate t' | psql",
+    'psql -c "select 1; DELETE FROM logs"',
+    'psql -h localhost -c "DELETE FROM t"',
+    'psql -c "DROP \\\nTABLE users"',
+    'psql -h localhost -d app <<EOF\nDROP \\\nTABLE users;\nEOF',
+    "psql <<'EOF'\ndrop table t;\nEOF",
+    'psql <<< "drop table x"',
+    'duckdb x.db "drop table t"',
+    'clickhouse-client --query "TRUNCATE TABLE t"',
+    'sqlcmd -Q "DROP TABLE t"',
+    'cockroach sql -e "drop database d"',
+    'bash -c "psql -c \\"drop table t\\""',
+    'echo $(psql -c "drop table t")',
+    'sudo -u postgres psql -c "drop table t"',
+    'echo "drop table t" | xargs psql -c',
+    'cd db && sqlite3 x.db "delete from t"',
+]
+SQL_DESTROY_NEG = [
+    'psql -c "DELETE FROM users WHERE id = 3"',
+    'psql -c "SELECT * FROM users"',
+    'git commit -m "drop table users from docs"',
+    'mysql -e "drop index idx on t"',
+    'psql -c "create table t(id int)"',
+    "psql -c \"select 'drop table x' -- truncate\"",
+    'echo "drop table" | grep x',
+    'echo "DROP TABLE t"',
+    'psql -f drop.sql; echo "drop table t"',
+    'git commit -F- <<EOF\nfix: DROP \\\nTABLE in docs\nEOF',
+    'mongosh app --eval "db.dropDatabase()"',
+    "psql -c 'select $$drop table x$$'",
+]
+
+
+@pytest.mark.parametrize("cmd", SQL_DESTROY_POS)
+def test_sql_destroy_bash_positive(env, cmd):
+    v = bash(env, cmd)
+    assert "sql-destroy" in ids(v), v
+    assert "db-write" not in ids(v), v  # one approval, not two
+    assert v.decision == "approve"
+    assert not hard_ids(v)
+
+
+@pytest.mark.parametrize("cmd", SQL_DESTROY_NEG)
+def test_sql_destroy_bash_negative(env, cmd):
+    assert "sql-destroy" not in ids(bash(env, cmd))
+
+
+DB_WRITE_POS = [
+    'psql -h db.prod.example.com -c "INSERT INTO users VALUES (1)"',
+    'psql postgres://app:pw@db.example.com:5432/app -c "UPDATE users SET admin = true WHERE id = 1"',
+    'mysql -h 10.0.0.5 -u root -e "ALTER TABLE orders ADD COLUMN note text"',
+    'PGHOST=prod.example.com psql -c "delete from sessions where id = 3"',
+    'echo "INSERT INTO t VALUES (1);" | psql -h prod.example.com app',
+    'psql -h $DB_HOST -c "create table x (id int)"',
+    'psql "$DATABASE_URL" -c "update t set a = 1 where id = 2"',
+    'psql -h prod.db -f x.sql',
+    'PGHOST=prod psql < x.sql',
+    "psql -h prod.example.com app <<'EOF'\ninsert into t values (1)\nEOF",
+    'psql -h prod.example.com app <<EOF\ninsert into t values ($X)\nEOF',
+    'cat migrate.sql | psql -h prod.example.com app',
+    'export PGHOST=prod.example.com; psql -c "insert into t values (1)"',
+    'export DATABASE_URL=postgres://db.example.com/app && psql "$DATABASE_URL" -c "insert into t values (1)"',
+    'PGHOST=prod.example.com; psql -c "insert into t values (1)"',
+    'env PGHOST=prod.example.com psql -c "insert into t values (1)"',
+    'PGSERVICE=prod psql -c "insert into t values (1)"',
+    'mysql --login-path=prod -e "insert into t values (1)"',
+    'sqlcmd -S prod-sql.database.windows.net -Q "UPDATE t SET a = 1 WHERE id = 2"',
+    "mongosh 'mongodb+srv://cluster0.mongodb.net/app' --eval 'db.users.insertOne({{a: 1}})'",
+    'pg_restore -h prod.example.com -d app dump.backup',
+    'redis-cli -h prod.example.com FLUSHALL',
+    'echo FLUSHALL | redis-cli -h prod.example.com',
+    'clickhouse-client -h ch.example.com --query "INSERT INTO t VALUES (1)"',
+    'duckdb md:my_db -c "insert into t values (1)"',
+    'cockroach sql --url postgresql://root@crdb.example.com:26257 -e "insert into t values (1)"',
+    'npx prisma db push',
+    'prisma migrate deploy',
+    'pnpm dlx prisma migrate reset --force',
+    'bunx prisma db push',
+    'supabase db push',
+    'supabase db reset --linked',
+    'npx supabase migration repair --status applied 1',
+    'bash -c "psql -h prod.example.com -c \\"insert into t values (1)\\""',
+    'X=$(psql -h prod.example.com -c "insert into t values (1) returning id")',
+    'ssh bastion psql -h localhost -c "insert into t values (1)"',
+    '{{ psql -h prod.example.com; }} < x.sql',
+]
+DB_WRITE_NEG = [
+    'psql "$DATABASE_URL" -c "select 1"',
+    "psql -c \"select 'drop table x' -- truncate\"",
+    'sqlite3 app.db "insert into t values (1)"',
+    'prisma migrate dev',
+    'npx prisma generate',
+    'echo "drop table" | grep x',
+    'psql -h prod.example.com -c "SELECT * FROM users"',
+    'psql -h prod.example.com -c "select 1; select 2"',
+    'mysql -h 10.0.0.5 -e "SHOW TABLES"',
+    'psql -h localhost -c "INSERT INTO t VALUES (1)"',
+    'psql -h 127.0.0.1 -c "UPDATE t SET a = 1 WHERE id = 2"',
+    'psql mydb -c "insert into t values (1)"',
+    'mysql -e "update t set a = 1 where id = 2"',
+    'echo "select 1" | psql -h prod.example.com app',
+    'psql -h prod.example.com app <<EOF\nselect 1\nEOF',
+    'export PGHOST=localhost; psql -c "insert into t values (1)"',
+    'PGHOST=prod.example.com psql -c "select 1"; psql -c "insert into t values (1)"',
+    'redis-cli -h prod.example.com GET k',
+    'mongosh app --eval "db.users.deleteMany({{a: 1}})"',
+    'supabase db reset',
+    'supabase db push --local',
+    'pg_restore -l dump.backup',
+    'git commit -m "update users set flow" && psql -h prod.example.com -c "select 1"',
+    'sqlcmd -S tcp:localhost,1433 -Q "insert into t values (1)"',
+]
+
+
+@pytest.mark.parametrize("cmd", DB_WRITE_POS)
+def test_db_write_bash_positive(env, cmd):
+    v = bash(env, cmd)
+    assert db_hits(v) == {"db-write"}, v
+    assert v.decision == "approve"
+    assert not hard_ids(v)
+
+
+@pytest.mark.parametrize("cmd", DB_WRITE_NEG)
+def test_db_write_bash_negative(env, cmd):
+    assert "db-write" not in ids(bash(env, cmd))
+
+
+# Review Focus 1, exactly
+def test_review_focus_1(env):
+    assert db_hits(bash(env, 'psql -h localhost -c "DELETE FROM t"')) == {"sql-destroy"}
+    for cmd in ['psql "$DATABASE_URL" -c "select 1"', "psql -c \"select 'drop table x' -- truncate\"",
+                'sqlite3 app.db "insert into t values (1)"', "prisma migrate dev", 'echo "drop table" | grep x']:
+        v = bash(env, cmd)
+        assert v.decision == "allow", (cmd, v)
+    for cmd in ["psql -h prod.db -f x.sql", "PGHOST=prod psql < x.sql", "npx prisma db push"]:
+        v = bash(env, cmd)
+        assert db_hits(v) == {"db-write"} and v.decision == "approve", (cmd, v)
+
+
+def test_sql_destroy_suppresses_db_write(env):
+    v = bash(env, 'psql -h db.example.com -c "TRUNCATE orders"')
+    assert db_hits(v) == {"sql-destroy"}
+    v = bash(env, 'psql -h db.example.com -c "UPDATE t SET a = 1 WHERE id = 2"')
+    assert db_hits(v) == {"db-write"}
+    v = tool(env, "mcp__claude_ai_Supabase__execute_sql", {"project_id": "p", "query": "DROP TABLE users"})
+    assert db_hits(v) == {"sql-destroy"}
+
+
+@pytest.mark.parametrize("cmd,db_dev,want", [
+    ('psql -h a.dev.internal -c "insert into t values (1)"', ["host:*.dev.internal"], set()),
+    ('psql -h prod.internal -c "insert into t values (1)"', ["host:*.dev.internal"], {"db-write"}),
+    ('PGHOST=a.dev.internal psql -h prod.internal -c "insert into t values (1)"', ["host:*.dev.internal"],
+     {"db-write"}),
+    ('psql -h a.dev.internal,prod.internal -c "insert into t values (1)"', ["host:*.dev.internal"], {"db-write"}),
+    ('psql "$DEV_DB" -c "insert into t values (1)"', ["host:*.dev.internal"], {"db-write"}),
+    ('psql -h dev.internal -c "insert into t values (1)"', ["dev.internal"], set()),
+    ('psql -h x.dev.internal -c "insert into t values (1)"', ["dev.internal"], {"db-write"}),
+    ('psql -h prod.example.com -c "insert into t values (1)"', ["mcp:prod.example.com"], {"db-write"}),
+    ('psql -h a.dev.internal -c "drop table t"', ["host:*.dev.internal"], {"sql-destroy"}),
+    ('supabase db push --db-url postgres://u@a.dev.internal/x', ["host:*.dev.internal"], set()),
+    ('psql -h a.dev.internal -c "insert into t values (1)"', "host:*.dev.internal", {"db-write"}),  # not a list
+    ('psql -h a.dev.internal -c "insert into t values (1)"', [None, 1, "host:*.dev.internal"], set()),
+])
+def test_db_dev_patterns_bash(env, cmd, db_dev, want):
+    assert db_hits(bash(env, cmd, db_dev=db_dev)) == want
+
+
+MCP_DB_POS = [
+    ("mcp__claude_ai_Supabase__execute_sql", {"project_id": "p", "query": "UPDATE users SET a = 1 WHERE id = 1"},
+     "db-write"),
+    ("mcp__claude_ai_Supabase__apply_migration", {"name": "x", "query": "create table x (id int)"}, "db-write"),
+    ("mcp__postgres__query", {"sql": "INSERT INTO t VALUES (1)"}, "db-write"),
+    ("mcp__mongodb__insert-many", {"collection": "users", "documents": [{"a": 1}]}, "db-write"),
+    ("mcp__redis__flushall", {}, "db-write"),
+    ("mcp__postgres__query", {"sql": "DROP TABLE x"}, "sql-destroy"),
+    ("mcp__db__execute", {"query": "delete from audit"}, "sql-destroy"),
+    ("mcp__claude_ai_Supabase__execute_sql", {"query": "truncate orders"}, "sql-destroy"),
+    ("mcp__pg__run", {"statement": "drop schema s cascade"}, "sql-destroy"),
+    ("mcp__mysql__query", {"sql": "select 1; delete from t"}, "sql-destroy"),
+]
+MCP_DB_NEG = [
+    ("mcp__claude_ai_Supabase__execute_sql", {"project_id": "p", "query": "SELECT * FROM users"}),
+    ("mcp__claude_ai_Supabase__list_tables", {"project_id": "p"}),
+    ("mcp__postgres__query", {"sql": "describe users"}),
+    ("mcp__github__create_issue", {"title": "x", "body": "insert into users; drop table users"}),
+    ("mcp__notes__save", {"note": "DROP TABLE users"}),
+    ("mcp__postgres__query", {"sql": "select 'drop table x' -- truncate"}),
+    ("mcp__mongodb__find", {"collection": "users"}),
+    ("mcp__redis__get", {"key": "k"}),
+    ("mcp__postgres__query", {"note": "DELETE FROM t", "sql": "select 1"}),
+    ("mcp__slack__post_message", {"text": "update users set a = 1"}),
+]
+
+
+@pytest.mark.parametrize("name,inp,rule", MCP_DB_POS)
+def test_db_rules_mcp_positive(env, name, inp, rule):
+    v = tool(env, name, inp)
+    assert db_hits(v) == {rule}, v
+    assert v.decision == "approve"
+
+
+@pytest.mark.parametrize("name,inp", MCP_DB_NEG)
+def test_db_rules_mcp_negative(env, name, inp):
+    v = tool(env, name, inp)
+    assert not db_hits(v), v
+    assert v.decision == "allow"
+
+
+@pytest.mark.parametrize("servers,db_dev,name,sql,want", [
+    ({"acme": {"name": "Acme", "environment": "prod"}}, [], "mcp__acme__run_query", "insert into t values (1)",
+     {"db-write"}),
+    ({"acme": {"name": "Acme", "environment": "dev"}}, [], "mcp__acme__run_query", "insert into t values (1)", set()),
+    ({"acme": {"name": "Acme", "environment": "dev"}}, [], "mcp__acme__run_query", "drop table t", {"sql-destroy"}),
+    ({"acme": {"name": "Acme", "environment": "unknown"}}, [], "mcp__acme__run_query", "insert into t values (1)",
+     set()),  # not a database server by name, and not marked
+    ({"postgres": {"name": "PG", "environment": "unknown"}}, [], "mcp__postgres__query", "insert into t values (1)",
+     {"db-write"}),  # unknown counts as prod
+    ({"postgres": {"name": "PG", "environment": "dev"}}, [], "mcp__postgres__query", "insert into t values (1)",
+     set()),
+    ({}, ["mcp:pg-dev*"], "mcp__pg-dev-eu__query", "insert into t values (1)", set()),
+    ({}, ["mcp:pg-dev*"], "mcp__pg-prod__query", "insert into t values (1)", {"db-write"}),
+    ({}, ["pg_dev"], "mcp__pg_dev__query", "insert into t values (1)", set()),
+    ({}, ["dev"], "mcp__pg_dev__query", "insert into t values (1)", {"db-write"}),
+    ({}, ["mcp:pg-dev*"], "mcp__pg-dev-eu__query", "truncate t", {"sql-destroy"}),
+    ("junk", [], "mcp__postgres__query", "insert into t values (1)", {"db-write"}),
+])
+def test_db_rules_mcp_environment_and_dev(env, servers, db_dev, name, sql, want):
+    v = tool(env, name, {"query": sql}, mcp_servers=servers, db_dev=db_dev)
+    assert db_hits(v) == want, v
+
+
+def test_db_rules_follow_the_guard_switch(env):
+    assert not db_hits(bash(env, 'psql -c "drop table t"', guard_enabled=False))
+    assert not db_hits(bash(env, "npx prisma db push", guard_enabled=False))
+    assert not db_hits(tool(env, "mcp__postgres__query", {"sql": "drop table t"}, guard_enabled=False))
+
+
+def test_db_rules_join_mcp_require_approval(env):
+    v = tool(env, "mcp__db__query", {"sql": "insert into t values (1)"})
+    assert ids(v) == {"mcp-require-approval", "db-write"} and v.decision == "approve"
+    v = tool(env, "mcp__db__drop_table", {"sql": "drop table t"})  # blocked: the block decides alone
+    assert ids(v) == {"mcp-block"} and v.decision == "deny"
+
+
+def test_db_hits_are_confirmable_with_forge_reasons(env):
+    v = bash(env, 'psql -h prod.example.com -c "insert into t values (1)"')
+    h = [x for x in v.hits if x.rule_id == "db-write"][0]
+    assert not h.hard and h.reason == RULES["db-write"][0] and "production database" in h.reason
+    v = bash(env, 'psql -c "drop table t"')
+    h = [x for x in v.hits if x.rule_id == "sql-destroy"][0]
+    assert not h.hard and "DROP, TRUNCATE, or DELETE without WHERE" in h.reason
+
+
+def test_db_line_env_does_not_leak_between_evaluations(env):
+    assert "db-write" in ids(bash(env, 'export PGHOST=prod.example.com; psql -c "insert into t values (1)"'))
+    assert "db-write" not in ids(bash(env, 'psql -c "insert into t values (1)"'))
+
+
+def test_no_builtin_rule_id_contains_a_dot():
+    assert not [r for r in RULES if "." in r]
+
+
+def test_standalone_db_rules(tmp_path):
+    d = _isolated(tmp_path)
+    req = {"tool_name": "Bash", "tool_input": {"command": 'psql -h prod.example.com -c "insert into t values (1)"'},
+           "policy": {"project_dir": str(tmp_path), "home": str(tmp_path / "h")}, "cwd": str(tmp_path)}
+    out = subprocess.run([sys.executable, "-I", "-S", str(d / "rules.py")], input=json.dumps(req),
+                         capture_output=True, text=True, timeout=30, cwd=str(tmp_path),
+                         env={"PATH": os.environ.get("PATH", "")})
+    assert out.returncode == 0, out.stderr
+    res = json.loads(out.stdout)
+    assert res["decision"] == "approve" and [h["rule_id"] for h in res["hits"]] == ["db-write"]
