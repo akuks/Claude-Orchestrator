@@ -268,8 +268,7 @@ def test_echoed_env_is_redacted_everywhere(client):
         assert "PROBE_SHAPED=***" in text, where
         # Non-secrets untouched.
         assert "PROBE_PROJECT_VAR=plain-visible-value" in text, where
-        # < 8 chars: not an env secret value, but a labelled TOKEN= value (final wave, forge F90b)
-        assert "PROBE_SHORT_TOKEN=***" in text, where
+        assert "PROBE_SHORT_TOKEN=short1" in text, where  # < 8 chars: kept
         assert f"PATH={os.environ['PATH']}".replace("\\", "\\\\") in text, where
     # Every output channel went through: text, tool_use, tool_result, raw log.
     types = {e.type for e in _events(done["id"])}
@@ -336,8 +335,8 @@ SHAPES = [
     ("xoxa-2-fakefake1234 and xoxr-fakefake1234", "fakefake1234"),
     ('curl -H "Authorization: Bearer eyJhbGciOi.abc.def" x', "eyJhbGciOi.abc.def"),
     ("curl -H 'Authorization: bearer abcdef123456' x", "abcdef123456"),
-    ('psql "host=db password=hunter2 user=me"', "hunter2"),
-    ("connect pwd=s3cr3t;", "s3cr3t"),
+    ('psql "host=db password=hunter2-fake user=me"', "hunter2-fake"),
+    ("connect passwd=s3cr3t-fake;", "s3cr3t-fake"),
     ("https://api.example.com/?token=abc123def&x=1", "abc123def"),
     ("https://api.example.com/v1?access_token=fakeAccess99&x=1", "fakeAccess99"),
     ("curl 'https://x/?api_key=fakekey123'", "fakekey123"),
@@ -347,6 +346,14 @@ SHAPES = [
     ("GITHUB_TOKEN=fakeghvalue123 gh pr list", "fakeghvalue123"),
     ("client_secret=fake-client-secret", "fake-client-secret"),
     ("aws_secret_access_key: fakeAwsSecretValue", "fakeAwsSecretValue"),
+    ("PGPASSWORD='s3 cr3t' psql -h db", "s3 cr3t"),
+    ('DB_PASSWORD="short" make', "short"),
+    ("mysql -u root -p'S3cretFake' db", "S3cretFake"),
+    ('mysql -u root -p"S3cret" db', "S3cret"),
+    ("tool --password FakePassword9 --user me", "FakePassword9"),
+    ("tool --api-key fake-api-key-1 run", "fake-api-key-1"),
+    ("tool --api_key 'fake key 2' run", "fake key 2"),
+    ("secret: 'a.b(c)'", "a.b(c)"),  # a quoted literal stays masked whatever it holds
     ("  api_key: fake-yaml-key", "fake-yaml-key"),
     ("accessToken: fakeCamelValue", "fakeCamelValue"),
     ("the cookie is " + FAKE_JWT + " ok", "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9"),
@@ -370,7 +377,10 @@ def test_secret_shapes_are_redacted(which, text, secret):
 @pytest.mark.parametrize("which", sorted(REDACTORS))
 def test_labels_are_kept(which):
     r = REDACTORS[which]
-    assert r("psql password=hunter2 -h db") == "psql password=*** -h db"
+    assert r("psql password=hunter2-x -h db") == "psql password=*** -h db"
+    assert r("PGPASSWORD='s3 cr3t' psql") == "PGPASSWORD='***' psql"
+    assert r("mysql -u root -p'S3cretFake' db") == "mysql -u root -p'***' db"
+    assert r("tool --password FakePassword9 x") == "tool --password *** x"
     assert r("Authorization: Bearer abcdef123456") == "Authorization: Bearer ***"
     assert r("mysql -u root -pS3cretPass mydb") == "mysql -u root -p*** mydb"
     assert r('{"password":"p4ssw0rd-json"}') == '{"password":"***"}'
@@ -392,6 +402,20 @@ ORDINARY = [
     "rule secret-files blocked it (secrets.yml)",
     "eyJ alone is not a token, nor eyJabc.def",
     "AKIA is a prefix; AKIAshort",
+    # coordinator's re-review: code and prose with secret words survive
+    "token_count: 5",
+    "token: refresh logic fixed",
+    "if token == expected:",
+    "csrf_token = request.form['x']",
+    "secret: none",
+    "token=None",
+    "no_password: true",
+    "pwd=/home/x",
+    "password: NULL, secret: False, token: true, api_key: ''",
+    "token = get_token(user)",
+    "api_key = settings.API_KEY",
+    "password=12345678901",
+    "the --password flag and --api-key - are documented",
     "skeleton sk-short",
 ]
 
