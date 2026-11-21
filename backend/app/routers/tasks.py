@@ -1,5 +1,6 @@
 import base64
 import json
+import logging
 import os
 import re
 import shutil
@@ -544,8 +545,11 @@ async def put_notes(task_id: str, request: Request):
             (tdir / "notes.stamp").touch()
         except OSError:
             pass
-    await resume_handoff.snapshot(task_id, "notes", secrets=worker._run_secrets.get(task_id),
-                                  since=worker._run_since.get(task_id))
+    try:  # the notes are saved: a failed snapshot must not turn the save into a 500 the agent retries
+        await resume_handoff.snapshot(task_id, "notes", secrets=worker._run_secrets.get(task_id),
+                                      since=worker._run_since.get(task_id))
+    except Exception:  # noqa: BLE001
+        logging.getLogger(__name__).exception("handoff snapshot after notes failed for %s", task_id)
     return out
 
 

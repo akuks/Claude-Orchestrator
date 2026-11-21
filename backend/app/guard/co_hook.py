@@ -760,7 +760,8 @@ def pre_tool_use(payload, policy, started):
     if verdict.decision == "allow":
         # a commit about to run: remind the agent to save its notes (a loose match: a quoted "git commit"
         # gets it too). Context only - never changes the decision.
-        cmd = (payload.get("tool_input") or {}).get("command") if isinstance(payload.get("tool_input"), dict) else None
+        ti = payload.get("tool_input")
+        cmd = ti.get("command") if isinstance(ti, dict) else None
         if tool in SHELL_TOOLS and policy.get("notes") is True and isinstance(cmd, str) and _COMMIT.search(cmd):
             return context_only(NOTES_LINE)
         return _emit(None)

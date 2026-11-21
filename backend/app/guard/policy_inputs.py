@@ -46,9 +46,8 @@ from datetime import datetime, timezone
 
 from ..access import project_role
 from ..auth import Principal
-from ..models import Project, User
+from ..models import GuardOrgSettings, Project, User
 from . import custom, policy_store
-from ..models import GuardOrgSettings
 from .co_hook import DATA_LINE, NOTES_AFTER_ACTS
 
 TRUST = ("own", "external")
