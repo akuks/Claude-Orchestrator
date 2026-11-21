@@ -232,7 +232,7 @@ def _repo(d: Path, *, remote=True, authors=("someone@else.example",)):
 
 def test_trust_not_a_repo(tmp_path):
     t, why = trust.suggest_trust(tmp_path, ["me@org.example"])
-    assert t == "own" and why
+    assert (t, why) == ("own", trust.R_NOT_REPO)
 
 
 def test_trust_no_remote_is_own(tmp_path):
@@ -281,7 +281,7 @@ def test_trust_git_failure_after_remote_is_external(tmp_path, monkeypatch):
     real = trust._git
 
     def failing(directory, args, deadline):
-        if args[0] != "remote":
+        if args[0] not in ("rev-parse", "remote"):
             return trust._Result(ok=False, out="", failed=True)
         return real(directory, args, deadline)
 
@@ -308,3 +308,114 @@ def test_trust_timeout_after_remote_is_external(tmp_path, monkeypatch):
 
 def test_trust_git_timeout_constant():
     assert trust.GIT_TIMEOUT == 5
+
+
+# ---- fix round 1: repo-controlled git config never runs (C1, Ruling P21), I1, I2 ---------------
+
+
+def _hostile(tmp_path, name, url, **config):
+    """A promisor (partial-clone) repo whose HEAD commit object is gone: any
+    git command that reads it lazily fetches from `url` with the repo's own
+    config (forge review C1 reproduction)."""
+    d = _repo(tmp_path / name, remote=False, authors=("a@x.example",))
+    _git(d, "remote", "add", "origin", url)
+    _git(d, "config", "extensions.partialClone", "origin")
+    _git(d, "config", "remote.origin.promisor", "true")
+    for k, v in config.items():
+        _git(d, "config", k.replace("__", "."), v)
+    head = subprocess.run(["git", "-C", str(d), "rev-parse", "HEAD"], capture_output=True, text=True).stdout.strip()
+    (d / ".git" / "objects" / head[:2] / head[2:]).unlink()
+    return d
+
+
+@pytest.mark.parametrize("variant", ["ssh", "credential-helper", "ext"])
+def test_trust_never_runs_repo_config(tmp_path, variant):
+    marker = tmp_path / "PWNED"
+    cmd = f"touch {marker}"
+    if variant == "ssh":
+        d = _hostile(tmp_path, "r", "ssh://example.invalid/x.git", core__sshCommand=f"sh -c '{cmd}' --")
+    elif variant == "credential-helper":
+        d = _hostile(tmp_path, "r", "https://example.invalid/x.git", credential__helper=f"!{cmd}; echo")
+    else:
+        d = _hostile(tmp_path, "r", f"ext::sh -c {cmd.replace(' ', '% ')}", protocol__ext__allow="always",
+                     protocol__allow="always")
+    t, _ = trust.suggest_trust(d, ["me@org.example"])
+    assert not marker.exists(), "repo-controlled git config ran"
+    assert t == "external"
+
+
+def test_trust_ignores_inherited_git_env(tmp_path, monkeypatch):
+    other = _repo(tmp_path / "other", authors=("me@org.example",))
+    d = _repo(tmp_path / "r", authors=("a@x.example",))
+    monkeypatch.setenv("GIT_DIR", str(other / ".git"))
+    monkeypatch.setenv("GIT_WORK_TREE", str(other))
+    monkeypatch.setenv("GIT_CONFIG_COUNT", "1")
+    monkeypatch.setenv("GIT_CONFIG_KEY_0", "core.sshCommand")
+    monkeypatch.setenv("GIT_CONFIG_VALUE_0", f"touch {tmp_path / 'PWNED'}")
+    assert trust.suggest_trust(d, ["me@org.example"])[0] == "external"  # d's history, not other's
+
+
+def test_trust_does_not_climb_into_a_parent_repo(tmp_path):
+    parent = _repo(tmp_path / "parent", authors=("a@x.example",))
+    child = parent / "sub"
+    child.mkdir()
+    t, why = trust.suggest_trust(child, ["me@org.example"])
+    assert t == "own" and why == trust.R_NOT_REPO
+
+
+def test_trust_git_missing_is_own(tmp_path, monkeypatch):
+    d = _repo(tmp_path / "r")
+    monkeypatch.setenv("PATH", str(tmp_path / "empty"))  # no git here
+    assert trust.suggest_trust(d, ["me@org.example"]) == ("own", trust.R_NO_GIT)
+
+
+@pytest.mark.parametrize("breakage", ["bad-config", "format-99", "garbage-git-file"])
+def test_trust_broken_repo_before_remote_is_external(tmp_path, breakage):
+    d = _repo(tmp_path / "r", authors=("me@org.example",))
+    cfg = d / ".git" / "config"
+    if breakage == "bad-config":
+        cfg.write_text(cfg.read_text() + "\n[broken\n")
+    elif breakage == "format-99":
+        _git(d, "config", "core.repositoryformatversion", "99")
+    else:
+        import shutil
+
+        shutil.rmtree(d / ".git")
+        (d / ".git").write_text("gitdir: /nonexistent/elsewhere\n")
+    t, why = trust.suggest_trust(d, ["me@org.example"])
+    assert (t, why) == ("external", trust.R_FAILED)
+
+
+def test_trust_unborn_head_with_history_is_judged_by_history(tmp_path):
+    d = _repo(tmp_path / "r", authors=("a@x.example",))
+    _git(d, "checkout", "-q", "--orphan", "empty")  # HEAD on an unborn branch, history elsewhere
+    t, why = trust.suggest_trust(d, ["me@org.example"])
+    assert t == "external" and why == trust.R_FOREIGN
+    # a genuinely empty repo (no refs at all) is still own
+    e = _repo(tmp_path / "e", authors=())
+    assert trust.suggest_trust(e, ["me@org.example"]) == ("own", trust.R_NO_COMMITS)
+
+
+def test_gitsafe_environment(tmp_path, monkeypatch):
+    from app import gitsafe
+
+    monkeypatch.setenv("GIT_DIR", "/elsewhere")
+    monkeypatch.setenv("GIT_INDEX_FILE", "/elsewhere/index")
+    monkeypatch.setenv("GIT_OBJECT_DIRECTORY", "/elsewhere/objects")
+    monkeypatch.setenv("GIT_CONFIG_PARAMETERS", "'core.sshcommand'='x'")
+    env = gitsafe.git_env(tmp_path / "proj")
+    for k in ("GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_OBJECT_DIRECTORY", "GIT_CONFIG_PARAMETERS"):
+        assert k not in env
+    assert env["GIT_ALLOW_PROTOCOL"] == "none" and env["GIT_NO_LAZY_FETCH"] == "1"
+    assert env["GIT_SSH_COMMAND"] == "false" and env["GIT_CONFIG_NOSYSTEM"] == "1"
+    assert env["GIT_CONFIG_GLOBAL"] == os.devnull and env["GIT_TERMINAL_PROMPT"] == "0"
+    assert env["GIT_PAGER"] == "cat"
+    assert env["GIT_CEILING_DIRECTORIES"] == os.path.dirname(os.path.realpath(tmp_path / "proj"))
+    args = gitsafe.SAFE_ARGS
+    for kv in ("core.sshCommand=false", "credential.helper=", "core.fsmonitor=false", "core.hooksPath=/dev/null",
+               "core.pager=cat"):
+        assert kv in args
+    r = gitsafe.run_git(tmp_path, "--version", timeout=5)
+    assert r.ok and r.out.startswith("git version")
+    r = gitsafe.run_git(tmp_path / "missing-dir", "status", timeout=5)
+    assert not r.ok and r.failed

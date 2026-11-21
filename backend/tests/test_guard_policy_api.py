@@ -180,7 +180,7 @@ def test_rule_pattern_validation(world):
 
 def test_rule_reason_is_cleaned_and_cut(world):
     a = world["admin"]
-    r = a.post("/guard/rules", json=_rule(reason="line1\nline2‮​  \x07end"))
+    r = a.post("/guard/rules", json=_rule(reason="line1 line2‮​   end"))
     assert r.status_code == 201 and r.json()["reason"] == "line1 line2 end"
     long = a.post("/guard/rules", json=_rule(reason="y" * 300)).json()
     assert long["reason"] == "y" * custom.REASON_MAX
@@ -354,11 +354,12 @@ def test_reference_projects_validation(world, client):
     pid, qid = world["p"]["id"], world["q"]["id"]
     hidden = a.post("/projects", json={"name": f"gh-{_uid()}"}).json()["id"]  # M cannot see it
     assert m.patch(f"/projects/{pid}", json={"reference_project_ids": [pid]}).status_code == 400
-    assert m.patch(f"/projects/{pid}", json={"reference_project_ids": ["nope"]}).status_code == 400
+    nope = uuid.uuid4().hex
+    assert m.patch(f"/projects/{pid}", json={"reference_project_ids": [nope]}).status_code == 400
     r = m.patch(f"/projects/{pid}", json={"reference_project_ids": [hidden]})
-    unknown = m.patch(f"/projects/{pid}", json={"reference_project_ids": ["nope"]})
+    unknown = m.patch(f"/projects/{pid}", json={"reference_project_ids": [nope]})
     assert r.status_code == 400  # same answer as an unknown id: existence is not revealed
-    assert r.json()["detail"].replace(hidden, "ID") == unknown.json()["detail"].replace("nope", "ID")
+    assert r.json()["detail"].replace(hidden, "ID") == unknown.json()["detail"].replace(nope, "ID")
     # a contributor of Q who maintains P may reference Q
     assert m.patch(f"/projects/{pid}", json={"reference_project_ids": [qid]}).status_code == 200
     # the admin sees every project
@@ -483,3 +484,161 @@ def test_project_rule_rows_carry_their_project(world):
             return (await s.execute(select(ActionRule).where(ActionRule.scope == "project"))).scalars().all()
 
     assert all(r.project_id for r in _run(go()))
+
+
+# ---- fix round 1 --------------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("field,value", [
+    ("pattern", "rm\n-rf"), ("pattern", "a\x00b"), ("pattern", "tab\there"), ("pattern", "x\x85y"),
+    ("reason", "two\nlines"), ("reason", "nul\x00"), ("reason", "bell\x07"), ("name", "n\x1bx"),
+])
+def test_m1_control_characters_rejected(world, field, value):
+    a = world["admin"]
+    r = a.post("/guard/rules", json=_rule(**{field: value}))
+    assert r.status_code == 400 and "control character" in r.json()["detail"], r.text
+    if field != "name":
+        ok = a.post("/guard/rules", json=_rule()).json()
+        r = a.patch(f"/guard/rules/{ok['id']}", json={field: value})
+        assert r.status_code == 400, r.text
+
+
+def test_m1_readonly_reason_control_characters_rejected(world):
+    r = world["m"].patch(f"/projects/{world['p']['id']}",
+                         json={"readonly_paths": [{"path": "/opt/x", "reason": "a\nb"}]})
+    assert r.status_code == 400
+
+
+@pytest.mark.parametrize("ref", ["../x", "NOT-HEX", "ab" * 17, "", "g" * 32])
+def test_m1_reference_ids_must_be_hex(world, ref):
+    r = world["m"].patch(f"/projects/{world['p']['id']}", json={"reference_project_ids": [ref]})
+    assert r.status_code == 400 and "is not a project id" in r.json()["detail"]
+
+
+def test_m2_reference_directories_are_checked(world, tmp_path, monkeypatch):
+    a = world["admin"]
+    home = tmp_path / "home"
+    proj = home / "work" / "proj"
+    proj.mkdir(parents=True)
+    me = a.post("/projects", json={"name": f"m2-{_uid()}", "directory": str(proj)}).json()
+    bad = {
+        "same": a.post("/projects", json={"name": f"m2s-{_uid()}"}).json(),
+        "parent": a.post("/projects", json={"name": f"m2p-{_uid()}"}).json(),
+        "home": a.post("/projects", json={"name": f"m2h-{_uid()}"}).json(),
+        "root": a.post("/projects", json={"name": f"m2r-{_uid()}"}).json(),
+    }
+    dirs = {"same": proj, "parent": home / "work", "home": home, "root": "/"}
+
+    async def put_dirs():
+        async with SessionLocal() as s:
+            from app.models import Project
+
+            for k, prj in bad.items():
+                (await s.get(Project, prj["id"])).directory = str(dirs[k])
+            await s.commit()
+
+    _run(put_dirs())
+    monkeypatch.setenv("HOME", str(home))
+    for k, prj in bad.items():
+        r = a.patch(f"/projects/{me['id']}", json={"reference_project_ids": [prj["id"]]})
+        assert r.status_code == 400, (k, r.text)
+    sibling = a.post("/projects", json={"name": f"m2ok-{_uid()}", "directory": str(home / "work" / "lib")}).json()
+    inside = a.post("/projects", json={"name": f"m2in-{_uid()}", "directory": str(proj / "vendor")}).json()
+    r = a.patch(f"/projects/{me['id']}", json={"reference_project_ids": [sibling["id"], inside["id"]]})
+    assert r.status_code == 200, r.text
+
+
+def test_m3_directory_change_revalidates_policy_paths(world, tmp_path, monkeypatch):
+    a = world["admin"]
+    home = tmp_path / "home"
+    (home / "a" / "proj").mkdir(parents=True)
+    p = a.post("/projects", json={"name": f"m3-{_uid()}", "directory": str(home / "a" / "proj")}).json()
+    monkeypatch.setenv("HOME", str(home))
+    assert a.patch(f"/projects/{p['id']}", json={"readonly_paths": [{"path": "../.."}]}).status_code == 400
+    ref_dir = str(home / "a" / "ref")
+    ok = a.patch(f"/projects/{p['id']}", json={"readonly_paths": [{"path": ref_dir}]})
+    assert ok.status_code == 200
+    # moving the project inside that root would make every change a hard deny: refused, nothing changes
+    r = a.patch(f"/projects/{p['id']}", json={"directory": str(home / "a" / "ref" / "proj2")})
+    assert r.status_code == 400, r.text
+    got = a.get(f"/projects/{p['id']}").json()
+    assert got["directory"].endswith("proj") and got["readonly_paths"] == [{"path": ref_dir, "reason": ""}]
+    # the same move with new paths in the same PATCH is fine
+    r = a.patch(f"/projects/{p['id']}", json={"directory": str(home / "a" / "ref" / "proj2"),
+                                              "readonly_paths": [{"path": "ref"}]})
+    assert r.status_code == 200 and r.json()["readonly_paths"] == [{"path": "ref", "reason": ""}]
+    # a reference that the new folder would sit inside is refused too
+    ref = a.post("/projects", json={"name": f"m3r-{_uid()}", "directory": str(home / "b")}).json()
+    assert a.patch(f"/projects/{p['id']}", json={"reference_project_ids": [ref["id"]]}).status_code == 200
+    r = a.patch(f"/projects/{p['id']}", json={"directory": str(home / "b" / "proj3")})
+    assert r.status_code == 400, r.text
+
+
+def test_m5_import_trust_budget(world, tmp_path, monkeypatch):
+    from app.guard import trust as trust_mod
+    from app.routers import projects as projects_router
+
+    a = world["admin"]
+    dirs = [tmp_path / f"imp-{_uid()}" for _ in range(3)]
+    for d in dirs:
+        d.mkdir()
+    monkeypatch.setattr(projects_router, "IMPORT_TRUST_BUDGET", 0)
+    r = a.post("/projects/import", json={"directories": [str(d) for d in dirs]})
+    assert r.status_code == 200, r.text
+    assert [(p["trust"], p["quarantine"], p["trust_reason"]) for p in r.json()] == [
+        ("external", True, trust_mod.R_TIME_LIMIT)] * 3
+
+
+def test_m5_import_budget_constant():
+    from app.routers import projects as projects_router
+
+    assert projects_router.IMPORT_TRUST_BUDGET == 30
+
+
+def test_m6_more_permission_cases(world):
+    a, m, c = world["admin"], world["m"], world["c"]
+    other = a.post("/projects", json={"name": f"m6-{_uid()}"}).json()  # M has no grant on it
+    foreign = a.post("/guard/rules", json=_rule(scope="project", project_id=other["id"])).json()
+    assert m.patch(f"/guard/rules/{foreign['id']}", json={"enabled": False}).status_code == 404
+    assert m.delete(f"/guard/rules/{foreign['id']}").status_code == 404
+    q_rule = a.post("/guard/rules", json=_rule(scope="project", project_id=world["q"]["id"])).json()
+    assert m.patch(f"/guard/rules/{q_rule['id']}", json={"enabled": False}).status_code == 403  # contributor on Q
+    # scope / project_id in a PATCH are ignored: a rule never moves
+    own = m.post("/guard/rules", json=_rule(scope="project", project_id=world["p"]["id"])).json()
+    r = m.patch(f"/guard/rules/{own['id']}", json={"scope": "org", "project_id": other["id"], "slug": "x"})
+    assert r.status_code == 200
+    assert (r.json()["scope"], r.json()["project_id"], r.json()["slug"]) == ("project", world["p"]["id"], own["slug"])
+    assert m.put("/guard/org-settings", json={"dev_db_patterns": ["host:x.dev"]}).status_code == 403
+    pid = world["p"]["id"]
+    for body in ({"trust": "external"}, {"quarantine": True}, {"on_no_answer": "deny_and_resume"},
+                 {"readonly_paths": []}, {"reference_project_ids": []}):
+        assert c.patch(f"/projects/{pid}", json=body).status_code == 403, body
+    srv = a.post("/mcp/servers", json={"name": f"m6-{_uid()}", "command": "true"}).json()
+    assert m.patch(f"/mcp/servers/{srv['id']}", json={"default_action": "auto_approve"}).status_code == 403
+    assert m.post("/mcp/servers", json={"name": f"m6-{_uid()}", "command": "true",
+                                        "environment": "dev"}).status_code == 403
+    assert a.get(f"/mcp/servers/{srv['id']}").json()["default_action"] == "require_approval"
+
+
+def test_m8_rule_cap_is_race_safe(world, monkeypatch):
+    import threading
+
+    from app.routers import guard as guard_router
+
+    a, pid = world["admin"], world["p"]["id"]
+    have = len(a.get("/guard/rules", params={"project_id": pid}).json())
+    monkeypatch.setattr(guard_router, "RULES_PER_SCOPE", have + 1)
+    codes = []
+    barrier = threading.Barrier(6)
+
+    def post():
+        barrier.wait()
+        codes.append(a.post("/guard/rules", json=_rule(scope="project", project_id=pid)).status_code)
+
+    threads = [threading.Thread(target=post) for _ in range(6)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(30)
+    assert sorted(codes) == [201] + [409] * 5, codes
+    assert len(a.get("/guard/rules", params={"project_id": pid}).json()) == have + 1
