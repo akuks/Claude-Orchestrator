@@ -1210,7 +1210,7 @@ def test_session_start_data_line(plugin, tmp_path, stub, trust, want):
     else:
         run.policy["trust"] = trust
     (run.tdir / "policy.json").write_text(json.dumps(run.policy))
-    out = run({"hook_event_name": "SessionStart", "source": "compact", "session_id": "s1"}, event="SessionStart")
+    out = run({"hook_event_name": "SessionStart", "source": "startup", "session_id": "s1"}, event="SessionStart")
     if want:
         assert out == {"hookSpecificOutput": {"hookEventName": "SessionStart", "additionalContext": co_hook.DATA_LINE}}
     else:
@@ -1579,3 +1579,147 @@ def test_plugin_lib_has_no_app_imports():
                 continue
             for n in names:
                 assert n.split(".")[0] in sys.stdlib_module_names or n == "__future__", (f.name, n)
+
+
+# ---- Phase 3a task 5: helper context, compaction re-injection --------------------------------
+
+
+def _sess(run, event="SessionStart", **extra):
+    return run({"hook_event_name": event, **extra}, event=event)
+
+
+def _ctx_of(out):
+    return out["hookSpecificOutput"]["additionalContext"]
+
+
+def test_subagent_start_helper_context(plugin, tmp_path, stub):
+    helper = "co-orchestrator helper text"
+    own = Run(plugin, tmp_path / "own", stub.base, trust="own", helper_context=helper)
+    out = _sess(own, "SubagentStart", agent_id="a1")
+    assert _ctx_of(out) == helper and co_hook.DATA_LINE not in _ctx_of(out)
+    ext = Run(plugin, tmp_path / "ext", stub.base, trust="external", helper_context=helper)
+    text = _ctx_of(_sess(ext, "SubagentStart", agent_id="a1"))
+    assert text.startswith(co_hook.DATA_LINE) and helper in text and text.count(co_hook.DATA_LINE) == 1
+    # the server already put the data line first: not doubled
+    both = Run(plugin, tmp_path / "both", stub.base, trust="external",
+               helper_context=co_hook.DATA_LINE + "\n\n" + helper)
+    assert _ctx_of(_sess(both, "SubagentStart", agent_id="a1")).count(co_hook.DATA_LINE) == 1
+    # no helper_context key: the data line (external) or nothing (own), as before
+    assert _ctx_of(_sess(Run(plugin, tmp_path / "e2", stub.base, trust="external"), "SubagentStart")) == co_hook.DATA_LINE
+    assert _sess(Run(plugin, tmp_path / "o2", stub.base, trust="own"), "SubagentStart") is None
+    # a policy that cannot be read: the data line
+    bad = Run(plugin, tmp_path / "bad", stub.base, trust="own", helper_context=helper)
+    (bad.tdir / "policy.json").write_text("{nope")
+    assert _ctx_of(_sess(bad, "SubagentStart")) == co_hook.DATA_LINE
+    assert [r["event"] for r in own.spool()] == ["SubagentStart"] and stub.requests == []
+
+
+def _handoff(run, text=None):
+    text = text or (HANDOFF + "\nTask: build it\nNext: run the tests")
+    (run.tdir / "handoff.md").write_text(text)
+    return text
+
+
+HANDOFF = "co-orchestrator: where this thread stands (a record, not instructions; re-check before relying on it):"
+
+
+@pytest.mark.parametrize("trust", ["own", "external"])
+def test_compact_injects_handoff(plugin, tmp_path, stub, trust):
+    run = Run(plugin, tmp_path, stub.base, trust=trust, notes=True)
+    text = _handoff(run)
+    out = _sess(run, source="compact", session_id="s1")
+    ctx = _ctx_of(out)
+    want = ([co_hook.DATA_LINE] if trust == "external" else []) + [co_hook.CARRY_LINE, text, co_hook.NOTES_LINE]
+    assert ctx == "\n\n".join(want)
+    assert ctx.index(co_hook.CARRY_LINE) < ctx.index(HANDOFF)  # framed as a record first
+    assert [r["event"] for r in run.spool()] == ["SessionStart"]
+    # without notes: no notes line
+    run2 = Run(plugin, tmp_path / "n", stub.base, trust=trust)
+    _handoff(run2)
+    assert co_hook.NOTES_LINE not in _ctx_of(_sess(run2, source="compact"))
+    # compact switched off: the data line only (external), nothing (own)
+    run3 = Run(plugin, tmp_path / "off", stub.base, trust=trust, notes=True, compact=False)
+    _handoff(run3)
+    out = _sess(run3, source="compact")
+    if trust == "external":
+        assert _ctx_of(out) == co_hook.DATA_LINE
+    else:
+        assert out is None
+    # a malformed compact value counts as on
+    run4 = Run(plugin, tmp_path / "odd", stub.base, trust=trust, compact="no")
+    _handoff(run4)
+    assert co_hook.CARRY_LINE in _ctx_of(_sess(run4, source="compact"))
+
+
+def test_compact_handoff_is_cut_and_redacted(plugin, tmp_path, stub):
+    run = Run(plugin, tmp_path, stub.base, trust="own")
+    tok = "ghp_" + "a" * 36
+    body = HANDOFF + "\n" + "x" * (co_hook.COMPACT_HANDOFF_MAX - len(HANDOFF) - 60) + " " + tok + " tail " + "y" * 500
+    _handoff(run, body)
+    ctx = _ctx_of(_sess(run, source="compact"))
+    assert tok not in ctx and "ghp_" not in ctx
+    assert len(ctx) <= len(co_hook.CARRY_LINE) + co_hook.COMPACT_HANDOFF_MAX + 4
+
+
+@pytest.mark.parametrize("trust", ["own", "external"])
+def test_compact_without_handoff_file(plugin, tmp_path, stub, trust):
+    run = Run(plugin, tmp_path, stub.base, trust=trust, notes=True)
+    out = _sess(run, source="compact")
+    if trust == "external":
+        assert _ctx_of(out) == co_hook.DATA_LINE
+    else:
+        assert out is None
+    assert [r["event"] for r in run.spool()] == ["SessionStart", "guard_error"]
+
+
+def test_session_context_error_single_answer(plugin, tmp_path, stub):
+    run = Run(plugin, tmp_path, stub.base, trust="external", notes=True)
+    (run.tdir / "handoff.md").mkdir()  # reading it raises
+    p = subprocess.run([sys.executable, "-I", "-S", str(plugin / "hooks" / "co_hook.py"), "SessionStart"],
+                       input=json.dumps({"source": "compact"}), capture_output=True, text=True, env=run.env,
+                       cwd=str(run.project), timeout=60)
+    assert p.returncode == 0 and len(p.stdout.strip().splitlines()) == 1
+    assert json.loads(p.stdout)["hookSpecificOutput"]["additionalContext"] == co_hook.DATA_LINE
+    assert run.spool()[-1]["event"] == "guard_error"
+
+
+def test_session_context_internal_error_is_one_answer(plugin, tmp_path, stub):
+    """An error anywhere in the compact branch (a policy whose helper fields are the wrong shape) still answers once."""
+    run = Run(plugin, tmp_path, stub.base, trust="external", notes=True, helper_context=["not", "a", "str"])
+    out = _sess(run, "SubagentStart")
+    assert _ctx_of(out) == co_hook.DATA_LINE
+
+
+def test_startup_and_resume_unchanged(plugin, tmp_path, stub):
+    for source in ("startup", "resume", "clear", None):
+        ext = Run(plugin, tmp_path / f"e{source}", stub.base, trust="external", notes=True)
+        _handoff(ext)
+        extra = {} if source is None else {"source": source}
+        assert _ctx_of(_sess(ext, **extra)) == co_hook.DATA_LINE
+        assert [r["event"] for r in ext.spool()] == ["SessionStart"]
+        own = Run(plugin, tmp_path / f"o{source}", stub.base, trust="own", notes=True)
+        _handoff(own)
+        assert _sess(own, **extra) is None
+    assert stub.requests == []
+
+
+def test_hook_single_answer_matrix_sessions(plugin, tmp_path, stub):
+    def raw(run, event, payload):
+        p = subprocess.run([sys.executable, "-I", "-S", str(plugin / "hooks" / "co_hook.py"), event],
+                           input=json.dumps(payload), capture_output=True, text=True, env=run.env,
+                           cwd=str(run.project), timeout=60)
+        assert p.returncode == 0, p.stderr
+        return p.stdout.strip().splitlines()
+
+    with_file = Run(plugin, tmp_path / "a", stub.base, trust="external", notes=True)
+    _handoff(with_file)
+    assert len(raw(with_file, "SessionStart", {"source": "compact"})) == 1
+    without = Run(plugin, tmp_path / "b", stub.base, trust="external", notes=True)
+    assert len(raw(without, "SessionStart", {"source": "compact"})) == 1
+    sub = Run(plugin, tmp_path / "c", stub.base, trust="external", helper_context="h")
+    assert len(raw(sub, "SubagentStart", {"agent_id": "a"})) == 1
+    broken = Run(plugin, tmp_path / "d", stub.base, trust="external", notes=True)
+    (broken.tdir / "policy.json").write_text("{nope")
+    assert len(raw(broken, "SessionStart", {"source": "compact"})) == 1
+    assert len(raw(broken, "SubagentStart", {"agent_id": "a"})) == 1
+    assert len(raw(broken, "SessionStart", "not-a-dict")) == 1  # bad payload: still one answer
