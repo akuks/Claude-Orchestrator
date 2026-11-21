@@ -229,7 +229,8 @@ class ActionApproval(Base):
     decision_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
     # Phase 2: the hook's grant_key of the call (sha256 hex); resume_until set
     # when the project's on_no_answer is deny_and_resume; delivery "inline" |
-    # "resume"; scope of the approval "once" | "run"; the follow-up task an
+    # "resume" | "dropped" (approved while a step was active, and that step was
+    # cancelled: no follow-up); scope of the approval "once" | "run"; the follow-up task an
     # approval in the resume phase created or joined; the grants it made.
     grant_key: Mapped[str] = mapped_column(String(64), default="", server_default="")
     resume_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)

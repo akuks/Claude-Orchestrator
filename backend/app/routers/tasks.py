@@ -7,7 +7,7 @@ from pathlib import Path
 
 from fastapi import APIRouter, HTTPException, Query, Request
 from fastapi.responses import FileResponse, Response
-from sqlalchemy import func, select
+from sqlalchemy import and_, delete, func, or_, select
 
 from ..access import (
     can_see_task,
@@ -22,7 +22,7 @@ from ..config import settings
 from ..constants import VALID_MODELS, Priority, Status
 from ..database import SessionLocal
 from .. import reports
-from ..models import Artifact, Project, Task, TaskEvent
+from ..models import ActionGrant, Artifact, Project, Task, TaskEvent
 from ..task_service import build_task
 from ..schemas import (
     ArtifactOut,
@@ -442,6 +442,10 @@ async def delete_task(task_id: str, request: Request):
                 except OSError:
                     pass
             await s.delete(m)
+        # co-guard grants of the deleted thread / steps (no FK: they would be orphans)
+        await s.execute(delete(ActionGrant).where(
+            or_(ActionGrant.root_id.in_(deleted),
+                and_(ActionGrant.scope == "once", ActionGrant.task_id.in_(deleted)))))
         await s.commit()
 
 

@@ -26,6 +26,7 @@ from .config import settings
 from .constants import Priority, Status
 from .database import SessionLocal
 from .events import broker
+from .guard import grants as guard_grants
 from .guard import policy_inputs
 from .guard import runtime as guard_runtime
 from .guard.plugin import ensure_plugin
@@ -349,6 +350,10 @@ class WorkerManager:
                 await broker.publish(
                     task_id, {"seq": 0, "type": "completed", "payload": {"status": Status.CANCELLED}}
                 )
+                try:  # co-guard: drop follow-ups deferred on this step
+                    await guard_grants.after_task_finished(task_id, submit=self.submit)
+                except Exception:  # noqa: BLE001
+                    pass
                 return
             task.status = Status.RUNNING
             task.started_at = _now()
@@ -406,6 +411,13 @@ class WorkerManager:
                     if Path(p.local_path).exists():
                         plugin_dirs.append(p.local_path)
             await s.commit()
+        # Re-read the prompt now that the task is marked running: a co-guard
+        # resume approval may have joined this queued follow-up (its update
+        # applies only while the task is still queued).
+        async with SessionLocal() as s:
+            fresh = await s.get(Task, task_id)
+            if fresh is not None:
+                prompt = fresh.prompt
 
         # Build the subprocess environment from scratch (app.agent_env): the
         # allowlisted base + project env + the task creator's own credentials
@@ -774,6 +786,8 @@ class WorkerManager:
             if settings.guard_verify_api and not await asyncio.to_thread(guard_runtime.verify_api_base, api_base):
                 raise guard_runtime.GuardConfigError(
                     f"co-guard approval address not verified ({api_base} did not prove it is this server)")
+            # once grants a previous attempt used (its spool is about to be wiped) stay spent
+            await self._spend_spool_grants(task_id, strict=True)
             inputs = await self._gather_policy(task_id, guard_project, owner_id, mcp)
         except Exception as e:  # noqa: BLE001 - no policy, no task (fail closed)
             msg = f"co-guard could not be set up; task not started: {e}"
@@ -996,6 +1010,7 @@ class WorkerManager:
         live = self._guard_live.get(task_id)
         reported = live["reported"] if live else Counter()
         try:
+            await self._spend_spool_grants(task_id)  # every granted line, durably (retries wipe the spool)
             for rec in guard_runtime.read_spool(task_id):
                 if rec.get("seen") is True:
                     continue  # watchdog bookkeeping, not an event
@@ -1006,9 +1021,35 @@ class WorkerManager:
                 if reported[key] > 0:
                     reported[key] -= 1
                     continue
+                if payload.get("decision") == "granted":
+                    await self._count_grant_use(task_id, payload.get("grant_ids"))
                 await emit("guard", payload)
         finally:
             guard_runtime.remove_task_dir(task_id)
+
+    @staticmethod
+    async def _spend_spool_grants(task_id: str, strict: bool = False) -> None:
+        """Spend the once grants the spool's granted lines used. ``strict``
+        (before a run): a failure stops the task (fail closed)."""
+        try:
+            async with SessionLocal() as s:
+                await guard_grants.mark_spool_used(s, task_id)
+        except Exception:  # noqa: BLE001 - never blocks a finish
+            if strict:
+                raise
+
+    @staticmethod
+    async def _count_grant_use(task_id: str, grant_ids) -> None:
+        """An unreported granted record: one more use of each grant it names."""
+        try:
+            async with SessionLocal() as s:
+                task = await s.get(Task, task_id)
+                grants = await guard_grants.valid_use(s, task, grant_ids) if task is not None else None
+                if grants:
+                    await guard_grants.record_use(s, grants, count=True)
+                    await s.commit()
+        except Exception:  # noqa: BLE001
+            pass
 
     async def _consume_stdout(self, proc, emit, result, ctx) -> None:
         # Read raw chunks and split on newlines ourselves. A single stream-json
@@ -1159,6 +1200,7 @@ class WorkerManager:
         if error:
             error = redact(error, secrets or [])
         context_store.cleanup(task_id)  # drop this task's knowledge snapshot
+        await self._spend_spool_grants(task_id)  # a spool not ingested (error paths): its once grants stay spent
         guard_runtime.remove_task_dir(task_id)  # co-guard policy + spool (normally gone already)
         async with SessionLocal() as s:
             await auth.revoke_task_tokens(s, task_id)
@@ -1196,3 +1238,8 @@ class WorkerManager:
                     )
                 )
             await s.commit()
+        # co-guard deny-and-resume: follow-ups deferred while this step was active
+        try:
+            await guard_grants.after_task_finished(task_id, submit=self.submit)
+        except Exception:  # noqa: BLE001 - never breaks a finish
+            pass

@@ -34,6 +34,48 @@ co-guard's hook and decided by people, and the hook's live decision reports.
   agent can read the token and call this too) and then with the stored
   request's tool/summary/rule_ids, at most GUARD_REPORT_CAP per run.
 
+Grants and deny-and-resume (Phase 2, ``guard.grants``):
+
+* ``POST /guard/approvals`` also takes ``grant_key`` (64 hex, part of the
+  idempotency content). When live RUN grants of the task's thread cover every
+  rule id with the right key, it records an ``approved`` row at once
+  (``decided_by`` the grant's creator, reason ``covered by run grant <ids>``,
+  ``grant_ids``, each grant's ``use_count`` + 1, no notification) and answers
+  ``{id, status: "approved", expires_at, command_hash, grant_ids}``. Otherwise
+  the pending answer carries ``resume_until`` (ISO) when the project's
+  ``on_no_answer`` is ``deny_and_resume`` and the call has a grant key
+  (``created_at + RESUME_WINDOW``), else null.
+* Phases (``_state``): without ``resume_until`` nothing changes (Phase 1).
+  With it, a pending request is in the inline phase while its task runs and
+  ``expires_at`` is ahead (and the hook has not reported ``filed``); then in
+  the resume phase (``delivery`` "resume", persisted) until ``resume_until``.
+  A cancelled task expires it. The agent's GET of a request approved in the
+  resume phase still reads ``pending``: that approval is the follow-up's.
+* ``POST /guard/approvals/{id}/approve`` takes ``{"scope": "once"|"run"}``
+  (default once). ``run`` makes one run grant per grantable rule id for the
+  thread (12 h; 409 when nothing is grantable or the request has no grant
+  key). In the resume phase an approval also makes the follow-up's once
+  grant(s) and joins / defers / spawns the thread's follow-up; a reject only
+  records. Inside ``DECIDE_MARGIN`` of the inline wait a request with
+  ``resume_until`` answers 409 "the agent is giving up on this request; try
+  again in a few seconds" (without it: 409 "expired", as before). R25 holds.
+* The card adds ``delivery``, ``resume_until``, ``scope``,
+  ``followup_task_id``, ``grant_ids`` and ``run_keys``. The pending list (the
+  Home / badge count) includes resume-phase requests.
+* ``POST /guard/report``: a deny with ``status: "filed"`` moves a request
+  with ``resume_until`` to the resume phase instead of expiring it; a
+  ``granted`` record is taken only when every grant id is a live run grant
+  of the task's thread or a live once grant of this task - once grants are
+  spent (``used_at``) and, when the record reaches the run log, every grant's
+  ``use_count`` + 1 (the spool ingestion does the same for records not
+  reported, and spends once grants of every granted line).
+* ``GET /guard/grants?root_id=`` (any step id names its thread; people who
+  can see that step, else 404; without it: every grant whose task the viewer
+  can see; live grants unless ``include_inactive``), each
+  with ``can_revoke`` (``_may_decide`` on the grant's task). ``POST
+  /guard/grants/{id}/revoke`` - the same people (403 otherwise; 409 when
+  already revoked). Agent tokens: 403 (allowlist).
+
 Policy settings (Phase 2; people only - agent tokens are refused by the
 allowlist in auth.py and again here):
 
@@ -90,11 +132,12 @@ from ..constants import Status
 from ..database import SessionLocal
 from ..guard import custom as guard_custom
 from ..guard import dbrules as guard_dbrules
+from ..guard import grants as guard_grants
 from ..guard import policy_store
 from ..guard import rules as guard_rules
 from ..guard import runtime as guard_runtime
 from ..guard.co_hook import SUMMARY_MAX as HOOK_SUMMARY_MAX
-from ..models import ActionApproval, ActionRule, GuardOrgSettings, Project, Task
+from ..models import ActionApproval, ActionGrant, ActionRule, GuardOrgSettings, Project, Task
 from ..redaction import redact
 
 router = APIRouter(prefix="/guard", tags=["guard"])
@@ -109,7 +152,8 @@ LIST_LIMIT = 200
 BODY_LIMIT = 16 * 1024  # bytes, POST /guard/approvals and /guard/report
 SUMMARY_LIMIT = 8000  # the full command a person decides on (the hook cuts to fit BODY_LIMIT)
 # Stored request fields, compared whole when an idempotency key is reused.
-CONTENT_FIELDS = ("rule_ids", "tool", "summary", "cwd", "reason", "command_hash")
+CONTENT_FIELDS = ("rule_ids", "tool", "summary", "cwd", "reason", "command_hash", "grant_key")
+GIVING_UP = "the agent is giving up on this request; try again in a few seconds"
 
 
 @router.get("/whoami")
@@ -185,26 +229,56 @@ def _wait_seconds(task_id: str, project: Project | None) -> int:
     )
 
 
+def _state(a: ActionApproval, task_status: str | None, now: datetime | None = None) -> tuple[str, str]:
+    """(effective status, delivery). Without ``resume_until`` (Phase 1, and
+    ``on_no_answer`` deny): a pending request past ``expires_at`` or whose task
+    stopped running is expired. With it: pending in the inline phase (task
+    running, before ``expires_at``, the hook not given up), then pending in the
+    resume phase until ``resume_until``; a cancelled (or gone) task expires it."""
+    now = now or _now()
+    delivery = a.delivery or "inline"
+    if a.status != "pending":
+        return a.status, delivery
+    if a.resume_until is None:
+        if now >= _aware(a.expires_at) or task_status != Status.RUNNING:
+            return "expired", delivery
+        return "pending", delivery
+    if task_status is None or task_status == Status.CANCELLED or now >= _aware(a.resume_until):
+        return "expired", delivery
+    if delivery == "inline" and (now >= _aware(a.expires_at) or task_status != Status.RUNNING):
+        delivery = "resume"
+    return "pending", delivery
+
+
 def _effective(a: ActionApproval, task_status: str | None, now: datetime | None = None) -> str:
-    if a.status == "pending" and (
-        (now or _now()) >= _aware(a.expires_at) or task_status != Status.RUNNING
-    ):
-        return "expired"
-    return a.status
+    return _state(a, task_status, now)[0]
 
 
 async def _settle(s, a: ActionApproval, task: Task | None) -> str:
-    """Persist a lazy expiry; returns the effective status."""
-    st = _effective(a, task.status if task else None)
-    if st == "expired" and a.status == "pending":
+    """Persist a lazy expiry or the move to the resume phase; returns the
+    effective status."""
+    st, delivery = _state(a, task.status if task else None)
+    if a.status == "pending" and (st == "expired" or delivery != a.delivery):
+        values = {"status": "expired"} if st == "expired" else {"delivery": delivery}
         await s.execute(
             update(ActionApproval)
             .where(ActionApproval.id == a.id, ActionApproval.status == "pending")
-            .values(status="expired")
+            .values(**values)
         )
         await s.commit()
-        a.status = "expired"
+        for k, v in values.items():
+            setattr(a, k, v)
     return st
+
+
+def _live_pending():
+    """SQL: a pending row that still reads as pending (needs the Task join)."""
+    now = _now()
+    inline = and_(ActionApproval.resume_until.is_(None), ActionApproval.expires_at > now,
+                  Task.status == Status.RUNNING)
+    resume = and_(ActionApproval.resume_until.is_not(None), ActionApproval.resume_until > now,
+                  Task.status != Status.CANCELLED)
+    return and_(ActionApproval.status == "pending", or_(inline, resume))
 
 
 async def _may_decide(s, p, task: Task) -> bool:
@@ -241,10 +315,21 @@ class ActionApprovalOut(BaseModel):
     decided_at: Optional[datetime] = None
     decision_reason: Optional[str] = None
     can_decide: bool = False
+    # Phase 2
+    delivery: str = "inline"  # inline | resume (| dropped: a deferred follow-up whose thread was cancelled)
+    resume_until: Optional[datetime] = None
+    scope: Optional[str] = None
+    followup_task_id: Optional[str] = None
+    grant_ids: list = []
+    run_keys: list = []  # what "approve for this run" covers: [{rule_id, key_kind, key}]
 
 
-def _card(a: ActionApproval, task_title: str, status: str, can_decide: bool) -> ActionApprovalOut:
+def _card(a: ActionApproval, task_title: str, status: str, can_decide: bool,
+          delivery: str | None = None) -> ActionApprovalOut:
     return ActionApprovalOut(
+        delivery=delivery or a.delivery or "inline", resume_until=_aware(a.resume_until) if a.resume_until else None, scope=a.scope,
+        followup_task_id=a.followup_task_id, grant_ids=list(a.grant_ids or []),
+        run_keys=guard_grants.run_keys(a),
         id=a.id, task_id=a.task_id, task_title=task_title or "", project_id=a.project_id,
         requested_by=a.requested_by, rule_ids=list(a.rule_ids or []), tool=a.tool or "",
         summary=a.summary or "", cwd=a.cwd or "", reason=a.reason or "", command_hash=a.command_hash or "",
@@ -265,6 +350,8 @@ class FileBody(BaseModel):
     cwd: str = ""
     reason: str = ""
     command_hash: str = ""
+    # Phase 2: the hook's grant_key of the call (sha256 hex), or none
+    grant_key: str = Field("", pattern=r"^([0-9a-f]{64})?$")
     # seconds left before the hook's own deadline (not part of the content)
     wait_left: Optional[float] = None
 
@@ -278,6 +365,7 @@ def _content(body: FileBody, secrets: list[str]) -> dict:
         "cwd": _cut(redact(body.cwd, secrets), 1000),
         "reason": _cut(redact(body.reason, secrets), 2000),
         "command_hash": body.command_hash[:128],
+        "grant_key": body.grant_key,
     }
 
 
@@ -303,7 +391,11 @@ async def _find_pending(s, task_id: str, key: str) -> ActionApproval | None:
 
 
 def _filed(a: ActionApproval) -> dict:
-    return {"id": a.id, "status": "pending", "expires_at": _aware(a.expires_at)}
+    if a.status == "approved":  # covered by a run grant of the thread
+        return {"id": a.id, "status": "approved", "expires_at": _aware(a.expires_at),
+                "command_hash": a.command_hash, "grant_ids": list(a.grant_ids or [])}
+    return {"id": a.id, "status": "pending", "expires_at": _aware(a.expires_at),
+            "resume_until": _aware(a.resume_until).isoformat() if a.resume_until else None}
 
 
 def _replay(a: ActionApproval, content: dict, response: Response) -> dict:
@@ -314,6 +406,25 @@ def _replay(a: ActionApproval, content: dict, response: Response) -> dict:
         raise HTTPException(409, "conflicting request")
     response.status_code = 200
     return _filed(a)
+
+
+async def _covered(s, task: Task, content: dict, key: str | None, project_id, now: datetime):
+    """An ``approved`` row for a call the thread's live run grants cover (no
+    notification), or None. Not committed."""
+    grants = await guard_grants.thread_cover(
+        s, root_id=task.root_id or task.id, rule_ids=content["rule_ids"], tool=content["tool"],
+        grant_key=content["grant_key"], now=now)
+    if not grants:
+        return None
+    ids = [g.id for g in grants]
+    a = ActionApproval(
+        task_id=task.id, project_id=project_id, requested_by=task.created_by, idempotency_key=key,
+        status="approved", created_at=now, expires_at=now, decided_by=grants[0].created_by, decided_at=now,
+        decision_reason=f"covered by run grant {', '.join(ids)}", scope="run", grant_ids=ids, **content,
+    )
+    s.add(a)
+    await guard_grants.record_use(s, grants, count=True, now=now)
+    return a
 
 
 @api.post("/approvals", status_code=201, dependencies=[Depends(_limit_body)])
@@ -349,6 +460,10 @@ async def file_request(
         if counts[0] >= MAX_TOTAL_PER_TASK or counts[1] >= MAX_PENDING_PER_TASK:
             raise HTTPException(429, "Too many approval requests for this task")
         project_id = await effective_project_id(s, task)
+        covered = await _covered(s, task, content, key, project_id, now)
+        if covered is not None:
+            await s.commit()
+            return _filed(covered)
         project = await s.get(Project, project_id) if project_id else None
         wait = float(_wait_seconds(task.id, project))
         if body.wait_left is not None and body.wait_left == body.wait_left:  # not NaN
@@ -361,6 +476,10 @@ async def file_request(
             status="pending",
             created_at=now,
             expires_at=now + timedelta(seconds=wait),
+            # deny_and_resume: the request outlives the inline wait (needs the call's grant key)
+            resume_until=now + timedelta(seconds=guard_grants.RESUME_WINDOW)
+            if project is not None and project.on_no_answer == "deny_and_resume" and content["grant_key"]
+            else None,
             **content,
         )
         tid = task.id  # ORM attributes expire on rollback
@@ -398,14 +517,14 @@ async def list_requests(
     now = _now()
     async with SessionLocal() as s:
         stmt = select(ActionApproval, Task).join(Task, Task.id == ActionApproval.task_id)
-        lazily_expired = or_(ActionApproval.expires_at <= now, Task.status != Status.RUNNING)
+        live = _live_pending()  # inline or resume phase (the Home / badge counts use this list)
         if status == "pending":
-            stmt = stmt.where(ActionApproval.status == "pending", ~lazily_expired)
+            stmt = stmt.where(live)
         elif status == "expired":
             stmt = stmt.where(
                 or_(
                     ActionApproval.status == "expired",
-                    and_(ActionApproval.status == "pending", lazily_expired),
+                    and_(ActionApproval.status == "pending", ~live),
                 )
             )
         elif status != "all":
@@ -426,7 +545,11 @@ async def list_requests(
         rows = (
             await s.execute(stmt.order_by(ActionApproval.created_at.desc()).limit(LIST_LIMIT))
         ).all()
-    return [_card(a, t.title, _effective(a, t.status, now), decidable) for a, t in rows]
+    out = []
+    for a, t in rows:
+        st, delivery = _state(a, t.status, now)
+        out.append(_card(a, t.title, st, decidable, delivery))
+    return out
 
 
 @api.get("/approvals/{approval_id}")
@@ -438,8 +561,13 @@ async def get_request(approval_id: str, request: Request):
         if p.is_agent:
             if a is None or a.task_id != p.token.task_id:
                 raise HTTPException(404, "Not found")
+            st = await _settle(s, a, task)
+            if a.delivery != "inline" and st == "approved":
+                # approved in the resume phase: that answer is the follow-up's
+                # once grant, never a late answer to a hook still polling
+                st = "pending"
             # command_hash: the hook checks the id stands for ITS call
-            return {"id": a.id, "status": await _settle(s, a, task), "command_hash": a.command_hash}
+            return {"id": a.id, "status": st, "command_hash": a.command_hash}
         if a is None or task is None or not await can_see_task(s, p, task):
             raise HTTPException(404, "Not found")
         st = await _settle(s, a, task)
@@ -453,40 +581,74 @@ class RejectBody(BaseModel):
     reason: Optional[str] = None
 
 
-async def _decide(request: Request, approval_id: str, status: str, reason: str | None):
+class ApproveBody(BaseModel):
+    scope: Literal["once", "run"] = "once"
+
+
+async def _decide(request: Request, approval_id: str, status: str, reason: str | None, scope: str = "once"):
+    """Inline phase: the waiting hook sees the decision (``run`` also makes
+    run grants for the thread). Resume phase: an approval makes the
+    follow-up's once grant and joins / defers / spawns the thread's follow-up
+    (``grants.create_resume_followup``); a reject only records."""
     p = request.state.principal
-    async with SessionLocal() as s:
-        a = await s.get(ActionApproval, approval_id)
-        task = await s.get(Task, a.task_id) if a is not None else None
-        if a is None or task is None or not await can_see_task(s, p, task):
-            raise HTTPException(404, "Not found")
-        if not await _may_decide(s, p, task):
-            raise HTTPException(403, "Not allowed to decide this request")
-        st = await _settle(s, a, task)
-        if st == "expired":
-            raise HTTPException(409, "expired")
-        if st != "pending":
-            raise HTTPException(409, f"already {st}")
-        now = _now()
-        if now >= _aware(a.expires_at) - timedelta(seconds=DECIDE_MARGIN):
-            raise HTTPException(409, "expired")
-        res = await s.execute(
-            update(ActionApproval)
-            .where(ActionApproval.id == a.id, ActionApproval.status == "pending")
-            .values(status=status, decided_by=p.user.id, decided_at=now,
-                    decision_reason=(reason or None) and reason[:2000])
-        )
-        if res.rowcount != 1:
-            await s.rollback()
-            raise HTTPException(409, "already decided")
-        await s.commit()
-        await s.refresh(a)
-        return _card(a, task.title, a.status, False)
+    spawned: list = []
+    async with guard_grants.FOLLOWUP_LOCK:
+        async with SessionLocal() as s:
+            a = await s.get(ActionApproval, approval_id)
+            task = await s.get(Task, a.task_id) if a is not None else None
+            if a is None or task is None or not await can_see_task(s, p, task):
+                raise HTTPException(404, "Not found")
+            if not await _may_decide(s, p, task):
+                raise HTTPException(403, "Not allowed to decide this request")
+            st = await _settle(s, a, task)
+            if st == "expired":
+                raise HTTPException(409, "expired")
+            if st != "pending":
+                raise HTTPException(409, f"already {st}")
+            now = _now()
+            resume = a.resume_until is not None and a.delivery == "resume"
+            if not resume and now >= _aware(a.expires_at) - timedelta(seconds=DECIDE_MARGIN):
+                # the hook stops polling at expires_at: a decision now could land on both phases
+                raise HTTPException(409, GIVING_UP if a.resume_until is not None else "expired")
+            if resume and status == "approved" and await guard_grants.thread_cancelled(s, task):
+                raise HTTPException(409, "the thread was cancelled, so no follow-up can start")
+            res = await s.execute(
+                update(ActionApproval)
+                .where(ActionApproval.id == a.id, ActionApproval.status == "pending",
+                       ActionApproval.delivery == a.delivery)
+                .values(status=status, decided_by=p.user.id, decided_at=now,
+                        decision_reason=(reason or None) and reason[:2000],
+                        scope=scope if status == "approved" else None)
+            )
+            if res.rowcount != 1:
+                await s.rollback()
+                raise HTTPException(409, "the request just changed; try again")
+            await s.refresh(a)
+            if status == "approved":
+                try:
+                    made = await guard_grants.create_run_grants(s, a, task, p.user.id) if scope == "run" else []
+                    if resume and not guard_grants.is_hex_key(a.grant_key):
+                        raise ValueError("this request has no grant key, so it cannot resume")
+                except ValueError as e:
+                    await s.rollback()
+                    raise HTTPException(409, str(e))
+                a.grant_ids = [g.id for g in made]
+                if resume:
+                    await guard_grants.create_resume_followup(s, a, p.user.id, spawned=spawned)
+            await s.commit()
+            await s.refresh(a)
+            jobs = [(t.id, t.priority, t.created_at) for t in spawned]
+            out = _card(a, task.title, a.status, False)
+    w = _worker(request)
+    for job in jobs:
+        if w is not None:
+            await w.submit(*job)
+    return out
 
 
 @api.post("/approvals/{approval_id}/approve", response_model=ActionApprovalOut)
-async def approve(approval_id: str, request: Request):
-    return await _decide(request, approval_id, "approved", None)
+async def approve(approval_id: str, request: Request, body: Optional[ApproveBody] = None):
+    return await _decide(request, approval_id, "approved", None, (body.scope if body else "once"))
 
 
 @api.post("/approvals/{approval_id}/reject", response_model=ActionApprovalOut)
@@ -506,20 +668,27 @@ async def report(request: Request, rec: dict = Body(...)):
     rid = rec.get("request_id")
     if rec.get("decision") == "deny" and isinstance(rid, str) and rid:
         # The hook gave up on (or was refused) this request: it can no longer
-        # be approved for a call that was already denied.
+        # be approved for a call that was already denied - unless the request
+        # was filed for deny-and-resume: then it waits for a person (resume
+        # phase) and an approval starts a follow-up instead.
+        mine = and_(ActionApproval.id == rid, ActionApproval.task_id == task_id, ActionApproval.status == "pending")
         async with SessionLocal() as s:
-            await s.execute(
-                update(ActionApproval)
-                .where(ActionApproval.id == rid, ActionApproval.task_id == task_id,
-                       ActionApproval.status == "pending")
-                .values(status="expired")
-            )
+            if rec.get("status") == "filed":
+                await s.execute(update(ActionApproval)
+                                .where(mine, ActionApproval.resume_until.is_not(None))
+                                .values(delivery="resume"))
+            await s.execute(update(ActionApproval)
+                            .where(mine, ActionApproval.delivery != "resume")
+                            .values(status="expired"))
             await s.commit()
     # The token is in the agent's env, so the agent can call this too: accept
-    # only what the hook reports (PreToolUse deny / approved), and an
-    # "approved" record only for a request of this task a person approved.
-    if rec.get("event") != "PreToolUse" or rec.get("decision") not in ("deny", "approved"):
+    # only what the hook reports (PreToolUse deny / approved / granted), an
+    # "approved" record only for a request of this task a person approved, and
+    # a "granted" one only for live grants of this task's thread (run) or of
+    # this task (once).
+    if rec.get("event") != "PreToolUse" or rec.get("decision") not in ("deny", "approved", "granted"):
         return {"accepted": False}
+    grants = None
     if rec.get("decision") == "approved":
         async with SessionLocal() as s:
             a = await s.get(ActionApproval, rid) if isinstance(rid, str) and rid else None
@@ -532,11 +701,127 @@ async def report(request: Request, rec: dict = Body(...)):
         if len(summ) > HOOK_SUMMARY_MAX:
             summ = summ[: HOOK_SUMMARY_MAX - 1] + "…"
         rec = dict(rec, tool=a.tool, rule_ids=list(a.rule_ids or []), summary=summ)
+    elif rec.get("decision") == "granted":
+        async with SessionLocal() as s:
+            task = await s.get(Task, task_id)
+            grants = await guard_grants.valid_use(s, task, rec.get("grant_ids")) if task is not None else None
+            if not grants:
+                return {"accepted": False}
+            rec = {k: rec[k] for k in ("event", "decision", "grant_ids", "tool", "rule_ids", "summary",
+                                       "tool_use_id") if k in rec}
+            # spent now (the spool ingestion spends it again, idempotently, if this is lost)
+            await guard_grants.record_use(s, grants, count=False)
+            await s.commit()
     w = _worker(request)
     accepted = False
     if w is not None and hasattr(w, "report_guard"):
         accepted = await w.report_guard(task_id, rec)  # redacts with the run's secrets
+    if accepted and grants:
+        async with SessionLocal() as s:  # counted once: the spool ingestion skips a reported record
+            await guard_grants.record_use(s, grants, count=True)
+            await s.commit()
     return {"accepted": accepted}
+
+
+# ---- grants (people) -------------------------------------------------------------------------
+
+
+class GrantOut(BaseModel):
+    id: str
+    root_id: str
+    task_id: Optional[str] = None
+    approval_id: Optional[str] = None
+    scope: str
+    rule_id: str
+    key_kind: str
+    key: str
+    created_by: Optional[str] = None
+    created_at: datetime
+    expires_at: datetime
+    revoked_at: Optional[datetime] = None
+    revoked_by: Optional[str] = None
+    used_at: Optional[datetime] = None
+    use_count: int = 0
+    active: bool = False
+    can_revoke: bool = False
+
+
+def _grant_out(g: ActionGrant, can_revoke: bool, now: datetime) -> GrantOut:
+    active = g.revoked_at is None and _aware(g.expires_at) > now and not (g.scope == "once" and g.used_at)
+    return GrantOut(
+        id=g.id, root_id=g.root_id, task_id=g.task_id, approval_id=g.approval_id, scope=g.scope, rule_id=g.rule_id,
+        key_kind=g.key_kind, key=g.key, created_by=g.created_by, created_at=_aware(g.created_at),
+        expires_at=_aware(g.expires_at), revoked_at=g.revoked_at and _aware(g.revoked_at), revoked_by=g.revoked_by,
+        used_at=g.used_at and _aware(g.used_at), use_count=g.use_count or 0, active=active,
+        can_revoke=can_revoke and active,
+    )
+
+
+async def _grant_task(s, g: ActionGrant) -> Task | None:
+    """The task whose decide rights govern a grant: its own task, else the root."""
+    for tid in (g.task_id, g.root_id):
+        t = await s.get(Task, tid) if tid else None
+        if t is not None:
+            return t
+    return None
+
+
+@api.get("/grants", response_model=list[GrantOut])
+async def list_grants(request: Request, root_id: Optional[str] = None, include_inactive: bool = False):
+    """A thread's grants (any step id names its thread) for people who can
+    see that step (else 404); without ``root_id``, the grants of every thread
+    whose granting task the viewer can see. Live ones only unless
+    ``include_inactive``."""
+    p = request.state.principal
+    _person(p)
+    now = _now()
+    async with SessionLocal() as s:
+        stmt = select(ActionGrant)
+        if root_id is not None:
+            task = await require_task(s, p, root_id)  # 404 when invisible
+            stmt = stmt.where(ActionGrant.root_id == (task.root_id or task.id))
+        if not include_inactive:
+            stmt = stmt.where(ActionGrant.revoked_at.is_(None), ActionGrant.expires_at > now,
+                              or_(ActionGrant.scope == "run", ActionGrant.used_at.is_(None)))
+        rows = (await s.execute(stmt.order_by(ActionGrant.created_at.desc()).limit(LIST_LIMIT))).scalars().all()
+        out, cache = [], {}
+        for g in rows:
+            t = await _grant_task(s, g)
+            if t is None:
+                continue
+            if t.id not in cache:
+                seen = await can_see_task(s, p, t)
+                cache[t.id] = (seen, seen and await _may_decide(s, p, t))
+            seen, can = cache[t.id]
+            if root_id is None and not seen:
+                continue
+            out.append(_grant_out(g, can, now))
+    return out
+
+
+@api.post("/grants/{grant_id}/revoke", response_model=GrantOut)
+async def revoke_grant(grant_id: str, request: Request):
+    """Stops server answers and later tasks at once (a running step keeps its
+    policy-file copy until it ends). The same people who may decide the
+    grant's requests (Ruling R25)."""
+    p = request.state.principal
+    _person(p)
+    async with SessionLocal() as s:
+        g = await s.get(ActionGrant, grant_id)
+        t = await _grant_task(s, g) if g is not None else None
+        if g is None or t is None or not await can_see_task(s, p, t):
+            raise HTTPException(404, "Not found")
+        if not await _may_decide(s, p, t):
+            raise HTTPException(403, "Not allowed to revoke this grant")
+        now = _now()
+        res = await s.execute(update(ActionGrant).where(ActionGrant.id == g.id, ActionGrant.revoked_at.is_(None))
+                              .values(revoked_at=now, revoked_by=p.user.id))
+        if res.rowcount != 1:
+            await s.rollback()
+            raise HTTPException(409, "already revoked")
+        await s.commit()
+        await s.refresh(g)
+        return _grant_out(g, False, now)
 
 
 # ---- policy settings (people) ----------------------------------------------------------------
