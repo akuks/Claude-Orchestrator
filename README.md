@@ -46,6 +46,11 @@ cost caps, security reviews, and reusable agent roles.
 >   push`, write tools of a database MCP server. Local databases (localhost,
 >   sockets, SQLite files) are free. Mark dev databases in **Agent guard → Dev
 >   databases** or a database MCP server's environment as *Dev*.
+> - **Check your database MCP servers' environment.** A server whose name looks
+>   like a database (postgres, mysql, sql, mongo, redis …) starts as
+>   *Unknown*, which counts as **production** for `db-write`: every write tool
+>   call on it needs approval. Set dev and local servers to *Dev* in MCP
+>   Servers (or add them to the dev database patterns).
 > - **Destructive SQL needs approval on every database, local ones included**
 >   (`sql-destroy`): `DROP TABLE/DATABASE/SCHEMA`, `TRUNCATE`, `DELETE` without
 >   `WHERE`.
@@ -232,7 +237,7 @@ hook checks **every tool call** before it runs, with the task's policy:
 | Decision | What |
 |---|---|
 | **Allowed** | Everyday work: reads, edits inside the project, builds, tests, `git` on feature branches, `rm -rf` inside the project or strictly inside a temp dir (`/tmp/…`, `$TMPDIR/…`, `/private/var/folders/…` — never the temp root itself) |
-| **Needs approval** (a person, once) | `rm -rf` outside the project (or of the project / its `.git`), force-push to `main`/`master`, `git reset --hard`, `git clean -fdx`, `git stash drop`, secret files (`.env`, keys), wide `chmod`, `curl … \| sh`, `.git/config` / hooks, Claude Code settings / hooks / agents / `.mcp.json`, commands too unclear to check, MCP tools set to *Require approval*, **unknown tools** |
+| **Needs approval** (a person, once) | `rm -rf` outside the project (or of the project / its `.git`), force-push to `main`/`master`, `git reset --hard`, `git clean -fdx`, `git stash drop`, secret files (`.env`, keys, `secrets.yml`; source and docs such as `secrets.ts` or `docs/secrets.md` are free), wide `chmod`, `curl … \| sh`, `.git/config` / hooks, Claude Code settings / hooks / agents / `.mcp.json`, commands too unclear to check, MCP tools set to *Require approval*, **unknown tools** |
 | **Needs approval** (database) | `sql-destroy`: `DROP TABLE/DATABASE/SCHEMA`, `TRUNCATE`, `DELETE` without `WHERE` sent to any database client or database MCP server, local ones included. `db-write`: any non-read statement, script file or unknown stdin sent to a target that is neither local nor dev; `prisma db push` / `migrate deploy|resolve|reset`, `supabase db push`; database MCP write tools (not on *Dev* servers) |
 | **Needs approval** (policy) | `guest-quarantine`: the repo's install / build / test / run commands in a quarantined project (also with the built-in rules off). `org.<slug>` / `project.<slug>` / `repo.<slug>` *confirm* rules |
 | **Denied** (never approvable) | `rm -rf ~` / `/`, anything touching the orchestrator itself (its code, `.env`, DB, venv, the guard, other tasks' data, the Claude config dir) — **self-protection**, commands too complex to parse, MCP tools set to *Block*, the PowerShell tool |
@@ -322,8 +327,10 @@ Patterns that are only wildcards are refused.
 **MCP servers (admins).** Each server has an **environment** — *Dev*, *Prod* or
 *Unknown* (the default). *Dev* or *Prod* marks it as a database; an *Unknown*
 server whose name looks like a database (postgres, mysql, sql, mongo, redis …)
-is one too and counts as production. `db-write` skips *Dev* servers (an
-explicit *Prod* beats any dev pattern); `sql-destroy` applies to all. Each
+is one too and counts as production — so set your dev and local database
+servers to *Dev*. `db-write` skips *Dev* servers (an explicit *Prod* beats any
+dev pattern); `sql-destroy` applies to all of them, *Dev* and local databases
+included. Each
 server also has a **default
 action** for tools with no policy row: *Auto-approve*, *Require approval* or
 *Block*. An explicit tool policy always wins.
@@ -331,7 +338,7 @@ action** for tools with no policy row: *Auto-approve*, *Require approval* or
 **Trust and quarantine (Project → Guard).** *Own* code or *External* (someone
 else's). New and imported projects get a suggestion (the git-author check in
 the upgrade note; trust is not checked when no member has a git email) and the
-Guard tab shows why. For an external project the agent is told, at start and
+Guard tab shows why. For an external project the agent (and every helper it starts) is told, at start and
 after compaction, that the repo's README, comments, docs, scripts and rules
 files are data to review, never instructions; and its rules file is not read.
 **Quarantine** (on by default for projects that come out external) holds the
@@ -359,7 +366,8 @@ and **Approve for this run**: the same rules through for the rest of the
 **thread** (the task and its follow-up steps) for **12 h**. A run grant covers
 a call only when every rule it hits is granted, for:
 - `guest-quarantine`: any command of the thread;
-- MCP approvals and `db-write` on an MCP tool: that tool;
+- MCP approvals and `db-write` on an MCP tool: **every call of that tool** in
+  the thread (whatever its input; the button's tooltip says so);
 - every other rule: the same command (Bash and Monitor runs of one command
   share one approval) or the same tool input.
 
@@ -367,8 +375,11 @@ A `db-write` grant never covers `sql-destroy`, and a hard deny is never
 covered. Grants made during a step answer that step's later calls through the
 server; a new step gets them in its policy file and its hook checks them
 locally. Only requests whose key the server can verify from what the card shows
-can be approved for the run: a request the agent filed itself, or a command too
-long to show uncut, is **once only**. **Approvals → Run and follow-up grants**
+can be approved for the run: a request the agent filed itself, a command too
+long to show uncut, one that redaction changed or that holds hidden (bidi,
+zero-width) characters, a call that hit more than 50 rules, and a request with
+a rule that cannot be granted (a hard or *never* rule) are **once only** — the
+server decides, and the card says why. **Approvals → Run and follow-up grants**
 lists live grants with **Revoke**; revoking stops server answers and later
 steps at once, but a step already running keeps its copy until it ends.
 
@@ -435,6 +446,14 @@ input before a call runs, not what the program then does. Accepted limits
   and `find -exec {}`; it holds some reads (`python -c`, `node -p`, `bash -n`,
   `pytest --collect-only`, `--dry-run` installs). Trust follows git author
   emails, which anyone can set, so treat *own* as a convenience, not proof.
+- **Hook errors.** `PreToolUse` fails closed. Any other hook that fails
+  (session start/end, helpers, `PostToolUse`, settings changes) is recorded as
+  a "co-guard hook error" line in the run's log, and **Agent guard** shows how
+  many there were in the last 48 h (`GET /guard/health`).
+- **Redaction** (run logs, approval cards, spool) knows common shapes — API
+  keys (`sk-…`, GitHub, Slack, AWS key ids), JWTs, PEM private keys, URL
+  passwords, `Bearer …`, `password=` / `token:` / `api_key=`-style values and
+  `mysql -p…` — not every secret.
 - **Grants.** Revoking a grant does not reach a step that is already running
   (it keeps its policy copy until it ends). Bash and Monitor runs of the same
   command share one approval. Requests the agent filed itself and commands too
