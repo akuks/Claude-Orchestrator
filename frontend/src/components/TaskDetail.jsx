@@ -30,6 +30,8 @@ import {
   KeyOutlined,
   PlayCircleOutlined,
   PoweroffOutlined,
+  PauseCircleOutlined,
+  SafetyCertificateOutlined,
   LoadingOutlined,
   MinusCircleFilled,
   ReloadOutlined,
@@ -39,7 +41,7 @@ import {
 } from '@ant-design/icons'
 import { api, notifyUnauthorized, PRIORITY_COLORS, STATUS_COLORS, shortModel } from '../api'
 import { statusVar } from '../theme/tokens'
-import { guardLine, waitingLine } from '../guard/guard'
+import { guardLine, revealHidden, waitingLine } from '../guard/guard'
 import '../guard/guard.css'
 
 // co-guard lines in the run log: one icon per kind (guard.js guardLine).
@@ -53,18 +55,21 @@ const GUARD_ICON = {
   error: <BugOutlined />,
   watchdog: <PoweroffOutlined />,
   ran: <PlayCircleOutlined />,
+  granted: <SafetyCertificateOutlined />,
+  filed: <PauseCircleOutlined />,
   info: <InfoCircleOutlined />,
 }
 const GUARD_POLL_MS = 3000
 
-// Plain text only: guard fields come from the agent's commands.
+// Plain text only: guard fields come from the agent's commands. Bidi and
+// zero-width characters are shown as ⟦U+XXXX⟧ so they cannot reorder the line.
 function GuardLine({ line }) {
   return (
     <div className={`co-guard-line co-guard-line-${line.kind}`} data-testid={`guard-line-${line.kind}`}>
       {GUARD_ICON[line.kind] || GUARD_ICON.info}
       <span className="co-guard-line-text">
-        {line.text}
-        {line.kind === 'waiting' && line.canDecide && line.requestId && (
+        {revealHidden(line.text).text}
+        {(line.kind === 'waiting' || line.kind === 'filed') && line.canDecide && line.requestId && (
           <>
             {' '}
             <a href={`#/approvals/${encodeURIComponent(line.requestId)}`}>open the request</a>
