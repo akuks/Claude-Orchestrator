@@ -270,3 +270,14 @@
 .co-guard-builtin-locked .co-guard-builtin-name {
   color: var(--co-text-secondary);
 }
+
+/* Night-safe danger text (hidden-characters chip, Reject). */
+.co-guard-hidden-chip.ant-tag {
+  color: var(--co-danger-text);
+  border-color: var(--co-danger-text);
+  background: transparent;
+}
+.co-guard-reject.ant-btn:not(:disabled) {
+  color: var(--co-danger-text);
+  border-color: var(--co-danger-text);
+}

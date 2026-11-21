@@ -161,4 +161,20 @@ describe('GuardSettings', () => {
     c = await mount({ project: project({ trust: 'external' }), canEdit: false })
     expect(q(c, 'rules-file-not-read').textContent).toMatch(/Not read: this project is external \(the file exists\)/)
   })
+
+  it('fix round 1: repo rules-file text shows hidden characters as markers with a chip', async () => {
+    api.projectRulesFile.mockImplementationOnce(async () => ({
+      path: '/w/.claude-orchestrator/rules.md', present: true, read: true,
+      confirm: [{ id: 'repo.x', kind: 'confirm', match: 'text', pattern: 'make\u202e deploy', reason: 'ships\u200b', line: 3 }],
+      never: [],
+      errors: [{ line: 7, message: 'bad line \u2066x' }],
+    }))
+    const c = await mount({ project: project(), canEdit: true })
+    const box = q(c, 'rules-file')
+    expect(box.textContent).toContain('make⟦U+202E⟧ deploy')
+    expect(box.textContent).toContain('ships⟦U+200B⟧')
+    expect(box.textContent).toContain('line 7: bad line ⟦U+2066⟧x')
+    expect(box.textContent).not.toMatch(/[\u202e\u200b\u2066]/)
+    expect(box.querySelectorAll('[data-testid="rules-file-hidden"]').length).toBe(3)
+  })
 })

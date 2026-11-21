@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { Alert, Button, Empty, Popconfirm, Space, Table, Tag, Tooltip, Typography, message } from 'antd'
 import { KeyOutlined, ReloadOutlined } from '@ant-design/icons'
 import dayjs from 'dayjs'
@@ -18,17 +18,25 @@ export default function RunGrants({ rootId, refreshSignal }) {
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState(null)
   const [busy, setBusy] = useState(null)
+  const alive = useRef(true)
+  useEffect(() => {
+    alive.current = true
+    return () => {
+      alive.current = false
+    }
+  }, [])
 
   const load = useCallback(async () => {
     setLoading(true)
     try {
       const list = await api.listGrants(rootId)
+      if (!alive.current) return
       setGrants(Array.isArray(list) ? list : [])
       setError(null)
     } catch (e) {
-      setError(e.message)
+      if (alive.current) setError(e.message)
     } finally {
-      setLoading(false)
+      if (alive.current) setLoading(false)
     }
   }, [rootId])
   useEffect(() => {
@@ -43,23 +51,24 @@ export default function RunGrants({ rootId, refreshSignal }) {
     } catch (e) {
       message.error(e.message)
     } finally {
-      setBusy(null)
+      if (alive.current) setBusy(null)
     }
-    load()
+    if (alive.current) load()
   }
 
   return (
-    <section className="co-guard-section" data-testid="run-grants" aria-label="Active run grants">
+    <section className="co-guard-section" data-testid="run-grants" aria-label="Run and follow-up grants">
       <Space style={{ marginBottom: 4 }}>
         <Typography.Title level={5} style={{ margin: 0 }}>
-          <KeyOutlined /> Active run grants ({grants.length})
+          <KeyOutlined /> Run and follow-up grants ({grants.length})
         </Typography.Title>
         <Button size="small" icon={<ReloadOutlined />} onClick={load} loading={loading}>
           Refresh
         </Button>
       </Space>
       <Typography.Paragraph type="secondary" className="co-guard-sub" data-testid="run-grants-note">
-        Approvals made for a whole run: they let the same rules through in that thread until they expire. {REVOKE_NOTE}
+        Approvals made for a whole run let the same rules through in that thread until they expire; a follow-up's
+        grant lets its one approved call run once. {REVOKE_NOTE}
       </Typography.Paragraph>
       {error && <Alert type="error" showIcon message={error} style={{ marginBottom: 8 }} />}
       <Table

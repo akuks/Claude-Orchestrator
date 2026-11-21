@@ -13,7 +13,7 @@ import {
 import dayjs from 'dayjs'
 import relativeTime from 'dayjs/plugin/relativeTime'
 import { api } from '../api'
-import { when } from '../time'
+import { parseTime, when } from '../time'
 import {
   ONCE_ONLY_REASON,
   RESUME_BADGE,
@@ -64,10 +64,13 @@ function conflictState(e) {
 }
 
 // Resume phase: the server says so (delivery), or the inline wait of a
-// request with resume_until has run out (the server moves it on its next read).
+// request with resume_until has run out at expires_at (the server moves it on
+// its next read). Between the decide margin and expires_at the request is
+// still inline: the server answers 409 "giving up" there.
 export function inResume(card, now = Date.now()) {
   if (card?.delivery === 'resume') return true
-  return Boolean(card?.resume_until) && card?.status === 'pending' && closesIn(card, now) <= 0
+  const exp = parseTime(card?.expires_at)
+  return Boolean(card?.resume_until) && card?.status === 'pending' && exp != null && exp <= now
 }
 function resumeLeft(card, now) {
   const until = card?.resume_until ? Date.parse(card.resume_until) : NaN
@@ -172,7 +175,7 @@ function ActionCard({ card, state, now, busy, names, focused, onApprove, onRejec
         ))}
         {hidden > 0 && (
           <Tooltip title="Bidi or zero-width characters can make text read differently from what runs; each is shown as ⟦U+XXXX⟧">
-            <Tag color="error" icon={<EyeInvisibleOutlined />} data-testid={`action-hidden-${id}`}>
+            <Tag className="co-guard-hidden-chip" icon={<EyeInvisibleOutlined />} data-testid={`action-hidden-${id}`}>
               hidden characters
             </Tag>
           </Tooltip>
@@ -212,7 +215,7 @@ function ActionCard({ card, state, now, busy, names, focused, onApprove, onRejec
       )}
       {!pending && state === 'approved' && card.scope === 'run' && (
         <Typography.Text type="secondary" className="co-guard-note" data-testid={`action-run-note-${id}`}>
-          Approved for this run — {runGrantTooltip(card)}. Revoke it under Active run grants.
+          Approved for this run — {runGrantTooltip(card)}. Revoke it under Run and follow-up grants.
         </Typography.Text>
       )}
       {!pending && state === 'approved' && card.delivery === 'resume' && (
@@ -288,7 +291,7 @@ function ActionCard({ card, state, now, busy, names, focused, onApprove, onRejec
                   </Popconfirm>
                 </span>
               </Tooltip>
-              <Button danger icon={<CloseOutlined />} disabled={busy} onClick={() => setRejecting(true)}>
+              <Button danger className="co-guard-reject" icon={<CloseOutlined />} disabled={busy} onClick={() => setRejecting(true)}>
                 Reject
               </Button>
             </Space>
@@ -434,6 +437,7 @@ export default function ActionApprovals({ onChanged, focusId, pollMs = POLL_MS }
     if (o) return o.state
     if (card.status && card.status !== 'pending') return card.status
     if (inResume(card, now)) return resumeLeft(card, now) > 0 ? 'pending' : 'expired'
+    if (card.resume_until) return 'pending' // margin before expires_at: still inline, then the resume phase
     return closesIn(card, now) <= 0 ? 'expired' : 'pending'
   }
   const pendingCount = shown.filter((c) => stateOf(c) === 'pending').length

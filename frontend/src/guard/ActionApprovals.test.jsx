@@ -357,7 +357,7 @@ describe('ActionApprovals: approve scope, resume phase, hidden characters', () =
     const c = await mount()
     expect(q(c, 'action-resume-note-r1').textContent).toMatch(/24 h/)
     expect(q(c, 'action-resume-r1')).toBeNull()
-    await tick(121_000)
+    await tick(126_000) // past expires_at (10:02:05)
     expect(q(c, 'action-resume-r1')).not.toBeNull()
     expect(q(c, 'action-state-r1')).toBeNull() // not expired
   })
@@ -382,5 +382,28 @@ describe('ActionApprovals: approve scope, resume phase, hidden characters', () =
   it('no chip for ordinary text', async () => {
     const c = await mount()
     expect(q(c, 'action-hidden-r1')).toBeNull()
+  })
+
+  it('fix round 1: the resume badge comes at expires_at, not when decisions close (margin stays pending)', async () => {
+    api.listActionApprovals.mockImplementation(async () => [card({ resume_until: '2026-11-22T09:59:00Z' })])
+    const c = await mount()
+    await tick(118_000) // 10:01:58: inside the 5 s margin (closes 10:02:00, expires 10:02:05)
+    await tick(4_000) // 10:02:02
+    expect(q(c, 'action-resume-r1')).toBeNull()
+    expect(q(c, 'action-state-r1')).toBeNull() // not expired
+    expect(btn(c, 'Approve once')).toBeTruthy()
+    await tick(4_000) // 10:02:06: past expires_at
+    expect(q(c, 'action-resume-r1')).not.toBeNull()
+  })
+
+  it('fix round 1: the hidden-characters chip and Reject use the night-safe danger token', async () => {
+    api.listActionApprovals.mockImplementation(async () => [card({ summary: 'a\u200bb' })])
+    const c = await mount()
+    expect(q(c, 'action-hidden-r1').className).toContain('co-guard-hidden-chip')
+    expect(btn(c, 'Reject').className).toContain('co-guard-reject')
+    const { readFileSync } = await import('node:fs')
+    const css = readFileSync(`${process.cwd()}/src/guard/guard.css`, 'utf8')
+    expect(css).toMatch(/\.co-guard-hidden-chip\.ant-tag \{[^}]*var\(--co-danger-text\)/)
+    expect(css).toMatch(/\.co-guard-reject\.ant-btn[^{]*\{[^}]*var\(--co-danger-text\)/)
   })
 })

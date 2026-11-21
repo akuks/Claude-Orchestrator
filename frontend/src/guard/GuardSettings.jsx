@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from 'react'
 import { Alert, Button, Divider, Input, InputNumber, Select, Slider, Space, Switch, Tag, Typography, message } from 'antd'
-import { DeleteOutlined, FileTextOutlined, PlusOutlined, SafetyOutlined } from '@ant-design/icons'
+import { DeleteOutlined, EyeInvisibleOutlined, FileTextOutlined, PlusOutlined, SafetyOutlined } from '@ant-design/icons'
 import { api } from '../api'
 import RuleTable from './RuleTable'
 import {
@@ -11,6 +11,7 @@ import {
   REFERENCES_HELP,
   TRUST_HELP,
   WAIT_MAX,
+  revealHidden,
   WAIT_MIN,
   formatWait,
 } from './guard'
@@ -33,6 +34,22 @@ function initial(project) {
     readonly: listOf(project.readonly_paths).map((r) => ({ path: r?.path || '', reason: r?.reason || '' })),
     refs: listOf(project.reference_project_ids).filter((x) => typeof x === 'string'),
   }
+}
+
+// Repo text (the least-trusted on this page): hidden characters are shown as
+// ⟦U+XXXX⟧ markers, with a chip after the value.
+function RepoText({ value, testid }) {
+  const { text, count } = revealHidden(value)
+  return (
+    <>
+      {text}
+      {count > 0 && (
+        <Tag className="co-guard-hidden-chip" icon={<EyeInvisibleOutlined />} style={{ marginLeft: 6 }} data-testid={testid}>
+          hidden characters
+        </Tag>
+      )}
+    </>
+  )
 }
 
 // The repo's .claude-orchestrator/rules.md as the worker reads it.
@@ -81,8 +98,15 @@ function RulesFileStatus({ projectId }) {
                   <Tag bordered={false} color={r.kind === 'never' ? 'red' : 'orange'}>
                     {r.kind}
                   </Tag>
-                  <span className="co-guard-mono">{r.pattern}</span>
-                  {r.reason ? <Typography.Text type="secondary"> — {r.reason}</Typography.Text> : null}
+                  <span className="co-guard-mono">
+                    <RepoText value={r.pattern} testid="rules-file-hidden" />
+                  </span>
+                  {r.reason ? (
+                    <Typography.Text type="secondary">
+                      {' '}
+                      — <RepoText value={r.reason} testid="rules-file-hidden" />
+                    </Typography.Text>
+                  ) : null}
                   <Typography.Text type="secondary"> (line {r.line})</Typography.Text>
                 </li>
               ))}
@@ -102,7 +126,7 @@ function RulesFileStatus({ projectId }) {
               {errors.map((e, i) => (
                 <li key={i}>
                   {e.line ? `line ${e.line}: ` : ''}
-                  {e.message}
+                  <RepoText value={e.message} testid="rules-file-hidden" />
                 </li>
               ))}
             </ul>

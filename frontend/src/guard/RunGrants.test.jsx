@@ -36,7 +36,7 @@ describe('RunGrants', () => {
     await flush()
     const c = view.container
     expect(api.listGrants).toHaveBeenCalledWith(undefined)
-    expect(c.textContent).toContain('Active run grants (2)')
+    expect(c.textContent).toContain('Run and follow-up grants (2)')
     expect(c.textContent).toContain('the same command')
     expect(c.textContent).toContain("all of this repo's code")
     expect(c.querySelector('a[href="#/tasks/root1"]')).not.toBeNull()
@@ -56,6 +56,33 @@ describe('RunGrants', () => {
     await click(btn(document.querySelector('.ant-popconfirm'), 'Revoke'))
     await flush()
     expect(api.revokeGrant).toHaveBeenCalledWith('g1')
-    expect(view.container.textContent).toContain('Active run grants (0)')
+    expect(view.container.textContent).toContain('Run and follow-up grants (0)')
+  })
+
+  it('fix round 1: a tool key is shown with hidden characters revealed', async () => {
+    api.listGrants.mockImplementation(async () => [grant({ rule_id: 'mcp-require-approval', key_kind: 'tool', key: 'mcp__db\u202e__q' })])
+    view = await render(<RunGrants />)
+    await flush()
+    expect(view.container.textContent).toContain('the tool mcp__db⟦U+202E⟧__q')
+  })
+
+  it('fix round 1: nothing reloads or sets state after unmount', async () => {
+    api.listGrants.mockImplementation(async () => [grant()])
+    let finish
+    api.revokeGrant.mockImplementation(() => new Promise((r) => { finish = r }))
+    const err = vi.spyOn(console, 'error').mockImplementation(() => {})
+    view = await render(<RunGrants />)
+    await flush()
+    await click(q(view.container, 'grant-revoke-g1'))
+    await flush()
+    await click(btn(document.querySelector('.ant-popconfirm'), 'Revoke'))
+    const loads = api.listGrants.mock.calls.length
+    await view.unmount()
+    view = null
+    await act(async () => finish(grant({ active: false })))
+    expect(api.listGrants.mock.calls.length).toBe(loads) // no reload once unmounted
+    const calls = err.mock.calls.map((c) => String(c[0])).filter((m) => !m.includes('Not implemented'))
+    err.mockRestore()
+    expect(calls).toEqual([])
   })
 })

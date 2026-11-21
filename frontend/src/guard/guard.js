@@ -86,6 +86,7 @@ export const REFERENCES_HELP =
   'Other projects the agent may read: they are mounted read-only into each task. Only projects the task\'s ' +
   'owner can see are mounted.'
 export const RUN_GRANT_HELP = 'These rules, this thread, 12 h'
+export const SHARED_KEY_NOTE = 'Bash and Monitor runs of the same command share one approval'
 export const QUARANTINE_GRANT_HELP = "Lets this repo's code run in this thread for 12 h"
 export const ONCE_ONLY_REASON =
   "This request can't be approved for the whole run (the agent filed it itself, or the command is too long to " +
@@ -100,12 +101,16 @@ export const REVOKE_NOTE = 'A running step keeps its grants until it ends; revok
 
 // Bidi controls and zero-width characters can make a command read differently
 // from what runs. The command block shows each one as a visible marker.
-export const HIDDEN_CHARS = /[\u200B-\u200F\u202A-\u202E\u2060-\u2064\u2066-\u2069\uFEFF]/g
+// Also: C0 controls (but tab and newline), C1, line/paragraph separators,
+// soft hyphen and other invisible fillers, and Unicode tag characters.
+export const HIDDEN_CHARS =
+  // eslint-disable-next-line no-control-regex
+  /[\u0000-\u0008\u000B-\u001F\u007F-\u009F\u00AD\u034F\u061C\u115F\u180E\u200B-\u200F\u2028\u2029\u202A-\u202E\u2060-\u2064\u2066-\u2069\u3164\uFEFF\uFFA0\u{E0000}-\u{E007F}]/gu
 export function revealHidden(text) {
   let count = 0
   const out = String(text ?? '').replace(HIDDEN_CHARS, (ch) => {
     count += 1
-    return `⟦U+${ch.charCodeAt(0).toString(16).toUpperCase().padStart(4, '0')}⟧`
+    return `⟦U+${ch.codePointAt(0).toString(16).toUpperCase().padStart(4, '0')}⟧`
   })
   return { text: out, count }
 }
@@ -126,12 +131,13 @@ export function runGrantTooltip(card) {
   if (keys.length && keys.every((k) => k.rule_id === 'guest-quarantine')) return QUARANTINE_GRANT_HELP
   const names = [...new Set(keys.map((k) => ruleName(k.rule_id)))]
   const extra = keys.some((k) => k.rule_id === 'guest-quarantine') ? `; ${QUARANTINE_GRANT_HELP.toLowerCase()}` : ''
-  return `${RUN_GRANT_HELP}${names.length ? ` (${names.join(', ')})` : ''}${extra}`
+  const shared = keys.some((k) => k.key_kind === 'command') ? `. ${SHARED_KEY_NOTE}` : ''
+  return `${RUN_GRANT_HELP}${names.length ? ` (${names.join(', ')})` : ''}${extra}${shared}`
 }
 // What a grant covers, in words.
 export function grantCovers(g) {
   if (g?.key_kind === 'rule') return g.rule_id === 'guest-quarantine' ? "all of this repo's code" : 'every call'
-  if (g?.key_kind === 'tool') return `the tool ${g.key}`
+  if (g?.key_kind === 'tool') return `the tool ${revealHidden(g.key).text}`
   return 'the same command'
 }
 

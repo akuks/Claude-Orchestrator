@@ -218,7 +218,7 @@ describe('approve for this run', () => {
   })
   it('tooltips say what the grant covers', () => {
     expect(runGrantTooltip({ run_keys: [{ rule_id: 'git-reset-hard', key_kind: 'command', key: KEY }] })).toBe(
-      'These rules, this thread, 12 h (Discard uncommitted work)',
+      'These rules, this thread, 12 h (Discard uncommitted work). Bash and Monitor runs of the same command share one approval',
     )
     expect(runGrantTooltip({ run_keys: [{ rule_id: 'guest-quarantine', key_kind: 'rule', key: '*' }] })).toBe(
       QUARANTINE_GRANT_HELP,
@@ -273,5 +273,30 @@ describe('actionTitle reveals hidden characters', () => {
   it('Home rows and waiting lines cannot be reordered by bidi controls', async () => {
     const { actionTitle } = await import('./guard')
     expect(actionTitle({ tool: 'Bash', summary: 'a\u202eb' })).toBe('Bash: a⟦U+202E⟧b')
+  })
+})
+
+describe('fix round 1: wider hidden-character set', () => {
+  it('reveals C0 (not tab/newline), C1, separators, fillers and tag characters', () => {
+    const chars = ['\u0000', '\u0007', '\u000B', '\u001B', '\u007F', '\u0085', '\u009F', '\u2028', '\u2029', '\u00AD',
+      '\u034F', '\u115F', '\u3164', '\uFFA0', '\u180E', '\u061C', '\u{E0041}', '\u{E007F}', '\u{E0000}']
+    for (const ch of chars) {
+      const { text, count } = revealHidden(`a${ch}b`)
+      expect(count, ch.codePointAt(0).toString(16)).toBe(1)
+      expect(text).toBe(`a⟦U+${ch.codePointAt(0).toString(16).toUpperCase().padStart(4, '0')}⟧b`)
+    }
+    expect(revealHidden('\u{E0041}').text).toBe('⟦U+E0041⟧') // one marker per tag character, not per surrogate
+  })
+  it('keeps tab, newline and ordinary astral characters', () => {
+    expect(revealHidden('a\tb\nc 😀 \u{1F600}')).toEqual({ text: 'a\tb\nc 😀 \u{1F600}', count: 0 })
+  })
+  it('the run-grant tooltip says Bash and Monitor share one approval (command keys only)', () => {
+    expect(runGrantTooltip({ run_keys: [{ rule_id: 'db-write', key_kind: 'command', key: KEY }] })).toMatch(
+      /Bash and Monitor runs of the same command share one approval/,
+    )
+    expect(runGrantTooltip({ run_keys: [{ rule_id: 'mcp-require-approval', key_kind: 'tool', key: 'mcp__x__y' }] })).not.toMatch(/Monitor/)
+  })
+  it('a tool grant key is revealed', () => {
+    expect(grantCovers({ key_kind: 'tool', key: 'mcp__a\u202e__b' })).toBe('the tool mcp__a⟦U+202E⟧__b')
   })
 })
