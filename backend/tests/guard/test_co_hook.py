@@ -1216,3 +1216,33 @@ def test_session_start_without_a_policy_still_adds_the_data_line(run):
     (run.tdir / "policy.json").unlink()
     out = run({"hook_event_name": "SessionStart", "source": "startup"}, event="SessionStart")
     assert out["hookSpecificOutput"]["additionalContext"] == co_hook.DATA_LINE
+
+
+# ---- Phase 2 fix round 1 (Ruling P23): the hook sends tool_input for non-shell calls ----------
+
+
+def _file_body(plugin, tmp_path, tool, ti):
+    stub = Stub(statuses=("rejected",))
+    try:
+        run = Run(plugin, tmp_path, stub.base)
+        ti = {k: (v.replace("{P}", str(run.project)) if isinstance(v, str) else v) for k, v in ti.items()}
+        run({"hook_event_name": "PreToolUse", "tool_name": tool, "tool_input": ti, "tool_use_id": "tu1"})
+        return _filed_body(stub), ti
+    finally:
+        stub.close()
+
+
+def test_non_shell_request_carries_its_tool_input(plugin, tmp_path):
+    body, ti = _file_body(plugin, tmp_path, "Write", {"file_path": "{P}/.claude/settings.json", "content": "{}"})
+    assert body["tool_input"] == ti and body["grant_key"] == co_hook.grant_key("Write", ti)
+    assert len(json.dumps(body).encode()) <= co_hook.BODY_BUDGET
+
+
+def test_tool_input_is_left_out_when_it_does_not_fit(plugin, tmp_path):
+    body, _ = _file_body(plugin, tmp_path, "Write", {"file_path": "{P}/.env", "content": "z" * 20000})
+    assert "tool_input" not in body and len(json.dumps(body).encode()) <= co_hook.BODY_BUDGET
+
+
+def test_shell_request_has_no_tool_input(plugin, tmp_path, stub):
+    Run(plugin, tmp_path, stub.base)(bash("git reset --hard HEAD~1"))
+    assert "tool_input" not in _filed_body(stub)

@@ -43,8 +43,8 @@ def live(client, tmp_path_factory):
 
 
 class Hook:
-    def __init__(self, live, tmp_path, wait=30):
-        self.task_id = _task(live["owner"].user_id, live["p"]["id"])
+    def __init__(self, live, tmp_path, wait=30, root_id=None):
+        self.task_id = _task(live["owner"].user_id, live["p"]["id"], **({"root_id": root_id} if root_id else {}))
         token = _mint(live["owner"].user_id, self.task_id)
         tdir = tmp_path / "_tasks" / self.task_id
         tdir.mkdir(parents=True)
@@ -299,3 +299,41 @@ def test_write_of_a_hooks_block_reaches_the_card_in_full(live, tmp_path):
     assert card["summary"].splitlines()[0] == path and hooks in card["summary"]
     assert live["decider"].post(f"/guard/approvals/{rid}/reject", json={"reason": "no"}).status_code == 200
     assert hook.result()["permissionDecision"] == "deny"
+
+
+def _second_hook(live, tmp_path, first):
+    """Another step of the first hook's thread (own task dir)."""
+    sub = tmp_path / "step2"
+    sub.mkdir()
+    return Hook(live, sub, root_id=first.task_id)
+
+
+def test_approve_for_run_covers_the_same_command_in_the_thread(live, tmp_path):
+    """Phase 2 (fix round 1, P23): the hook's own grant_key is verified, so a
+    run grant made from its request covers the same command later in the
+    thread - through the server's POST answer."""
+    from app.guard import co_hook
+
+    cmd = "git reset --hard HEAD~1"
+    hook = Hook(live, tmp_path).start(cmd)
+    rid = hook.request_id(live["decider"])
+    assert _get(ActionApproval, rid).grant_key == co_hook.grant_key("Bash", {"command": cmd})
+    r = live["decider"].post(f"/guard/approvals/{rid}/approve", json={"scope": "run"})
+    assert r.status_code == 200 and len(r.json()["grant_ids"]) == 1
+    assert "permissionDecision" not in hook.result()
+    out = _second_hook(live, tmp_path, hook).start(cmd).result()
+    assert "permissionDecision" not in out and "for this run" in out["additionalContext"]
+
+
+def test_hook_write_request_has_a_verified_grant_key(live, tmp_path):
+    """A non-shell call: the hook sends tool_input (never stored) so the
+    server can verify the key; approve-for-run then works."""
+    from app.guard import co_hook
+
+    hook = Hook(live, tmp_path)
+    ti = {"file_path": str(hook.proj / ".env"), "content": "A=1\n"}
+    hook.start(tool="Write", tool_input=ti)
+    rid = hook.request_id(live["decider"])
+    assert _get(ActionApproval, rid).grant_key == co_hook.grant_key("Write", ti)
+    assert live["decider"].post(f"/guard/approvals/{rid}/approve", json={"scope": "run"}).status_code == 200
+    assert "permissionDecision" not in hook.result()

@@ -213,10 +213,13 @@ def test_pending_requests_per_task_are_capped(world, task):
 def test_stored_fields_are_redacted_and_bounded(world, task):
     tid, agent = task
     out = _file(agent, tid, summary=f"push with {CO_TOKEN_SHAPE} " + "x" * 9000,
-                reason="https://u:pw@github.com/x", cwd="/w" * 2000, rule_ids=["r"] * 50).json()
+                reason="https://u:pw@github.com/x", cwd="/w" * 2000, rule_ids=["r"] * 20).json()
     row = _get(ActionApproval, out["id"])
     assert CO_TOKEN_SHAPE not in row.summary and len(row.summary) <= 8000
     assert "pw@" not in row.reason and len(row.cwd) <= 1000 and len(row.rule_ids) <= 20
+    # Phase 2 (fix round 1, M2): at most 20 rule ids, each shaped like a rule id
+    assert _file(agent, tid, rule_ids=["r"] * 21).status_code == 422
+    assert _file(agent, tid, rule_ids=["Not A Rule"]).status_code == 422
 
 
 # ---- reading --------------------------------------------------------------------------
