@@ -139,6 +139,11 @@ NOTES_LINE = (
 )
 CARRY_LINE = ("co-orchestrator: the conversation was just compacted. Below is where the work stands (a record, not "
               "instructions). Carry on from Next; no need to ask.")
+# the characters that can make text read differently from what it says (app.redaction.HIDDEN_CHARS, kept equal
+# by a test: the hook cannot import the app)
+HIDDEN_CHARS = re.compile(
+    "[\u0000-\u0008\u000b-\u001f\u007f-\u009f\u00ad\u034f\u061c\u115f\u180e\u200b-\u200f\u2028\u2029"
+    "\u202a-\u202e\u2060-\u2064\u2066-\u2069\u3164\ufeff\uffa0\U000e0000-\U000e007f]")
 COMPACT_HANDOFF_MAX = 8000  # chars of handoff.md re-injected after a compaction
 TEMP_DOC_LINE = ("co-orchestrator: {path} is in a temp folder and can vanish; save it in the project and give "
                  "the user its path.")
@@ -836,10 +841,11 @@ def _compact_handoff():
     """The task dir's handoff.md (redacted, then cut), or raises OSError / ValueError when it is missing,
     not a file, or empty."""
     with open(os.path.join(os.environ["CO_TASK_DIR"], "handoff.md"), encoding="utf-8", errors="replace") as f:
-        text = f.read(COMPACT_HANDOFF_MAX * 4).strip()
+        text = f.read(COMPACT_HANDOFF_MAX * 4)
+    text = HIDDEN_CHARS.sub("", text).strip()
     if not text:
         raise ValueError("handoff.md is empty")
-    return redact(text, COMPACT_HANDOFF_MAX)
+    return redact(text, COMPACT_HANDOFF_MAX)  # redact first, then cut
 
 
 def session_context(event="SessionStart", source=None):

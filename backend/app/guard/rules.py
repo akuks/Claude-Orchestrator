@@ -90,6 +90,12 @@ Policy (a dict, as written by the worker into ``policy.json``)::
       "regex_budget_ms": 250,              #   shared budget for every custom regex in
                                            #   one evaluate (at most 1000; a non-number
                                            #   means 250, <= 0 means every regex times out)
+      "notes": true, "notes_after": 12,    #   the hook nudges for notes every 12 calls (notes
+                                           #   false or missing: never); never denies anything
+      "helper_context": "...",             #   text SubagentStart hands every helper ("" or
+                                           #   missing: the data line unless trust is own)
+      "compact": true,                     #   false: no handoff re-injection after a compaction
+                                           #   (missing or malformed means true)
       "env_paths": {"CO_POLICY_FILE": "/abs/...", "CO_TASK_DIR": "/abs/...",
                     "CLAUDE_CONFIG_DIR": "/abs/...", "CLAUDE_PLUGIN_ROOT": "/abs/..."}
                                            #   values of the agent's env vars that
