@@ -15,6 +15,7 @@ GIT_BUDGET = 5.0
 DIRTY_CAP = 2000
 SUBJECT_MAX = 200
 
+_SHA40 = re.compile(r"^[0-9a-f]{40}$")
 _OWN_RE = re.compile(r"^\[(?:[^\]\s]+|detached HEAD)(?: \(root-commit\))? ([0-9a-f]{7,40})\]", re.M)
 
 
@@ -87,9 +88,9 @@ def commits_between(directory, base: str, head: str, budget: Budget, limit: int 
     if not r.ok:
         return None
     out = []
-    for line in r.out.splitlines():
+    for line in r.out.split("\n"):
         sha, _, subject = line.partition("\x1f")
-        if sha:
+        if _SHA40.match(sha):
             out.append(Commit(sha, clean_text(subject, SUBJECT_MAX)))
     return out
 

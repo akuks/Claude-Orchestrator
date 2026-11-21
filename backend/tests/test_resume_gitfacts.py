@@ -200,3 +200,26 @@ def test_git_state_route(client, tmp_path):
     agent = TestClient(app)
     agent.headers["Authorization"] = f"Bearer {asyncio.run(mint())}"
     assert agent.get(f"/projects/{pid}/git-state").status_code == 403
+
+
+def test_crafted_subject_makes_no_fake_commit(tmp_path):
+    d = repo(tmp_path)
+    commit(d, "base.txt")
+    base = head(d)
+    subject = "evil\rA\x1eB\u2028C\u2029D\x85E \u202eRTL\u200bZW"
+    commit(d, "x.txt", subject)
+    h = head(d)
+    cs = gitfacts.commits_between(d, base[:7], h, gitfacts.Budget())
+    assert [c.sha for c in cs] == [h]
+    assert "\u202e" not in cs[0].subject and "\u200b" not in cs[0].subject
+    assert cs[0].subject.startswith("evil")
+    r = gitfacts.outside_commits(d, since=base[:12], head=h[:12], own=set(), budget=gitfacts.Budget())
+    assert [c.sha for c in r["commits"]] == [h]
+
+
+def test_spent_budget_is_unknown_without_running_git(tmp_path, monkeypatch):
+    d = repo(tmp_path)
+    commit(d, "a.txt")
+    monkeypatch.setattr(gitsafe, "run_git", lambda *a, **k: pytest.fail("git ran"))
+    f = gitfacts.facts(d, gitfacts.Budget(0))
+    assert f.dirty is None and f.error
