@@ -151,11 +151,26 @@ HARD (never approvable):
   operand, or with ``-t``), so ``find ref -exec cp {} ./copy/ +`` is a read,
   while ``mv`` and ``cp -l`` sources count; a build/install/test/script run
   with the cwd in a root (quarantine's tables with the root as "the repo")
-  is hard only for known writers (Ruling P18: package manager
-  install/add/ci/sync/update, make/cmake/ninja, cargo build/run/test,
-  ``./configure``, docker/podman build, gradle/mvn builds, not their dry
-  runs) and otherwise a confirmable ``uncertain-command`` ("this runs a
-  read-only source's code, which may change it"); inline
+  is hard only for known writers (Rulings P18/P19: package manager
+  install/add/ci/sync/update, JS ``build``/``run build``/``version``/``audit
+  fix``, make/cmake/ninja/meson, cargo build/check/clippy/run/test, go
+  build/generate/install, ``python setup.py``, ``python -m build``, ``pip
+  install -e .``, bare ``tsc``/``npx tsc`` without ``--noEmit``,
+  ``./configure``, autoreconf, docker/podman build, gradle/mvn, dotnet
+  build/publish/restore, swift/bazel/zig build, mix deps.get/compile, git
+  submodule update, poetry/bundle install - not their dry runs) and
+  otherwise a confirmable ``uncertain-command`` ("this runs a read-only
+  source's code, which may change it"); Ruling P19: in-place formatters and
+  fixers (black, ``ruff format``/``check --fix``, isort, ``autopep8 -i``,
+  ``prettier --write`` - also via npx/pnpm/yarn/bun -, ``eslint --fix``,
+  ``gofmt -w``, ``go fmt``, ``goimports -w``, ``cargo fmt``, rustfmt,
+  ``clang-format -i``, ``shfmt -w``, stylua, ``rubocop -a|-A``, swiftformat,
+  ``terraform fmt``; not their check/diff modes) treat their path operands
+  (default ``.``) like ``chmod -R`` targets, and builds aimed at a folder by
+  a flag write it (``cmake -S|-B|--build``, ``cargo --manifest-path``, ``go
+  -C``, ``pip install -e DIR``, ``uv --project|--directory``, ``poetry
+  -C|--directory``, ``tsc -p`` without ``--noEmit``, ``git -C DIR submodule
+  update``); inline
   interpreter code that may write (the agent-config pattern) and names a
   root (as written, normalised or real, case-folded) or runs with the cwd in
   one. An unknown path counts by its braces (``{../ref,/tmp}/``), a ``for``
@@ -335,8 +350,13 @@ by a ``find`` rooted above it, nor ``git clean -fdx``, ``git stash -u`` or
 ``tar -x`` replacing an untracked rules folder.
 
 cwd tracking (P15-P17) is straight-line: a function body is checked where
-it is defined, in that cwd, not where it is called (``f() { echo > a; };
-cd ref; f`` is missed); a ``cd`` inside ``if``/loops/``||`` is assumed to
+it is defined, in that cwd, not where it is called - in both directions
+(``f() { echo > a; }; cd ref; f`` is missed, and a body defined inside a
+root is judged there even when it is called elsewhere); path lists that
+reach ``sed -i`` or ``xargs`` through a pipe or ``$(..)`` from anything but
+``ls``/``find``/``fd``/``echo``/``printf`` (``git ls-files | xargs sed -i``,
+``sed -i .. $(grep -l x -r .)``) are not followed; the GNU ``parallel``
+command template is not parsed as a command; a ``cd`` inside ``if``/loops/``||`` is assumed to
 happen (``while false; do cd /tmp; done`` moves the cwd); in zsh the last
 stage of a pipeline runs in the current shell, so ``true | cd ref`` does
 move it there (co-guard follows bash); and ``find`` reach ignores ``-prune``
@@ -1372,19 +1392,228 @@ _RUN_WRITERS = frozenset({"touch", "chmod", "chown", "chgrp", "mv", "cp", "ln", 
 _FD_HOLDERS = ("{}", "{/}", "{//}", "{.}", "{/.}")
 
 
+_JS_RUN = frozenset({"npx", "pnpx", "bunx"})
+
+
+def _unrun(argv, dyn):
+    """``npx tool ..``, ``pnpm exec|dlx tool``, ``yarn dlx|exec tool``,
+    ``bun x tool`` -> (tool argv, dyn); anything else unchanged."""
+    argv, dyn = list(argv), list(dyn) + [False] * len(argv)
+    name = _sh.command_name(argv[0]) if argv else ""
+    i = None
+    if name in _JS_RUN:
+        i = 1
+    elif name in ("pnpm", "yarn", "bun", "npm") and len(argv) > 1 and argv[1] in ("exec", "dlx", "x"):
+        i = 2
+    if i is None:
+        return argv, dyn[:len(argv)]
+    while i < len(argv) and argv[i].startswith("-"):
+        i += 2 if argv[i] in ("-p", "--package", "-c", "--call") else 1
+    if i < len(argv) and argv[i] == "--":
+        i += 1
+    if i >= len(argv):
+        return argv, dyn[:len(argv)]
+    return argv[i:], dyn[i:len(argv)]
+
+
+def _pos_skipping(args, dargs, values=(), default=None):
+    """Positional operands with option values left out; ``-`` (stdin) dropped."""
+    out, i = [], 0
+    while i < len(args):
+        a = args[i]
+        if a in values:
+            i += 2
+            continue
+        if a == "--":
+            out += [(w, d) for w, d in zip(args[i + 1:], dargs[i + 1:]) if w != "-"]
+            break
+        if not a.startswith("-"):
+            out.append((a, dargs[i]))
+        i += 1
+    return out or ([(default, False)] if default else [])
+
+
+def _format_targets(name, args, dargs):
+    """Ruling P19: the paths an in-place formatter/fixer rewrites (default
+    ``.``), or [] when it only checks."""
+    has = lambda *opts: any(a in opts or a.split("=", 1)[0] in opts for a in args)  # noqa: E731
+    if name == "black":
+        if has("--check", "--diff", "--version", "--help") or args == ["-"]:
+            return []
+        return _pos_skipping(args, dargs, ("-l", "--line-length", "-t", "--target-version", "--config", "--include",
+                                           "--exclude", "--extend-exclude", "--force-exclude", "-W", "--workers",
+                                           "--required-version", "--stdin-filename", "--python-cell-magics"), ".")
+    if name == "ruff":
+        sub = next((a for a in args if not a.startswith("-")), "")
+        if (sub == "format" and not has("--check", "--diff")) or (sub in ("check", "") and has("--fix")
+                                                                   and not has("--no-fix", "--diff")):
+            k = args.index(sub) + 1 if sub else 0
+            return _pos_skipping(args[k:], dargs[k:], ("--config", "--select", "--ignore", "--extend-select",
+                                                       "--target-version", "--line-length", "--exclude",
+                                                       "--extend-exclude", "--output-format", "--cache-dir",
+                                                       "--stdin-filename", "--per-file-ignores"), ".")
+        return []
+    if name == "isort":
+        if has("--check", "--check-only", "-c", "--diff", "--show-files", "--version"):
+            return []
+        return _pos_skipping(args, dargs, ("-l", "--line-length", "--profile", "--settings-path", "--sp", "-p",
+                                           "--skip", "-s", "--src", "--filter-files"), ".")
+    if name == "autopep8":
+        return _pos_skipping(args, dargs, ("--max-line-length", "--select", "--ignore", "-j", "--jobs", "-a",
+                                           "--global-config")) if has("-i", "--in-place") or any(
+            re.fullmatch(r"-[a-z]*i[a-z]*", a) for a in args) else []
+    if name == "prettier":
+        if not has("--write", "-w"):
+            return []
+        return _pos_skipping(args, dargs, ("--config", "--ignore-path", "--plugin", "--parser", "--log-level",
+                                           "--print-width", "--tab-width", "--trailing-comma", "--cache-location",
+                                           "--end-of-line", "--stdin-filepath"), ".")
+    if name == "eslint":
+        if not has("--fix"):
+            return []
+        return _pos_skipping(args, dargs, ("-c", "--config", "--ext", "--rulesdir", "--ignore-path", "-f",
+                                           "--format", "-o", "--output-file", "--parser", "--max-warnings",
+                                           "--cache-location", "--rule", "--env", "--global", "--plugin",
+                                           "--resolve-plugins-relative-to", "--fix-type"), ".")
+    if name in ("gofmt", "goimports"):
+        return _pos_skipping(args, dargs, ("-r", "-local")) if has("-w") else []
+    if name in ("rustfmt", "stylua", "swiftformat"):
+        if has("--check", "--lint", "--dryrun", "--version", "--help"):
+            return []
+        return _pos_skipping(args, dargs, ("--edition", "--config-path", "--config", "--emit", "-f",
+                                           "--config-path", "--search-parent-directories", "--swiftversion",
+                                           "--rules", "--disable", "--enable"), "." if name != "rustfmt" else None)
+    if name == "clang-format":
+        return _pos_skipping(args, dargs, ("--style", "-style", "--assume-filename", "--lines", "--offset",
+                                           "--length")) if has("-i") else []
+    if name == "shfmt":
+        return _pos_skipping(args, dargs, ("-i", "--indent", "-ln", "--language-dialect", "-f")) \
+            if has("-w", "--write") else []
+    if name == "rubocop":
+        if not (has("-a", "-A", "-x", "--autocorrect", "--auto-correct", "--autocorrect-all", "--auto-correct-all",
+                    "--fix-layout") or any(re.fullmatch(r"-[a-zA-Z]*[aAx][a-zA-Z]*", a) for a in args)):
+            return []
+        return _pos_skipping(args, dargs, ("-c", "--config", "--only", "--except", "-f", "--format", "-o", "--out",
+                                           "--require", "-r"), ".")
+    if name == "terraform":
+        k = next((i for i, a in enumerate(args) if a == "fmt"), None)
+        if k is None or has("-check", "-write=false", "-list=true"):
+            return []
+        return _pos_skipping(args[k + 1:], dargs[k + 1:], default=".")
+    if name == "go" and args[:1] == ["fmt"] or (name == "go" and "fmt" in args[:3] and args[:1] == ["-C"]):
+        k = args.index("fmt")
+        return [(re.sub(r"/\.\.\.$", "", w) or ".", d) for w, d in _pos_skipping(args[k + 1:], dargs[k + 1:],
+                                                                                   default=".")]
+    if name == "cargo" and "fmt" in args[:2]:
+        if has("--check"):
+            return []
+        mp = [args[i + 1] for i, a in enumerate(args[:-1]) if a == "--manifest-path"]
+        return [(posixpath.dirname(mp[0]) or ".", False)] if mp else [(".", False)]
+    if name == "cargo" and "clippy" in args[:2] and has("--fix"):
+        return [(".", False)]
+    return []
+
+
+def _build_dirs(name, args, dargs):
+    """Ruling P19: folders a build is aimed at by a flag (it writes there)."""
+    out = []
+
+    def val(*opts):
+        for i, a in enumerate(args):
+            key, eq, v = a.partition("=")
+            if key in opts and a.startswith("--"):
+                if eq:
+                    out.append((v, dargs[i]))
+                elif i + 1 < len(args):
+                    out.append((args[i + 1], dargs[i + 1]))
+            elif a in opts and i + 1 < len(args):
+                out.append((args[i + 1], dargs[i + 1]))
+            elif not a.startswith("--") and len(a) > 2 and a[:2] in opts:
+                out.append((a[2:], dargs[i]))
+
+    if any(a in _DRY for a in args):
+        return out
+    sub, i = "", 0
+    while i < len(args):  # the subcommand, past this function's own folder options
+        if args[i] in ("-C", "-P", "--project", "--directory", "--manifest-path", "--prefix"):
+            i += 2
+            continue
+        if not args[i].startswith("-"):
+            sub = args[i].lower()
+            break
+        i += 1
+    if name == "cmake":
+        val("-S", "-B", "--build")
+    elif name == "cargo" and (sub not in _READONLY_SUBS["cargo"] or sub == "fmt"):
+        for i, a in enumerate(args):
+            if a == "--manifest-path" and i + 1 < len(args):
+                out.append((posixpath.dirname(args[i + 1]) or ".", dargs[i + 1]))
+            elif a.startswith("--manifest-path="):
+                out.append((posixpath.dirname(a.split("=", 1)[1]) or ".", dargs[i]))
+    elif name == "go" and sub in ("build", "generate", "install", "get", "mod", "fmt", "work"):
+        val("-C")
+    elif name in ("pip", "pip3") or (_BASE_TOOL.fullmatch(name) and name.startswith("pip")):
+        if "install" in args:
+            val("-e", "--editable")
+    elif name == "uv" and sub not in _READONLY_SUBS["uv"]:
+        val("--project", "--directory")
+    elif name == "poetry" and sub not in _READONLY_SUBS["poetry"]:
+        val("-C", "--directory", "-P", "--project")
+    elif name == "tsc" and "--noEmit" not in args:
+        start = len(out)
+        val("-p", "--project")
+        out[start:] = [(posixpath.dirname(w) or "." if w.endswith(".json") else w, d) for w, d in out[start:]]
+    elif name == "terraform":
+        for i, a in enumerate(args):
+            if a.startswith("-chdir=") and "fmt" in args:
+                out.append((a.split("=", 1)[1], dargs[i]))
+    return out
+
+
 def _known_writer(word, name, args):
-    """Ruling P18: commands that certainly write where they run - package
-    manager install/add/ci/sync/update (bare yarn/bundle), make/cmake/ninja,
-    cargo build/run/test (not a dry run), ./configure, docker/podman build,
-    gradle/mvn builds."""
+    """Ruling P18/P19: commands that certainly write where they run -
+    package manager install/add/ci/sync/update (bare yarn/bundle), JS
+    ``build``/``run build``/``version``/``audit fix``, make/cmake/ninja/meson,
+    cargo build/check/clippy/run/test, go build/generate/install, ``python
+    setup.py``, ``python -m build``, bare ``tsc`` (no --noEmit),
+    ./configure, autoreconf, docker/podman build, gradle/mvn, dotnet
+    build/publish/restore, swift/bazel/zig build, mix deps.get/compile, git
+    submodule update (not a dry run)."""
     cmd = _BASE_TOOL.sub(r"\1", name) if _BASE_TOOL.fullmatch(name) else name
     if any(a in _DRY for a in args):
         return False
     sub, rest = _subcommand_of(args)
-    if cmd in ("make", "gmake", "cmake", "ninja"):
+    if cmd in ("make", "gmake", "cmake", "ninja", "autoreconf", "autogen.sh", "bootstrap"):
         return True
     if cmd == "cargo":
-        return sub in ("build", "b", "run", "r", "test", "t", "install", "bench")
+        return sub in ("build", "b", "check", "c", "clippy", "run", "r", "test", "t", "install", "bench", "fix",
+                       "update", "generate-lockfile")
+    if cmd == "go":
+        return sub in ("build", "generate", "install", "get") or (sub == "mod" and rest[:1] in (["tidy"], ["vendor"]))
+    if cmd in ("python", "py") and (any(posixpath.basename(a) == "setup.py" for a in args[:3]) or
+                                    args[:2] == ["-m", "build"] or args[:3] == ["-m", "pip", "install"]):
+        return True
+    if cmd == "tsc":
+        return "--noEmit" not in args and not any(a in ("--version", "-v", "--help", "-h") for a in args)
+    if cmd == "meson":
+        return sub in ("setup", "compile", "install", "configure") or (bool(sub) and sub not in ("help", "introspect"))
+    if cmd == "dotnet":
+        return sub in ("build", "publish", "restore", "pack", "test", "run", "new", "add", "tool")
+    if cmd in ("swift", "zig", "bazel", "bazelisk"):
+        return sub in ("build", "test", "run", "package") if cmd != "swift" else sub in ("build", "test", "run")
+    if cmd == "mix":
+        return sub in ("deps.get", "compile", "deps.compile", "deps.update", "release")
+    if cmd == "git":
+        return sub == "submodule" and bool(rest[:1]) and rest[0] in ("update", "add", "init", "sync", "deinit")
+    if cmd in ("npm", "yarn", "pnpm", "bun"):
+        if sub in ("build", "version", "pack", "publish", "rebuild") or (sub == "audit" and "fix" in rest):
+            return True
+        if sub in ("run", "run-script") and rest[:1] and "build" in rest[0]:
+            return True
+        if cmd == "yarn" and sub and "build" in sub:
+            return True
+    if posixpath.basename(word) == "configure":
+        return True
     if posixpath.basename(word) == "configure":
         return True
     if cmd in ("docker", "podman"):
@@ -1842,6 +2071,9 @@ def _git_check(ctx, argv, dyn, cwd, summary, bash):
     rule = None
     if sub in _GIT_CHANGES:  # readonly-source: a work-tree change run in (or on) a readonly root
         _git_readonly(ctx, argv, dyn, d, sub, rest, summary, bash)
+    elif sub == "submodule" and rest[:1] and rest[0] in ("update", "add", "init", "sync", "deinit"):
+        for folder in ([d] if d is not None else ctx.bases(None)):
+            ctx.readonly_check(folder, summary)  # Ruling P19: it writes the work tree
     elif sub == "clone":  # git clone URL [DEST]: DEST is written
         pos, i = [], 0
         while i < len(rest):
@@ -2740,14 +2972,18 @@ class _Bash:
         Ruling P18: a known writer (_known_writer) is a hard readonly-source
         hit; anything else is a confirmable uncertain-command."""
         ctx = self.ctx
+        run, _rd = _unrun(argv, dyn)  # npx tsc, pnpm exec prettier ...
+        rname, rargs = _sh.command_name(run[0]), run[1:]
         for b in ctx.bases(cwd):
             for forms, shown, reason in ctx.readonly:
                 folder = next((f for f in sorted(forms) if _within(b.lower(), f)), None)
-                if folder and _quarantined(ctx, st, argv[0], name, args, dargs, b, st.index > 0, folder=folder):
-                    if _known_writer(argv[0], name, args):  # Ruling P18: hard only for known writers
-                        ctx.readonly_hit((shown, reason), self.raw)
-                    else:
-                        ctx.hits.append(Hit("uncertain-command", _RUNS_ROOT, False, _short(self.raw)))
+                if not folder:
+                    continue
+                if _known_writer(run[0], rname, rargs) or _known_writer(argv[0], name, args):
+                    ctx.readonly_hit((shown, reason), self.raw)  # Ruling P18/P19: hard for known writers
+                    return
+                if _quarantined(ctx, st, argv[0], name, args, dargs, b, st.index > 0, folder=folder):
+                    ctx.hits.append(Hit("uncertain-command", _RUNS_ROOT, False, _short(self.raw)))
                     return
 
     def xargs_writer(self, st, cwd, pipeline):
@@ -3020,6 +3256,12 @@ class _Bash:
 
         if ctx.readonly and not ctx.remote and not lookup:
             self.readonly_runs(st, argv, dyn, name, args, dargs, cwd)
+            run, rdyn = _unrun(argv, dyn)
+            rname, rargs, rdargs = _sh.command_name(run[0]), run[1:], rdyn[1:]
+            for w, d in _format_targets(rname, rargs, rdargs):  # Ruling P19: like chmod -R targets
+                self.readonly_write(w, ctx.path(w, cwd, d), "chmod-r", cwd)
+            for w, d in _build_dirs(rname, rargs, rdargs):  # builds aimed at a folder by a flag
+                self.readonly_write(w, ctx.path(w, cwd, d), "copydir", cwd)
         if ("xargs" in st.wrappers or "parallel" in st.wrappers) and not ctx.remote and \
                 _is_writer(argv, *_xargs_holder(st)):
             self.xargs_writer(st, cwd, pipeline)
