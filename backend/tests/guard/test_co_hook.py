@@ -1459,3 +1459,116 @@ def test_stop_background_absent(run, payload):
     run(dict(payload, hook_event_name="Stop"), event="Stop")
     rec = run.spool()[-1]
     assert rec["event"] == "Stop" and "background" not in rec
+
+
+# ---- phase 3a task 4: notes and temp-document nudges -----------------------------------------
+
+
+def _post(run, n, tool="Bash", **extra):
+    payload = {"tool_name": tool, "tool_use_id": f"p{n}", "tool_response": {}, **extra}
+    return run(payload, event="PostToolUse")
+
+
+def _ctx(out):
+    return out["hookSpecificOutput"]["additionalContext"] if out else None
+
+
+def test_nudge_every_12_calls(plugin, tmp_path, stub):
+    run = Run(plugin, tmp_path, stub.base, notes=True, notes_after=12)
+    for i in range(1, 12):
+        assert _post(run, i) is None
+    out = _post(run, 12)
+    assert out["hookSpecificOutput"]["hookEventName"] == "PostToolUse" and _ctx(out) == co_hook.NOTES_LINE
+    assert _post(run, 13) is None
+    # a stamp newer than the first call of the window silences the 24th call
+    for i in range(14, 24):
+        assert _post(run, i) is None
+    (run.tdir / "notes.stamp").write_text("")
+    assert _post(run, 24) is None
+    # an older stamp does not
+    first = [r for r in run.spool() if r.get("done")][12]["ts"]
+    os.utime(run.tdir / "notes.stamp", (first - 100, first - 100))
+    for i in range(25, 36):
+        assert _post(run, i) is None
+    assert _ctx(_post(run, 36)) == co_hook.NOTES_LINE
+    # org switch off: nothing
+    off = Run(plugin, tmp_path / "off", stub.base, notes=False, notes_after=12)
+    assert all(_post(off, i) is None for i in range(1, 13))
+
+
+def test_commit_reminder_on_allowed_commit(plugin, tmp_path, stub):
+    run = Run(plugin, tmp_path, stub.base, notes=True)
+    out = run(bash("git commit -m x"))
+    assert decision(out) is None and _ctx(out) == co_hook.NOTES_LINE
+    assert out["hookSpecificOutput"]["hookEventName"] == "PreToolUse"
+    out = run(bash("rm -rf ~ && git commit -m x"))
+    assert decision(out) == "deny" and "additionalContext" not in out["hookSpecificOutput"]
+    assert "NOTES" not in reason(out)
+    assert _ctx(run(bash('echo "git commit"'))) == co_hook.NOTES_LINE  # pinned false positive
+    assert run(bash("git status")) is None
+    off = Run(plugin, tmp_path / "off", stub.base, notes=False)
+    assert off(bash("git commit -m x")) is None
+
+
+def test_temp_doc_note_once(plugin, tmp_path, stub):
+    run = Run(plugin, tmp_path, stub.base, notes=False)
+
+    def write(path, n):
+        return _post(run, n, tool="Write", tool_input={"file_path": path, "content": "x"})
+
+    out = write("/tmp/a.html", 1)
+    assert _ctx(out) == co_hook.TEMP_DOC_LINE.replace("{path}", "/tmp/a.html")
+    assert [r["outside_doc"] for r in run.spool() if "outside_doc" in r] == ["/tmp/a.html"]
+    assert write("/tmp/a.html", 2) is None
+    assert write("/tmp/a.py", 3) is None
+    assert write(str(run.project / "a.html"), 4) is None
+    assert _ctx(write("/tmp/b.md", 5)) == co_hook.TEMP_DOC_LINE.replace("{path}", "/tmp/b.md")
+
+
+def test_nudge_and_doc_join_with_a_blank_line(plugin, tmp_path, stub):
+    run = Run(plugin, tmp_path, stub.base, notes=True, notes_after=2)
+    assert _post(run, 1) is None
+    out = _post(run, 2, tool="Write", tool_input={"file_path": "/tmp/r.pdf", "content": "x"})
+    assert _ctx(out) == co_hook.NOTES_LINE + "\n\n" + co_hook.TEMP_DOC_LINE.replace("{path}", "/tmp/r.pdf")
+
+
+def test_hook_single_answer_matrix(plugin, tmp_path, stub):
+    # nudge + doc: one JSON line
+    run = Run(plugin, tmp_path / "a", stub.base, notes=True, notes_after=1)
+    p = subprocess.run([sys.executable, "-I", "-S", str(plugin / "hooks" / "co_hook.py"), "PostToolUse"],
+                       input=json.dumps({"tool_name": "Write", "tool_use_id": "q1",
+                                         "tool_input": {"file_path": "/tmp/m.html"}}),
+                       capture_output=True, text=True, env=run.env, cwd=str(run.project), timeout=60)
+    assert len(p.stdout.strip().splitlines()) == 1 and p.returncode == 0
+    # commit: one line
+    run = Run(plugin, tmp_path / "b", stub.base, notes=True)
+    p = subprocess.run([sys.executable, "-I", "-S", str(plugin / "hooks" / "co_hook.py"), "PreToolUse"],
+                       input=json.dumps(bash("git commit -m x")), capture_output=True, text=True, env=run.env,
+                       cwd=str(run.project), timeout=60)
+    assert len(p.stdout.strip().splitlines()) == 1
+    # broken policy: PostToolUse spools a guard_error and prints nothing; PreToolUse still denies
+    run = Run(plugin, tmp_path / "c", stub.base, notes=True)
+    (run.tdir / "policy.json").write_text("{not json")
+    assert _post(run, 1) is None
+    assert [r["event"] for r in run.spool()][-1] == "guard_error"
+    assert decision(run(bash("git commit -m x"))) == "deny"
+    # spool unwritable: PostToolUse gives no nudge and no crash
+    run = Run(plugin, tmp_path / "d", stub.base, notes=True, notes_after=1)
+    (run.tdir / "spool.jsonl").mkdir()
+    assert _post(run, 1) is None
+
+
+def test_co_hook_has_no_app_imports():
+    import ast
+
+    src = open(co_hook.__file__, encoding="utf-8").read()
+    for node in ast.walk(ast.parse(src)):
+        if isinstance(node, ast.Import):
+            names = [a.name for a in node.names]
+        elif isinstance(node, ast.ImportFrom):
+            assert node.level == 0, "no relative imports"
+            names = [node.module]
+        else:
+            continue
+        for n in names:
+            assert n.split(".")[0] in sys.stdlib_module_names, n
