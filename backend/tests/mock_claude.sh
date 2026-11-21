@@ -35,7 +35,8 @@ if [[ "$args" == *"stream-json"* && "$prompt" == *"[hang]"* ]]; then
   if [[ -n "$CO_TASK_DIR" && -d "$CO_TASK_DIR" ]]; then
     printf '{"event":"PreToolUse","tool_use_id":"tuH","seen":true,"tool":"Bash","what":"hang :: sleep 600"}\n' >>"$CO_TASK_DIR/spool.jsonl"
   fi
-  printf '{"type":"assistant","message":{"id":"mh2","model":"claude-test","content":[{"type":"text","text":"waiting"}]}}\n'
+  # (a project env PROBE_DB_PASSWORD is echoed in the text: the cut-off handoff tests)
+  printf '{"type":"assistant","message":{"id":"mh2","model":"claude-test","content":[{"type":"text","text":"waiting%s"}]}}\n' "${PROBE_DB_PASSWORD:+ $PROBE_DB_PASSWORD}"
   sleep 600
   exit 0
 fi

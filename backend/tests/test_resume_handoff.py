@@ -190,6 +190,10 @@ def test_step_from_plan_file_and_notes_newer_wins(tmp_path):
     assert newer["next"] == "tests"
     older = handoff.step_progress(evs, tmp_path, notes, T0 - timedelta(minutes=5))
     assert older["source"] == "plan"
+    # every box checked: the plan is done, not on its last item
+    f.write_text("- [x] a\n- [x] b\n")
+    st = handoff.step_progress(evs, tmp_path, None, None)
+    assert (st["n"], st["m"], st["text"], st["next"]) == (2, 2, "all steps done", None)
     # fewer than 2 boxes, or too big: not a plan
     f.write_text("- [ ] only one\n")
     assert handoff.step_progress(evs, tmp_path, None, None) is None
@@ -779,3 +783,38 @@ def test_snapshot_children_waiting_others(client, tmp_path):
     # a child's finish still describes the main line
     kid = mk_task(workspace_dir=ws, root_id=root, parent_task_id=root, origin="agent", status="completed")
     assert run(handoff.snapshot(kid, "run ended")).content["step_task_id"] == root
+
+
+# ---- fix round 1: cut-off finishes redact with the run's exact secrets ------------------------
+
+
+def _cut_off_run(client, monkeypatch, how):
+    """A [hang] run in a project whose env holds a run secret that is not
+    token-shaped; the secret is in the prompt and in the last reply."""
+    secret = "plainpw-" + uuid.uuid4().hex  # built at runtime, no token shape
+    r = client.post("/projects", json={"name": f"ho-cut-{uuid.uuid4().hex[:8]}",
+                                       "env": {"PROBE_DB_PASSWORD": secret}})
+    assert r.status_code == 201, r.text
+    if how == "timeout":
+        from app.config import settings
+
+        monkeypatch.setattr(settings, "task_timeout_seconds", 3)
+    tid = start(client, f"[hang] use {secret}", project_id=r.json()["id"])
+    assert until(lambda: any(e["type"] == "text_output" for e in client.get(f"/tasks/{tid}/events").json()))
+    if how == "cancel":
+        assert client.post(f"/tasks/{tid}/cancel").status_code == 200
+    done = wait_task(client, tid)
+    assert done["status"] == ("cancelled" if how == "cancel" else "failed"), done.get("error")
+    row = until(lambda: (x := stored_row(tid)) is not None and x.reason == "cut off" and x)
+    return secret, row
+
+
+@pytest.mark.parametrize("how", ["cancel", "timeout"])
+def test_cut_off_handoff_redacts_run_secrets(client, monkeypatch, how):
+    secret, row = _cut_off_run(client, monkeypatch, how)
+    assert row.content["ended"] == "cut off"
+    assert row.content["last_reply"] and row.content["last_reply"].startswith("waiting")
+    for blob in (json.dumps(row.content), row.text):
+        assert secret not in blob and secret[:12] not in blob
+        assert "***" in blob
+    assert "***" in row.content["task"] and "***" in row.content["last_reply"]
