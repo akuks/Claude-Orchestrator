@@ -157,7 +157,9 @@ def run(plugin, tmp_path, stub):
 def test_allow_prints_nothing_and_does_not_touch_the_network(run, stub):
     assert run(bash("ls -la && git status")) is None
     assert stub.requests == []
-    assert run.spool() == [{"event": "PreToolUse", "tool_use_id": "tu1", "seen": True, "ts": run.spool()[0]["ts"]}]
+    sp = run.spool()
+    assert sp == [{"event": "PreToolUse", "tool_use_id": "tu1", "seen": True, "tool": "Bash",
+                   "what": "ls -la && git status", "ts": sp[0]["ts"]}]
     assert run({"hook_event_name": "PreToolUse", "tool_name": "mcp__db__list", "tool_input": {}}) is None
 
 
@@ -382,7 +384,7 @@ def test_post_tool_use_spools_only_approved_calls(plugin, tmp_path):
         run(bash("git reset --hard"))  # approved, tool_use_id tu1
         run({"tool_name": "Bash", "tool_use_id": "tu1", "tool_response": {}}, event="PostToolUse")
         run({"tool_name": "Bash", "tool_use_id": "tu2", "tool_response": {}}, event="PostToolUse")
-        posts = [r for r in run.spool() if r["event"] == "PostToolUse"]
+        posts = [r for r in run.spool() if r["event"] == "PostToolUse" and not r.get("done")]
         assert [(r["tool_use_id"], r["decision"]) for r in posts] == [("tu1", "ran")]
     finally:
         stub.close()
@@ -595,7 +597,8 @@ def test_config_change_other_edits_are_allowed(run, tmp_path, content):
 def test_seen_record_is_written_before_evaluation(run):
     run(bash("rm -rf ~"))
     sp = run.spool()
-    assert sp[0] == {"event": "PreToolUse", "tool_use_id": "tu1", "seen": True, "ts": sp[0]["ts"]}
+    assert sp[0] == {"event": "PreToolUse", "tool_use_id": "tu1", "seen": True, "tool": "Bash",
+                     "what": "rm -rf ~", "ts": sp[0]["ts"]}
 
 
 def test_seen_write_failure_denies(run):
@@ -1366,3 +1369,93 @@ def test_spool_writes_are_fsynced(tmp_path, monkeypatch):
     co_hook._spool_strict({"event": "y"})
     assert len(synced) == 1 and synced[0] in [fd for fd, n, _d in kinds if n == "spool.jsonl"]  # file only
     assert [json.loads(x)["event"] for x in (tdir / "spool.jsonl").read_text().splitlines()] == ["x", "y"]
+
+
+# ---- phase 3a: what a call was, done lines, Stop background -------------------------
+
+
+def _pre(tool, tool_input, tid="tu1"):
+    return {"hook_event_name": "PreToolUse", "tool_name": tool, "tool_input": tool_input, "tool_use_id": tid,
+            "session_id": "s1"}
+
+
+def test_seen_line_has_tool_and_what(run):
+    tok = "ghp_" + "a" * 36
+    run.env["GH_TOKEN"] = tok
+    run(_pre("Bash", {"command": "echo " + tok, "description": "say hi"}, "t1"))
+    first = run.spool()[0]
+    assert first["seen"] is True and first["tool"] == "Bash" and first["tool_use_id"] == "t1"
+    assert tok not in first["what"] and "***" in first["what"] and first["what"].startswith("say hi :: echo ")
+    assert run.spool()[0] is not None and "seen" in run.spool()[0]  # still the first spool line
+    # the token starts at char 190 of the command: redacted before the cut, so no prefix survives
+    long_cmd = "x" * 190 + tok
+    run(_pre("Bash", {"command": long_cmd}, "t2"))
+    what = [r for r in run.spool() if r.get("seen") and r["tool_use_id"] == "t2"][0]["what"]
+    assert len(what) <= 200 and "***" in what
+    for n in range(5, len(tok) + 1):
+        assert tok[:n] not in what
+    # a file tool: the path
+    run(_pre("Write", {"file_path": "/work/a/b.py", "content": "x"}, "t3"))
+    what = [r for r in run.spool() if r.get("seen") and r["tool_use_id"] == "t3"][0]
+    assert what["what"] == "/work/a/b.py" and what["tool"] == "Write"
+    run(_pre("Agent", {"subagent_type": "Explore", "prompt": "p"}, "t4"))
+    assert [r for r in run.spool() if r.get("seen") and r["tool_use_id"] == "t4"][0]["what"] == "Explore"
+    run(_pre("mcp__db__list", {}, "t5"))
+    assert [r for r in run.spool() if r.get("seen") and r["tool_use_id"] == "t5"][0]["what"] == "mcp__db__list"
+
+
+def test_what_of_unit():
+    assert co_hook.what_of("Bash", {"command": "ls"}) == "ls"
+    assert co_hook.what_of("Monitor", {"command": "tail -f x", "description": "watch"}) == "watch :: tail -f x"
+    assert len(co_hook.what_of("Bash", {"command": "y" * 500})) <= co_hook.WHAT_MAX
+    assert len(co_hook.what_of("Edit", {"file_path": "/p" * 400})) <= co_hook.WHAT_PATH_MAX
+    assert co_hook.what_of("Weird", None) == "Weird"
+
+
+def test_seen_record_without_what_when_what_of_raises(monkeypatch):
+    def boom(tool, tool_input):
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(co_hook, "what_of", boom)
+    rec = co_hook.seen_record({"tool_use_id": "t9", "tool_name": "Bash", "tool_input": {"command": "ls"}})
+    assert rec == {"event": "PreToolUse", "tool_use_id": "t9", "seen": True}
+
+
+def test_post_tool_use_done_line_every_call(plugin, tmp_path):
+    stub = Stub(statuses=("approved",))
+    try:
+        run = Run(plugin, tmp_path, stub.base)
+        run(bash("git reset --hard"))  # approved, tool_use_id tu1
+        run({"tool_name": "Bash", "tool_use_id": "tu1", "tool_response": {}}, event="PostToolUse")
+        run({"tool_name": "Bash", "tool_use_id": "tu2", "tool_response": {}}, event="PostToolUse")
+        posts = [r for r in run.spool() if r["event"] == "PostToolUse"]
+        assert [(r["tool_use_id"], r.get("done"), r.get("decision")) for r in posts] == [
+            ("tu1", True, None), ("tu1", None, "ran"), ("tu2", True, None)]
+    finally:
+        stub.close()
+
+
+_BG = [
+    ([{"id": "b1", "command": "npm run dev", "status": "running"}, {"id": "b2", "status": "completed"}],
+     [{"id": "b1", "what": "npm run dev"}]),
+    (["b1", "b2"], [{"id": "b1", "what": "b1"}, {"id": "b2", "what": "b2"}]),
+    ({"b1": {"command": "x"}}, [{"id": "b1", "what": "x"}]),
+    ([{"id": "d1", "description": "dev server"}, {"id": "d2"}],
+     [{"id": "d1", "what": "dev server"}, {"id": "d2", "what": "d2"}]),
+    ([{"id": f"r{i}", "status": "running", "command": f"c{i}"} for i in range(15)],
+     [{"id": f"r{i}", "what": f"c{i}"} for i in range(10)]),
+    ([{"id": "x", "command": "echo ghp_" + "a" * 36}], [{"id": "x", "what": "echo ***"}]),
+]
+
+
+@pytest.mark.parametrize("given,want", _BG)
+def test_stop_background_shapes(run, given, want):
+    run({"hook_event_name": "Stop", "background_tasks": given}, event="Stop")
+    assert run.spool()[-1]["background"] == want
+
+
+@pytest.mark.parametrize("payload", [{}, {"background_tasks": None}])
+def test_stop_background_absent(run, payload):
+    run(dict(payload, hook_event_name="Stop"), event="Stop")
+    rec = run.spool()[-1]
+    assert rec["event"] == "Stop" and "background" not in rec

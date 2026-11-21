@@ -12,7 +12,7 @@ from sqlalchemy.orm import Session
 from app import models
 from app.database import _alembic_cfg, _baseline_metadata, run_migrations
 
-HEAD = "0007"  # the latest revision
+HEAD = "0008"  # the latest revision
 
 
 def _tables(db) -> set[str]:
@@ -171,7 +171,7 @@ def test_migration_0006(scratch_url):
     from alembic import command
 
     url = scratch_url
-    run_migrations(url)
+    command.upgrade(_alembic_cfg(url), "0006")
 
     def check_head(sc, insp):
         assert "action_approvals" in insp.get_table_names()
@@ -184,7 +184,7 @@ def test_migration_0006(scratch_url):
         assert idx["uq_action_approvals_pending_key"]["unique"]
         return sc.exec_driver_sql("SELECT version_num FROM alembic_version").scalar()
 
-    assert _inspect(url, check_head) == HEAD
+    assert _inspect(url, check_head) == "0006"
     command.downgrade(_alembic_cfg(url), "0005")
 
     def check_down(sc, insp):
@@ -232,7 +232,7 @@ def test_migration_0007(scratch_url):
     from alembic import command
 
     url = scratch_url
-    run_migrations(url)
+    command.upgrade(_alembic_cfg(url), "0007")
 
     def check_head(sc, insp):
         tables = set(insp.get_table_names())
@@ -329,3 +329,51 @@ def test_migration_0007(scratch_url):
     assert [as_list(v) for v in settings_row] == [[], []]
     assert errors == ["IntegrityError", "IntegrityError"]  # one slug per (scope, project); org slugs too
     assert use == 0
+
+
+def test_migration_0008(scratch_url):
+    """0008_resume: task resume columns, task_handoffs, ground_rules; old rows get the
+    defaults and a guard follow-up is attributed to the guard."""
+    from alembic import command
+
+    url = scratch_url
+    command.upgrade(_alembic_cfg(url), "0007")
+    task_sql = ("INSERT INTO tasks (id, title, prompt, status, priority, tags, model, max_turns, attempt,"
+                " allow_remote, read_only, requires_approval, risk, created_at) VALUES ('{id}', '{title}', 'p',"
+                " 'completed', 'normal', '[]', '', 25, 0, true, false, false, 'info', CURRENT_TIMESTAMP)")
+
+    def seed(sc, insp):
+        sc.exec_driver_sql(task_sql.format(id="t8", title="plain"))
+        sc.exec_driver_sql(task_sql.format(id="g8", title="co-guard follow-up: approved request x"))
+        sc.exec_driver_sql("INSERT INTO guard_org_settings (id, updated_at) VALUES (1, CURRENT_TIMESTAMP)")
+
+    _inspect(url, seed)
+    command.upgrade(_alembic_cfg(url), "head")
+
+    def check_head(sc, insp):
+        cols = {c["name"] for c in insp.get_columns("tasks")}
+        assert {"origin", "notes", "notes_updated_at", "heartbeat_at", "run_pgid", "run_proc_start",
+                "recoveries", "recovery", "credential_ref", "head_at_start"} <= cols
+        assert {"id", "root_id", "task_id", "version", "status", "reason", "saved_at", "content", "text",
+                "prev_content", "prev_text", "closed_at", "closed_by"} <= {
+            c["name"] for c in insp.get_columns("task_handoffs")}
+        assert ("root_id",) in {tuple(i["column_names"]) for i in insp.get_indexes("task_handoffs")}
+        assert "ground_rules" in {c["name"] for c in insp.get_columns("guard_org_settings")}
+        q = sc.exec_driver_sql
+        rows = {r[0]: (r[1], r[2]) for r in q("SELECT id, origin, recoveries FROM tasks")}
+        assert rows["t8"] == ("user", 0) and rows["g8"] == ("guard", 0)
+        gr = q("SELECT ground_rules FROM guard_org_settings").scalar()
+        assert (json.loads(gr) if isinstance(gr, str) else gr) == {}
+        return q("SELECT version_num FROM alembic_version").scalar()
+
+    assert _inspect(url, check_head) == "0008"
+    command.downgrade(_alembic_cfg(url), "0007")
+
+    def check_down(sc, insp):
+        assert "task_handoffs" not in insp.get_table_names()
+        cols = {c["name"] for c in insp.get_columns("tasks")}
+        assert not ({"origin", "notes", "heartbeat_at", "recovery", "head_at_start"} & cols)
+        assert "ground_rules" not in {c["name"] for c in insp.get_columns("guard_org_settings")}
+        return sc.exec_driver_sql("SELECT version_num FROM alembic_version").scalar()
+
+    assert _inspect(url, check_down) == "0007"
