@@ -703,6 +703,11 @@ async def reject(approval_id: str, request: Request, body: Optional[RejectBody] 
 # ---- live report (agent) -------------------------------------------------------------------
 
 
+# What a "granted" report keeps: the hook's own spool record minus its ts, so the
+# worker keys both copies alike (one TaskDetail line, one counted use).
+GRANTED_REPORT_KEYS = ("event", "decision", "grant_ids", "tool", "rule_ids", "summary", "tool_use_id", "agent_id")
+
+
 @api.post("/report", status_code=202, dependencies=[Depends(_limit_body)])
 async def report(request: Request, rec: dict = Body(...)):
     """The hook's decision record (best effort, after it answered Claude Code)."""
@@ -751,8 +756,7 @@ async def report(request: Request, rec: dict = Body(...)):
             grants = await guard_grants.valid_use(s, task, rec.get("grant_ids")) if task is not None else None
             if not grants:
                 return {"accepted": False}
-            rec = {k: rec[k] for k in ("event", "decision", "grant_ids", "tool", "rule_ids", "summary",
-                                       "tool_use_id") if k in rec}
+            rec = {k: rec[k] for k in GRANTED_REPORT_KEYS if k in rec}
             # spent now, each on its own: a once grant already spent is a re-use (the
             # spool ingestion spends it again, idempotently, if this report is lost)
             if not await guard_grants.spend_once(s, grants):

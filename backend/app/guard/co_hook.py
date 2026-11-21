@@ -675,7 +675,7 @@ def grant_cover(policy, payload, verdict, tool, base):
         _spool_strict(rec)  # a once grant is used when this line is written; if it cannot be: error, deny
     context_only(GRANTED_CONTEXT.format(ids=", ".join(ids)))
     post_report(policy, {k: rec[k] for k in ("event", "decision", "grant_ids", "tool", "rule_ids", "summary",
-                                             "tool_use_id")})
+                                             "tool_use_id", "agent_id")})
     return True
 
 

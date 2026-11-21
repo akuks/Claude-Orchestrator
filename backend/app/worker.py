@@ -988,7 +988,9 @@ class WorkerManager:
         # one approval answers exactly one call.
         if payload.get("decision") == "approved" and payload.get("request_id"):
             return json.dumps({"approved": payload["request_id"], "event": payload.get("event")})
-        return json.dumps({k: v for k, v in payload.items() if k != "ts"}, sort_keys=True, default=str)
+        # A null and a missing key are the same record (the spool keeps agent_id: null).
+        return json.dumps({k: v for k, v in payload.items() if k != "ts" and v is not None}, sort_keys=True,
+                          default=str)
 
     async def report_guard(self, task_id: str, rec: dict) -> bool:
         """POST /guard/report: emit the hook's record now as a `guard` event of
