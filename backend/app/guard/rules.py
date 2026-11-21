@@ -126,8 +126,14 @@ server receives, any target; any non-read statement, script file or unknown
 stdin against a target that is neither local nor dev, prisma/supabase
 commands that write a database, database MCP write tools - checked for
 every stage, nested and wrapped ones included, with ``PGHOST``-style
-prefixes and earlier ``export``s; when both fire on one call only
-``sql-destroy`` is kept; an ``mcp-block`` tool gets no database hits).
+variables from the hook's own env (Ruling P6), prefixes (also into
+``bash -c`` bodies) and earlier ``export``s - ``source``/``.``, ``set -a``,
+``export $(..)``, ``read``, ``eval "$x"`` and ``dotenv --`` make them
+unknown; shell escapes inside a client (psql ``\\!``, ``\\o |cmd``,
+``COPY .. PROGRAM``, sqlite ``.shell``, mysql ``system``) are checked as
+commands; a client with no inline SQL on a line with a pipe reads unknown
+input; when both fire on one call only ``sql-destroy`` is kept; an
+``mcp-block`` tool gets no database hits).
 
 Paths: write targets, file-tool paths, ``cd`` targets, glob folders and
 delete targets ending in ``/`` or ``/.`` are resolved through every symlink
@@ -576,7 +582,9 @@ class _Ctx:
         self.db_dev = [p for p in db_dev if isinstance(p, str)] if isinstance(db_dev, list) else []
         servers = policy.get("mcp_servers")
         self.mcp_servers = servers if isinstance(servers, dict) else {}
-        self.db_env = {}  # PGHOST-style variables exported earlier in the command line
+        # PGHOST-style variables: inherited from the hook's env (Ruling P6, the agent's shell has them too),
+        # then set earlier in the command line (None: unknown)
+        self.db_env = {n: os.environ[n] for n in _db.DB_ENV_NAMES if n in os.environ}
         env = policy.get("env_paths")
         env = {k: str(v) for k, v in env.items() if isinstance(k, str) and v} if isinstance(env, dict) else {}
         cfg = policy.get("claude_config_dir")
@@ -1433,8 +1441,10 @@ class _Bash:
         self.git_mirror = False
         self.subst_vars = {}
         self.res_stack = []  # the ParseResult (nesting level) being checked
+        self.text = raw  # the command text at this nesting level
 
     def run(self, command, cwd):
+        self.text = command
         res = _sh.parse(command)
         pctx = getattr(res, "_ctx", None)
         if "TMPDIR" in _TMPDIR_REF.sub("", command) or pctx is None or pctx.poison or "TMPDIR" in pctx.writes:
@@ -1464,14 +1474,26 @@ class _Bash:
     def _result(self, res, cwd, outer, pipelines):
         for st in res:
             here = outer | _argv_tokens(pipelines.get(st.pipeline, [st]))
-            for sub in st.nested:
-                self.result(sub, cwd, here)
             argv = _sh.expand_wrappers(st)
+            if st.nested:
+                # PGHOST=x bash -c 'psql ...': the nested commands inherit the stage's database variables
+                env, overlay = self.ctx.db_env, self.db_prefix(st, argv)
+                saved = {k: env[k] for k in overlay if k in env}
+                env.update(overlay)
+                try:
+                    for sub in st.nested:
+                        self.result(sub, cwd, here)
+                finally:
+                    for k in overlay:
+                        if k in saved:
+                            env[k] = saved[k]
+                        else:
+                            env.pop(k, None)
             off = len(st.argv) - len(argv) if argv else 0
             dyn = list(st.dynamic[off:]) if argv else []
             dyn += [False] * (len(argv or ()) - len(dyn))
             self.note_vars(st, argv, dyn)
-            self.note_db_env(st, argv)
+            self.note_db_env(st, argv, dyn)
             self.stage(st, argv, dyn, cwd, pipelines.get(st.pipeline, [st]), outer)
             cwd = self.after_cd(argv, dyn, cwd)
 
@@ -1502,10 +1524,16 @@ class _Bash:
                 if re.fullmatch(r"[A-Za-z_]\w*", a):
                     self.nonliteral.add(a)
 
-    def note_db_env(self, st, argv):
+    def db_unknown(self):
+        """Every database variable may now hold anything (``source .env``,
+        ``set -a``, ``export $(...)``, ``eval "$x"``)."""
+        for n in _db.DB_ENV_NAMES:
+            self.ctx.db_env[n] = None
+
+    def note_db_env(self, st, argv, dyn=()):
         """``export PGHOST=x`` / ``PGHOST=x`` on its own: later commands in the
-        line connect there (forge noteDbEnv). A value from a substitution is
-        unknown (None)."""
+        line connect there (forge noteDbEnv). A value from a substitution, a
+        sourced file or a dynamic export is unknown (None)."""
         env = self.ctx.db_env
         if not st.argv:
             for k, v in st.env.items():
@@ -1513,12 +1541,53 @@ class _Bash:
                 if name:
                     env[name] = v
             return
-        if argv and _sh.command_name(argv[0]) in ("export", "declare", "typeset", "local", "readonly"):
-            for a in argv[1:]:
+        if not argv:
+            return
+        name = _sh.command_name(argv[0])
+        args, dargs = argv[1:], list(dyn[1:]) + [False] * len(argv)
+        if name in ("source", "."):
+            self.db_unknown()
+        elif name == "set" and any(re.fullmatch(r"-[a-zA-Z]*a[a-zA-Z]*", a) for a in args) or (
+                name == "set" and "allexport" in args):
+            self.db_unknown()
+        elif name == "eval" and any(dargs[:len(args)]):
+            self.db_unknown()
+        elif name in ("read", "mapfile", "readarray"):
+            for a in args:
+                n = _db.db_env_name(a)
+                if n:
+                    env[n] = None
+        elif name in ("export", "declare", "typeset", "local", "readonly"):
+            for a, d in zip(args, dargs):
                 m = re.match(r"([A-Za-z_]\w*)=(.*)\Z", a, re.S)
-                name = m and _db.db_env_name(m.group(1))
-                if name:
-                    env[name] = m.group(2)
+                if m:
+                    n = _db.db_env_name(m.group(1))
+                    if n:
+                        env[n] = None if d else m.group(2)
+                elif d:
+                    self.db_unknown()  # export $(cat .env | xargs)
+                else:
+                    n = _db.db_env_name(a)
+                    if n and n not in env:
+                        env[n] = None  # export PGHOST: whatever it holds
+
+    def db_prefix(self, st, argv):
+        """The stage's own database variables: prefix assignments and the
+        ones wrappers take (``env PGHOST=x psql``, ``sudo PGHOST=x psql``)."""
+        out = {}
+        for k, v in st.env.items():
+            n = _db.db_env_name(k)
+            if n:
+                out[n] = v
+        off = len(st.argv) - len(argv) if argv else len(st.argv)
+        for w, d in zip(st.argv[:off], list(st.dynamic[:off]) + [False] * off):
+            m = re.match(r"([A-Za-z_]\w*)=(.*)\Z", w, re.S)
+            n = m and _db.db_env_name(m.group(1))
+            if n:
+                out[n] = None if d else m.group(2)
+            elif d and not m:
+                out.update({x: None for x in _db.DB_ENV_NAMES})  # env $(cat .env) psql
+        return out
 
     def db_stdin(self, st, pipeline):
         """(stdin, feed) for a database client stage: ("literal", text) for a
@@ -1559,23 +1628,29 @@ class _Bash:
             return "literal", "\n".join(texts)
         return "none", None
 
-    def db_check(self, st, argv, name, args, pipeline):
-        """sql-destroy / db-write for SQL and NoSQL clients and ORM CLIs."""
+    def db_check(self, st, argv, name, args, pipeline, cwd, prefix=None, depth=0):
+        """sql-destroy / db-write for SQL and NoSQL clients and ORM CLIs;
+        shell escapes inside a client are checked as commands."""
         ctx = self.ctx
+        prefix = self.db_prefix(st, argv) if prefix is None else prefix
+        if name in _DOTENV and "--" in args and depth < 3:  # dotenv -e .env.prod -- psql ...
+            inner = args[args.index("--") + 1:]
+            if inner:
+                unknown = {x: None for x in _db.DB_ENV_NAMES}
+                self.db_check(st, inner, _sh.command_name(inner[0]), inner[1:], pipeline, cwd,
+                              dict(prefix, **unknown), depth + 1)
+            return
         if name in _db.DB_CLIENT_SPECS:
-            off = len(st.argv) - len(argv)
-            prefix = dict(st.env)
-            for w in st.argv[:off]:  # env PGHOST=x psql / sudo PGHOST=x psql
-                m = re.match(r"([A-Za-z_]\w*)=(.*)\Z", w, re.S)
-                if m:
-                    prefix[m.group(1)] = m.group(2)
             stdin, feed = self.db_stdin(st, pipeline)
+            piped = "|" in self.text.replace("||", "")
             f = _db.client_finding(name, args, prefix_env=prefix, line_env=ctx.db_env, stdin=stdin, feed=feed,
-                                   patterns=ctx.db_dev, remote=ctx.remote)
+                                   patterns=ctx.db_dev, remote=ctx.remote, piped=piped)
             if f.destroy:
                 ctx.hit("sql-destroy", False, self.raw)
             if f.write:
                 ctx.hit("db-write", False, self.raw)
+            for cmd in f.shell:  # psql \! / \o |cmd / COPY ... PROGRAM, sqlite .shell, mysql system ...
+                self.nested_eval(cmd, cwd)
         if _db.cli_write(name, args, ctx.db_dev):
             ctx.hit("db-write", False, self.raw)
 
@@ -1789,7 +1864,7 @@ class _Bash:
             return
 
         # database rules (sql-destroy, db-write)
-        self.db_check(st, argv, name, args, pipeline)
+        self.db_check(st, argv, name, args, pipeline, cwd)
 
         # a protected path (or an unknown guard variable) in the arguments of a non-reader
         if name not in _READERS or name in ("cd", "pushd"):
@@ -2270,6 +2345,7 @@ def _reads_stdin(name, args):
     return False
 
 
+_DOTENV = frozenset({"dotenv", "dotenvx", "dotenv-cli", "env-cmd"})
 _COMPOUND_CLOSERS = frozenset({"}", "fi", "done", "esac", ")"})
 
 _OTHER_INTERP = frozenset({"pwsh", "powershell", "rscript", "tclsh", "wish", "osascript"})
