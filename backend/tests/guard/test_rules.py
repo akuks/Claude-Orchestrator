@@ -3519,7 +3519,7 @@ P19_FORMAT_FREE = [
     "clang-format x.c", "shfmt -d x.sh", "go vet ./...", "black --diff .", "eslint .", "gofmt -d vendor/old",
 ]
 P19_BUILD_DENIED = [
-    "cmake -S {R} -B /tmp/b", "cmake -B {R}/build", "cmake --build {R}/build",
+    "cmake -B {R}/build", "cmake --build {R}/build",
     "cargo build --manifest-path {R}/Cargo.toml", "cargo test --manifest-path={R}/Cargo.toml", "go build -C {R}",
     "go -C {R} build", "pip install -e {R}", "uv sync --project {R}", "uv run --directory {R} pytest",
     "poetry -C {R} install", "poetry --directory {R} build", "tsc -p {R}", "tsc --project {R}/tsconfig.json",
@@ -3571,3 +3571,47 @@ def test_p19_formatter_after_unknown_cd(ro2):
     assert v.decision == "approve" and P17_REASON in [h.reason for h in v.hits], v
     v = rbash(ro2, "cd $D && black .")  # "." from the project is a parent of vendor/old -> hard (P15)
     assert v.decision == "deny" and "readonly-source" in hard_ids(v), v
+
+
+
+# ---- Task 3 fix round 4 (formatter globs, cmake -S is read, pip install DIR) ---------------------
+@pytest.mark.parametrize("cmd", [
+    'prettier --write "**/*.js"', "prettier --write '**/*.{{js,ts}}'", 'eslint --fix "**/*.ts"', 'black "**/*.py"',
+    "prettier --write **/*.js", 'prettier --write "vendor/*/x.js"', "cd {R} && prettier --write 'src/**/*.js'",
+    'npx prettier --write "**/*.md"',
+])
+def test_fix4_formatter_globs_reach_by_their_literal_folder(ro2, cmd):
+    v = rbash(ro2, cmd)
+    assert v.decision == "deny" and "readonly-source" in hard_ids(v), v
+
+
+@pytest.mark.parametrize("cmd", ['prettier --write "src/**/*.js"', 'prettier --check "**/*.js"',
+                                 "eslint --fix 'src/**/*.ts'", 'black "src/*.py"'])
+def test_fix4_formatter_globs_elsewhere_stay_free(ro2, cmd):
+    assert "readonly-source" not in ids(rbash(ro2, cmd)), rbash(ro2, cmd)
+
+
+@pytest.mark.parametrize("cmd,hard", [
+    ("cmake -S {R}", False), ("cmake -S {R} -B /tmp/b", False), ("cmake {R}", False), ("cmake -S{R} -B/tmp/b", False),
+    ("cmake -B {R}/build", True), ("cmake --build {R}/build", True), ("cmake -S src -B{R}/b", True),
+])
+def test_fix4_cmake_writes_only_its_build_folder(ro2, cmd, hard):
+    v = rbash(ro2, cmd)
+    assert ("readonly-source" in hard_ids(v)) is hard and (v.decision == "deny") is hard, v
+
+
+PIP_LOCAL = "pip builds this read-only folder in place"
+
+
+@pytest.mark.parametrize("cmd", ["pip install {R}", "pip install ./vendor/old", "pip3 install --no-deps {R}/",
+                                 "python -m pip install {R}"])
+def test_fix4_pip_install_of_a_root_folder_asks(ro2, cmd):
+    v = rbash(ro2, cmd)
+    assert v.decision == "approve" and PIP_LOCAL in [h.reason for h in v.hits] and not hard_ids(v), v
+
+
+@pytest.mark.parametrize("cmd,decision", [("pip install -e {R}", "deny"), ("pip install requests", "allow"),
+                                          ("pip install -r {R}/requirements.txt", "allow"),
+                                          ("pip install ./src", "allow")])
+def test_fix4_other_pip_installs(ro2, cmd, decision):
+    assert rbash(ro2, cmd).decision == decision, rbash(ro2, cmd)
