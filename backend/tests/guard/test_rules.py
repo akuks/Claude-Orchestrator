@@ -3290,7 +3290,7 @@ FIX1_FREE = [
     "npm --prefix {R} ls", "make -n -C {R}", "patch --dry-run -d {R} -p1 < x.diff", "git clone https://x/y /tmp/c",
     "cp -a {R}/a.txt /tmp/", "ln -s {R}/a.txt link", "diff -r {R} src", "git diff --no-index {R}/a.txt x.py",
     "du -sh {R}", "ls {R} | xargs echo", "find {R} -name '*.c' | xargs wc -l", "cd {R} && git status",
-    # P15 tries the project and the start cwd only (documented)
+    # P15 places these in no root (P17 makes them confirmable, see below)
     "cd $D && git commit -m x", "cd $D && echo x > notes.txt",
     # minor 7: forms that change nothing
     "git -C {R} stash list", "git -C {R} stash show", "git rm --cached vendor/old/x", "git rm -n vendor/old/x",
@@ -3373,3 +3373,44 @@ def test_fix1_shell_records_subshell_depth():
     assert got == [("cd", 1, 0, {}), ("ls", 1, 1, {0: 0}), ("x", 1, 0, {}), ("y", 2, 1, {}), ("z", 0, 0, {})]
     r = shell.parse("(cd x; echo a > f)")
     assert r[1].rdepth == {0: 1}  # a redirect inside the group stays inside
+
+
+# ---- Ruling P17: unknown cwd with readonly roots -> confirmable uncertain-command ------------
+P17_REASON = "the folder this runs in is unknown, and read-only folders exist"
+
+
+@pytest.mark.parametrize("cmd", [
+    "cd $D && git commit -m x", "cd $D && echo x > notes.txt", "cd $D && rm -f old.txt", "cd $D && rm -rf build",
+    "cd - && git checkout -- src/x.py", "cd \"$(git rev-parse --show-toplevel)\" && touch new.txt",
+    "cd $D && mv a b", "cd $D && sed -i s/a/b/ src/x.py", "popd; echo x > f",
+])
+def test_p17_unknown_cwd_with_roots_asks(ro2, cmd):
+    v = rbash(ro2, cmd)
+    assert v.decision == "approve", v
+    h = [h for h in v.hits if h.rule_id == "uncertain-command"]
+    assert h and not h[0].hard and h[0].reason == P17_REASON, v
+
+
+@pytest.mark.parametrize("cmd", ["cd $D && git commit -m x", "cd $D && echo x > notes.txt", "cd $D && rm -f old.txt",
+                                 "cd - && touch new.txt"])
+def test_p17_no_roots_changes_nothing(env, cmd):
+    assert bash(env, cmd).decision == "allow"
+    assert bash(env, cmd, readonly_paths=[]).decision == "allow"
+
+
+@pytest.mark.parametrize("cmd", [
+    "cd $D && echo x > /tmp/notes.txt", "cd $D && touch {P}/src/new.txt", "cd $D && cp x /opt/y",
+    "cd $D && git -C {P} commit -m x", "cd $D && rm -f /tmp/a",
+    # reads stay free
+    "cd $D && cat notes.txt", "cd $D && git log", "cd $D && git status", "cd $D && grep -r foo .", "cd $D && ls",
+    "cd $D && git diff > /tmp/d.patch",
+])
+def test_p17_absolute_targets_and_reads_stay_free(ro2, cmd):
+    v = rbash(ro2, cmd)
+    assert v.decision == "allow", v
+
+
+def test_p17_a_root_hit_stays_hard(ro2):
+    v = rbash(ro2, "cd $D && echo x > vendor/old/f")
+    assert v.decision == "deny" and "readonly-source" in hard_ids(v)
+    assert P17_REASON not in [h.reason for h in v.hits]
