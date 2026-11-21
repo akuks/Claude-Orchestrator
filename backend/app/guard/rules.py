@@ -166,11 +166,14 @@ HARD (never approvable):
   ``gofmt -w``, ``go fmt``, ``goimports -w``, ``cargo fmt``, rustfmt,
   ``clang-format -i``, ``shfmt -w``, stylua, ``rubocop -a|-A``, swiftformat,
   ``terraform fmt``; not their check/diff modes) treat their path operands
-  (default ``.``) like ``chmod -R`` targets, and builds aimed at a folder by
-  a flag write it (``cmake -S|-B|--build``, ``cargo --manifest-path``, ``go
-  -C``, ``pip install -e DIR``, ``uv --project|--directory``, ``poetry
-  -C|--directory``, ``tsc -p`` without ``--noEmit``, ``git -C DIR submodule
-  update``); inline
+  (default ``.``; a glob operand, quoted or not, counts as its literal
+  folder: ``"**/*.js"`` is ``.``) like ``chmod -R`` targets, and builds
+  aimed at a folder by a flag write it (``cmake -B|--build`` - not ``-S``,
+  the source -, ``cargo --manifest-path``, ``go -C``, ``pip install -e
+  DIR``, ``uv --project|--directory``, ``poetry -C|--directory``, ``tsc -p``
+  without ``--noEmit``, ``git -C DIR submodule update``); a non-editable
+  ``pip install DIR`` of a folder in a root is a confirmable
+  ``uncertain-command`` ("pip builds this read-only folder in place"); inline
   interpreter code that may write (the agent-config pattern) and names a
   root (as written, normalised or real, case-folded) or runs with the cwd in
   one. An unknown path counts by its braces (``{../ref,/tmp}/``), a ``for``
@@ -597,6 +600,7 @@ _RULES_DIR = ".claude-orchestrator"
 _MKTEMP_DIR = re.compile(r"(?:\$\(|`)\s*mktemp\s+(?:-d|--directory)(?:\s+(?:-q|-t|--tmpdir|[\w.-]*X{3,}[\w.-]*))*\s*(?:\)|`)")
 _UNKNOWN_CWD = "the folder this runs in is unknown, and read-only folders exist"  # Ruling P17
 _RUNS_ROOT = "this runs a read-only source's code, which may change it"  # Ruling P18
+_PIP_LOCAL = "pip builds this read-only folder in place"
 _PM_WRITE_SUBS = frozenset({"install", "i", "add", "ci", "sync", "update", "upgrade", "up"})
 _DRY = frozenset({"-n", "--dry-run", "--just-print", "--recon"})
 
@@ -1542,8 +1546,8 @@ def _build_dirs(name, args, dargs):
             sub = args[i].lower()
             break
         i += 1
-    if name == "cmake":
-        val("-S", "-B", "--build")
+    if name == "cmake":  # only the build folder is written (-S is read)
+        val("-B", "--build")
     elif name == "cargo" and (sub not in _READONLY_SUBS["cargo"] or sub == "fmt"):
         for i, a in enumerate(args):
             if a == "--manifest-path" and i + 1 < len(args):
@@ -2966,6 +2970,26 @@ class _Bash:
                 self.check_write(a, d, "fetch", cwd, _FETCHED)
         self.direct_writes(name, args, dargs, cwd)
 
+    def pip_local(self, args, dargs, cwd):
+        """``pip install DIR`` (not editable) builds that folder in place: a
+        confirmable uncertain-command when it is in a root."""
+        ctx = self.ctx
+        if "install" not in args or any(a in ("-e", "--editable") or a.startswith("--editable=") for a in args):
+            return
+        k = args.index("install")
+        for w, d in _pos_skipping(args[k + 1:], dargs[k + 1:], (
+                "-r", "--requirement", "-c", "--constraint", "-t", "--target", "--prefix", "--root", "-i",
+                "--index-url", "--extra-index-url", "-f", "--find-links", "--python-version", "--platform",
+                "--src", "--upgrade-strategy", "--implementation", "--abi", "--only-binary", "--no-binary",
+                "--progress-bar", "--log", "--cache-dir", "--trusted-host", "--proxy", "--timeout", "--retries")):
+            if d or not ("/" in w or w in (".", "..")):
+                continue
+            p = ctx.path(w, cwd)
+            root = p and ctx.readonly_root(p)
+            if root:
+                ctx.hits.append(Hit("uncertain-command", _PIP_LOCAL, False, _short(self.raw)))
+                return
+
     def readonly_runs(self, st, argv, dyn, name, args, dargs, cwd):
         """A build/install/test/script run inside a root (quarantine's tables,
         the root as "the repo"; inline -c/-e code is checked as code).
@@ -3259,7 +3283,14 @@ class _Bash:
             run, rdyn = _unrun(argv, dyn)
             rname, rargs, rdargs = _sh.command_name(run[0]), run[1:], rdyn[1:]
             for w, d in _format_targets(rname, rargs, rdargs):  # Ruling P19: like chmod -R targets
+                if _GLOB.search(w):  # "**/*.js" (quoted too): the formatter expands it - its literal folder
+                    head = _GLOB.split(w, maxsplit=1)[0]
+                    w, d = (head if head.endswith("/") else (posixpath.dirname(head) or ".")), False
                 self.readonly_write(w, ctx.path(w, cwd, d), "chmod-r", cwd)
+            if rname in ("pip", "pip3") or (_BASE_TOOL.fullmatch(rname) and rname.startswith("pip")):
+                self.pip_local(rargs, rdargs, cwd)
+            elif _interp_kind(rname) == "python" and rargs[:2] == ["-m", "pip"]:
+                self.pip_local(rargs[2:], rdargs[2:], cwd)
             for w, d in _build_dirs(rname, rargs, rdargs):  # builds aimed at a folder by a flag
                 self.readonly_write(w, ctx.path(w, cwd, d), "copydir", cwd)
         if ("xargs" in st.wrappers or "parallel" in st.wrappers) and not ctx.remote and \
