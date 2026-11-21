@@ -464,12 +464,14 @@ def test_i3_sigalrm_blocked_in_the_mask_is_unblocked_then_restored():
 
 
 def test_i3_a_pending_blocked_alarm_is_left_alone_and_every_regex_times_out():
-    import os
+    import threading
     fired = []
     old_handler = signal.signal(signal.SIGALRM, lambda *_a: fired.append(1))
     old_mask = signal.pthread_sigmask(signal.SIG_BLOCK, [signal.SIGALRM])
     try:
-        os.kill(os.getpid(), signal.SIGALRM)
+        # thread-directed: with other threads alive (a live server from an earlier
+        # test), a process-directed signal goes to a thread that does not block it
+        signal.pthread_kill(threading.main_thread().ident, signal.SIGALRM)
         assert signal.SIGALRM in signal.sigpending()
         got = match_rules("abc", [R("org.r", "b", "regex"), R("org.t", "b")], 250)
         assert [v for _r, v in got] == ["timeout", "match"]

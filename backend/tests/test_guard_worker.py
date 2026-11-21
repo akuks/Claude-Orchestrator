@@ -1024,3 +1024,23 @@ def test_granted_spool_records_keep_their_grant_ids():
     assert p["decision"] == "granted" and p["grant_ids"][:2] == ["g1", "2"] and len(p["grant_ids"]) == 20
     assert "junk" not in p
     assert WorkerManager.guard_payload({"grant_ids": "nope"})["grant_ids"] == []
+
+
+@pytest.mark.parametrize("agent_id", [None, "sub-1"])
+def test_granted_report_and_its_spool_line_key_alike(agent_id):
+    """Task 8: the hook spools a granted record with agent_id (null for the main
+    agent) and posts it to /guard/report, which forwards only its own keys; the
+    worker must see one record (one TaskDetail line, one use), not two."""
+    from app.worker import WorkerManager
+
+    spool = {"event": "PreToolUse", "tool": "Bash", "rule_ids": ["project.x"], "summary": "./deploy.sh --prod",
+             "tool_use_id": "toolu_1", "agent_id": agent_id, "decision": "granted", "grant_ids": ["g1"], "ts": 1.5}
+    hook_report = {k: spool[k] for k in ("event", "decision", "grant_ids", "tool", "rule_ids", "summary",
+                                         "tool_use_id", "agent_id")}
+    hook_report["task_id"] = "T"
+    # what POST /guard/report forwards for a granted record
+    from app.routers import guard as guard_router
+
+    forwarded = {k: hook_report[k] for k in guard_router.GRANTED_REPORT_KEYS if k in hook_report}
+    key = WorkerManager._guard_key
+    assert key(WorkerManager.guard_payload(spool)) == key(WorkerManager.guard_payload(forwarded))
