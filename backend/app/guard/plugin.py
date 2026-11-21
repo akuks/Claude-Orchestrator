@@ -6,8 +6,8 @@ read-only plugin directory::
     .claude-plugin/plugin.json
     hooks/hooks.json      every event -> "<server python> -I .../co_hook.py <Event>"
     hooks/co_hook.py
-    lib/rules.py, lib/shell.py, lib/dbrules.py
-    lib/__pycache__/{rules,shell,dbrules}.<cache tag>.pyc   checked hash-based pycs
+    lib/rules.py, lib/shell.py, lib/dbrules.py, lib/custom.py
+    lib/__pycache__/{rules,shell,dbrules,custom}.<cache tag>.pyc   checked hash-based pycs
 
 ``root`` is a symlink to a content-addressed sibling ``.co-guard-<hash>``: when
 the content (including the interpreter path) changes, the new version is
@@ -43,7 +43,7 @@ _FILE_MODE = 0o444
 _DIR_MODE = 0o555
 _OTHER_TIMEOUT = 15  # spool-only events
 _LOCK = threading.Lock()
-LIB_MODULES = ("rules", "shell", "dbrules")  # the guard library (stdlib only, Ruling R1)
+LIB_MODULES = ("rules", "shell", "dbrules", "custom")  # the guard library (stdlib only, Ruling R1)
 
 
 def _interpreter() -> str:

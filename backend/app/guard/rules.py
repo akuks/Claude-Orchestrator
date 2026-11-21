@@ -6,7 +6,7 @@ Python port of jspark-forge ``scripts/lib/blocklist.js`` and
 parsed with :mod:`shell` (the co-guard parser); nothing is ever executed.
 
 RULING R1: this module uses only the Python standard library and the siblings
-``shell.py`` and ``dbrules.py``. It is copied next to them into the co-guard
+``shell.py``, ``dbrules.py`` and ``custom.py``. It is copied next to them into the co-guard
 plugin and must work both as ``app.guard.rules`` and as a standalone file run with
 ``python3 -I`` (``python3 -I rules.py < request.json`` prints a verdict).
 
@@ -50,6 +50,17 @@ Policy (a dict, as written by the worker into ``policy.json``)::
                       "environment": "dev"|"prod"|"unknown"}},
                                            #   dev/prod marks a database server;
                                            #   dev skips db-write (not sql-destroy)
+      "custom_rules": [{"id": "org.x"|"project.x"|"repo.x", "kind": "confirm"|"never",
+                        "match": "text"|"regex", "pattern": str, "reason": str}],
+                                           #   org/project/repo rules (custom.py); they
+                                           #   apply even with guard_enabled false
+      "disabled_rules": ["git-reset-hard", ...],
+                                           #   built-ins switched off by an admin: only
+                                           #   ids in DISABLEABLE count, and never a hard
+                                           #   hit (rm -rf ~ stays denied)
+      "regex_budget_ms": 250,              #   shared budget for every custom regex in
+                                           #   one evaluate (at most 1000; a non-number
+                                           #   means 250, <= 0 means every regex times out)
       "env_paths": {"CO_POLICY_FILE": "/abs/...", "CO_TASK_DIR": "/abs/...",
                     "CLAUDE_CONFIG_DIR": "/abs/...", "CLAUDE_PLUGIN_ROOT": "/abs/..."}
                                            #   values of the agent's env vars that
@@ -136,6 +147,19 @@ client's input unknown; shell escapes inside a client (psql ``\\!``, ``\\o |cmd`
 commands; a client with no inline SQL on a line with a pipe reads unknown
 input; when both fire on one call only ``sql-destroy`` is kept; an
 ``mcp-block`` tool gets no database hits).
+
+Custom rules (``custom_rules``, ids ``org.<slug>`` / ``project.<slug>`` /
+``repo.<slug>``; built-in ids never contain a dot): checked for every tool
+against one text - Bash/Monitor: the command with whitespace collapsed; file
+tools: ``<tool> <file_path>`` (never the content); any other tool: ``<tool>
+<compact JSON input, sorted keys>``. ``never`` is hard, ``confirm`` is
+confirmable, and a regex still running when the shared ``regex_budget_ms``
+budget ends is a confirmable hit (also for ``never``) with the reason ``rule
+<id> took too long to check, so it needs approval``. The reason is the rule's
+own (control, zero-width and bidi characters stripped, 200 chars) or ``this
+matches the rule "<pattern>"``. A ``custom_rules`` or ``disabled_rules`` value
+that is not a list of well-formed entries is a hard ``unparseable`` hit with
+the co-guard error reason (fail closed); a missing key is empty.
 
 Paths: write targets, file-tool paths, ``cd`` targets, glob folders and
 delete targets ending in ``/`` or ``/.`` are resolved through every symlink
@@ -245,8 +269,9 @@ def _sibling(name):
 
 _sh = _sibling("shell")
 _db = _sibling("dbrules")
+_cu = _sibling("custom")
 
-__all__ = ["RULES", "Hit", "Verdict", "evaluate", "is_secret_name"]
+__all__ = ["RULES", "DISABLEABLE", "Hit", "Verdict", "evaluate", "is_secret_name"]
 
 # ---------------------------------------------------------------------------
 # Rule table (plain reasons ported from forge default-blocklist.json)
@@ -284,6 +309,12 @@ RULES = {
 }
 _ALWAYS_ON = frozenset({"self-protect", "unparseable", "mcp-block", "mcp-require-approval", "unsupported-shell",
                         "unknown-tool"})
+# Built-ins an admin may switch off (policy "disabled_rules"); only their confirmable part - a hard hit
+# (rm -rf ~, rm -rf /) always stays. Anything else in disabled_rules is ignored.
+DISABLEABLE = frozenset({"rm-rf-outside", "git-force-push-main", "git-reset-hard", "git-clean-fdx",
+                         "git-stash-drop", "secret-files", "chmod-wide", "pipe-to-shell", "sql-destroy", "db-write"})
+ERROR_REASON = "co-guard error \u2014 action blocked for safety"  # co_hook.ERROR_REASON
+_BUDGET_MAX_MS = 1000  # the hook must answer well inside its own timeout
 
 # Ruling R17: tools are checked fail closed, by name.
 _BASH_TOOLS = frozenset({"Bash", "Monitor"})  # tool_input.command is a Bash command line
@@ -578,6 +609,21 @@ class _Ctx:
         project = policy.get("project_dir") or cwd or os.getcwd()
         self.project = _real(os.path.abspath(str(project)))
         self.guard = policy.get("guard_enabled", True) is not False
+        self.policy_errors = []  # malformed custom_rules / disabled_rules: fail closed (hard)
+        disabled = policy.get("disabled_rules", [])
+        if not isinstance(disabled, list) or not all(isinstance(r, str) for r in disabled):
+            self.policy_errors.append("disabled_rules")
+            disabled = []
+        self.disabled = DISABLEABLE.intersection(disabled)
+        try:
+            self.custom = _cu.policy_rules(policy.get("custom_rules", []))
+        except ValueError:
+            self.policy_errors.append("custom_rules")
+            self.custom = []
+        budget = policy.get("regex_budget_ms", _cu.REGEX_BUDGET_MS)
+        if isinstance(budget, bool) or not isinstance(budget, (int, float)) or budget != budget:
+            budget = _cu.REGEX_BUDGET_MS
+        self.regex_budget_ms = min(float(budget), _BUDGET_MAX_MS)
         self.mcp_tools = policy.get("mcp_tools", {})
         # database rules: dev patterns and MCP server environments (malformed -> nothing is dev)
         db_dev = policy.get("db_dev")
@@ -661,6 +707,8 @@ class _Ctx:
     # -- hits --------------------------------------------------------------
     def hit(self, rule_id, hard, summary):
         if not self.guard and rule_id not in _ALWAYS_ON:
+            return
+        if not hard and rule_id in self.disabled:  # an admin switched it off (never its hard part)
             return
         self.hits.append(_make_hit(rule_id, hard, summary))
 
@@ -2688,6 +2736,38 @@ def _file_tool(ctx, tool_name, tool_input, cwd):
             ctx.hit("git-internals", False, raw)
 
 
+def _rule_text(tool_name, tool_input):
+    """What custom rules match: Bash/Monitor the command with whitespace
+    collapsed; file tools ``<tool> <path>``; others ``<tool> <compact sorted JSON>``."""
+    if tool_name in _BASH_TOOLS:
+        command = tool_input.get("command")
+        return " ".join(str(command if command is not None else "").split())
+    if tool_name in _FILE_TOOLS:
+        raw = tool_input.get("file_path") or tool_input.get("notebook_path") or ""
+        return f"{tool_name} {raw}"
+    try:
+        text = json.dumps(tool_input, sort_keys=True, separators=(",", ":"), ensure_ascii=False, default=str)
+    except (TypeError, ValueError, RecursionError):
+        text = "<input>"
+    return f"{tool_name} {text}"
+
+
+def _custom(ctx, tool_name, tool_input):
+    """Org/project/repo rules (custom.py); they apply even with the guard off."""
+    if not ctx.custom:
+        return
+    text = _rule_text(tool_name, tool_input)
+    for rule, how in _cu.match_rules(text, ctx.custom, ctx.regex_budget_ms):
+        rid = rule["id"]
+        if how == "timeout":  # never a pass; also for a never rule (forge)
+            ctx.hits.append(Hit(rid, f"rule {rid} took too long to check, so it needs approval", False,
+                                _short(text)))
+            continue
+        reason = (_cu.clean_reason(rule.get("reason"))
+                  or f'this matches the rule "{_cu.clean_reason(rule["pattern"])}"')
+        ctx.hits.append(Hit(rid, reason, rule["kind"] == "never", _short(text)))
+
+
 def _order(hits):
     seen, out = set(), []
     for h in sorted(hits, key=lambda h: not h.hard):
@@ -2703,6 +2783,9 @@ def evaluate(tool_name, tool_input, policy, cwd):
     tool_name = str(tool_name or "")
     ctx = _Ctx(policy, cwd)
     start = _real(os.path.abspath(str(cwd))) if cwd else ctx.project
+    for key in ctx.policy_errors:
+        ctx.hits.append(Hit("unparseable", f"{ERROR_REASON} (the task policy's {key} is malformed)", True,
+                            _short(tool_name)))
     if not isinstance(tool_input, dict):
         ctx.hit("unparseable", True, f"{tool_name}: malformed tool input")
     elif tool_name in _BASH_TOOLS:
@@ -2738,6 +2821,8 @@ def evaluate(tool_name, tool_input, policy, cwd):
         except (TypeError, ValueError, RecursionError):
             text = "<input>"
         ctx.hit("unknown-tool", False, f"{tool_name} {text}")
+    if isinstance(tool_input, dict):
+        _custom(ctx, tool_name, tool_input)
     hits = _order(ctx.hits)
     if any(h.rule_id == "sql-destroy" for h in hits):  # it already holds the statement: one approval, not two
         hits = [h for h in hits if h.rule_id != "db-write"]
