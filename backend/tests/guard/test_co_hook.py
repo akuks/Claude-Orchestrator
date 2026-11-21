@@ -813,3 +813,58 @@ def test_tmpdir_from_the_hooks_env(plugin, tmp_path, stub):
     assert run(bash("rm -rf $TMPDIR/build"), env={"TMPDIR": str(tmpd)}) is None  # allowed, no request
     run(dict(bash("rm -rf $TMPDIR"), tool_use_id="tu2"), env={"TMPDIR": str(tmpd)})
     assert stub.paths("POST")[0] == "/guard/approvals"  # the root itself: a person decides
+
+
+# ---- Phase 2 Task 2: custom rules in the real hook ------------------------
+
+
+def _slow_rule(kind="never"):
+    return {"id": "repo.slow", "kind": kind, "match": "regex", "pattern": "(a+)+$", "reason": "never this"}
+
+
+def test_redos_regex_answers_approve_with_the_timeout_reason_fast(plugin, tmp_path):
+    """Review Focus 2: a catastrophic repo regex on a 40-char input cannot hold the hook:
+    the shared 250 ms budget ends it and the call goes to a person. Timed to the hook's
+    answer: the stub refuses the filing (403), so no polling interval is added."""
+    stub = Stub(post_status=403)
+    try:
+        run = Run(plugin, tmp_path, stub.base, custom_rules=[_slow_rule()])
+        out = run(bash("echo " + "a" * 40 + "b"))
+        assert run.elapsed < 1.0, run.elapsed
+        assert decision(out) == "deny"  # the filing was refused: no person can approve it
+        timeout_reason = "rule repo.slow took too long to check, so it needs approval"
+        assert f"It needed a person's approval: {timeout_reason} (repo.slow)" in reason(out)
+        body = [b for _m, p, _a, b in stub.requests if p == "/guard/approvals"][0]
+        assert body["rule_ids"] == ["repo.slow"] and body["reason"] == timeout_reason
+    finally:
+        stub.close()
+
+
+def test_redos_regex_approved_by_a_person_runs(plugin, tmp_path):
+    stub = Stub(statuses=("approved",))
+    try:
+        run = Run(plugin, tmp_path, stub.base, custom_rules=[_slow_rule()])
+        out = run(bash("echo " + "a" * 40 + "b"))
+        assert decision(out) is None and "approved" in out["hookSpecificOutput"]["additionalContext"]
+        assert run.spool()[-1]["rule_ids"] == ["repo.slow"]
+    finally:
+        stub.close()
+
+
+def test_custom_never_rule_denies_in_the_hook(run, stub):
+    rules_ = [{"id": "org.tf", "kind": "never", "match": "text", "pattern": "terraform destroy",
+               "reason": "destroys cloud infrastructure"}]
+    run.policy.update(custom_rules=rules_, guard_enabled=False)
+    (run.tdir / "policy.json").write_text(json.dumps(run.policy))
+    out = run(bash("terraform  destroy -auto-approve"))
+    assert decision(out) == "deny"
+    assert reason(out) == "CO-GUARD: blocked — destroys cloud infrastructure (org.tf)"
+    assert stub.paths("POST") == ["/guard/report"]
+
+
+@pytest.mark.parametrize("key,value", [("custom_rules", "nope"), ("disabled_rules", [3])])
+def test_malformed_custom_policy_denies_in_the_hook(run, key, value):
+    run.policy[key] = value
+    (run.tdir / "policy.json").write_text(json.dumps(run.policy))
+    out = run(bash("ls"))
+    assert decision(out) == "deny" and ERROR in reason(out) and key in reason(out)

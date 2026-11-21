@@ -11,7 +11,7 @@ from app.guard import co_hook, plugin as plugin_mod
 from app.guard.plugin import ensure_plugin
 
 FILES = (".claude-plugin/plugin.json", "hooks/hooks.json", "hooks/co_hook.py", "lib/rules.py", "lib/shell.py",
-         "lib/dbrules.py")
+         "lib/dbrules.py", "lib/custom.py")
 
 
 def _mode(p):
@@ -223,7 +223,7 @@ def test_lib_is_precompiled_for_the_server_interpreter(tmp_path):
 
     root = ensure_plugin(tmp_path / "co-guard")
     real = root.resolve()
-    for name in ("rules", "shell", "dbrules"):
+    for name in ("rules", "shell", "dbrules", "custom"):
         pyc = real / "lib" / "__pycache__" / f"{name}.{sys.implementation.cache_tag}.pyc"
         assert pyc.is_file() and _mode(pyc) == 0o444
         assert importlib.util.cache_from_source(str(real / "lib" / f"{name}.py")) == str(pyc)
@@ -272,4 +272,4 @@ def test_hook_uses_the_cache_and_skips_network_imports(tmp_path):
         assert info["urllib"] is False, (event, p.stderr[-2000:])
     # no write of a fresh .pyc was even attempted: the shipped one was valid
     assert sorted(os.listdir(root.resolve() / "lib" / "__pycache__")) == sorted(
-        f"{n}.{sys.implementation.cache_tag}.pyc" for n in ("rules", "shell", "dbrules"))
+        f"{n}.{sys.implementation.cache_tag}.pyc" for n in ("rules", "shell", "dbrules", "custom"))
