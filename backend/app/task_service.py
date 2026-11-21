@@ -36,6 +36,15 @@ _CRITICAL_PATTERNS = (
 
 
 def classify_risk(prompt: str, project_id: str | None, tags: list | None = None) -> str:
+    """Task-level risk from the prompt: "critical" (a keyword in
+    _CRITICAL_PATTERNS), "warning" (a project task, or a vapt/security
+    review) or "info".
+
+    Kept as it is in forge-port Phase 2. co-guard's per-action rules now hold
+    force-pushes to main, deletes outside the project, ``reset --hard`` and
+    production database writes call by call, but ordinary pushes and merges
+    are still gated only by this keyword check, so removing it is not yet a
+    safe simplification. Phase 5 (launch scope) revisits it."""
     # Read-only reviews (VAPT/security) mention "merge"/"delete" in their own
     # prohibitions — never gate those on keyword match.
     tag_set = {str(t).lower() for t in (tags or [])}

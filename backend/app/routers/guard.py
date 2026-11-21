@@ -34,6 +34,27 @@ co-guard's hook and decided by people, and the hook's live decision reports.
   agent can read the token and call this too) and then with the stored
   request's tool/summary/rule_ids, at most GUARD_REPORT_CAP per run.
 
+Policy settings (Phase 2; people only - agent tokens are refused by the
+allowlist in auth.py and again here):
+
+* ``GET /guard/rules`` - org rules (any person), or with ``?project_id=`` that
+  project's rules (visible project, else 404). ``POST /guard/rules`` -
+  ``{scope: org|project, project_id?, name?, kind, match, pattern, reason,
+  enabled}``; org rules: admins; project rules: the project's maintainers and
+  admins (invisible -> 404, contributor -> 403). ``PATCH|DELETE
+  /guard/rules/{rule_id}`` (the row id) under the same rules. Patterns follow
+  ``custom.validate_pattern`` (400; a regex that does not compile ->
+  ``invalid regex: ...``); reasons are cleaned and cut to 200 chars
+  (``custom.clean_reason``); the slug comes from the name, else the reason,
+  else the pattern, unique within its scope and project (``-2``, ``-3``...)
+  and never changes; at most ``RULES_PER_SCOPE`` rules per scope (org; each
+  project) -> 409.
+* ``GET /guard/builtins`` - ``[{id, reason, hard_reason, disableable}]``.
+* ``GET /guard/org-settings`` (any person) / ``PUT`` (admins):
+  ``{disabled_rules, dev_db_patterns}`` (a field left out stays); only
+  ``rules.DISABLEABLE`` ids may be switched off and every dev pattern must pass
+  ``dbrules.check_dev_pattern`` (400).
+
 Expiry: ``expires_at = created_at + min(approval_wait_seconds, wait_left)`` -
 the wait in the task's own policy file (what its hook waits), else the
 project's, clamped 60-900; ``wait_left`` is what the hook has left. A
@@ -50,7 +71,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Literal, Optional
 
 from fastapi import APIRouter, Body, Depends, Header, HTTPException, Query, Request, Response
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from sqlalchemy import and_, func, or_, select, update
 from sqlalchemy.exc import IntegrityError
 
@@ -61,13 +82,18 @@ from ..access import (
     effective_project_id,
     maintained_project_ids,
     project_role,
+    require_project_role,
     require_task,
 )
 from ..constants import Status
 from ..database import SessionLocal
+from ..guard import custom as guard_custom
+from ..guard import dbrules as guard_dbrules
+from ..guard import policy_store
+from ..guard import rules as guard_rules
 from ..guard import runtime as guard_runtime
 from ..guard.co_hook import SUMMARY_MAX as HOOK_SUMMARY_MAX
-from ..models import ActionApproval, Project, Task
+from ..models import ActionApproval, ActionRule, GuardOrgSettings, Project, Task
 from ..redaction import redact
 
 router = APIRouter(prefix="/guard", tags=["guard"])
@@ -510,3 +536,256 @@ async def report(request: Request, rec: dict = Body(...)):
     if w is not None and hasattr(w, "report_guard"):
         accepted = await w.report_guard(task_id, rec)  # redacts with the run's secrets
     return {"accepted": accepted}
+
+
+# ---- policy settings (people) ----------------------------------------------------------------
+
+RULES_PER_SCOPE = guard_custom.RULES_PER_SCOPE
+RULE_SCOPES = ("org", "project")
+DEV_PATTERNS_MAX = 200
+
+
+def _person(p) -> None:
+    if p.is_agent:  # also refused by the allowlist
+        raise HTTPException(403, "Token not allowed for this route")
+
+
+class RuleIn(BaseModel):
+    scope: str = "org"
+    project_id: Optional[str] = None
+    name: Optional[str] = Field(None, max_length=200)  # only shapes the slug
+    kind: str = "confirm"
+    match: str = "text"
+    pattern: str = Field(max_length=4000)  # the real limit (500) is checked with a clear message
+    reason: str = Field("", max_length=4000)
+    enabled: bool = True
+
+
+class RulePatch(BaseModel):
+    kind: Optional[str] = None
+    match: Optional[str] = None
+    pattern: Optional[str] = Field(None, max_length=4000)
+    reason: Optional[str] = Field(None, max_length=4000)
+    enabled: Optional[bool] = None
+
+
+class RuleOut(BaseModel):
+    id: str
+    rule_id: str  # the policy id: org.<slug> | project.<slug>
+    scope: str
+    project_id: Optional[str] = None
+    slug: str
+    kind: str
+    match: str
+    pattern: str
+    reason: str = ""
+    enabled: bool
+    created_by: Optional[str] = None
+    created_at: datetime
+    updated_at: datetime
+
+
+def _rule_out(r: ActionRule) -> RuleOut:
+    return RuleOut(
+        id=r.id, rule_id=guard_custom.rule_id(r.scope, r.slug), scope=r.scope, project_id=r.project_id,
+        slug=r.slug, kind=r.kind, match=r.match, pattern=r.pattern, reason=r.reason or "", enabled=r.enabled,
+        created_by=r.created_by, created_at=_aware(r.created_at), updated_at=_aware(r.updated_at),
+    )
+
+
+def _check_rule(kind: str, match: str, pattern: str) -> None:
+    if kind not in guard_custom.KINDS:
+        raise HTTPException(400, f"kind must be one of: {', '.join(guard_custom.KINDS)}")
+    err = guard_custom.validate_pattern(match, pattern)
+    if err is None:
+        return
+    bad_regex = "bad regular expression: "
+    if match == "regex" and err.startswith(bad_regex):
+        err = "invalid regex: " + err[len(bad_regex):]
+    raise HTTPException(400, err)
+
+
+def _same_scope(scope: str, project_id: str | None):
+    if project_id is None:
+        return and_(ActionRule.scope == scope, ActionRule.project_id.is_(None))
+    return and_(ActionRule.scope == scope, ActionRule.project_id == project_id)
+
+
+async def _may_write_rule(s, p, scope: str, project_id: str | None) -> None:
+    """Org rules: admins (403). Project rules: maintainers/admins of a
+    project the caller can see (invisible or missing -> 404, lower -> 403)."""
+    if scope == "org":
+        if not p.is_admin or not p.user.active:
+            raise HTTPException(403, "Admin only")
+        return
+    await require_project_role(s, p, project_id, "maintainer")
+    if await s.get(Project, project_id) is None:
+        raise HTTPException(404, "Not found")
+
+
+@api.get("/rules", response_model=list[RuleOut])
+async def list_rules(request: Request, project_id: Optional[str] = None):
+    p = request.state.principal
+    _person(p)
+    async with SessionLocal() as s:
+        if project_id is not None:
+            await require_project_role(s, p, project_id)
+            if await s.get(Project, project_id) is None:
+                raise HTTPException(404, "Not found")
+            where = _same_scope("project", project_id)
+        else:
+            if not p.user.active:
+                raise HTTPException(404, "Not found")
+            where = _same_scope("org", None)
+        rows = (await s.execute(select(ActionRule).where(where).order_by(ActionRule.created_at, ActionRule.slug))
+                ).scalars().all()
+    return [_rule_out(r) for r in rows]
+
+
+@api.post("/rules", response_model=RuleOut, status_code=201)
+async def create_rule(body: RuleIn, request: Request):
+    p = request.state.principal
+    _person(p)
+    if body.scope not in RULE_SCOPES:
+        raise HTTPException(400, f"scope must be one of: {', '.join(RULE_SCOPES)}")
+    if body.scope == "org" and body.project_id is not None:
+        raise HTTPException(400, "an org rule has no project_id")
+    if body.scope == "project" and not body.project_id:
+        raise HTTPException(400, "a project rule needs a project_id")
+    project_id = body.project_id if body.scope == "project" else None
+    async with SessionLocal() as s:
+        await _may_write_rule(s, p, body.scope, project_id)
+        _check_rule(body.kind, body.match, body.pattern)
+        reason = guard_custom.clean_reason(body.reason)
+        same = _same_scope(body.scope, project_id)
+        count = (await s.execute(select(func.count(ActionRule.id)).where(same))).scalar_one()
+        if count >= RULES_PER_SCOPE:
+            raise HTTPException(409, f"at most {RULES_PER_SCOPE} rules per scope")
+        taken = set((await s.execute(select(ActionRule.slug).where(same))).scalars())
+        name = guard_custom.clean_reason(body.name) if body.name else ""
+        now = _now()
+        rule = ActionRule(
+            scope=body.scope, project_id=project_id,
+            slug=guard_custom.unique_slug(name or reason or body.pattern, taken),
+            kind=body.kind, match=body.match, pattern=body.pattern, reason=reason, enabled=body.enabled,
+            created_by=p.user.id, created_at=now, updated_at=now,
+        )
+        s.add(rule)
+        try:
+            await s.commit()
+        except IntegrityError:
+            await s.rollback()
+            raise HTTPException(409, "a rule with this name was just added; try again")
+        await s.refresh(rule)
+        return _rule_out(rule)
+
+
+async def _rule_for_write(s, p, rule_id: str) -> ActionRule:
+    rule = await s.get(ActionRule, rule_id)
+    if rule is None:
+        raise HTTPException(404, "Not found")
+    await _may_write_rule(s, p, rule.scope, rule.project_id)
+    return rule
+
+
+@api.patch("/rules/{rule_id}", response_model=RuleOut)
+async def update_rule(rule_id: str, body: RulePatch, request: Request):
+    p = request.state.principal
+    _person(p)
+    async with SessionLocal() as s:
+        rule = await _rule_for_write(s, p, rule_id)
+        data = {k: v for k, v in body.model_dump(exclude_unset=True).items() if v is not None}
+        kind, match, pattern = data.get("kind", rule.kind), data.get("match", rule.match), data.get(
+            "pattern", rule.pattern)
+        _check_rule(kind, match, pattern)
+        rule.kind, rule.match, rule.pattern = kind, match, pattern
+        if "reason" in data:
+            rule.reason = guard_custom.clean_reason(data["reason"])
+        if "enabled" in data:
+            rule.enabled = data["enabled"]
+        rule.updated_at = _now()
+        await s.commit()
+        await s.refresh(rule)
+        return _rule_out(rule)
+
+
+@api.delete("/rules/{rule_id}", status_code=204)
+async def delete_rule(rule_id: str, request: Request):
+    p = request.state.principal
+    _person(p)
+    async with SessionLocal() as s:
+        rule = await _rule_for_write(s, p, rule_id)
+        await s.delete(rule)
+        await s.commit()
+
+
+@api.get("/builtins")
+async def list_builtins(request: Request):
+    _person(request.state.principal)
+    return [
+        {"id": rid, "reason": reason, "hard_reason": hard, "disableable": rid in guard_rules.DISABLEABLE}
+        for rid, (reason, hard) in guard_rules.RULES.items()
+    ]
+
+
+class OrgSettingsIn(BaseModel):
+    disabled_rules: Optional[list[str]] = None
+    dev_db_patterns: Optional[list[str]] = None
+
+
+async def _org_settings_out(s) -> dict:
+    row = await s.get(GuardOrgSettings, 1)
+    out = await policy_store.org_settings(s)
+    out["updated_by"] = row.updated_by if row else None
+    out["updated_at"] = _aware(row.updated_at) if row and row.updated_at else None
+    return out
+
+
+@api.get("/org-settings")
+async def get_org_settings(request: Request):
+    _person(request.state.principal)
+    async with SessionLocal() as s:
+        return await _org_settings_out(s)
+
+
+@api.put("/org-settings")
+async def put_org_settings(body: OrgSettingsIn, request: Request):
+    p = request.state.principal
+    _person(p)
+    if not p.is_admin or not p.user.active:
+        raise HTTPException(403, "Admin only")
+    disabled = patterns = None
+    if body.disabled_rules is not None:
+        disabled = list(dict.fromkeys(body.disabled_rules))
+        locked = [r for r in disabled if r not in guard_rules.DISABLEABLE]
+        if locked:
+            raise HTTPException(400, f"cannot switch off: {', '.join(locked)} (only "
+                                     f"{', '.join(sorted(guard_rules.DISABLEABLE))} can be)")
+    if body.dev_db_patterns is not None:
+        if len(body.dev_db_patterns) > DEV_PATTERNS_MAX:
+            raise HTTPException(400, f"at most {DEV_PATTERNS_MAX} dev database patterns")
+        for raw in body.dev_db_patterns:
+            err = guard_dbrules.check_dev_pattern(raw)
+            if err:
+                raise HTTPException(400, err)
+        patterns = list(dict.fromkeys(x.strip() for x in body.dev_db_patterns))
+    for attempt in range(2):
+        async with SessionLocal() as s:
+            row = await s.get(GuardOrgSettings, 1)
+            if row is None:
+                row = GuardOrgSettings(id=1, disabled_rules=[], dev_db_patterns=[])
+                s.add(row)
+            if disabled is not None:
+                row.disabled_rules = disabled
+            if patterns is not None:
+                row.dev_db_patterns = patterns
+            row.updated_by = p.user.id
+            row.updated_at = _now()
+            try:
+                await s.commit()
+            except IntegrityError:  # another first write won the race: update that row
+                await s.rollback()
+                if attempt:
+                    raise HTTPException(409, "the settings changed; try again")
+                continue
+            return await _org_settings_out(s)
