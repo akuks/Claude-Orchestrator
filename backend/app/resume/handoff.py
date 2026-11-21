@@ -2,7 +2,8 @@
 root_id), built by the server from the thread's steps, the described step's
 events, git facts and the thread's live state.
 
-* ``build(HandoffInput) -> content`` is pure: every text is redacted (the run's
+* ``build(HandoffInput) -> content`` uses no DB and no git (it only reads a
+  plan or ledger file the step wrote, and resolves paths): every text is redacted (the run's
   secrets plus token shapes), cleaned of hidden characters and then cut to
   ``FIELD_MAX``. ``render(content, level)`` gives the injected text (at most
   ``HANDOFF_MAX_WORDS`` words, ``HANDOFF_HEAD`` first).
@@ -160,8 +161,9 @@ def _progress(items, source):
         idx = next((i for i, it in enumerate(items) if it[2] != "completed"), len(items) - 1)
     nxt = next((it[1] for it in items[idx + 1:] if it[2] != "completed"), None)
     done = [it[1] for it in items if it[2] == "completed"][-DONE_MAX:]
-    return {"n": idx + 1, "m": len(items), "text": items[idx][0] or items[idx][1], "next": nxt, "done": done,
-            "source": source}
+    finished = all(it[2] == "completed" for it in items)
+    text = "all steps done" if finished else (items[idx][0] or items[idx][1])
+    return {"n": idx + 1, "m": len(items), "text": text, "next": nxt, "done": done, "source": source}
 
 
 def _from_todos(events):
@@ -570,7 +572,11 @@ def write_file(task_id: str, text: str, secrets=None) -> bool:
     if not d.is_dir():
         return False
     tmp, path = d / (HANDOFF_FILE + ".tmp"), d / HANDOFF_FILE
-    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    try:  # a fresh file (mode 0600), never through a planted link
+        os.unlink(tmp)
+    except FileNotFoundError:
+        pass
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0), 0o600)
     with os.fdopen(fd, "w") as fh:
         fh.write(redact(text or "", list(secrets or [])))
     os.replace(tmp, path)

@@ -498,7 +498,10 @@ async def refresh_handoff(task_id: str, request: Request):
     async with SessionLocal() as s:
         task = await require_task(s, p, task_id)
         await _require_manage(s, p, task)
-    row = await resume_handoff.snapshot(task_id, "manual")
+    # a live run's outside-commit base (F9), so a refresh keeps its outside commits
+    worker = request.app.state.worker
+    row = await resume_handoff.snapshot(task_id, "manual", secrets=worker._run_secrets.get(task_id),
+                                        since=worker._run_since.get(task_id))
     if row is None:
         raise HTTPException(404, "Task not found")
     return _handoff_out(row)

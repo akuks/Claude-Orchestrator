@@ -8,6 +8,7 @@ results + output artifacts. No external broker/queue needed for Phase 1.
 
 import asyncio
 import json
+import logging
 import mimetypes
 import os
 import signal
@@ -33,6 +34,8 @@ from .guard.plugin import ensure_plugin
 from .models import Agent, Artifact, McpCall, Project, SkillPack, Task, TaskEvent, User
 from .redaction import redact, redact_obj, secrets_from_env
 from .resume import gitfacts, handoff
+
+log = logging.getLogger(__name__)
 
 _MAX_TOOL_RESULT_CHARS = 2000
 
@@ -795,8 +798,8 @@ class WorkerManager:
             row = await handoff.stored(task_id)
             if row is not None and row.text:
                 handoff.write_file(task_id, row.text, secrets)
-        except Exception:  # noqa: BLE001 - resume bookkeeping never stops a run
-            pass
+        except Exception as e:  # noqa: BLE001 - resume bookkeeping never stops a run
+            log.warning("handoff: spawn bookkeeping failed for %s: %s", task_id, e)
         return since
 
     async def _heartbeat_loop(self, task_id: str, ctx) -> None:
@@ -812,8 +815,8 @@ class WorkerManager:
                     if t is not None:
                         t.heartbeat_at = _now()
                         await s.commit()
-            except Exception:  # noqa: BLE001
-                pass
+            except Exception as e:  # noqa: BLE001
+                log.warning("heartbeat: %s: %s", task_id, e)
             try:
                 n = ctx["run"]["events"]
                 if n != snapped and time.monotonic() - last >= handoff.HANDOFF_EVERY_SECONDS:
@@ -821,8 +824,8 @@ class WorkerManager:
                     row = await handoff.snapshot(task_id, "working", secrets=ctx["secrets"], since=ctx["since"])
                     if row is not None:
                         handoff.write_file(task_id, row.text, ctx["secrets"])
-            except Exception:  # noqa: BLE001
-                pass
+            except Exception as e:  # noqa: BLE001
+                log.warning("handoff: working snapshot failed for %s: %s", task_id, e)
 
     @staticmethod
     def _finish_reason(status: str, error: str | None) -> str:
@@ -1323,10 +1326,12 @@ class WorkerManager:
             await s.commit()
         # where the thread stands now (the run's outside-commit base when one is held)
         try:
-            await handoff.snapshot(task_id, self._finish_reason(status, error), secrets=secrets,
+            # the cut-off callers (cancel, timeout) pass no secrets: use the run's
+            await handoff.snapshot(task_id, self._finish_reason(status, error),
+                                   secrets=secrets if secrets is not None else self._run_secrets.get(task_id),
                                    since=self._run_since.get(task_id))
-        except Exception:  # noqa: BLE001 - never breaks a finish
-            pass
+        except Exception as e:  # noqa: BLE001 - never breaks a finish
+            log.warning("handoff: finish snapshot failed for %s: %s", task_id, e)
         # co-guard deny-and-resume: follow-ups deferred while this step was active
         try:
             await guard_grants.after_task_finished(task_id, submit=self.submit)
