@@ -267,13 +267,31 @@ def test_adhoc_thread_step_resolves_against_the_project_dir(client, tmp_path):
     assert inp.policy["readonly_paths"][0]["path"] == os.path.realpath(Path(p.directory) / "ref")
 
 
-def test_malformed_stored_readonly_entries_are_reported(client, tmp_path):
+@pytest.mark.parametrize("stored", [
+    ["nope", {"path": "ok", "reason": "x"}],
+    [{"path": ""}],
+    [{"path": "a\x00b"}],
+    [{"path": "~/x"}],
+    [{"path": "ok", "reason": 5}],
+    {"path": "ok"},
+    "vendor",
+])
+def test_malformed_stored_readonly_paths_fail_closed(client, tmp_path, stored):
+    """Ruling P22 (Task 6 carry-over): dropping a read-only root would fail open."""
     u = _user()
-    p = _project(tmp_path, readonly_paths=["nope", {"path": ""}, {"path": "ok", "reason": "x"}])
+    p = _project(tmp_path, readonly_paths=stored)
     _add(u, p)
-    inp = _gather(_task(p.id), p, u.id)
-    assert [e["path"] for e in inp.policy["readonly_paths"]] == [os.path.realpath(Path(p.directory) / "ok")]
-    assert [e for e in inp.events if e.get("event") == "readonly_skipped"]
+    with pytest.raises(policy_inputs.PolicyInputError):
+        _gather(_task(p.id), p, u.id)
+
+
+@pytest.mark.parametrize("ids", ["abc", [1, 2], {"a": 1}])
+def test_malformed_reference_ids_fail_closed(client, tmp_path, ids):
+    u = _user()
+    p = _project(tmp_path, reference_project_ids=ids)
+    _add(u, p)
+    with pytest.raises(policy_inputs.PolicyInputError):
+        _gather(_task(p.id), p, u.id)
 
 
 def test_reference_projects_visibility_and_folder(client, tmp_path):
@@ -293,11 +311,13 @@ def test_reference_projects_visibility_and_folder(client, tmp_path):
     real = os.path.realpath(seen.directory)
     assert inp.add_dirs == [real]
     refs = [e for e in inp.policy["readonly_paths"] if e["source"] == "reference"]
-    assert refs == [{"path": real, "reason": f"reference project {seen.name}", "source": "reference"}]
+    assert refs == [{"path": real, "reason": "a reference project", "source": "reference"}]
     skips = [e for e in inp.events if e.get("event") == "reference_skipped"]
     assert sorted(e["project_id"] for e in skips) == sorted([hidden.id, gone.id, missing_id])
-    # an invisible project's name never reaches the run log
-    assert hidden.name not in repr(inp.events)
+    # task viewers may not see the references: a count only, no other project's name or path
+    assert [e for e in inp.events if e.get("event") == "references"] == [{"event": "references", "count": 1}]
+    for proj in (seen, hidden, gone):
+        assert proj.name not in repr(inp.events) and os.path.realpath(proj.directory) not in repr(inp.events)
 
 
 def test_reference_projects_for_an_admin_and_for_no_owner(client, tmp_path, temp_admin):
@@ -349,6 +369,26 @@ def test_grants_as_epoch_seconds(client):
     for g in grants:
         assert set(g) == {"id", "scope", "rule_id", "key_kind", "key", "expires_at"}
         assert isinstance(g["expires_at"], float) and abs(g["expires_at"] - exp.timestamp()) < 1
+
+
+def test_once_grants_of_another_task_or_used_are_left_out(client):
+    """Task 6 carry-over: a once grant is bound to one task and spent once."""
+    u = _user()
+    _add(u)
+    root = uuid.uuid4().hex
+    me, sibling = _task(root_id=root), _task(root_id=root)
+    now = datetime.now(timezone.utc)
+    exp = now + timedelta(hours=1)
+    _add(
+        ActionGrant(id=f"m-{root[:8]}", root_id=root, task_id=me.id, scope="once", rule_id="db-write",
+                    key_kind="command", key="a" * 64, created_at=now, expires_at=exp),
+        ActionGrant(id=f"s-{root[:8]}", root_id=root, task_id=sibling.id, scope="once", rule_id="db-write",
+                    key_kind="command", key="a" * 64, created_at=now, expires_at=exp),
+        ActionGrant(id=f"u-{root[:8]}", root_id=root, task_id=me.id, scope="once", rule_id="db-write",
+                    key_kind="command", key="b" * 64, created_at=now, expires_at=exp, used_at=now),
+    )
+    assert [g["id"] for g in _gather(me, None, u.id).policy["grants"]] == [f"m-{root[:8]}"]
+    assert [g["id"] for g in _gather(sibling, None, u.id).policy["grants"]] == [f"s-{root[:8]}"]
 
 
 def test_thread_step_uses_the_root_grants(client):

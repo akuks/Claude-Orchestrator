@@ -907,7 +907,7 @@ def test_external_project_policy_add_dir_and_data_line(client):
     assert pol["trust"] == "external" and pol["quarantine"] is True and pol["on_no_answer"] == "deny_and_resume"
     assert pol["readonly_paths"] == [
         {"path": str((d / "vendor").resolve()), "reason": "upstream", "source": "project"},
-        {"path": ref_real, "reason": f"reference project {ref['name']}", "source": "reference"},
+        {"path": ref_real, "reason": "a reference project", "source": "reference"},
     ]
     # an external repo's rules file is never read
     assert not any(r["id"].startswith("repo.") for r in pol["custom_rules"])
