@@ -44,6 +44,9 @@ BEFORE_MAX = 4
 LAST_REPLY_WORDS = 70
 LAST_REPLY_TRIMMED = 35  # from trim level 3
 NOTES_TRIMMED = 60  # words, from trim level 3
+NOTES_MAX_WORDS = 120
+NOTES_MAX_CHARS = 1000
+NOTES_BODY_MAX = 4096  # bytes of a notes PUT
 EVENTS_SCAN_MAX = 2000
 PLAN_FILE_MAX = 262144
 HANDOFF_EVERY_SECONDS = 60
@@ -416,6 +419,17 @@ def build(inp: HandoffInput) -> dict:
 
 
 # ---- render ----------------------------------------------------------------------------------
+
+
+def clean_notes(text, secrets=None) -> str:
+    """Notes as stored: hidden characters stripped, the run's secrets and token shapes masked (both before
+    the cut, so a secret cannot straddle it), then cut to NOTES_MAX_WORDS words (line breaks kept) and
+    NOTES_MAX_CHARS characters."""
+    text = redact(clean_text(text), list(secrets or [])).strip()
+    ends = [m.end() for m in re.finditer(r"\S+", text)]
+    if len(ends) > NOTES_MAX_WORDS:
+        text = text[:ends[NOTES_MAX_WORDS - 1]]
+    return text[:NOTES_MAX_CHARS].rstrip()
 
 
 def _words(text, n, tail=False):

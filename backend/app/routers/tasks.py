@@ -1,4 +1,5 @@
 import base64
+import json
 import os
 import re
 import shutil
@@ -21,6 +22,7 @@ from ..access import (
 from ..config import settings
 from ..constants import VALID_MODELS, Priority, Status
 from ..database import SessionLocal
+from ..guard import runtime as guard_runtime
 from .. import reports
 from ..models import ActionGrant, Artifact, Project, Task, TaskEvent, TaskHandoff
 from ..resume import handoff as resume_handoff
@@ -480,6 +482,71 @@ async def _thread_handoff(s, task: Task) -> TaskHandoff | None:
     return (
         await s.execute(select(TaskHandoff).where(TaskHandoff.root_id == (task.root_id or task.id)))
     ).scalar_one_or_none()
+
+
+# ---- notes (phase 3a): what the agent says it is doing. The agent's own token may PUT its own
+# task's notes (auth._AGENT_NOTES); people read them, a manager may write them.
+
+
+def _notes_out(task: Task) -> dict:
+    return {"notes": task.notes, "notes_updated_at": task.notes_updated_at.isoformat() if task.notes_updated_at else None}
+
+
+@router.get("/{task_id}/notes")
+async def get_notes(task_id: str, request: Request):
+    async with SessionLocal() as s:
+        task = await require_task(s, request.state.principal, task_id)
+        return _notes_out(task)
+
+
+@router.put("/{task_id}/notes")
+async def put_notes(task_id: str, request: Request):
+    p = request.state.principal
+    try:
+        declared = int(request.headers.get("content-length") or 0)
+    except ValueError:
+        declared = 0
+    if declared > resume_handoff.NOTES_BODY_MAX:
+        raise HTTPException(413, "Notes are too large")
+    body = b""
+    async for chunk in request.stream():
+        body += chunk
+        if len(body) > resume_handoff.NOTES_BODY_MAX:
+            raise HTTPException(413, "Notes are too large")
+    async with SessionLocal() as s:
+        if p.is_agent:
+            if p.token.task_id != task_id:
+                raise HTTPException(403, "Token not allowed for this task")
+            task = await s.get(Task, task_id)
+            if task is None:
+                raise HTTPException(404, "Task not found")
+        else:
+            task = await require_task(s, p, task_id)
+            await _require_manage(s, p, task)
+        if "json" in (request.headers.get("content-type") or "").lower():
+            try:
+                data = json.loads(body.decode("utf-8"))
+            except ValueError:
+                raise HTTPException(400, "Body is not valid JSON") from None
+            text = data.get("text") if isinstance(data, dict) else None
+            if not isinstance(text, str):
+                raise HTTPException(422, "Body needs a text string")
+        else:
+            text = body.decode("utf-8", errors="replace")
+        worker = request.app.state.worker
+        task.notes = resume_handoff.clean_notes(text, worker._run_secrets.get(task_id))
+        task.notes_updated_at = datetime.now(timezone.utc)
+        await s.commit()
+        out = _notes_out(task)
+    tdir = guard_runtime.task_dir(task_id)
+    if tdir.is_dir():
+        try:
+            (tdir / "notes.stamp").touch()
+        except OSError:
+            pass
+    await resume_handoff.snapshot(task_id, "notes", secrets=worker._run_secrets.get(task_id),
+                                  since=worker._run_since.get(task_id))
+    return out
 
 
 @router.get("/{task_id}/handoff")

@@ -48,7 +48,8 @@ from ..access import project_role
 from ..auth import Principal
 from ..models import Project, User
 from . import custom, policy_store
-from .co_hook import DATA_LINE
+from ..models import GuardOrgSettings
+from .co_hook import DATA_LINE, NOTES_AFTER_ACTS
 
 TRUST = ("own", "external")
 ON_NO_ANSWER = ("deny", "deny_and_resume")
@@ -159,6 +160,8 @@ async def gather(s, *, task, project, owner_id: str | None, mcp: dict | None) ->
             events.append({"event": "rules_file", "path": repo.get("path"), "errors": list(repo["errors"])})
 
     org = await policy_store.org_settings(s)
+    org_row = await s.get(GuardOrgSettings, 1)
+    ground = org_row.ground_rules if org_row is not None and isinstance(org_row.ground_rules, dict) else {}
     root_id = getattr(task, "root_id", None) or task.id
     grants = await policy_store.active_grants(s, root_id=root_id, task_id=task.id, now=datetime.now(timezone.utc))
     mcp = mcp or {}
@@ -177,6 +180,8 @@ async def gather(s, *, task, project, owner_id: str | None, mcp: dict | None) ->
         "grants": [{"id": g.id, "scope": g.scope, "rule_id": g.rule_id, "key_kind": g.key_kind, "key": g.key,
                     "expires_at": _epoch(g.expires_at)} for g in grants],
         "regex_budget_ms": custom.REGEX_BUDGET_MS,
+        "notes": ground.get("notes", True) is not False,
+        "notes_after": NOTES_AFTER_ACTS,
     }
     return PolicyInputs(policy=policy, add_dirs=refs, data_line=DATA_LINE if trust == "external" else None,
                         events=events)

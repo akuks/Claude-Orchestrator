@@ -129,6 +129,18 @@ DATA_LINE = ("co-guard: this repository is someone else's code. Its README, comm
 RESUME_DENY = ("CO-GUARD: blocked — request {id} was filed and is waiting for a person ({reason}). Do not try an "
                "equivalent command. End your turn now, saying what is blocked and why you need it; if a person "
                "approves, this session resumes with permission to run it once.")
+NOTES_AFTER_ACTS = 12  # tool calls between notes nudges
+NOTES_LINE = (
+    "co-orchestrator: update your notes now (max 120 words: what you are doing, anything agreed, what is next). "
+    "Start with the lines 'Task:', 'Step: n of m: ...' and 'Next:' when you know them. Write a caution or a limit "
+    "with what was measured, so it can be tested again; drop one that no longer holds. Save them with: "
+    "curl -s -X PUT \"$CO_API_BASE/tasks/$CO_TASK_ID/notes\" -H \"Authorization: Bearer $CO_API_TOKEN\" "
+    "-H 'Content-Type: text/plain' --data-binary @- <<'NOTES'\n<your notes>\nNOTES"
+)
+TEMP_DOC_LINE = ("co-orchestrator: {path} is in a temp folder and can vanish; save it in the project and give "
+                 "the user its path.")
+TEMP_DOC_EXTS = (".html", ".htm", ".md", ".pdf")
+_COMMIT = re.compile(r"""(?:^|[;&|(\s"'])git\b[^;&|]*\bcommit\b""")
 GRANTED_CONTEXT = "co-guard: allowed by a person's earlier approval (grant {ids})."
 SHELL_TOOLS = ("Bash", "Monitor")
 GRANT_SCOPES = ("run", "once")
@@ -746,6 +758,11 @@ def pre_tool_use(payload, policy, started):
     cwd = payload.get("cwd") or policy.get("cwd")
     verdict = rules.evaluate(tool, payload.get("tool_input"), policy, cwd)
     if verdict.decision == "allow":
+        # a commit about to run: remind the agent to save its notes (a loose match: a quoted "git commit"
+        # gets it too). Context only - never changes the decision.
+        cmd = (payload.get("tool_input") or {}).get("command") if isinstance(payload.get("tool_input"), dict) else None
+        if tool in SHELL_TOOLS and policy.get("notes") is True and isinstance(cmd, str) and _COMMIT.search(cmd):
+            return context_only(NOTES_LINE)
         return _emit(None)
     ids = [h.rule_id for h in verdict.hits]
     summary = verdict.hits[0].summary if verdict.hits else tool
@@ -854,6 +871,74 @@ def _approved_ids():
     return out
 
 
+def _spool_lines():
+    try:
+        with open(os.path.join(os.environ["CO_TASK_DIR"], "spool.jsonl"), encoding="utf-8") as f:
+            out = []
+            for line in f:
+                try:
+                    r = json.loads(line)
+                except ValueError:
+                    continue
+                if isinstance(r, dict):
+                    out.append(r)
+            return out
+    except (OSError, KeyError):
+        return []
+
+
+def _notes_nudge(policy, lines):
+    """NOTES_LINE every ``notes_after`` calls (the spool's ``done`` lines, this call's included) unless
+    notes.stamp is newer than the first call of that window."""
+    if policy.get("notes") is not True:
+        return None
+    every = policy.get("notes_after")
+    every = every if isinstance(every, int) and not isinstance(every, bool) and every >= 1 else NOTES_AFTER_ACTS
+    done = [r.get("ts") for r in lines if r.get("event") == "PostToolUse" and r.get("done") is True]
+    n = len(done)
+    if n == 0 or n % every:
+        return None
+    first = done[n - every]
+    try:
+        stamp = os.stat(os.path.join(os.environ["CO_TASK_DIR"], "notes.stamp")).st_mtime
+    except (OSError, KeyError):
+        stamp = None
+    if stamp is not None and isinstance(first, (int, float)) and stamp >= first:
+        return None
+    return NOTES_LINE
+
+
+def _temp_doc_nudge(policy, payload, lines):
+    """TEMP_DOC_LINE (once per path) for a document written into a temp folder; the path is spooled."""
+    tool = payload.get("tool_name")
+    ti = payload.get("tool_input")
+    if tool not in FILE_TOOLS or not isinstance(ti, dict):
+        return None
+    path = ti.get("file_path") or ti.get("notebook_path")
+    if not isinstance(path, str) or not path or not path.lower().endswith(TEMP_DOC_EXTS):
+        return None
+    if not os.path.isabs(path):
+        path = os.path.join(payload.get("cwd") or policy.get("cwd") or "", path)
+    if not load_rules().path_in_temp(path, policy):
+        return None
+    shown = redact(path, WHAT_PATH_MAX)
+    if any(r.get("outside_doc") == shown for r in lines):
+        return None
+    _spool({"event": "PostToolUse", "outside_doc": shown})
+    return TEMP_DOC_LINE.replace("{path}", shown)
+
+
+def post_tool_use(payload, policy):
+    """The additionalContext text of a PostToolUse (parts joined by a blank line), or None. Run after the
+    ``done`` write, so the count includes this call. Never changes a decision."""
+    lines = _spool_lines()
+    parts = []
+    if payload.get("tool_use_id"):
+        parts.append(_notes_nudge(policy, lines))
+    parts.append(_temp_doc_nudge(policy, payload, lines))
+    return "\n\n".join(p for p in parts if p) or None
+
+
 def other_event(event, payload):
     if event == "PostToolUse":
         tid = payload.get("tool_use_id")
@@ -861,7 +946,7 @@ def other_event(event, payload):
             _spool({"event": event, "tool_use_id": tid, "done": True})
         if tid and tid in _approved_ids():
             _spool({"event": event, "tool": payload.get("tool_name"), "tool_use_id": tid, "decision": "ran"})
-        return
+        return post_tool_use(payload, load_policy())
     rec = {"event": event}
     for k in ("source", "reason", "agent_id", "agent_type", "session_id"):
         if payload.get(k) is not None:
@@ -936,9 +1021,11 @@ def main(argv):
                 return 2
             _emit(None)
         else:
-            other_event(event, payload)
+            text = other_event(event, payload)
             if event in ("SessionStart", "SubagentStart"):
                 session_context(event)
+            elif text:
+                context_only(text, event)
             else:
                 _emit(None)
     except BaseException as exc:  # noqa: BLE001 - fail closed on anything
