@@ -58,6 +58,15 @@ Policy (a dict, as written by the worker into ``policy.json``)::
                                            #   built-ins switched off by an admin: only
                                            #   ids in DISABLEABLE count, and never a hard
                                            #   hit (rm -rf ~ stays denied)
+      "quarantine": false,                 #   true: guest-quarantine holds the repo's
+                                           #   install/build/test/run commands (also with
+                                           #   the guard off); missing/null/false is off,
+                                           #   any other value is on (fail safe)
+      "readonly_paths": [{"path": "/abs" | "rel/to/project", "reason": str,
+                          "source": "project"|"reference"}],
+                                           #   readonly-source roots (reason and source
+                                           #   optional); not a list of such entries:
+                                           #   hard unparseable (fail closed)
       "regex_budget_ms": 250,              #   shared budget for every custom regex in
                                            #   one evaluate (at most 1000; a non-number
                                            #   means 250, <= 0 means every regex times out)
@@ -108,6 +117,21 @@ HARD (never approvable):
   ``tool_input``, or write-then-run/ssh re-checks deeper than 6 levels or more
   than 64 per call;
 * ``mcp-block`` (marked hard: never approvable);
+* ``readonly-source`` (always on, also with the guard off; never filed): a
+  change under a ``readonly_paths`` root (real path and as given, case-folded
+  per R9; reason ``this changes <path>, which is read-only (<reason>)``) -
+  Edit/Write/MultiEdit/NotebookEdit, every write target (redirects, ``tee``,
+  cp/ln/rsync/install/dd/curl destinations, ``sed -i``/``perl -i``, ``touch``,
+  ``truncate``, ``mkdir``, chmod/chown, client output files, ``tar -x``/
+  ``unzip`` folders), both ends of ``mv`` and the target of ``chmod -R`` (also
+  as a parent of a root), deletes (``rm``, ``rmdir``, ``find -delete``, ``fd
+  -X rm``, ``rimraf``, ``rsync --delete``; also a parent of a root, or a glob
+  or filter that reaches into one), and git ``commit add rm mv reset checkout
+  restore switch clean stash merge rebase pull apply am cherry-pick revert``
+  run in a root (``-C``, ``--work-tree``, ``--git-dir`` or the tracked cwd) or
+  naming paths under one (rm/mv/checkout/restore/clean). An unknown path
+  counts by its literal folder (``> ref/$f``) or a ``for`` loop's words. Reads
+  stay free; over ssh nothing is a root;
 * ``unsupported-shell``: the ``PowerShell`` tool (co-guard parses Bash only).
 
 Tools (Ruling R17, fail closed by name): ``Bash`` and ``Monitor``
@@ -130,8 +154,21 @@ or holds home or the project, nor over ssh), ``git-force-push-main``, ``git-rese
 ``update = !cmd`` key), ``agent-config`` (Rulings R6/R7/R20: writes to a
 ``.claude/settings*.json``, ``.claude/hooks/**``, ``.claude/agents/**``,
 ``.claude/skills/**``, ``.claude/commands/**``, ``.mcp.json`` or - Ruling P13,
-the repo rules file a later task loads - ``.claude-orchestrator/**``),
+the repo rules file a later task loads - ``.claude-orchestrator/**``; also
+deleting or moving it or a folder holding the project's one: ``rm``, ``mv``,
+``git rm``/``git mv``, ``find`` whose filter can reach it),
 ``uncertain-command``, ``mcp-require-approval``, ``unknown-tool``,
+``guest-quarantine`` (policy ``quarantine``; always on, never disableable:
+forge ``quarantined()`` ported with its tables - package managers held for
+every subcommand but a read-only list (``READONLY_SUBS``), ``PM_ALWAYS``
+runners, docker/podman except read-only subcommands, ``docker-compose``,
+``java -jar``, interpreters with ``-m/-c/-e/-r`` or a script inside the
+project, shells/``source`` running a script inside the project or fed by a
+pipe or a ``<`` redirect from the project, ``pwsh`` scripts, and the
+project's own executables run by path; versioned names (``python3.11``,
+``node22``); ``--version``/``--help`` alone and ``make -n`` are free; every
+stage, nested and wrapped ones included; "inside" means the project dir,
+real path, case-folded, and an unresolvable path counts as inside),
 ``sql-destroy`` and ``db-write`` (database rules, ported in ``dbrules.py``:
 DROP/TRUNCATE/DELETE without WHERE in the SQL a client or a database MCP
 server receives, any target; any non-read statement, script file or unknown
@@ -239,6 +276,12 @@ patch tools write files whose names it cannot see: ``tar -x``, ``unzip``,
 ``git apply``, ``patch``, ``git stash pop``, ``cp -r evil/. .`` and
 ``rsync -a evil/ .`` can therefore drop ``.claude/`` or ``.mcp.json`` files
 unnoticed. ``"$(dirname "$0")"/run.sh`` stays ``uncertain-command``.
+readonly-source does not see a root changed by a script or build run inside
+it, git subcommands outside forge's list (``fetch``, ``branch -D``,
+``worktree``), ``GIT_DIR``/``GIT_WORK_TREE`` set in the environment, work-tree
+commands of an enclosing repo that touch a root inside it (``git stash`` in
+the project when ``vendor/old`` is read-only), and ``rsync -a src/ parent/``
+whose unnamed contents land in a root inside ``parent``.
 """
 
 from __future__ import annotations
@@ -307,9 +350,14 @@ RULES = {
     "db-write": (
         "this writes to a production database (an insert, update, schema change, migration, merge, reset or "
         "restore; reads are never blocked)", None),
+    "guest-quarantine": (
+        "this runs code from a repo you are reviewing (install, build, test or run), and that code can do "
+        "anything your user account can", None),
+    # the real reason names the root: "this changes <path>, which is read-only (<reason>)" (_Ctx.readonly_hit)
+    "readonly-source": (None, "this changes a read-only source"),
 }
 _ALWAYS_ON = frozenset({"self-protect", "unparseable", "mcp-block", "mcp-require-approval", "unsupported-shell",
-                        "unknown-tool"})
+                        "unknown-tool", "guest-quarantine", "readonly-source"})
 # Built-ins an admin may switch off (policy "disabled_rules"); only their confirmable part - a hard hit
 # (rm -rf ~, rm -rf /) always stays. Anything else in disabled_rules is ignored.
 DISABLEABLE = frozenset({"rm-rf-outside", "git-force-push-main", "git-reset-hard", "git-clean-fdx",
@@ -415,6 +463,45 @@ _AGENT_DIRS = frozenset({"hooks", "agents", "skills", "commands"})
 _GITMODULES_EXEC = re.compile(r"(?im)^\s*update\s*=\s*!")
 _STDIN_PATHS = frozenset({"-", "/dev/stdin", "/dev/fd/0", "/proc/self/fd/0"})
 _MAKEFILES = frozenset({"makefile", "gnumakefile"})
+
+# guest-quarantine: forge blocklist.js quarantined() tables, ported as they are
+_PM_READ = "info view show list ls why outdated help search config licenses whoami ping docs repo bugs version"
+_READONLY_SUBS = {k: frozenset(v.split()) for k, v in {
+    "npm": f"{_PM_READ} audit", "pnpm": f"{_PM_READ} audit", "yarn": f"{_PM_READ} audit", "bun": _PM_READ,
+    "pip": "list show freeze help search check config index inspect",
+    "pip3": "list show freeze help search check config index inspect",
+    "uv": "help version tree", "pipx": "list help", "poetry": "show help about search check config env",
+    "pdm": "list show help info config", "conda": "list info search help config env",
+    "mamba": "list info search help config env", "composer": "show info help search licenses outdated why",
+    "gem": "list info help search query environment specification",
+    "cargo": "fmt tree metadata version help search pkgid locate-project", "go": "env fmt version doc help",
+    "dotnet": "help --list-sdks --list-runtimes --info", "deno": "info help fmt lint doc", "swift": "help",
+    "mix": "help", "stack": "help", "cabal": "help list info", "mvn": "", "gradle": "", "ant": "", "bundle": "",
+    "hatch": "version help",
+}.items()}
+_PM_ALWAYS = frozenset({
+    "npx", "pnpx", "bunx", "uvx", "make", "gmake", "cmake", "ninja", "just", "task", "tox", "nox", "rake",
+    "msbuild", "pre-commit", "pytest", "py.test", "jest", "vitest", "mocha", "ava", "tap", "playwright", "cypress",
+    "eslint", "vite", "webpack", "rollup", "next", "nuxt", "turbo", "nx", "lerna", "tsx", "ts-node", "gradlew",
+    "mvnw", "rspec", "sbt", "bazel", "bazelisk", "mill", "lein", "bats", "phpunit", "ctest", "meson", "scons"})
+_DOCKER_READONLY = frozenset({"ps", "images", "image", "inspect", "logs", "version", "info", "stats", "top",
+                              "volume", "network", "search", "login", "logout", "pull"})
+_INTERPRETERS = frozenset({"python", "python3", "py", "node", "nodejs", "ruby", "perl", "php"})
+_SCRIPT_SHELLS = frozenset({"bash", "sh", "zsh", "dash", "ksh", "fish", "source", "."})
+_PS_SHELLS = frozenset({"powershell", "pwsh"})
+_VALUE_FLAGS = re.compile(r"(--loglevel|--prefix|-C|--cwd|--dir|--registry|--workspace|-w|--filter|-F|"
+                          r"--manifest-path|--project|-p|--userconfig|--cache)")
+_FLAGS_ONLY = re.compile(r"(--version|-v|-V|--help|-h)")
+_MAKE_DRY = re.compile(r"(-n|--dry-run|--just-print|--recon|-q|--question)")  # make only (pytest -q runs tests)
+_INTERP_RUNS = re.compile(r"-(m|c|e|-eval|r|-require|-import)")  # python -m/-c, node -e/-r
+_PS_INLINE = re.compile(r"-(c|command|com|comm|comma|comman|encodedcommand|e|ec)", re.I)
+_SCRIPT_EXT = re.compile(r".*\.(sh|bash|ps1|bat|cmd|py|js|mjs|rb|pl)", re.I)
+_BASE_TOOL = re.compile(r"(python|pip|ruby|node|php|perl)\d+(\.\d+)*")  # python3.11 -> python, node22 -> node
+
+# readonly-source: git subcommands that change the work tree (forge GIT_CHANGES)
+_GIT_CHANGES = frozenset({"commit", "add", "rm", "mv", "reset", "checkout", "restore", "switch", "clean", "stash",
+                          "merge", "rebase", "pull", "apply", "am", "cherry-pick", "revert"})
+_RULES_DIR = ".claude-orchestrator"
 
 # Long options per command, for GNU-style prefix matching.
 _RM_LONG = ("--recursive", "--force", "--interactive", "--one-file-system", "--no-preserve-root",
@@ -596,6 +683,13 @@ def _agent_config(path):
     return False
 
 
+def _readonly_entry_ok(e):
+    """{path: non-empty str, reason?: str|None, source?: "project"|"reference"|None}"""
+    return (isinstance(e, dict) and isinstance(e.get("path"), str) and bool(e["path"].strip())
+            and (e.get("reason") is None or isinstance(e.get("reason"), str))
+            and e.get("source") in (None, "project", "reference"))
+
+
 def _brace_expand(word):
     """One level of {a,b} expansion, or None when it is not that simple."""
     m = re.fullmatch(r"([^{}]*)\{([^{}]*,[^{}]*)\}([^{}]*)", word)
@@ -625,6 +719,19 @@ class _Ctx:
         except ValueError:
             self.policy_errors.append("custom_rules")
             self.custom = []
+        # guest-quarantine: only a literal false (or no value) is off; anything else holds (fail safe)
+        quarantine = policy.get("quarantine")
+        self.quarantine = quarantine is not None and quarantine is not False
+        # readonly-source roots: (forms - normalised and real, case-folded per R9 -, path as given, reason)
+        self.readonly = []
+        ro = policy.get("readonly_paths", [])
+        if not isinstance(ro, list) or not all(_readonly_entry_ok(e) for e in ro):
+            self.policy_errors.append("readonly_paths")
+        else:
+            for e in ro:
+                ab = posixpath.join(self.project, e["path"])  # relative to the project; absolute stays
+                forms = {_norm(ab).lower(), _real(ab).lower()}
+                self.readonly.append((forms, e["path"], _cu.clean_reason(e.get("reason") or "")))
         budget = policy.get("regex_budget_ms", _cu.REGEX_BUDGET_MS)
         if isinstance(budget, bool) or not isinstance(budget, (int, float)) or budget != budget:
             budget = _cu.REGEX_BUDGET_MS
@@ -717,6 +824,51 @@ class _Ctx:
         if not hard and rule_id in self.disabled:  # an admin switched it off (never its hard part)
             return
         self.hits.append(_make_hit(rule_id, hard, summary))
+
+    def readonly_root(self, path, as_ancestor=False):
+        """(path as given, reason) of the readonly root ``path`` is (inside),
+        or - as_ancestor: deleting/moving a parent - that is inside ``path``;
+        else None. Over ssh nothing here is a root."""
+        if not self.readonly or not path or self.remote:
+            return None
+        cands = {path.lower(), _norm(path).lower(), _real(path).lower()}
+        for forms, shown, reason in self.readonly:
+            for f in forms:
+                if any(_within(c, f) or (as_ancestor and _inside(f, c)) for c in cands):
+                    return shown, reason
+        return None
+
+    def readonly_hit(self, root, summary):
+        """Hard, always on (also with the guard off), never disableable."""
+        shown, reason = root
+        text = f"this changes {shown}, which is read-only" + (f" ({reason})" if reason else "")
+        self.hits.append(Hit("readonly-source", text, True, _short(summary)))
+
+    def readonly_check(self, path, summary, as_ancestor=False):
+        root = self.readonly_root(path, as_ancestor)
+        if root:
+            self.readonly_hit(root, summary)
+
+    def readonly_delete(self, path, glob, summary):
+        """Deleting ``path`` (glob None: the path itself, so also a parent of
+        a root) or some of its children (a glob, or _SOME)."""
+        if glob is None:
+            return self.readonly_check(path, summary, as_ancestor=True)
+        root = self.readonly_root(path)
+        if root is None and self.readonly and not self.remote:
+            low = path.lower()
+            for forms, shown, reason in self.readonly:
+                for f in forms:
+                    if _inside(f, low):
+                        first = f[len(low):].lstrip("/").split("/")[0]
+                        if glob == _SOME or _BROAD.fullmatch(glob) or fnmatch.fnmatchcase(first, glob.lower()):
+                            root = (shown, reason)
+        if root:
+            self.readonly_hit(root, summary)
+
+    def rules_dir(self):
+        """The project's repo rules folder (Ruling P13), case-folded."""
+        return (self.project + "/" + _RULES_DIR).lower()
 
     def note_words(self, argv, unwrapped):
         """The de-quoted argv of a simple command (and without its wrappers),
@@ -877,17 +1029,42 @@ def _target_kinds(ctx, word, dyn, cwd):
 
 
 def _rules_dir_delete(ctx, path, glob, summary):
-    """Ruling P13: deleting the repo rules file (or its folder) relaxes what a
-    later task loads - agent-config, like editing it."""
+    """Ruling P13: deleting or moving the repo rules file (or its folder, or
+    a folder holding the project's one) relaxes what a later task loads -
+    agent-config, like editing it."""
     parts = path.lower().split("/") + ([glob.lower()] if glob not in (None, _SOME) else [])
-    if any(c == ".claude-orchestrator" or ("claude" in c and _GLOB.search(c) and
-                                           fnmatch.fnmatchcase(".claude-orchestrator", c)) for c in parts):
+    if any(c == _RULES_DIR or ("claude" in c and _GLOB.search(c) and
+                               fnmatch.fnmatchcase(_RULES_DIR, c)) for c in parts):
+        ctx.hit("agent-config", False, summary)
+    elif glob is None and not ctx.remote and _within(ctx.rules_dir(), path.lower()):
+        ctx.hit("agent-config", False, summary)
+
+
+def _rules_dir_find(ctx, root, names, summary):
+    """P13 for ``find ROOT <filter> -delete``: ROOT is in a rules folder, or
+    reaches the project's one and a -name filter (None: another filter) may
+    match it or something in it."""
+    low = root.lower()
+    if _RULES_DIR in low.split("/"):
+        ctx.hit("agent-config", False, summary)
+        return
+    rd = ctx.rules_dir()
+    if ctx.remote or not _within(rd, low):
+        return
+    cands = [_RULES_DIR, "rules.md"]
+    try:
+        cands += os.listdir(ctx.project + "/" + _RULES_DIR)
+    except OSError:
+        pass
+    if names is None or any(fnmatch.fnmatch(c.lower(), n.lower()) for c in cands for n in names):
         ctx.hit("agent-config", False, summary)
 
 
 def _protect_delete(ctx, path, glob, summary):
-    """self-protect for deleting/moving `path` (glob: which children)."""
+    """self-protect (and readonly-source) for deleting/moving `path` (glob:
+    which children)."""
     _rules_dir_delete(ctx, path, glob, summary)
+    ctx.readonly_delete(path, glob, summary)
     if ctx.is_protected(path, as_ancestor=glob is None):
         ctx.hit("self-protect", True, summary)
         return
@@ -955,6 +1132,8 @@ def _classify(ctx, targets, cwd, summary, narrow=False, names=None):
                     level = "hard"
                 glob = _SOME
                 _protect_find(ctx, path, names, summary)
+                _rules_dir_find(ctx, path, names, summary)
+                ctx.readonly_delete(path, _SOME, summary)
             else:
                 _protect_delete(ctx, path, glob, summary)
             whole = glob is None or _BROAD.fullmatch(glob) is not None
@@ -1057,12 +1236,16 @@ _FD_VALUE = frozenset({"-e", "--extension", "-t", "--type", "-E", "--exclude", "
 def _fd_check(ctx, argv, dyn, cwd, summary, bash):
     """fd [opts] [pattern] [path...] -x|-X CMD...: CMD runs on what fd finds."""
     args, dargs = argv[1:], dyn[1:]
-    pos, cmd, i, filtered = [], None, 0, False
+    pos, cmd, i, filtered, exts, other = [], None, 0, False, [], False
     while i < len(args):
         a = args[i]
-        if a.split("=", 1)[0] in ("-e", "--extension", "-S", "--size", "--changed-within", "--changed-before",
-                                  "-g", "--glob"):
+        key, eq, val = a.partition("=")
+        if key in ("-e", "--extension", "-S", "--size", "--changed-within", "--changed-before", "-g", "--glob"):
             filtered = True
+            if key in ("-e", "--extension") and (eq or i + 1 < len(args)):
+                exts.append(val if eq else args[i + 1])
+            else:
+                other = True
         if a in ("-x", "--exec", "-X", "--exec-batch"):
             cmd = (args[i + 1:], dargs[i + 1:])
             if ";" in cmd[0]:
@@ -1081,7 +1264,9 @@ def _fd_check(ctx, argv, dyn, cwd, summary, bash):
     if _sh.command_name(inner[0]) in _DELETERS:
         roots = pos[1:] or [(".", False)]
         pattern = pos[0][0] if pos else ""
-        _classify(ctx, roots, cwd, summary, narrow=filtered or pattern not in ("", ".", "^", ".*"))
+        loose = pattern in ("", ".", "^", ".*")
+        names = ["*." + e.lstrip(".") for e in exts] if exts and not other and loose else None
+        _classify(ctx, roots, cwd, summary, narrow=filtered or not loose, names=names)
     bash.nested_eval(" ".join(_quote(w) for w in inner), cwd)
 
 
@@ -1226,9 +1411,78 @@ def _push_force_main(rest, directory, conf_specs, conf_mirror):
     return any(_is_main(dst, directory) for dst in dsts)
 
 
+def _extract_dest(name, args, dargs):
+    """(folder, dyn) an archive extraction writes into, or None (not an extraction)."""
+    if name in ("unzip", "7z", "7za"):
+        if name != "unzip" and not (args and args[0] in ("x", "e")):
+            return None
+        if name == "unzip" and any(re.fullmatch(r"-[A-Za-z]*[ltvZz][A-Za-z]*", a) for a in args):
+            return None  # lists or tests the archive
+        for i, a in enumerate(args):
+            if name == "unzip" and a == "-d" and i + 1 < len(args):
+                return args[i + 1], dargs[i + 1]
+            if name != "unzip" and a.startswith("-o") and len(a) > 2:
+                return a[2:], dargs[i]
+        return ".", False
+    first = args[0] if args else ""
+    extract = bool(re.fullmatch(r"-?[A-Za-z]*x[A-Za-z]*", first)) or any(
+        a in ("--extract", "--get") or re.fullmatch(r"-[A-Za-z]*x[A-Za-z]*", a) for a in args)
+    if not extract:
+        return None
+    dest = (".", False)
+    for i, a in enumerate(args):
+        if a in ("-C", "--directory") and i + 1 < len(args):
+            dest = (args[i + 1], dargs[i + 1])
+        elif a.startswith("--directory="):
+            dest = (a.split("=", 1)[1], dargs[i])
+    return dest
+
+
+def _git_trees(ctx, args, dyn, cwd):
+    """Folders ``--work-tree`` / ``--git-dir`` name (before the subcommand)."""
+    out, i = [], 0
+    while i < len(args) and args[i].startswith("-"):
+        a = args[i]
+        key, eq, val = a.partition("=")
+        if key in ("--work-tree", "--git-dir"):
+            vd = dyn[i] if eq else (dyn[i + 1] if i + 1 < len(dyn) else True)
+            if not eq:
+                val = args[i + 1] if i + 1 < len(args) else ""
+                i += 1
+            if val and not vd:
+                out.append(ctx.path(val, cwd))
+        elif a in ("-C", "-c", "--namespace", "--exec-path", "--config-env"):
+            i += 1
+        i += 1
+    return [p for p in out if p]
+
+
+def _git_paths(ctx, sub, rest, d):
+    """Absolute work-tree paths a git rm/mv/checkout/restore/clean names."""
+    if "--" in rest:
+        words = rest[rest.index("--") + 1:]
+    else:
+        words = [a for a in rest if not a.startswith("-")]  # checkout: a branch name too (no root is named so)
+    out = []
+    for w in words:
+        p = ctx.path(w, d, False) if d is not None or w.startswith("/") else None
+        if p:
+            out.append(p)
+    return out
+
+
 def _git_check(ctx, argv, dyn, cwd, summary, bash):
     d, sub, rest, conf = _parse_git(ctx, argv[1:], dyn[1:], cwd)
     rule = None
+    if sub in _GIT_CHANGES:  # readonly-source: a work-tree change run in (or on) a readonly root
+        for folder in [d] + _git_trees(ctx, argv[1:], dyn[1:], cwd):
+            if folder:
+                ctx.readonly_check(folder, summary)
+        if sub in ("rm", "mv", "checkout", "restore", "clean"):
+            for p in _git_paths(ctx, sub, rest, d):
+                ctx.readonly_check(p, summary, as_ancestor=True)
+                if sub in ("rm", "mv"):  # Ruling P13: git rm/mv of the rules file or a folder holding it
+                    _rules_dir_delete(ctx, p, None, summary)
     if sub == "config":
         pos = [a for a in rest if not a.startswith("-")]
         if len(pos) >= 2:
@@ -1280,6 +1534,94 @@ def _git_check(ctx, argv, dyn, cwd, summary, bash):
             rule = "git-stash-drop"
     if rule:
         ctx.hit(rule, False, summary)
+
+
+# ---------------------------------------------------------------------------
+# guest-quarantine (forge quarantined())
+# ---------------------------------------------------------------------------
+def _inside_repo(ctx, word, dynamic, cwd):
+    """forge insideRepo: the path is the project or inside it (real path,
+    case-folded); a path we cannot resolve counts as inside (fail safe)."""
+    if not word or word.startswith("-"):
+        return False
+    project = ctx.project_or_none()
+    if project is None:
+        return False
+    p = ctx.path(word, cwd, dynamic)
+    return p is None or _within(p.lower(), project.lower())
+
+
+def _subcommand_of(args):
+    i = 0
+    while i < len(args):
+        if _VALUE_FLAGS.fullmatch(args[i]):
+            i += 2
+            continue
+        if not args[i].startswith("-"):
+            return args[i].lower(), args[i + 1:]
+        i += 1
+    return "", []
+
+
+def _quarantined(ctx, st, word, name, args, dargs, cwd, from_pipe):
+    """forge quarantined(word, cmd, args, cwd, ctx, fromPipe), plus: a shell or
+    interpreter reading a repo file on stdin (``sh < build.sh``) and any
+    shell spelling co-guard knows (``bash5``) is held too."""
+    cmd = _BASE_TOOL.sub(r"\1", name) if _BASE_TOOL.fullmatch(name) else name
+    if args and all(_FLAGS_ONLY.fullmatch(a) for a in args):
+        return False  # --version, --help
+    if cmd in ("make", "gmake") and any(_MAKE_DRY.fullmatch(a) for a in args):
+        return False  # make -n prints, runs nothing
+    sub, rest = _subcommand_of(args)
+    if cmd in _PM_ALWAYS:
+        return True
+    if cmd in ("docker", "podman", "docker-compose"):
+        if cmd == "docker-compose":
+            return True
+        if sub == "image":
+            return bool(re.fullmatch(r"build|load|import", rest[0] if rest else "", re.I))
+        return bool(sub) and sub not in _DOCKER_READONLY
+    if cmd in _READONLY_SUBS:
+        if not sub:
+            return cmd in ("yarn", "bundle", "gradle", "mvn")  # bare "yarn" installs
+        if cmd in ("conda", "mamba") and sub == "env":
+            return not re.fullmatch(r"list|export|config", rest[0] if rest else "", re.I)
+        if sub == "audit" and "fix" in rest:
+            return True  # npm audit fix installs
+        return sub not in _READONLY_SUBS[cmd]
+    stdin_files = [(t, "$" in t or "`" in t) for op, t in st.redirects if op == "<" and not t.startswith("<(")]
+
+    def fed():  # "cat x.py | python", "sh < build.sh": runs what it is fed
+        return from_pipe or any(_inside_repo(ctx, t, td, cwd) for t, td in stdin_files)
+
+    if cmd in ("java", "kotlin"):
+        return "-jar" in args or any(a.lower().endswith(".jar") and _inside_repo(ctx, a, d, cwd)
+                                     for a, d in zip(args, dargs))
+    if cmd in _INTERPRETERS:
+        if any(_INTERP_RUNS.fullmatch(a) for a in args):
+            return True
+        script = next(((a, d) for a, d in zip(args, dargs) if not a.startswith("-")), None)
+        return _inside_repo(ctx, script[0], script[1], cwd) if script else fed()
+    if cmd in ("source", "."):
+        script = next(((a, d) for a, d in zip(args, dargs) if not a.startswith("-")), None)
+        return _inside_repo(ctx, script[0], script[1], cwd) if script else fed()
+    if cmd in _SCRIPT_SHELLS or _sh.shell_name(cmd):
+        mode, path = _sh.shell_mode(args)
+        if mode == "c":
+            return False  # the -c text is checked as commands
+        if mode == "file" and path:
+            return _inside_repo(ctx, path, "$" in path or "`" in path, cwd)
+        return fed()
+    if cmd in _PS_SHELLS:
+        if any(_PS_INLINE.fullmatch(a) for a in args):
+            return False
+        i = next((k for k, a in enumerate(args) if re.fullmatch(r"-(f|file)", a, re.I)), -1)
+        script = args[i + 1] if 0 <= i < len(args) - 1 else next((a for a in args if not a.startswith("-")), None)
+        return _inside_repo(ctx, script, False, cwd) if script else fed()
+    # the repo's own executable run by path: ./x, scripts/x.sh, gradlew.bat
+    if "/" in word or "\\" in word or _SCRIPT_EXT.fullmatch(word):
+        return _inside_repo(ctx, word, "$" in word or "`" in word, cwd)
+    return False
 
 
 # ---------------------------------------------------------------------------
@@ -1780,8 +2122,11 @@ class _Bash:
             if not (kind == "copy" and src is not None and _is_template(src)):
                 ctx.hit("secret-files", False, raw)
         p = ctx.path(word, cwd, d, follow=kind != "move-src" or word.endswith(("/", "/.")))
+        self.readonly_write(word, p, kind, cwd)
         if p is None:
             return None
+        if kind == "move-src":  # Ruling P13: moving the rules file (or a folder holding it) away
+            _rules_dir_delete(ctx, p, None, raw)
         if kind in ("copy", "link", "copydir") and ctx.is_protected_dest(p):
             ctx.hit("self-protect", True, raw)
         if ctx.is_protected(p, as_ancestor=kind in ("move-src", "chmod-r")):
@@ -1810,6 +2155,28 @@ class _Bash:
             return p
         self.written[p] = content
         return p
+
+    def readonly_write(self, word, p, kind, cwd, bound=False):
+        """readonly-source for one changed path (every write kind; a moved
+        source or a chmod -R target also as a parent of a root). An unknown
+        path counts by its literal folder (``> ref/$f``) or the words a
+        ``for`` loop binds it to, unless it starts with an unknown variable."""
+        ctx = self.ctx
+        if not ctx.readonly:
+            return
+        if p is None and not bound:
+            words = self.bind([(word, True)])
+            if words != [(word, True)]:
+                for w, d in words:
+                    self.readonly_write(w, ctx.path(w, cwd, d), kind, cwd, bound=True)
+                return
+        if p is None:
+            e = ctx.expand(word, cwd)
+            if not e or (word[:1] in ("$", "`") and cwd and e == posixpath.join(cwd, word)):
+                return
+            lit = re.split(r"[$`*?\[]", e, maxsplit=1)[0]
+            p = _real(lit if lit.endswith("/") else (posixpath.dirname(lit) or "/"))
+        ctx.readonly_check(p, self.raw, as_ancestor=kind in ("move-src", "chmod-r"))
 
     def writes(self, st, argv, dyn, cwd, pipeline):
         for op, t in st.redirects:
@@ -1869,6 +2236,15 @@ class _Bash:
         elif name == "touch":
             for a, d in pos:
                 self.check_write(a, d, "touch", cwd)
+        elif name in ("tar", "bsdtar", "gtar", "unzip", "7z", "7za"):  # only readonly-source: extracting into a root
+            dest = _extract_dest(name, args, dargs)
+            if dest:
+                self.readonly_write(dest[0], self.ctx.path(dest[0], cwd, dest[1]), "copydir", cwd)
+        elif name == "mkdir":  # only readonly-source: a new folder is a change
+            vals = {v for v, _d in _short_opt_value(args, dargs, "m", ("--mode", "--context"))}
+            for a, d in pos:
+                if a not in vals:
+                    self.readonly_write(a, self.ctx.path(a, cwd, d), "mkdir", cwd)
         elif name in ("chmod", "chown", "chgrp", "chattr"):
             recursive = any(re.fullmatch(r"-[a-zA-Z]*R[a-zA-Z]*", a) or "--recursive" in _long(a, _CHMOD_LONG)
                             for a in args)
@@ -1955,6 +2331,10 @@ class _Bash:
         # database rules (sql-destroy, db-write)
         self.db_check(st, argv, name, args, pipeline, cwd)
 
+        # guest-quarantine: the reviewed repo's install/build/test/run commands (every stage)
+        if ctx.quarantine and _quarantined(ctx, st, argv[0], name, args, dargs, cwd, st.index > 0):
+            ctx.hit("guest-quarantine", False, raw)
+
         # a protected path (or an unknown guard variable) in the arguments of a non-reader
         if name not in _READERS or name in ("cd", "pushd"):
             for a, d in zip(args, dargs):
@@ -1991,6 +2371,7 @@ class _Bash:
                         if ctx.is_protected(path):
                             ctx.hit("self-protect", True, raw)
                         _rules_dir_delete(ctx, path, g, raw)
+                        ctx.readonly_delete(path, g, raw)
         rim = _rimraf_targets(name, args)
         if rim is not None and name != "rimraf":
             _classify(ctx, self.bind([(a, False) for a in rim if not a.startswith("-")]), cwd, raw)
@@ -2746,6 +3127,7 @@ def _file_tool(ctx, tool_name, tool_input, cwd):
     if not raw:
         return
     p = ctx.path(raw, cwd or ctx.project, False)
+    ctx.readonly_check(p, raw)
     if ctx.is_protected(p) or (ctx.guard_var_unknown(raw)):
         ctx.hit("self-protect", True, raw)
     if is_secret_name(raw) or (p and is_secret_name(p)):
