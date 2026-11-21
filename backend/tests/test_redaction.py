@@ -268,7 +268,8 @@ def test_echoed_env_is_redacted_everywhere(client):
         assert "PROBE_SHAPED=***" in text, where
         # Non-secrets untouched.
         assert "PROBE_PROJECT_VAR=plain-visible-value" in text, where
-        assert "PROBE_SHORT_TOKEN=short1" in text, where  # < 8 chars: kept
+        # < 8 chars: not an env secret value, but a labelled TOKEN= value (final wave, forge F90b)
+        assert "PROBE_SHORT_TOKEN=***" in text, where
         assert f"PATH={os.environ['PATH']}".replace("\\", "\\\\") in text, where
     # Every output channel went through: text, tool_use, tool_result, raw log.
     types = {e.type for e in _events(done["id"])}
@@ -307,3 +308,110 @@ def test_failed_task_error_is_redacted(client):
     _assert_clean(db, secrets, "db")
     _assert_clean(api, secrets, "api")
     _assert_clean(live, secrets, "live")
+
+
+# ---- final fix wave (forge F90b): more secret shapes, the same in the hook's copy ------------------
+
+import pytest  # noqa: E402
+
+from app.guard import co_hook  # noqa: E402
+
+REDACTORS = {
+    "server": lambda text: redaction.redact(text, []),
+    "hook": lambda text: co_hook.redact(text, None),
+}
+FAKE_JWT = ("eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0."
+            "dozjgNryP4J3jVmNHl0w5N_XgL0n3I9PlFUP0THsR8U")
+FAKE_PEM = ("-----BEGIN RSA PRIVATE KEY-----\nMIIEfakefakefakefakefake\nAAAAfakefakefake==\n"
+            "-----END RSA PRIVATE KEY-----")
+# (input, the secret that must be gone) - forge's redact.test.js cases, then ours.
+SHAPES = [
+    ('curl -H "x-api-key: sk-ant-api03-AbCdEf1234567890xyz" https://x', "sk-ant-api03-AbCdEf1234567890xyz"),
+    ("git clone https://ghp_ABCDEFabcdef1234567890ABCDEFabcdef12@github.com/o/r",
+     "ghp_ABCDEFabcdef1234567890ABCDEFabcdef12"),
+    ("aws configure set aws_access_key_id AKIAIOSFODNN7EXAMPLE", "AKIAIOSFODNN7EXAMPLE"),
+    ("AWS_ACCESS_KEY_ID=ASIAIOSFODNN7EXAMPLE aws s3 ls", "ASIAIOSFODNN7EXAMPLE"),
+    ("SLACK=xoxb-1234-5678-abcdefghij", "xoxb-1234-5678-abcdefghij"),
+    ("xoxp-9999-8888-zyxwvu", "xoxp-9999-8888-zyxwvu"),
+    ("xoxa-2-fakefake1234 and xoxr-fakefake1234", "fakefake1234"),
+    ('curl -H "Authorization: Bearer eyJhbGciOi.abc.def" x', "eyJhbGciOi.abc.def"),
+    ("curl -H 'Authorization: bearer abcdef123456' x", "abcdef123456"),
+    ('psql "host=db password=hunter2 user=me"', "hunter2"),
+    ("connect pwd=s3cr3t;", "s3cr3t"),
+    ("https://api.example.com/?token=abc123def&x=1", "abc123def"),
+    ("https://api.example.com/v1?access_token=fakeAccess99&x=1", "fakeAccess99"),
+    ("curl 'https://x/?api_key=fakekey123'", "fakekey123"),
+    ("mysql -u root -pS3cretPass mydb", "S3cretPass"),
+    ("mysqldump --user=root --password=FakePw-77 db", "FakePw-77"),
+    ("export DB_PASSWORD=fake-db-pass", "fake-db-pass"),
+    ("GITHUB_TOKEN=fakeghvalue123 gh pr list", "fakeghvalue123"),
+    ("client_secret=fake-client-secret", "fake-client-secret"),
+    ("aws_secret_access_key: fakeAwsSecretValue", "fakeAwsSecretValue"),
+    ("  api_key: fake-yaml-key", "fake-yaml-key"),
+    ("accessToken: fakeCamelValue", "fakeCamelValue"),
+    ("the cookie is " + FAKE_JWT + " ok", "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9"),
+    ("The database password is: Hunter2-Hunter2 and it works", "Hunter2-Hunter2"),
+    ("password: correct-horse-battery", "correct-horse-battery"),
+    ("token: abc123XYZ789", "abc123XYZ789"),
+    ('{"user":"me","password":"p4ssw0rd-json"}', "p4ssw0rd-json"),
+    ("key file:\n" + FAKE_PEM + "\ndone", "MIIEfakefakefakefakefake"),
+    ("-----BEGIN OPENSSH PRIVATE KEY-----\nb3BlbnNzaC1rZXktdjEAAAAfake", "b3BlbnNzaC1rZXktdjEAAAAfake"),  # cut
+    ("OPENAI_KEY=sk-proj-FAKEfake1234567890abcd", "sk-proj-FAKEfake1234567890abcd"),
+]
+
+
+@pytest.mark.parametrize("which", sorted(REDACTORS))
+@pytest.mark.parametrize("text,secret", SHAPES)
+def test_secret_shapes_are_redacted(which, text, secret):
+    out = REDACTORS[which](text)
+    assert secret not in out and "***" in out, out
+
+
+@pytest.mark.parametrize("which", sorted(REDACTORS))
+def test_labels_are_kept(which):
+    r = REDACTORS[which]
+    assert r("psql password=hunter2 -h db") == "psql password=*** -h db"
+    assert r("Authorization: Bearer abcdef123456") == "Authorization: Bearer ***"
+    assert r("mysql -u root -pS3cretPass mydb") == "mysql -u root -p*** mydb"
+    assert r('{"password":"p4ssw0rd-json"}') == '{"password":"***"}'
+    assert r("a\n" + FAKE_PEM + "\nb") == "a\n***\nb"
+
+
+ORDINARY = [
+    "npm test -- save_chart && git commit -m \"add chart model\"",
+    "mysql -u root -p mydb",
+    "node server.js --port 3000",
+    "see https://example.com/docs and the keyboard token economy",
+    "ssh://git@host/repo.git",
+    "git checkout skip-ahead && git rebase task-sk-runner",
+    "git show 3f9c2a7d1e4b5a6c8d9e0f1a2b3c4d5e6f7a8b9c",
+    "id 123e4567-e89b-12d3-a456-426614174000",
+    "max_tokens: 4096 and tokenizer=fast, passwords are hashed",
+    "cd $PWD && echo PWD=/home/me OLDPWD=/tmp",
+    "PGPASSWORD=$PGPASS psql -h db; DB_PASSWORD=${DB_PASSWORD} make; TOKEN=$(cat t) x",
+    "rule secret-files blocked it (secrets.yml)",
+    "eyJ alone is not a token, nor eyJabc.def",
+    "AKIA is a prefix; AKIAshort",
+    "skeleton sk-short",
+]
+
+
+@pytest.mark.parametrize("which", sorted(REDACTORS))
+@pytest.mark.parametrize("text", ORDINARY)
+def test_ordinary_text_is_not_redacted(which, text):
+    assert REDACTORS[which](text) == text
+
+
+def test_hook_and_server_use_the_same_patterns():
+    assert co_hook._TOKEN_SHAPES.pattern == redaction.TOKEN_SHAPES.pattern
+    assert co_hook._TOKEN_SHAPES.flags == redaction.TOKEN_SHAPES.flags
+    assert [(r.pattern, r.flags) for r in co_hook._LABELLED] == [(r.pattern, r.flags) for r in redaction.LABELLED]
+    assert co_hook._URL_USERINFO.pattern == redaction.URL_USERINFO.pattern
+
+
+def test_redaction_stays_linear_on_long_input():
+    blob = "a" * 200_000 + " password" * 2000 + " mysql " + "x" * 50_000
+    t0 = time.monotonic()
+    redaction.redact(blob, [])
+    co_hook.redact(blob, None)
+    assert time.monotonic() - t0 < 3.0

@@ -1019,9 +1019,9 @@ def test_build_policy_merges_extra(tmp_path):
 def test_granted_spool_records_keep_their_grant_ids():
     from app.worker import WorkerManager
 
-    p = WorkerManager.guard_payload({"event": "PreToolUse", "decision": "granted", "grant_ids": ["g1", 2] + ["x"] * 30,
+    p = WorkerManager.guard_payload({"event": "PreToolUse", "decision": "granted", "grant_ids": ["g1", 2] + ["x"] * 60,
                                      "rule_ids": ["db-write"], "tool": "Bash", "junk": "dropped"})
-    assert p["decision"] == "granted" and p["grant_ids"][:2] == ["g1", "2"] and len(p["grant_ids"]) == 20
+    assert p["decision"] == "granted" and p["grant_ids"][:2] == ["g1", "2"] and len(p["grant_ids"]) == 50  # final wave: 50
     assert "junk" not in p
     assert WorkerManager.guard_payload({"grant_ids": "nope"})["grant_ids"] == []
 

@@ -365,6 +365,30 @@ def test_is_secret_name(path, secret):
     assert rules.is_secret_name(path) is secret
 
 
+# Final wave (forge v0.5.1 F89): a name with "secret"/"credentials" in it is source
+# code or a document, not a secrets store, when its extension says so.
+@pytest.mark.parametrize("path,secret", [
+    ("core/src/auth/secrets.ts", False), ("app/credentials.py", False), ("src/secret-manager.test.js", False),
+    ("docs/secrets.md", False), ("secret_manager.py", False), ("lib/Secrets.TSX", False),
+    ("docs/secret-rotation.mdx", False), ("pkg/credentials_service.go", False), ("x/secrets.rs", False),
+    ("a/ClientSecret.java", False), ("secrets.cjs", False), ("secrets.mjs", False), ("secrets.vue", False),
+    # data files stay held
+    ("config/secrets.yml", True), ("config/secrets.json", True), ("deploy/client_secret.txt", True),
+    ("aws/credentials", True), ("deploy/prod_secrets_c", True), ("credentials.json", True),
+    # .env*, keys, SSH keys and our wider names stay held whatever the extension
+    (".env.ts", True), ("secret.key", True), ("server.pem", True), ("id_rsa.py", True), ("~/.ssh/config.py", True),
+    (".netrc", True), (".npmrc", True), (".docker/config.json", True),
+])
+def test_secret_name_lets_code_and_docs_through(path, secret):
+    assert rules.is_secret_name(path) is secret
+
+
+def test_secret_files_rule_lets_source_files_through(env):
+    for path in ("{P}/src/secrets.ts", "{P}/app/credentials.py", "{P}/docs/secrets.md"):
+        assert tool(env, "Write", {"file_path": path, "content": "x"}).decision == "allow", path
+    assert tool(env, "Write", {"file_path": "{P}/config/secrets.yml", "content": "x"}).decision == "approve"
+
+
 # ===========================================================================
 # chmod-wide (F35)
 # ===========================================================================

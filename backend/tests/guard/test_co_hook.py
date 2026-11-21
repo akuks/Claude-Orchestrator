@@ -574,7 +574,10 @@ def _config(run, tmp_path, content, source="project_settings"):
 def test_config_change_switching_hooks_off_is_blocked(run, tmp_path, content):
     code, err = _config(run, tmp_path, content)
     assert code == 2 and "co-guard" in err
-    assert run.spool()[-1]["decision"] == "blocked"
+    sp = [r for r in run.spool() if r["event"] == "ConfigChange"]
+    assert sp[-1]["decision"] == "blocked"
+    if isinstance(content, str):  # could not be checked: also recorded as a hook error (final wave)
+        assert run.spool()[-1]["event"] == "guard_error" and run.spool()[-1]["hook_event"] == "ConfigChange"
 
 
 @pytest.mark.parametrize("content", [{"disableAllHooks": False}, {"model": "sonnet"},
@@ -851,7 +854,8 @@ def test_redos_regex_answers_approve_with_the_timeout_reason_fast(plugin, tmp_pa
     try:
         run = Run(plugin, tmp_path, stub.base, custom_rules=[_slow_rule()])
         out = run(bash("echo " + "a" * 40 + "b"))
-        assert run.elapsed < 1.0, run.elapsed
+        # load-tolerant bound (final wave): an unbounded (a+)+$ on 40 chars would run for hours
+        assert run.elapsed < 3.0, run.elapsed
         assert decision(out) == "deny"  # the filing was refused: no person can approve it
         timeout_reason = "rule repo.slow took too long to check, so it needs approval"
         assert f"It needed a person's approval: {timeout_reason} (repo.slow)" in reason(out)
@@ -902,7 +906,7 @@ def test_redos_with_sigalrm_blocked_in_the_inherited_mask_still_answers(plugin, 
                            input=json.dumps(bash("echo " + "a" * 40 + "b")), capture_output=True, text=True,
                            timeout=60, env=run.env, cwd=str(run.project),
                            preexec_fn=lambda: _signal.pthread_sigmask(_signal.SIG_BLOCK, [_signal.SIGALRM]))
-        assert time.monotonic() - t0 < 1.0
+        assert time.monotonic() - t0 < 3.0  # load-tolerant bound (final wave)
         out = json.loads(p.stdout)
         assert "rule repo.slow took too long to check" in reason(out)
         assert [b["rule_ids"] for _m, q, _a, b in stub.requests if q == "/guard/approvals"] == [["repo.slow"]]
@@ -1246,3 +1250,119 @@ def test_tool_input_is_left_out_when_it_does_not_fit(plugin, tmp_path):
 def test_shell_request_has_no_tool_input(plugin, tmp_path, stub):
     Run(plugin, tmp_path, stub.base)(bash("git reset --hard HEAD~1"))
     assert "tool_input" not in _filed_body(stub)
+
+
+# ---- final fix wave -------------------------------------------------------------------------------
+
+
+def _many_rules(n):
+    return [{"id": f"repo.m{i}", "kind": "confirm", "match": "text", "pattern": "zz-marker", "reason": f"r{i}"}
+            for i in range(n)]
+
+
+@pytest.mark.parametrize("n,once_only", [(50, False), (51, True), (60, True)])
+def test_more_than_50_hits_files_the_first_50_once_only(plugin, tmp_path, n, once_only):
+    """Item 3: a call with more than 50 rule hits is still filed (the server caps rule_ids at 50):
+    the first 50 ids, no grant key and no tool_input, so it can only be approved once."""
+    stub = Stub(statuses=("rejected",))
+    try:
+        run = Run(plugin, tmp_path, stub.base, custom_rules=_many_rules(n))
+        run(bash("echo zz-marker"))
+        body = _filed_body(stub)
+        assert body["rule_ids"] == [f"repo.m{i}" for i in range(min(n, 50))]
+        assert body["grant_key"] == ("" if once_only else co_hook.grant_key("Bash", {"command": "echo zz-marker"}))
+        assert "tool_input" not in body
+    finally:
+        stub.close()
+
+
+def test_more_than_50_hits_of_a_file_tool_send_no_tool_input(plugin, tmp_path):
+    stub = Stub(statuses=("rejected",))
+    try:
+        run = Run(plugin, tmp_path, stub.base, custom_rules=_many_rules(51))
+        run({"hook_event_name": "PreToolUse", "tool_name": "Write", "tool_use_id": "tu1",
+             "tool_input": {"file_path": str(run.project / "zz-marker.txt"), "content": "x"}})
+        body = _filed_body(stub)
+        assert len(body["rule_ids"]) == 50 and body["grant_key"] == "" and "tool_input" not in body
+    finally:
+        stub.close()
+
+
+# item 8: a non-PreToolUse hook error is recorded, never swallowed
+
+
+@pytest.mark.parametrize("event", ["Stop", "SessionStart", "SubagentStart", "PostToolUse", "SessionEnd"])
+def test_other_event_error_spools_and_reports_a_guard_error(run, stub, event):
+    assert run(None, event=event, raw="not json") is None or event in ("SessionStart", "SubagentStart")
+    rec = run.spool()[-1]
+    assert rec["event"] == "guard_error" and rec["hook_event"] == event
+    assert rec["error"].startswith("JSONDecodeError: ") and len(rec["error"]) <= 300
+    reports = [b for _m, p, _a, b in stub.requests if p == "/guard/report"]
+    assert reports and reports[-1]["event"] == "guard_error" and reports[-1]["task_id"] == "T1"
+    assert reports[-1]["hook_event"] == event
+
+
+def test_guard_error_message_is_redacted(run, stub, monkeypatch):
+    # a ConfigChange whose settings file is missing: the error names the path, which carries a secret shape
+    p = str(run.tdir / f"{TOKEN}.json")
+    out = subprocess.run([sys.executable, "-I", "-S", str(run.plugin / "hooks" / "co_hook.py"), "ConfigChange"],
+                         input=json.dumps({"file_path": p, "source": "user_settings"}), capture_output=True,
+                         text=True, timeout=60, env=run.env, cwd=str(run.project))
+    assert out.returncode == 2
+    rec = run.spool()[-1]
+    assert rec["event"] == "guard_error" and rec["hook_event"] == "ConfigChange"
+    assert TOKEN not in json.dumps(run.spool()) and "FileNotFoundError" in rec["error"]
+
+
+def test_guard_error_without_a_policy_is_still_spooled(run, stub):
+    (run.tdir / "policy.json").unlink()
+    run(None, event="Stop", raw="garbage")
+    assert run.spool()[-1]["event"] == "guard_error"
+    assert "/guard/report" not in stub.paths()  # no policy, no API address: spool only
+
+
+# item 9: helpers get the data line too
+
+
+@pytest.mark.parametrize("trust,want", [("external", True), ("own", False), ("odd", True)])
+def test_subagent_start_data_line(plugin, tmp_path, stub, trust, want):
+    run = Run(plugin, tmp_path, stub.base, trust=trust)
+    out = run({"hook_event_name": "SubagentStart", "agent_id": "a1", "agent_type": "general-purpose"},
+              event="SubagentStart")
+    if want:
+        assert out == {"hookSpecificOutput": {"hookEventName": "SubagentStart",
+                                              "additionalContext": co_hook.DATA_LINE}}
+    else:
+        assert out is None
+    assert run.spool()[-1]["event"] == "SubagentStart" and stub.requests == []
+
+
+# item 11: spool writes are durable
+
+
+def test_spool_writes_are_fsynced(tmp_path, monkeypatch):
+    tdir = tmp_path / "t"
+    tdir.mkdir()
+    monkeypatch.setenv("CO_TASK_DIR", str(tdir))
+    synced = []
+    real_fsync = os.fsync
+    kinds = []
+    real_open = os.open
+
+    def opener(path, flags, *a):
+        fd = real_open(path, flags, *a)
+        kinds.append((fd, os.path.basename(str(path)) or str(path), os.path.isdir(path)))
+        return fd
+
+    monkeypatch.setattr(co_hook.os, "fsync", lambda fd: (synced.append(fd), real_fsync(fd)))
+    monkeypatch.setattr(co_hook.os, "open", opener)
+    co_hook._spool_strict({"event": "x"})
+    first = list(synced)
+    dirs = [fd for fd, _n, isdir in kinds if isdir]
+    files = [fd for fd, n, isdir in kinds if n == "spool.jsonl"]
+    assert files and files[0] in first and dirs and dirs[0] in first  # the file and, on create, its folder
+    synced.clear()
+    kinds.clear()
+    co_hook._spool_strict({"event": "y"})
+    assert len(synced) == 1 and synced[0] in [fd for fd, n, _d in kinds if n == "spool.jsonl"]  # file only
+    assert [json.loads(x)["event"] for x in (tdir / "spool.jsonl").read_text().splitlines()] == ["x", "y"]

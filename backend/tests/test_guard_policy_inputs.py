@@ -413,3 +413,46 @@ def test_mcp_servers_and_defaults_from_prepare(client):
            "tool_defaults": {"mcp__pg_dev__*": "require_approval"}}
     p = _gather(_task(), None, u.id, mcp=mcp).policy
     assert p["mcp_servers"] == mcp["servers"] and p["mcp_defaults"] == mcp["tool_defaults"]
+
+
+# ---- final fix wave (forge F92): settings precedence ---------------------------------------------
+
+
+def test_project_settings_only_override_the_keys_they_set(client, tmp_path, org_settings_restored):
+    """A project's settings never undo org settings it does not own: a project left at its defaults
+    keeps the org's disabled rules and dev databases, and the compiled keys only replace the base
+    policy keys they name (guard on/off and the wait stay the project's own)."""
+    from app.guard import runtime as guard_runtime
+
+    _set_org(["git-reset-hard"], ["host:*.dev.internal"])
+    u = _user()
+    plain = _project(tmp_path)  # every policy setting left at its default
+    tuned = _project(tmp_path, trust="external", quarantine=True, on_no_answer="deny_and_resume",
+                     guard_enabled=False, approval_wait_seconds=120)
+    _add(u, plain, tuned)
+    for proj in (plain, tuned):
+        inp = _gather(_task(proj.id), proj, u.id)
+        assert inp.policy["disabled_rules"] == ["git-reset-hard"]  # the org's, whatever the project says
+        assert inp.policy["db_dev"] == ["host:*.dev.internal"]
+    p = _gather(_task(plain.id), plain, u.id).policy
+    assert (p["trust"], p["quarantine"], p["on_no_answer"]) == ("own", False, "deny")
+    t = _gather(_task(tuned.id), tuned, u.id).policy
+    assert (t["trust"], t["quarantine"], t["on_no_answer"]) == ("external", True, "deny_and_resume")
+    # the compiled keys are merged over the base keys: only the keys they name change
+    base = guard_runtime.build_policy(task_id="T-prec", project=tuned, workspace=tmp_path, cwd=tmp_path,
+                                      claude_config_dir=None, mcp_tools={"mcp__a__b": "block"})
+    merged = guard_runtime.build_policy(task_id="T-prec", project=tuned, workspace=tmp_path, cwd=tmp_path,
+                                        claude_config_dir=None, mcp_tools={"mcp__a__b": "block"}, extra=t)
+    assert set(t) & set(base) == set()  # no compiled key shadows a base key
+    assert {k: merged[k] for k in base} == base
+    assert merged["guard_enabled"] is False and merged["approval_wait_seconds"] == 120
+    assert {k: merged[k] for k in t} == t
+
+
+def test_org_settings_put_keeps_the_fields_left_out(client, org_settings_restored):
+    _set_org(["git-reset-hard"], ["host:*.dev.internal"])
+    r = client.put("/guard/org-settings", json={"disabled_rules": ["db-write"]})
+    assert r.status_code == 200, r.text
+    assert r.json()["disabled_rules"] == ["db-write"] and r.json()["dev_db_patterns"] == ["host:*.dev.internal"]
+    r = client.put("/guard/org-settings", json={"dev_db_patterns": ["mcp:pg-dev*"]})
+    assert r.json()["disabled_rules"] == ["db-write"] and r.json()["dev_db_patterns"] == ["mcp:pg-dev*"]

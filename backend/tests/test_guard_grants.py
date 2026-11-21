@@ -1033,3 +1033,192 @@ def test_two_resume_approvals_at_once_make_one_followup(world, rtask, submitted)
     assert len(fus) == 1 and None not in fus and submitted == list(fus)
     assert len(_rows(Task, Task.root_id == rtid, Task.id != rtid)) == 1
     assert len(_rows(ActionGrant, ActionGrant.task_id == fus.pop())) == 2
+
+
+# ---- final fix wave ------------------------------------------------------------------------------
+# 1. a grant key stands for exactly what the card shows
+
+
+def test_non_shell_key_needs_an_uncut_summary(world, task):
+    tid, agent = task
+    big = dict(EDIT, new_string="B" * 7990)  # the full card text is just over SUMMARY_LIMIT
+    body = _edit_body(big)
+    from app.routers.guard import SUMMARY_LIMIT, _cut
+    body["summary"] = _cut(co_hook.full_summary("Edit", big), SUMMARY_LIMIT)  # what an honest hook sends
+    rid = _file(agent, tid, **body).json()["id"]
+    assert _get(ActionApproval, rid).grant_key == ""
+    assert world["m"].post(f"/guard/approvals/{rid}/approve", json={"scope": "run"}).status_code == 409
+
+
+def test_non_shell_key_needs_redaction_to_change_nothing(world, task):
+    tid, agent = task
+    leaky = dict(EDIT, new_string="TOKEN=" + CO_TOKEN_SHAPE)
+    from app.redaction import redact
+    body = _edit_body(leaky, summary=redact(co_hook.full_summary("Edit", leaky), []))
+    rid = _file(agent, tid, **body).json()["id"]
+    row = _get(ActionApproval, rid)
+    assert row.grant_key == "" and CO_TOKEN_SHAPE not in row.summary
+
+
+@pytest.mark.parametrize("ch", ["​", "‮", "⁦", "﻿", "­", "\U000e0041", "\r"])
+def test_shell_summary_with_hidden_characters_gets_no_key(world, task, ch):
+    tid, agent = task
+    cmd = f"git reset --hard{ch} HEAD"
+    rid = _file(agent, tid, summary=cmd, grant_key=gk(cmd)).json()["id"]
+    assert _get(ActionApproval, rid).grant_key == ""
+    card = world["m"].get(f"/guard/approvals/{rid}").json()
+    assert card["can_approve_run"] is False
+
+
+# 2. the server says whether "approve for this run" can work
+
+
+def test_card_can_approve_run(world, task):
+    tid, agent = task
+    ok = world["m"].get(f"/guard/approvals/{_file(agent, tid, key='a').json()['id']}").json()
+    assert ok["can_approve_run"] is True and ok["run_reason"] is None
+    nokey = world["m"].get(f"/guard/approvals/{_file(agent, tid, key='b', grant_key='').json()['id']}").json()
+    assert nokey["can_approve_run"] is False and "Approve once" in nokey["run_reason"]
+    # a quarantine-only request needs no command key (its grant is keyed by the rule)
+    q = _file(agent, tid, key="c", rule_ids=["guest-quarantine"], grant_key="").json()["id"]
+    assert world["m"].get(f"/guard/approvals/{q}").json()["can_approve_run"] is True
+    # a hard rule in the request: never for the run
+    hard = _file(agent, tid, key="d", rule_ids=["git-reset-hard", "readonly-source"]).json()["id"]
+    card = world["m"].get(f"/guard/approvals/{hard}").json()
+    assert card["can_approve_run"] is False and "readonly-source" in card["run_reason"]
+    listed = {c["id"]: c for c in world["m"].get("/guard/approvals", params={"task_id": tid}).json()}
+    assert listed[hard]["can_approve_run"] is False and listed[ok["id"]]["can_approve_run"] is True
+
+
+def test_run_approval_refuses_a_partly_grantable_request(world, task):
+    tid, agent = task
+    tag = _uid()
+    never = _rule("org", f"fw-never-{tag}", "never")
+    for i, ids in enumerate((["git-reset-hard", "readonly-source"], ["git-reset-hard", never])):
+        rid = _file(agent, tid, key=f"p{i}", rule_ids=ids).json()["id"]
+        assert world["m"].get(f"/guard/approvals/{rid}").json()["can_approve_run"] is False
+        r = world["m"].post(f"/guard/approvals/{rid}/approve", json={"scope": "run"})
+        assert r.status_code == 409 and r.json()["detail"] == "this request can't be approved for the whole run"
+        assert _rows(ActionGrant, ActionGrant.approval_id == rid) == []  # nothing silently skipped
+        assert _get(ActionApproval, rid).status == "pending"
+
+
+# 3. up to 50 rule ids per request
+
+
+def test_up_to_50_rule_ids(world, task):
+    tid, agent = task
+    ids = [f"repo.r{i}" for i in range(50)]
+    r = _file(agent, tid, key="fifty", rule_ids=ids)
+    assert r.status_code == 201, r.text
+    assert len(_get(ActionApproval, r.json()["id"]).rule_ids) == 50
+    assert _file(agent, tid, key="fifty-one", rule_ids=ids + ["repo.r50"]).status_code == 422
+
+
+# 5. a retried POST answered from a run grant replays that answer
+
+
+def test_retried_covered_post_replays_the_answer(world, task):
+    tid, agent = task
+    _, card = _approve_run(world, agent, tid)
+    step, step_agent = _step(world, tid)
+    first = _file(step_agent, step, key="retry")
+    assert first.status_code == 201 and first.json()["status"] == "approved"
+    again = _file(step_agent, step, key="retry")
+    assert again.status_code == 200 and again.json() == first.json()
+    assert len(_rows(ActionApproval, ActionApproval.task_id == step)) == 1
+    assert _get(ActionGrant, card["grant_ids"][0]).use_count == 1
+    # past the replay window (60 s) the key files a new answer
+    _set(ActionApproval, first.json()["id"], created_at=_past(61))
+    late = _file(step_agent, step, key="retry")
+    assert late.status_code == 201 and late.json()["id"] != first.json()["id"]
+    assert _get(ActionGrant, card["grant_ids"][0]).use_count == 2
+
+
+def test_retried_covered_post_with_other_content_is_not_replayed(world, task):
+    tid, agent = task
+    _approve_run(world, agent, tid)
+    step, step_agent = _step(world, tid)
+    first = _file(step_agent, step, key="rk").json()
+    other = _file(step_agent, step, key="rk", cwd="/elsewhere")
+    assert other.json()["id"] != first["id"]
+
+
+# 6. the approval-timeout loop drops deferred resume approvals
+
+
+def test_auto_reject_drops_deferred_followups(world, rtask, submitted, monkeypatch):
+    from app import main as app_main
+    from app.config import settings
+
+    rtid, ragent = rtask
+    rid = _file(ragent, rtid).json()["id"]
+    _to_resume(rid, rtid)
+    waiting, _ = _step(world, rtid, status="awaiting_approval", project="r")
+    assert world["m"].post(f"/guard/approvals/{rid}/approve").json()["followup_task_id"] is None  # deferred
+    _set(Task, waiting, created_at=datetime.now(timezone.utc) - timedelta(days=30))
+    monkeypatch.setattr(settings, "approval_timeout_seconds", 20 * 86400)
+    ended = _run(app_main.auto_reject_stale(app.state.worker.submit))
+    assert waiting in ended
+    assert _get(Task, waiting).status == Status.CANCELLED
+    assert _get(ActionApproval, rid).delivery == "dropped" and submitted == []
+
+
+# 8. guard_error records: the live report, the run log and the health line
+
+
+def test_guard_error_report_becomes_a_run_log_event(world, task):
+    tid, agent = task
+    got = _live(tid)
+    try:
+        rec = {"task_id": tid, "event": "guard_error", "hook_event": "Stop",
+               "error": "ValueError: bad " + CO_TOKEN_SHAPE, "extra": "dropped", "ts": 1.0}
+        assert agent.post("/guard/report", json=rec).json() == {"accepted": True}
+    finally:
+        app.state.worker._guard_live.pop(tid, None)
+    assert len(got) == 1
+    ev = got[0]
+    assert ev["event"] == "guard_error" and ev["hook_event"] == "Stop" and "extra" not in ev
+    assert ev["error"].startswith("ValueError: bad ") and CO_TOKEN_SHAPE not in ev["error"]
+
+
+def test_guard_error_spool_line_is_ingested_once(world, task):
+    from app.worker import WorkerManager
+
+    tid, _agent = task
+    rec = {"event": "guard_error", "hook_event": "SessionEnd", "error": "OSError: x"}
+    payload = WorkerManager.guard_payload(rec)
+    assert payload == rec
+
+
+def _guard_event(task_id, payload, age=0):
+    from app.models import TaskEvent
+
+    async def go():
+        async with SessionLocal() as s:
+            s.add(TaskEvent(task_id=task_id, seq=1, type="guard", payload=payload,
+                            created_at=datetime.now(timezone.utc) - timedelta(seconds=age)))
+            await s.commit()
+
+    _run(go())
+
+
+def test_guard_health_counts_hook_errors_of_visible_tasks(world, task):
+    tid, _agent = task
+    hidden = _task(world["admin"].get("/auth/me").json()["id"], None)  # an admin's ad-hoc task
+    _guard_event(tid, {"event": "guard_error", "hook_event": "Stop", "error": "ValueError: old"}, age=3600)
+    _guard_event(tid, {"event": "guard_error", "hook_event": "SessionEnd", "error": "OSError: newest"}, age=60)
+    _guard_event(tid, {"event": "guard_error", "hook_event": "Stop", "error": "ValueError: too old"},
+                 age=3 * 86400)
+    _guard_event(tid, {"event": "PreToolUse", "decision": "deny"})
+    _guard_event(hidden, {"event": "guard_error", "hook_event": "Stop", "error": "ValueError: hidden"})
+    c = world["c"].get("/guard/health")
+    assert c.status_code == 200, c.text
+    h = c.json()["hook_errors"]
+    assert h["count"] == 2 and h["latest_error"] == "OSError: newest" and h["latest_hook_event"] == "SessionEnd"
+    assert h["window_hours"] == 48 and h["latest_task_id"] == tid
+    assert world["admin"].get("/guard/health").json()["hook_errors"]["count"] >= 3  # admins see every task
+    x = world["x"].get("/guard/health").json()["hook_errors"]
+    assert x["count"] == 0 and x["latest_error"] is None
+    _tid, agent = task
+    assert agent.get("/guard/health").status_code == 403
