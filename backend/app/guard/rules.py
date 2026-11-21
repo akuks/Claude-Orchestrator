@@ -5,9 +5,9 @@ Python port of jspark-forge ``scripts/lib/blocklist.js`` and
 (inventory F28-F31, F34-F36, F38, F39), plus MCP tool policies. Bash is
 parsed with :mod:`shell` (the co-guard parser); nothing is ever executed.
 
-RULING R1: this module uses only the Python standard library and the sibling
-``shell.py``. It is copied next to ``shell.py`` into the co-guard plugin and
-must work both as ``app.guard.rules`` and as a standalone file run with
+RULING R1: this module uses only the Python standard library and the siblings
+``shell.py`` and ``dbrules.py``. It is copied next to them into the co-guard
+plugin and must work both as ``app.guard.rules`` and as a standalone file run with
 ``python3 -I`` (``python3 -I rules.py < request.json`` prints a verdict).
 
 API
@@ -42,6 +42,14 @@ Policy (a dict, as written by the worker into ``policy.json``)::
                                            #   dirs/files (fnmatch patterns ok)
       "claude_config_dir": "/abs/.claude", # its settings*.json are protected
       "tmpdir": "/abs/tmp",                # optional: one more temp root ($TMPDIR comes from the env)
+      "db_dev": ["host:*.dev.internal", "mcp:pg-dev*", "staging-db"],
+                                           #   dev databases (forge "database dev:"
+                                           #   syntax, see dbrules.py); not a list or
+                                           #   a non-text entry: ignored (nothing dev)
+      "mcp_servers": {"<server prefix, lower-cased>": {"name": str,
+                      "environment": "dev"|"prod"|"unknown"}},
+                                           #   dev/prod marks a database server;
+                                           #   dev skips db-write (not sql-destroy)
       "env_paths": {"CO_POLICY_FILE": "/abs/...", "CO_TASK_DIR": "/abs/...",
                     "CLAUDE_CONFIG_DIR": "/abs/...", "CLAUDE_PLUGIN_ROOT": "/abs/..."}
                                            #   values of the agent's env vars that
@@ -111,7 +119,15 @@ or holds home or the project, nor over ssh), ``git-force-push-main``, ``git-rese
 ``update = !cmd`` key), ``agent-config`` (Rulings R6/R7/R20: writes to a
 ``.claude/settings*.json``, ``.claude/hooks/**``, ``.claude/agents/**``,
 ``.claude/skills/**``, ``.claude/commands/**`` or ``.mcp.json``),
-``uncertain-command``, ``mcp-require-approval``, ``unknown-tool``.
+``uncertain-command``, ``mcp-require-approval``, ``unknown-tool``,
+``sql-destroy`` and ``db-write`` (database rules, ported in ``dbrules.py``:
+DROP/TRUNCATE/DELETE without WHERE in the SQL a client or a database MCP
+server receives, any target; any non-read statement, script file or unknown
+stdin against a target that is neither local nor dev, prisma/supabase
+commands that write a database, database MCP write tools - checked for
+every stage, nested and wrapped ones included, with ``PGHOST``-style
+prefixes and earlier ``export``s; when both fire on one call only
+``sql-destroy`` is kept; an ``mcp-block`` tool gets no database hits).
 
 Paths: write targets, file-tool paths, ``cd`` targets, glob folders and
 delete targets ending in ``/`` or ``/.`` are resolved through every symlink
@@ -204,16 +220,23 @@ import re
 import sys
 from dataclasses import asdict, dataclass, field
 
-if __package__:
-    _sh = importlib.import_module(__package__ + ".shell")
-else:  # standalone copy next to shell.py (co-guard plugin, python3 -I)
-    _sh = sys.modules.get("shell")
-    if _sh is None:
-        _spec = importlib.util.spec_from_file_location(
-            "shell", os.path.join(os.path.dirname(os.path.abspath(__file__)), "shell.py"))
-        _sh = importlib.util.module_from_spec(_spec)
-        sys.modules["shell"] = _sh
-        _spec.loader.exec_module(_sh)
+def _sibling(name):
+    """``name``.py from this package, or (standalone copy in the co-guard
+    plugin, python3 -I) the file next to this one."""
+    if __package__:
+        return importlib.import_module(__package__ + "." + name)
+    mod = sys.modules.get(name)
+    if mod is None:
+        spec = importlib.util.spec_from_file_location(
+            name, os.path.join(os.path.dirname(os.path.abspath(__file__)), name + ".py"))
+        mod = importlib.util.module_from_spec(spec)
+        sys.modules[name] = mod
+        spec.loader.exec_module(mod)
+    return mod
+
+
+_sh = _sibling("shell")
+_db = _sibling("dbrules")
 
 __all__ = ["RULES", "Hit", "Verdict", "evaluate", "is_secret_name"]
 
@@ -245,6 +268,11 @@ RULES = {
     "mcp-block": (None, "this MCP tool is blocked for this task"),
     "unsupported-shell": (None, "co-guard cannot check this shell (only Bash is supported); use the Bash tool"),
     "unknown-tool": ("co-guard does not know this tool, so a person must approve each call", None),
+    "sql-destroy": (
+        "this deletes database tables or every row of a table (DROP, TRUNCATE, or DELETE without WHERE)", None),
+    "db-write": (
+        "this writes to a production database (an insert, update, schema change, migration, merge, reset or "
+        "restore; reads are never blocked)", None),
 }
 _ALWAYS_ON = frozenset({"self-protect", "unparseable", "mcp-block", "mcp-require-approval", "unsupported-shell",
                         "unknown-tool"})
@@ -543,6 +571,12 @@ class _Ctx:
         self.project = _real(os.path.abspath(str(project)))
         self.guard = policy.get("guard_enabled", True) is not False
         self.mcp_tools = policy.get("mcp_tools", {})
+        # database rules: dev patterns and MCP server environments (malformed -> nothing is dev)
+        db_dev = policy.get("db_dev")
+        self.db_dev = [p for p in db_dev if isinstance(p, str)] if isinstance(db_dev, list) else []
+        servers = policy.get("mcp_servers")
+        self.mcp_servers = servers if isinstance(servers, dict) else {}
+        self.db_env = {}  # PGHOST-style variables exported earlier in the command line
         env = policy.get("env_paths")
         env = {k: str(v) for k, v in env.items() if isinstance(k, str) and v} if isinstance(env, dict) else {}
         cfg = policy.get("claude_config_dir")
@@ -1437,6 +1471,7 @@ class _Bash:
             dyn = list(st.dynamic[off:]) if argv else []
             dyn += [False] * (len(argv or ()) - len(dyn))
             self.note_vars(st, argv, dyn)
+            self.note_db_env(st, argv)
             self.stage(st, argv, dyn, cwd, pipelines.get(st.pipeline, [st]), outer)
             cwd = self.after_cd(argv, dyn, cwd)
 
@@ -1466,6 +1501,83 @@ class _Bash:
             for a in argv[1:]:
                 if re.fullmatch(r"[A-Za-z_]\w*", a):
                     self.nonliteral.add(a)
+
+    def note_db_env(self, st, argv):
+        """``export PGHOST=x`` / ``PGHOST=x`` on its own: later commands in the
+        line connect there (forge noteDbEnv). A value from a substitution is
+        unknown (None)."""
+        env = self.ctx.db_env
+        if not st.argv:
+            for k, v in st.env.items():
+                name = _db.db_env_name(k)
+                if name:
+                    env[name] = v
+            return
+        if argv and _sh.command_name(argv[0]) in ("export", "declare", "typeset", "local", "readonly"):
+            for a in argv[1:]:
+                m = re.match(r"([A-Za-z_]\w*)=(.*)\Z", a, re.S)
+                name = m and _db.db_env_name(m.group(1))
+                if name:
+                    env[name] = m.group(2)
+
+    def db_stdin(self, st, pipeline):
+        """(stdin, feed) for a database client stage: ("literal", text) for a
+        literal heredoc / here-string / echo-printf-cat feed, ("unknown",
+        None) for a file, a non-literal feed or xargs input, else ("none",
+        None)."""
+        texts, unknown = [], False
+        for op, t in st.redirects:
+            if op in ("<", "<>", "<&"):
+                unknown = True
+            elif op == "<<<":
+                if "$" in t or "`" in t:
+                    unknown = True
+                else:
+                    texts.append(t)
+        for _dl, quoted, body in st.heredocs:
+            if quoted or ("$" not in body and "`" not in body):
+                texts.append(body)
+            else:
+                unknown = True
+        piped = st.index > 0 and not texts and not unknown
+        if piped or "xargs" in st.wrappers or "parallel" in st.wrappers:
+            prev = [x for x in pipeline if x.index == st.index - 1]
+            text = None
+            if prev:
+                pargv = _sh.expand_wrappers(prev[0]) or []
+                pdyn = prev[0].dynamic[len(prev[0].argv) - len(pargv):]
+                text = _literal_output(prev[0], pargv, pdyn)
+            if isinstance(text, str):
+                texts.append(text)
+            else:
+                unknown = True
+        if not texts and not unknown and self.compound_input(st):
+            unknown = True  # { psql; } < x.sql
+        if unknown:
+            return "unknown", None
+        if texts:
+            return "literal", "\n".join(texts)
+        return "none", None
+
+    def db_check(self, st, argv, name, args, pipeline):
+        """sql-destroy / db-write for SQL and NoSQL clients and ORM CLIs."""
+        ctx = self.ctx
+        if name in _db.DB_CLIENT_SPECS:
+            off = len(st.argv) - len(argv)
+            prefix = dict(st.env)
+            for w in st.argv[:off]:  # env PGHOST=x psql / sudo PGHOST=x psql
+                m = re.match(r"([A-Za-z_]\w*)=(.*)\Z", w, re.S)
+                if m:
+                    prefix[m.group(1)] = m.group(2)
+            stdin, feed = self.db_stdin(st, pipeline)
+            f = _db.client_finding(name, args, prefix_env=prefix, line_env=ctx.db_env, stdin=stdin, feed=feed,
+                                   patterns=ctx.db_dev, remote=ctx.remote)
+            if f.destroy:
+                ctx.hit("sql-destroy", False, self.raw)
+            if f.write:
+                ctx.hit("db-write", False, self.raw)
+        if _db.cli_write(name, args, ctx.db_dev):
+            ctx.hit("db-write", False, self.raw)
 
     def bind(self, targets):
         """Replace "$d" bound by `for d in ...` / `set -- ...` with its words."""
@@ -1676,6 +1788,9 @@ class _Bash:
         if not argv:
             return
 
+        # database rules (sql-destroy, db-write)
+        self.db_check(st, argv, name, args, pipeline)
+
         # a protected path (or an unknown guard variable) in the arguments of a non-reader
         if name not in _READERS or name in ("cd", "pushd"):
             for a, d in zip(args, dargs):
@@ -1813,10 +1928,10 @@ class _Bash:
             if _dangerous(toks) or (first_unknown and any(_DANGEROUS_ARGS.fullmatch(a) for a in argv[1:])):
                 ctx.hit("uncertain-command", False, raw)
 
-    def compound_stdin(self, st, kind, cwd):
-        """Input redirected onto the compound commands around ``st``: only
-        the closers of the groups that contain it (Stage.depth falls below
-        ``st``'s level), innermost first."""
+    def closers(self, st):
+        """The closing stages of the compound commands around ``st`` (only
+        the groups that contain it: Stage.depth falls below ``st``'s level),
+        innermost first. Input redirected onto them reaches ``st``."""
         res = self.res_stack[-1] if self.res_stack else []
         floor = st.depth
         after = False
@@ -1829,10 +1944,20 @@ class _Bash:
             a2 = _sh.expand_wrappers(s2)
             if s2.depth > s2.low or (a2 and _sh.command_name(a2[0]) not in _COMPOUND_CLOSERS):
                 break  # st's group closed earlier (and maybe another one opened): nothing reaches st
-            self.feed(kind, s2, cwd)
+            yield s2
             floor = s2.low
             if floor <= 0:
                 break
+
+    def compound_stdin(self, st, kind, cwd):
+        """Input redirected onto the compound commands around ``st``."""
+        for s2 in self.closers(st):
+            self.feed(kind, s2, cwd)
+
+    def compound_input(self, st):
+        """Some stdin redirect sits on a compound command around ``st``."""
+        return any(s2.heredocs or any(op in ("<", "<<<", "<>", "<&") for op, _t in s2.redirects)
+                   for s2 in self.closers(st))
 
     def feed(self, kind, s2, cwd):
         """Check the stdin text a closer stage redirects in, as ``kind``
@@ -2481,8 +2606,14 @@ def evaluate(tool_name, tool_input, policy, cwd):
         summary = f"{tool_name} {text}"
         if action == "block":
             ctx.hit("mcp-block", True, summary)
-        elif action == "require_approval":
-            ctx.hit("mcp-require-approval", False, summary)
+        else:
+            if action == "require_approval":
+                ctx.hit("mcp-require-approval", False, summary)
+            f = _db.mcp_finding(tool_name, tool_input, ctx.mcp_servers, ctx.db_dev)
+            if f.destroy:
+                ctx.hit("sql-destroy", False, summary)
+            if f.write:
+                ctx.hit("db-write", False, summary)
     else:  # Ruling R17: a tool co-guard does not know (maybe a new shell) - a person decides
         try:
             text = json.dumps(tool_input, sort_keys=True, default=str)
@@ -2490,6 +2621,8 @@ def evaluate(tool_name, tool_input, policy, cwd):
             text = "<input>"
         ctx.hit("unknown-tool", False, f"{tool_name} {text}")
     hits = _order(ctx.hits)
+    if any(h.rule_id == "sql-destroy" for h in hits):  # it already holds the statement: one approval, not two
+        hits = [h for h in hits if h.rule_id != "db-write"]
     if any(h.hard or h.rule_id == "mcp-block" for h in hits):
         decision = "deny"
     elif hits:
