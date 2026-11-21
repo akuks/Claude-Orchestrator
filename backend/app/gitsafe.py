@@ -21,8 +21,16 @@ remote's lazy fetch of a missing object), so every such call goes through
   into an enclosing repo;
 * stdin is /dev/null, ``LC_ALL=C`` (stable messages), a timeout always.
 
-Not for commands that need the network on the agent's behalf (clone, fetch,
-push): those are out of scope here.
+* signature and diff programs off: ``-c gpg.program=false``,
+  ``gpg.ssh.program``/``gpg.x509.program`` too, ``-c diff.external=``,
+  ``-c core.attributesFile=/dev/null``;
+* a subcommand allowlist (``ValueError`` otherwise): ``rev-parse``, plain
+  ``remote`` (or ``-v``), ``for-each-ref``, ``log``/``rev-list`` with only
+  ``ALLOWED_LOG_OPTIONS`` (no patches or diffs, no ``%G`` signature
+  formats), ``config --get <key>`` and ``--version``.
+
+It only reads metadata. Commands that need the network or write (clone,
+fetch, push, checkout ...) are refused; they are out of scope here.
 """
 
 from __future__ import annotations
@@ -42,6 +50,11 @@ SAFE_ARGS = (
     "-c", "core.pager=cat",
     "-c", "log.showSignature=false",
     "-c", "protocol.allow=never",
+    "-c", "gpg.program=false",
+    "-c", "gpg.ssh.program=false",
+    "-c", "gpg.x509.program=false",
+    "-c", "diff.external=",
+    "-c", "core.attributesFile=/dev/null",
     "--no-pager",
     "--no-optional-locks",
 )
@@ -71,6 +84,38 @@ class GitResult:
     missing: bool = False  # no git executable
 
 
+# log / rev-list options a caller may pass (exact, or a prefix ending in "=").
+ALLOWED_LOG_OPTIONS = ("--all", "-i", "--fixed-strings", "--no-merges", "--count", "--max-count=", "--format=",
+                       "--author=")
+
+
+def check_args(args) -> None:
+    """ValueError unless ``args`` is an allowed read-only git command."""
+    if not args or not all(isinstance(a, str) for a in args):
+        raise ValueError("git: no command")
+    cmd, rest = args[0], list(args[1:])
+    if cmd == "--version" and not rest:
+        return
+    if cmd == "rev-parse" and all(a in ("--git-dir", "--show-toplevel", "--verify", "-q", "HEAD") for a in rest):
+        return
+    if cmd == "remote" and rest in ([], ["-v"]):
+        return
+    if cmd == "for-each-ref" and all(a.startswith(("--count=", "--format=", "refs/")) for a in rest):
+        return
+    if cmd == "config" and len(rest) == 2 and rest[0] == "--get":
+        return
+    if cmd in ("log", "rev-list"):
+        for a in rest:
+            exact = a in ALLOWED_LOG_OPTIONS and not a.endswith("=")
+            valued = any(o.endswith("=") and a.startswith(o) for o in ALLOWED_LOG_OPTIONS)
+            if not (exact or valued):
+                raise ValueError(f"git {cmd}: option not allowed: {a[:80]!r}")
+            if a.startswith("--format=") and "%G" in a:
+                raise ValueError(f"git {cmd}: signature formats are not allowed")
+        return
+    raise ValueError(f"git command not allowed: {' '.join(args)[:120]!r}")
+
+
 def git_env(directory) -> dict[str, str]:
     env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
     env.update(_FIXED_ENV)
@@ -83,7 +128,9 @@ def git_available() -> bool:
 
 
 def run_git(directory, *args: str, timeout: float) -> GitResult:
-    """Run ``git <SAFE_ARGS> <args>`` in ``directory`` (see the module doc)."""
+    """Run ``git <SAFE_ARGS> <args>`` in ``directory`` (see the module doc);
+    ValueError for a command outside the allowlist."""
+    check_args(args)
     exe = shutil.which("git")
     if exe is None:
         return GitResult(False, "", True, "git not found", missing=True)

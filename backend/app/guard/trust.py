@@ -4,8 +4,10 @@ generalised from "my git email" to every org member's.
 ``suggest_trust(directory, member_emails) -> ("own" | "external", reason)``,
 in order:
 
-1. git missing -> own (``R_NO_GIT``); the folder is not a git repo (no
-   ``.git`` and git says "not a git repository") -> own (``R_NOT_REPO``);
+1. git missing -> own (``R_NO_GIT``). A folder without ``.git`` is checked as
+   the repo whose top-level folder is its nearest ancestor with a ``.git``
+   (a monorepo package; the walk stops before home and /). No such ancestor
+   and git says "not a git repository" -> own (``R_NOT_REPO``);
 2. no git remote -> own;
 3. no commit on any ref (``for-each-ref refs/`` finds none; HEAD alone is not
    asked, a foreign repo can sit on an unborn branch) -> own;
@@ -62,12 +64,29 @@ def _emails(member_emails) -> list[str]:
     return list(seen)[:MAX_EMAILS]
 
 
+def _repo_top(directory) -> str:
+    """The folder itself if it has a .git, else its nearest ancestor that has
+    one (stopping before home and /), else the folder. gitsafe then sets the
+    ceiling to that folder's parent."""
+    real = os.path.realpath(directory)
+    if os.path.lexists(os.path.join(real, ".git")):
+        return real
+    stops = {"/", os.path.realpath(os.path.expanduser("~")), os.path.normpath(os.path.expanduser("~"))}
+    cur = os.path.dirname(real)
+    while cur not in stops and cur != os.path.dirname(cur):
+        if os.path.lexists(os.path.join(cur, ".git")):
+            return cur
+        cur = os.path.dirname(cur)
+    return real
+
+
 def suggest_trust(directory, member_emails) -> tuple[str, str]:
     deadline = time.monotonic() + GIT_TIMEOUT
     if not os.path.isdir(directory):
         return "own", R_NOT_REPO
     if not gitsafe.git_available():
         return "own", R_NO_GIT
+    directory = _repo_top(directory)
     has_git = os.path.lexists(os.path.join(directory, ".git"))
     top = _git(directory, ["rev-parse", "--git-dir"], deadline)
     if top.missing:
