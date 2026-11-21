@@ -38,6 +38,10 @@ Policy (a dict, as written by the worker into ``policy.json``)::
                                            #   restrictive matching action wins;
                                            #   an unknown action or a non-dict
                                            #   value means require_approval
+      "mcp_defaults": {"mcp__<prefix>__*": "auto_approve"|"require_approval"|"block"},
+                                           #   server-wide default actions, used only
+                                           #   when no mcp_tools entry matches (same
+                                           #   matching; malformed: require_approval)
       "protected_paths": ["/abs/co-guard", "/abs/_tasks/T1", ...],
                                            #   dirs/files (fnmatch patterns ok)
       "claude_config_dir": "/abs/.claude", # its settings*.json are protected
@@ -69,6 +73,17 @@ Policy (a dict, as written by the worker into ``policy.json``)::
                                            #   NUL, or a "~" prefix (the worker writes
                                            #   absolute paths): hard unparseable (fail
                                            #   closed)
+      "trust": "own"|"external",           #   read by the hook (SessionStart data line;
+                                           #   anything but "own" is external), not here
+      "on_no_answer": "deny"|"deny_and_resume",
+                                           #   the server's no-answer mode (the hook
+                                           #   follows the POST's resume_until), not here
+      "grants": [{"id": str, "scope": "run"|"once", "rule_id": str,
+                  "key_kind": "rule"|"tool"|"command", "key": str, "expires_at": epoch}],
+                                           #   a person's earlier approvals; checked by the
+                                           #   hook (co_hook.covering_grants) after an
+                                           #   approve verdict, never here; a malformed
+                                           #   entry covers nothing
       "regex_budget_ms": 250,              #   shared budget for every custom regex in
                                            #   one evaluate (at most 1000; a non-number
                                            #   means 250, <= 0 means every regex times out)
@@ -894,6 +909,7 @@ class _Ctx:
             budget = _cu.REGEX_BUDGET_MS
         self.regex_budget_ms = min(float(budget), _BUDGET_MAX_MS)
         self.mcp_tools = policy.get("mcp_tools", {})
+        self.mcp_defaults = policy.get("mcp_defaults")  # used only when no mcp_tools entry matches
         # database rules: dev patterns and MCP server environments (malformed -> nothing is dev)
         db_dev = policy.get("db_dev")
         self.db_dev = [p for p in db_dev if isinstance(p, str)] if isinstance(db_dev, list) else []
@@ -4082,9 +4098,17 @@ _MCP_RANK = {"auto_approve": 0, "require_approval": 1, "block": 2}
 
 
 def _mcp_action(ctx, tool_name):
-    """Most restrictive action among the matching entries; an unknown action
-    or a malformed table means require_approval; no entry means allow."""
-    tools = ctx.mcp_tools
+    """Most restrictive action among the matching ``mcp_tools`` entries; when
+    none matches, the same over ``mcp_defaults`` (server-wide defaults); an
+    unknown action or a malformed table means require_approval; no entry in
+    either means allow."""
+    act = _mcp_table_action(ctx.mcp_tools, tool_name)
+    if act is None:
+        act = _mcp_table_action(ctx.mcp_defaults, tool_name)
+    return act
+
+
+def _mcp_table_action(tools, tool_name):
     if tools is None:
         return None
     if not isinstance(tools, dict):
