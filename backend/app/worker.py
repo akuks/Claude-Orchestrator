@@ -494,7 +494,8 @@ class WorkerManager:
         if guard_plugin is None:
             return
         # external projects: forge's data line (also re-added by the SessionStart hook)
-        system_prompt = "\n\n".join(filter(None, [system_prompt, guard_inputs.data_line]))
+        system_prompt = "\n\n".join(filter(None, [system_prompt, guard_inputs.data_line, guard_inputs.main_text]))
+        await emit("ground_rules", {"included": list(guard_inputs.ground_included)})
 
         # Repo-backed project tasks: skip artifact diffing (git tracks changes and
         # scanning a whole repo is slow/noisy). Sandbox tasks still collect outputs.

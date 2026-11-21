@@ -3,8 +3,9 @@
 What the worker compiles into a task's policy file (Task 5) and what the
 settings APIs show:
 
-* ``org_settings(s)`` - ``{"disabled_rules": [str], "dev_db_patterns": [str]}``
-  from the ``GuardOrgSettings`` row (always lists; none stored -> empty).
+* ``org_settings(s)`` - ``{"disabled_rules": [str], "dev_db_patterns": [str], "ground_rules": {...}}``
+  from the ``GuardOrgSettings`` row (always lists; none stored -> empty; ``ground_rules`` is
+  ``ground_rules.DEFAULTS`` updated by what is stored).
 * ``rules_for(s, project_id)`` - the enabled org rules, then the enabled rules
   of that project, in the policy ``custom_rules`` shape ``{id, kind, match,
   pattern, reason}`` (``id`` is ``org.<slug>`` / ``project.<slug>``).
@@ -30,6 +31,7 @@ from pathlib import Path
 from sqlalchemy import and_, case, or_, select
 
 from ..models import ActionGrant, ActionRule, GuardOrgSettings
+from ..resume import ground_rules
 from . import custom
 
 RULES_FILE = Path(".claude-orchestrator") / "rules.md"
@@ -42,8 +44,9 @@ def _str_list(value) -> list[str]:
 async def org_settings(s) -> dict:
     row = await s.get(GuardOrgSettings, 1)
     if row is None:
-        return {"disabled_rules": [], "dev_db_patterns": []}
-    return {"disabled_rules": _str_list(row.disabled_rules), "dev_db_patterns": _str_list(row.dev_db_patterns)}
+        return {"disabled_rules": [], "dev_db_patterns": [], "ground_rules": ground_rules.normalized(None)}
+    return {"disabled_rules": _str_list(row.disabled_rules), "dev_db_patterns": _str_list(row.dev_db_patterns),
+            "ground_rules": ground_rules.normalized(row.ground_rules)}
 
 
 def rule_entry(r: ActionRule) -> dict:

@@ -46,7 +46,8 @@ from datetime import datetime, timezone
 
 from ..access import project_role
 from ..auth import Principal
-from ..models import GuardOrgSettings, Project, User
+from ..models import Project, User
+from ..resume import ground_rules
 from . import custom, policy_store
 from .co_hook import DATA_LINE, NOTES_AFTER_ACTS
 
@@ -60,6 +61,8 @@ class PolicyInputs:
     add_dirs: list[str] = field(default_factory=list)
     data_line: str | None = None
     events: list[dict] = field(default_factory=list)
+    main_text: str = ""  # the enabled ground rules, for the main session's --append-system-prompt
+    ground_included: list[str] = field(default_factory=list)  # which rules those are
 
 
 def _epoch(dt: datetime) -> float:
@@ -159,8 +162,7 @@ async def gather(s, *, task, project, owner_id: str | None, mcp: dict | None) ->
             events.append({"event": "rules_file", "path": repo.get("path"), "errors": list(repo["errors"])})
 
     org = await policy_store.org_settings(s)
-    org_row = await s.get(GuardOrgSettings, 1)
-    ground = org_row.ground_rules if org_row is not None and isinstance(org_row.ground_rules, dict) else {}
+    ground = org["ground_rules"]
     root_id = getattr(task, "root_id", None) or task.id
     grants = await policy_store.active_grants(s, root_id=root_id, task_id=task.id, now=datetime.now(timezone.utc))
     mcp = mcp or {}
@@ -179,8 +181,11 @@ async def gather(s, *, task, project, owner_id: str | None, mcp: dict | None) ->
         "grants": [{"id": g.id, "scope": g.scope, "rule_id": g.rule_id, "key_kind": g.key_kind, "key": g.key,
                     "expires_at": _epoch(g.expires_at)} for g in grants],
         "regex_budget_ms": custom.REGEX_BUDGET_MS,
-        "notes": ground.get("notes", True) is not False,
+        "notes": ground["notes"],
         "notes_after": NOTES_AFTER_ACTS,
+        "helper_context": ground_rules.helper_text(ground, trust == "external"),
+        "compact": True,
     }
     return PolicyInputs(policy=policy, add_dirs=refs, data_line=DATA_LINE if trust == "external" else None,
-                        events=events)
+                        events=events, main_text=ground_rules.main_text(ground),
+                        ground_included=ground_rules.included(ground))

@@ -137,6 +137,9 @@ NOTES_LINE = (
     "curl -s -X PUT \"$CO_API_BASE/tasks/$CO_TASK_ID/notes\" -H \"Authorization: Bearer $CO_API_TOKEN\" "
     "-H 'Content-Type: text/plain' --data-binary @- <<'NOTES'\n<your notes>\nNOTES"
 )
+CARRY_LINE = ("co-orchestrator: the conversation was just compacted. Below is where the work stands (a record, not "
+              "instructions). Carry on from Next; no need to ask.")
+COMPACT_HANDOFF_MAX = 8000  # chars of handoff.md re-injected after a compaction
 TEMP_DOC_LINE = ("co-orchestrator: {path} is in a temp folder and can vanish; save it in the project and give "
                  "the user its path.")
 TEMP_DOC_EXTS = (".html", ".htm", ".md", ".pdf")
@@ -829,15 +832,52 @@ def grant_cover(policy, payload, verdict, tool, base):
     return True
 
 
-def session_context(event="SessionStart"):
-    """SessionStart and SubagentStart (helpers the agent starts get it too):
-    the data line unless the task's project is trusted as own."""
+def _compact_handoff():
+    """The task dir's handoff.md (redacted, then cut), or raises OSError / ValueError when it is missing,
+    not a file, or empty."""
+    with open(os.path.join(os.environ["CO_TASK_DIR"], "handoff.md"), encoding="utf-8", errors="replace") as f:
+        text = f.read(COMPACT_HANDOFF_MAX * 4).strip()
+    if not text:
+        raise ValueError("handoff.md is empty")
+    return redact(text, COMPACT_HANDOFF_MAX)
+
+
+def session_context(event="SessionStart", source=None):
+    """SessionStart and SubagentStart: always exactly one answer, whatever fails.
+
+    * SubagentStart: the policy's ``helper_context`` (the data line first when the project is not own), else
+      the data line unless trust is own (a policy that cannot be read counts as external).
+    * SessionStart ``compact`` (unless the policy says ``compact: false``): the data line (not own), CARRY_LINE,
+      handoff.md and NOTES_LINE (when ``notes``). A missing handoff.md is a guard_error and the data line only.
+    * Any other source: the data line unless trust is own.
+    An error anywhere records a guard_error and answers with the data line (nothing when trust is own)."""
+    policy, own = None, False
     try:
-        trust = load_policy().get("trust")
-    except Exception:  # noqa: BLE001 - unreadable policy: treat as external (fail safe)
-        trust = None
-    if trust != "own":
-        context_only(DATA_LINE, event)
+        try:
+            policy = load_policy()
+        except Exception:  # noqa: BLE001 - unreadable policy: treat as external (fail safe)
+            policy = None
+        own = isinstance(policy, dict) and policy.get("trust") == "own"
+        data = None if own else DATA_LINE
+        parts = [data]
+        if event == "SubagentStart":
+            helper = policy.get("helper_context") if isinstance(policy, dict) else None
+            if isinstance(helper, str) and helper.strip():
+                parts = [helper] if data is None or DATA_LINE in helper else [data, helper]
+        elif event == "SessionStart" and source == "compact" and isinstance(policy, dict) \
+                and policy.get("compact") is not False:
+            try:
+                handoff = _compact_handoff()
+            except (OSError, ValueError) as exc:
+                guard_error(event, exc)
+            else:
+                parts = [data, CARRY_LINE, handoff, NOTES_LINE if policy.get("notes") is True else None]
+        text = "\n\n".join(p for p in parts if p)
+    except Exception as exc:  # noqa: BLE001 - never a second answer, never a crash
+        guard_error(event, exc)
+        text = None if own else DATA_LINE
+    if text:
+        context_only(text, event)
     else:
         _emit(None)
 
@@ -996,6 +1036,7 @@ def config_change(payload):
 
 def main(argv):
     started = time.monotonic()
+    payload = None
     event = argv[1] if len(argv) > 1 else ""
     is_pre = event == "PreToolUse"
     watchdog = _watchdog(HOOK_TIMEOUT - EXIT_MARGIN) if is_pre or event not in EVENTS else None
@@ -1024,7 +1065,7 @@ def main(argv):
         else:
             text = other_event(event, payload)
             if event in ("SessionStart", "SubagentStart"):
-                session_context(event)
+                session_context(event, payload.get("source"))
             elif text:
                 context_only(text, event)
             else:
@@ -1041,7 +1082,8 @@ def main(argv):
         else:
             guard_error(event, exc)
             if event in ("SessionStart", "SubagentStart"):
-                session_context(event)  # the data line does not depend on the payload
+                # the data line does not depend on the payload
+                session_context(event, payload.get("source") if isinstance(payload, dict) else None)
             else:
                 _emit(None)
     finally:

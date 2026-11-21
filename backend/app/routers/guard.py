@@ -107,7 +107,8 @@ allowlist in auth.py and again here):
   project) -> 409.
 * ``GET /guard/builtins`` - ``[{id, reason, hard_reason, disableable}]``.
 * ``GET /guard/org-settings`` (any person) / ``PUT`` (admins):
-  ``{disabled_rules, dev_db_patterns}`` (a field left out stays); only
+  ``{disabled_rules, dev_db_patterns, ground_rules}`` (a field left out stays; ``ground_rules`` is replaced
+  whole after ``ground_rules.validate``, so a key left out takes its default, 400 on a bad one); only
   ``rules.DISABLEABLE`` ids may be switched off and every dev pattern must pass
   ``dbrules.check_dev_pattern`` (400).
 
@@ -155,6 +156,7 @@ from ..guard import co_hook
 from ..guard.co_hook import SUMMARY_MAX as HOOK_SUMMARY_MAX
 from ..models import ActionApproval, ActionGrant, ActionRule, GuardOrgSettings, Project, Task
 from ..redaction import HIDDEN_CHARS, redact
+from ..resume import ground_rules
 
 router = APIRouter(prefix="/guard", tags=["guard"])
 api = APIRouter(prefix="/guard", tags=["guard"])
@@ -1192,6 +1194,7 @@ async def list_builtins(request: Request):
 class OrgSettingsIn(BaseModel):
     disabled_rules: Optional[list[str]] = None
     dev_db_patterns: Optional[list[str]] = None
+    ground_rules: Optional[dict] = None  # replaces the whole object (a key left out takes its default)
 
 
 async def _org_settings_out(s) -> dict:
@@ -1215,7 +1218,9 @@ async def put_org_settings(body: OrgSettingsIn, request: Request):
     _person(p)
     if not p.is_admin or not p.user.active:
         raise HTTPException(403, "Admin only")
-    disabled = patterns = None
+    disabled = patterns = ground = None
+    if body.ground_rules is not None:
+        ground = ground_rules.validate(body.ground_rules)
     if body.disabled_rules is not None:
         disabled = list(dict.fromkeys(body.disabled_rules))
         locked = [r for r in disabled if r not in guard_rules.DISABLEABLE]
@@ -1240,6 +1245,8 @@ async def put_org_settings(body: OrgSettingsIn, request: Request):
                 row.disabled_rules = disabled
             if patterns is not None:
                 row.dev_db_patterns = patterns
+            if ground is not None:
+                row.ground_rules = ground
             row.updated_by = p.user.id
             row.updated_at = _now()
             try:
