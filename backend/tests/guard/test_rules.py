@@ -3615,3 +3615,25 @@ def test_fix4_pip_install_of_a_root_folder_asks(ro2, cmd):
                                           ("pip install ./src", "allow")])
 def test_fix4_other_pip_installs(ro2, cmd, decision):
     assert rbash(ro2, cmd).decision == decision, rbash(ro2, cmd)
+
+
+# Phase 2 Task 5: MCP server-wide default actions (policy mcp_defaults) ---------------------------
+@pytest.mark.parametrize("tools,defaults,name,decision", [
+    ({}, {"mcp__pg__*": "block"}, "mcp__pg__query", "deny"),
+    ({}, {"mcp__pg__*": "require_approval"}, "mcp__PG__query", "approve"),
+    ({}, {"mcp__pg__*": "auto_approve"}, "mcp__pg__query", "allow"),
+    ({}, {"mcp__pg__*": "weird"}, "mcp__pg__query", "approve"),
+    ({}, {"mcp__pg__*": "block"}, "mcp__other__query", "allow"),
+    # an explicit tool policy always beats the server default
+    ({"mcp__pg__query": "auto_approve"}, {"mcp__pg__*": "block"}, "mcp__pg__query", "allow"),
+    ({"mcp__pg__query": "require_approval"}, {"mcp__pg__*": "auto_approve"}, "mcp__pg__query", "approve"),
+    ({"mcp__pg__*": "auto_approve"}, {"mcp__pg__*": "block"}, "mcp__pg__list", "allow"),
+    # a malformed defaults table fails safe
+    ({}, ["mcp__pg__*"], "mcp__pg__query", "approve"),
+    ({}, None, "mcp__pg__query", "allow"),
+])
+def test_mcp_defaults(env, tools, defaults, name, decision):
+    pol = dict(env.policy, mcp_tools=tools)
+    if defaults is not None:
+        pol["mcp_defaults"] = defaults
+    assert evaluate(name, {}, pol, str(env.P)).decision == decision

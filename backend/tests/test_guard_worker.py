@@ -858,3 +858,169 @@ def test_adhoc_child_of_a_project_thread_uses_the_root_projects_guard_settings(c
     pol = json.loads(read_probe_file(key, "policy"))
     assert pol["guard_enabled"] is False and pol["approval_wait_seconds"] == 120
     assert pol["project_dir"] == str((settings.workspaces_dir / child_id).resolve())
+
+
+# ---- Phase 2 Task 5: policy compilation, --add-dir, the external data line --------------------
+
+
+def _patch(client, pid, **fields):
+    r = client.patch(f"/projects/{pid}", json=fields)
+    assert r.status_code == 200, r.text
+    return r.json()
+
+
+def _agent_run(client, project_id, prompt, system_prompt):
+    r = client.post("/agents", json={"name": f"gw-agent-{_uid()}", "system_prompt": system_prompt,
+                                     "default_prompt": "go", "project_id": project_id})
+    assert r.status_code == 201, r.text
+    r = client.post(f"/agents/{r.json()['id']}/run", json={"prompt": prompt})
+    assert r.status_code == 201, r.text
+    return wait_task(client, r.json()["id"])
+
+
+def _arg_values(args, flag):
+    return [args[i + 1] for i, a in enumerate(args) if a == flag]
+
+
+def test_external_project_policy_add_dir_and_data_line(client):
+    from app.guard import co_hook
+
+    proj = _project(client)
+    ref = _project(client)
+    d = Path(proj["directory"])
+    (d / "vendor").mkdir(parents=True, exist_ok=True)
+    (d / ".claude-orchestrator").mkdir(exist_ok=True)
+    (d / ".claude-orchestrator" / "rules.md").write_text("## Confirm\n- `make deploy` : ships\n")
+    _patch(client, proj["id"], trust="external", quarantine=True, on_no_answer="deny_and_resume",
+           readonly_paths=[{"path": "vendor", "reason": "upstream"}], reference_project_ids=[ref["id"]])
+    key = env_probe_key()
+    done = _agent_run(client, proj["id"], f"work [env-probe:{key}]", "You are careful.")
+    assert done["status"] == "completed", done.get("error")
+    args = read_probe_args(key)
+    ref_real = str(Path(ref["directory"]).resolve())
+    assert ref_real in _arg_values(args, "--add-dir")
+    # the mock writes argv one per line: the two-paragraph value spans three lines
+    i = args.index("--append-system-prompt")
+    assert "\n".join(args[i + 1:i + 4]) == "You are careful.\n\n" + co_hook.DATA_LINE
+    assert args.count("--append-system-prompt") == 1
+    pol = json.loads(read_probe_file(key, "policy"))
+    assert pol["trust"] == "external" and pol["quarantine"] is True and pol["on_no_answer"] == "deny_and_resume"
+    assert pol["readonly_paths"] == [
+        {"path": str((d / "vendor").resolve()), "reason": "upstream", "source": "project"},
+        {"path": ref_real, "reason": f"reference project {ref['name']}", "source": "reference"},
+    ]
+    # an external repo's rules file is never read
+    assert not any(r["id"].startswith("repo.") for r in pol["custom_rules"])
+    for k in ("custom_rules", "disabled_rules", "db_dev", "grants"):
+        assert isinstance(pol[k], list), k
+    assert pol["regex_budget_ms"] == 250
+    # every key the base policy had is still there
+    assert pol["task_id"] == done["id"] and pol["protected_paths"]
+
+
+def test_external_project_without_system_prompt_gets_the_data_line(client):
+    from app.guard import co_hook
+
+    proj = _project(client)
+    _patch(client, proj["id"], trust="external")
+    key = env_probe_key()
+    done = _run(client, f"work [env-probe:{key}]", project_id=proj["id"])
+    assert done["status"] == "completed", done.get("error")
+    assert _arg_values(read_probe_args(key), "--append-system-prompt") == [co_hook.DATA_LINE]
+
+
+def test_own_project_reads_repo_rules_and_has_no_data_line(client):
+    proj = _project(client)
+    d = Path(proj["directory"])
+    (d / ".claude-orchestrator").mkdir(parents=True, exist_ok=True)
+    (d / ".claude-orchestrator" / "rules.md").write_text("## Never\n- `make nuke` : wipes\n## Other\n- x\n")
+    key = env_probe_key()
+    done = _agent_run(client, proj["id"], f"work [env-probe:{key}]", "Role text.")
+    assert done["status"] == "completed", done.get("error")
+    args = read_probe_args(key)
+    assert _arg_values(args, "--append-system-prompt") == ["Role text."]
+    pol = json.loads(read_probe_file(key, "policy"))
+    assert pol["trust"] == "own"
+    repo = [r for r in pol["custom_rules"] if r["id"].startswith("repo.")]
+    assert [(r["kind"], r["pattern"]) for r in repo] == [("never", "make nuke")]
+    ev = [e.payload for e in _events(done["id"]) if e.type == "guard" and e.payload.get("event") == "rules_file"]
+    assert ev and ev[0]["errors"]
+
+
+def test_invisible_reference_is_skipped_with_an_event(client):
+    """The task's owner (a maintainer of the project only) cannot see the reference project."""
+    from conftest import login_as
+
+    proj = _project(client)
+    hidden = _project(client)
+    _patch(client, proj["id"], reference_project_ids=[hidden["id"]])
+    u = login_as(f"gw-ref-{_uid()}@test.local")
+    r = client.put(f"/projects/{proj['id']}/members",
+                   json=[{"subject_type": "user", "subject_id": u.user_id, "role": "maintainer"}])
+    assert r.status_code == 200, r.text
+    key = env_probe_key()
+    r = u.post("/tasks", json={"prompt": f"x [env-probe:{key}]", "project_id": proj["id"]})
+    assert r.status_code == 201, r.text
+    done = wait_task(client, r.json()["id"])
+    assert done["status"] == "completed", done.get("error")
+    args = read_probe_args(key)
+    assert str(Path(hidden["directory"]).resolve()) not in _arg_values(args, "--add-dir")
+    pol = json.loads(read_probe_file(key, "policy"))
+    assert pol["readonly_paths"] == []
+    ev = [e.payload for e in _events(done["id"]) if e.type == "guard"
+          and e.payload.get("event") == "reference_skipped"]
+    assert ev and hidden["name"] not in json.dumps(ev)
+
+
+def test_mcp_servers_and_defaults_reach_the_policy(client):
+    proj = _project(client)
+    name = f"Pg.Dev{_uid()}"
+    _add_rows(McpServer(name=name, transport="stdio", scope="project", project=proj["name"], command="echo",
+                        enabled=True, environment="dev", default_action="block"))
+    key = env_probe_key()
+    done = _run(client, f"x [env-probe:{key}]", project_id=proj["id"])
+    assert done["status"] == "completed", done.get("error")
+    pol = json.loads(read_probe_file(key, "policy"))
+    prefix = name.replace(".", "_").lower()
+    assert pol["mcp_servers"][prefix] == {"name": name, "environment": "dev"}
+    assert pol["mcp_defaults"][f"mcp__{prefix}__*"] == "block"
+
+
+def test_grants_of_the_thread_reach_the_policy(client):
+    from datetime import datetime, timedelta, timezone
+
+    from app.models import ActionGrant
+
+    first = _run(client, "first")
+    assert first["status"] == "completed"
+    now = datetime.now(timezone.utc)
+    root = first.get("root_id") or first["id"]
+    gid = f"g{_uid()}"
+    _add_rows(ActionGrant(id=gid, root_id=root, scope="run", rule_id="git-reset-hard", key_kind="command",
+                          key="c" * 64, created_at=now, expires_at=now + timedelta(hours=1)))
+    key = env_probe_key()
+    r = client.post(f"/tasks/{first['id']}/followup", json={"prompt": f"more [env-probe:{key}]"})
+    assert r.status_code == 201, r.text
+    done = wait_task(client, r.json()["id"])
+    assert done["status"] == "completed", done.get("error")
+    pol = json.loads(read_probe_file(key, "policy"))
+    assert [g["id"] for g in pol["grants"]] == [gid]
+    assert isinstance(pol["grants"][0]["expires_at"], float)
+
+
+def test_build_policy_merges_extra(tmp_path):
+    base = dict(task_id="T1", workspace=tmp_path, cwd=tmp_path, claude_config_dir=None, mcp_tools=None,
+                project=None)
+    p = runtime.build_policy(**base, extra={"trust": "external", "grants": []})
+    assert p["trust"] == "external" and p["grants"] == [] and p["task_id"] == "T1"
+    assert "trust" not in runtime.build_policy(**base)
+
+
+def test_granted_spool_records_keep_their_grant_ids():
+    from app.worker import WorkerManager
+
+    p = WorkerManager.guard_payload({"event": "PreToolUse", "decision": "granted", "grant_ids": ["g1", 2] + ["x"] * 30,
+                                     "rule_ids": ["db-write"], "tool": "Bash", "junk": "dropped"})
+    assert p["decision"] == "granted" and p["grant_ids"][:2] == ["g1", "2"] and len(p["grant_ids"]) == 20
+    assert "junk" not in p
+    assert WorkerManager.guard_payload({"grant_ids": "nope"})["grant_ids"] == []

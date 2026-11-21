@@ -103,7 +103,7 @@ class Run:
         self.project.mkdir()
         self.policy = {
             "task_id": "T1", "api_base": api_base, "project_dir": str(self.project), "cwd": str(self.project),
-            "home": str(tmp_path / "home"), "guard_enabled": True, "approval_wait_seconds": 5,
+            "home": str(tmp_path / "home"), "guard_enabled": True, "approval_wait_seconds": 5, "trust": "own",
             "approval_poll_seconds": 0.2,
             "mcp_tools": {"mcp__db__query": "require_approval", "mcp__db__drop": "block",
                           "mcp__db__list": "auto_approve"},
@@ -214,7 +214,9 @@ def test_approve_then_approved(plugin, tmp_path):
         assert len(posts) == 1
         _m, _p, auth, body = posts[0]
         assert auth == f"Bearer {TOKEN}"
-        assert set(body) == {"task_id", "rule_ids", "tool", "summary", "cwd", "reason", "command_hash", "wait_left"}
+        assert set(body) == {"task_id", "rule_ids", "tool", "summary", "cwd", "reason", "command_hash", "wait_left",
+                             "grant_key"}
+        assert body["grant_key"] == co_hook.grant_key("Bash", {"command": "git reset --hard HEAD~1"})
         assert 0 < body["wait_left"] <= 5
         assert body["task_id"] == "T1" and body["rule_ids"] == ["git-reset-hard"] and body["tool"] == "Bash"
         assert body["summary"] == "git reset --hard HEAD~1" and body["cwd"] == str(run.project)
@@ -435,7 +437,10 @@ def test_post_must_answer_pending_with_an_id(plugin, tmp_path, post_body):
     try:
         run = Run(plugin, tmp_path, stub.base)
         out = run(_approve_cmd())
-        assert decision(out) == "deny" and "unexpected answer" in reason(out)
+        # Phase 2: an "approved" POST answer counts only with this call's command_hash
+        want = "another action" if isinstance(post_body, dict) and post_body.get("status") == "approved" \
+            else "unexpected answer"
+        assert decision(out) == "deny" and want in reason(out)
         assert stub.paths("GET") == [] and run.elapsed < 3
     finally:
         stub.close()
@@ -911,3 +916,303 @@ def test_org_never_rule_timeout_denies_in_the_hook(run, stub):
     out = run(bash("echo " + "a" * 40 + "b"))
     assert decision(out) == "deny" and "rule org.slow took too long to check, so it is blocked" in reason(out)
     assert "/guard/approvals" not in stub.paths("POST")
+
+
+# ---- Phase 2 Task 5: grants, the POST approved answer, deny-and-resume, the data line ----------
+
+import hashlib  # noqa: E402
+
+RESUME_TAIL = ("Do not try an equivalent command. End your turn now, saying what is blocked and why you need it; "
+               "if a person approves, this session resumes with permission to run it once.")
+
+
+def _shell_key(cmd):
+    return hashlib.sha256(("shell\0" + cmd).encode()).hexdigest()
+
+
+def _command_hash(tool, tool_input):
+    canon = json.dumps({"tool_name": tool, "tool_input": tool_input}, sort_keys=True, default=str)
+    return hashlib.sha256(canon.encode()).hexdigest()
+
+
+def _grant(gid, rule_id, key_kind, key, scope="run", ttl=3600.0):
+    return {"id": gid, "scope": scope, "rule_id": rule_id, "key_kind": key_kind, "key": key,
+            "expires_at": time.time() + ttl}
+
+
+def _bash(cmd, tid="tu1", description=None):
+    p = bash(cmd)
+    p["tool_use_id"] = tid
+    if description is not None:
+        p["tool_input"]["description"] = description
+    return p
+
+
+def _context(out):
+    return (out or {}).get("hookSpecificOutput", {}).get("additionalContext")
+
+
+def _filed(stub):
+    return [b for _m, p, _a, b in stub.requests if p == "/guard/approvals"]
+
+
+def test_grant_key_shapes():
+    a = co_hook.grant_key("Bash", {"command": "git reset --hard", "description": "first"})
+    b = co_hook.grant_key("Bash", {"command": "git reset --hard", "description": "second"})
+    assert a == b == _shell_key("git reset --hard")  # the description changes between calls
+    assert co_hook.grant_key("Monitor", {"command": "tail -f x", "description": "d"}) == _shell_key("tail -f x")
+    assert co_hook.grant_key("Bash", {"command": "git reset --hard HEAD~1"}) != a
+    ti = {"sql": "select 1", "db": "x"}
+    want = hashlib.sha256(("mcp__db__query\0" + json.dumps(ti, sort_keys=True, default=str)).encode()).hexdigest()
+    assert co_hook.grant_key("mcp__db__query", ti) == want
+    assert len(a) == 64 and all(c in "0123456789abcdef" for c in a)
+
+
+def test_covering_grants_unit():
+    now = time.time()
+    gk = "k" * 64
+    hit = lambda rid: type("H", (), {"rule_id": rid, "hard": False})()  # noqa: E731
+    run_g = _grant("r1", "git-reset-hard", "command", gk)
+    assert co_hook.covering_grants([hit("git-reset-hard")], "Bash", gk, [run_g], set(), now) == ["r1"]
+    # hard hits are never covered
+    hard = type("H", (), {"rule_id": "git-reset-hard", "hard": True})()
+    assert co_hook.covering_grants([hard], "Bash", gk, [run_g], set(), now) is None
+    # nothing to cover, another key, another rule, expired
+    assert co_hook.covering_grants([], "Bash", gk, [run_g], set(), now) is None
+    assert co_hook.covering_grants([hit("git-reset-hard")], "Bash", "x" * 64, [run_g], set(), now) is None
+    assert co_hook.covering_grants([hit("git-clean-fdx")], "Bash", gk, [run_g], set(), now) is None
+    assert co_hook.covering_grants([hit("git-reset-hard")], "Bash", gk, [run_g], set(), now + 7200) is None
+    # quarantine by rule, MCP rules by tool name (lower-cased); a command key does not stand in for them
+    q = _grant("q1", "guest-quarantine", "rule", "*")
+    assert co_hook.covering_grants([hit("guest-quarantine")], "Bash", gk, [q], set(), now) == ["q1"]
+    t = _grant("t1", "mcp-require-approval", "tool", "mcp__db__query")
+    assert co_hook.covering_grants([hit("mcp-require-approval")], "mcp__DB__query", gk, [t], set(), now) == ["t1"]
+    tc = _grant("t2", "mcp-require-approval", "command", gk)
+    assert co_hook.covering_grants([hit("mcp-require-approval")], "mcp__db__query", gk, [tc], set(), now) is None
+    dw = _grant("d1", "db-write", "tool", "mcp__db__query")
+    assert co_hook.covering_grants([hit("db-write")], "mcp__db__query", gk, [dw], set(), now) == ["d1"]
+    # a db-write grant never covers sql-destroy
+    assert co_hook.covering_grants([hit("sql-destroy")], "mcp__db__query", gk, [dw], set(), now) is None
+    # a once grant: always the command key, and only while unused in this task's spool
+    o = _grant("o1", "guest-quarantine", "command", gk, scope="once")
+    assert co_hook.covering_grants([hit("guest-quarantine")], "Bash", gk, [o], set(), now) == ["o1"]
+    assert co_hook.covering_grants([hit("guest-quarantine")], "Bash", gk, [o], {"o1"}, now) is None
+    # every hit must be covered
+    assert co_hook.covering_grants([hit("guest-quarantine"), hit("db-write")], "Bash", gk, [q], set(), now) is None
+    # a run grant is preferred over a once grant (the once grant stays for later)
+    o2 = _grant("o2", "git-reset-hard", "command", gk, scope="once")
+    assert co_hook.covering_grants([hit("git-reset-hard")], "Bash", gk, [o2, run_g], set(), now) == ["r1"]
+    # malformed grants cover nothing and never raise
+    bad = ["x", None, {}, dict(run_g, expires_at="soon"), dict(run_g, expires_at=True), dict(run_g, scope="all"),
+           dict(run_g, key_kind="any"), dict(run_g, id=""), dict(run_g, rule_id=None), dict(run_g, key=None)]
+    assert co_hook.covering_grants([hit("git-reset-hard")], "Bash", gk, bad, set(), now) is None
+    assert co_hook.covering_grants([hit("git-reset-hard")], "Bash", gk, "nope", set(), now) is None
+
+
+def test_local_run_grant_covers_without_filing(plugin, tmp_path, stub):
+    cmd = "git reset --hard HEAD~1"
+    run = Run(plugin, tmp_path, stub.base, grants=[_grant("g1", "git-reset-hard", "command", _shell_key(cmd))])
+    out = run(_bash(cmd, description="whatever"))
+    assert decision(out) is None
+    assert _context(out) == "co-guard: allowed by a person's earlier approval (grant g1)."
+    assert _filed(stub) == [] and "/guard/approvals" not in " ".join(stub.paths("GET"))
+    rec = run.spool()[-1]
+    assert rec["decision"] == "granted" and rec["grant_ids"] == ["g1"] and rec["rule_ids"] == ["git-reset-hard"]
+    rep = [b for _m, p, _a, b in stub.requests if p == "/guard/report"]
+    assert len(rep) == 1
+    assert {k: rep[0][k] for k in ("event", "decision", "grant_ids", "tool", "rule_ids", "tool_use_id")} == {
+        "event": "PreToolUse", "decision": "granted", "grant_ids": ["g1"], "tool": "Bash",
+        "rule_ids": ["git-reset-hard"], "tool_use_id": "tu1"}
+    assert rep[0]["task_id"] == "T1" and rep[0]["summary"]
+    # the run grant keeps covering the same command; another command is filed
+    assert _context(run(_bash(cmd, "tu2"))).startswith("co-guard: allowed by a person's earlier approval")
+    out = run(_bash("git reset --hard HEAD~2", "tu3"))
+    assert "a person approved this action" in _context(out)
+    assert len(_filed(stub)) == 1
+    # PostToolUse of a granted call is spooled as ran
+    run({"tool_name": "Bash", "tool_use_id": "tu1", "tool_response": {}}, event="PostToolUse")
+    assert run.spool()[-1] == dict(run.spool()[-1], event="PostToolUse", decision="ran", tool_use_id="tu1")
+
+
+def test_run_grants_by_rule_and_by_tool(plugin, tmp_path, stub):
+    run = Run(plugin, tmp_path, stub.base, quarantine=True,
+              grants=[_grant("q1", "guest-quarantine", "rule", "*"),
+                      _grant("m1", "mcp-require-approval", "tool", "mcp__db__query")])
+    out = run(_bash("npm install"))
+    assert "grant q1" in _context(out)
+    out = run(_bash("npm test", "tu2"))
+    assert "grant q1" in _context(out)
+    out = run({"hook_event_name": "PreToolUse", "tool_name": "mcp__db__query", "tool_use_id": "tu3",
+               "tool_input": {"sql": "select 1"}})
+    assert "grant m1" in _context(out)
+    assert _filed(stub) == []
+
+
+def test_once_grant_is_used_once_then_refiled(plugin, tmp_path, stub):
+    cmd = "git clean -fdx"
+    run = Run(plugin, tmp_path, stub.base,
+              grants=[_grant("o1", "git-clean-fdx", "command", _shell_key(cmd), scope="once")])
+    assert "grant o1" in _context(run(_bash(cmd)))
+    assert _filed(stub) == []
+    out = run(_bash(cmd, "tu2"))
+    assert "a person approved this action" in _context(out)  # filed this time; the stub approved it
+    assert len(_filed(stub)) == 1
+    assert [r.get("decision") for r in run.spool() if r.get("decision")] == ["granted", "approved"]
+
+
+def test_once_grant_is_used_once_by_parallel_calls(plugin, tmp_path):
+    stub = Stub(statuses=("rejected",))
+    try:
+        cmd = "git clean -fdx"
+        run = Run(plugin, tmp_path, stub.base,
+                  grants=[_grant("o1", "git-clean-fdx", "command", _shell_key(cmd), scope="once")])
+        procs = []
+        for i in range(4):
+            p = subprocess.Popen([sys.executable, "-I", "-S", str(plugin / "hooks" / "co_hook.py"), "PreToolUse"],
+                                 stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True, env=run.env,
+                                 cwd=str(run.project))
+            procs.append(p)
+        for i, p in enumerate(procs):
+            p.stdin.write(json.dumps(_bash(cmd, f"tp{i}")))
+            p.stdin.close()
+        outs = [json.loads(p.stdout.read()) for p in procs]
+        for p in procs:
+            p.wait(timeout=60)
+        granted = [r for r in run.spool() if r.get("decision") == "granted"]
+        assert len(granted) == 1
+        assert sum(1 for o in outs if decision(o) == "deny") == 3
+    finally:
+        stub.close()
+
+
+def test_expired_grant_is_ignored(plugin, tmp_path, stub):
+    cmd = "git reset --hard"
+    run = Run(plugin, tmp_path, stub.base,
+              grants=[_grant("g1", "git-reset-hard", "command", _shell_key(cmd), ttl=-1)])
+    out = run(_bash(cmd))
+    assert "a person approved this action" in _context(out)
+    assert len(_filed(stub)) == 1 and not [r for r in run.spool() if r.get("decision") == "granted"]
+
+
+def test_partial_cover_is_filed(plugin, tmp_path, stub):
+    """Quarantine + db-write in one command with only the quarantine grant: a person decides."""
+    cmd = 'npm install && psql -h prod.db.example -c "insert into t values (1)"'
+    run = Run(plugin, tmp_path, stub.base, quarantine=True, grants=[_grant("q1", "guest-quarantine", "rule", "*")])
+    out = run(_bash(cmd))
+    assert "a person approved this action" in _context(out)
+    body = _filed(stub)[0]
+    assert sorted(body["rule_ids"]) == ["db-write", "guest-quarantine"]
+    assert body["grant_key"] == _shell_key(cmd)
+
+
+def test_db_write_grant_does_not_cover_sql_destroy(plugin, tmp_path, stub):
+    cmd = 'psql -h prod.db.example -c "drop table t"'
+    run = Run(plugin, tmp_path, stub.base, grants=[_grant("d1", "db-write", "command", _shell_key(cmd))])
+    run(_bash(cmd))
+    assert [b["rule_ids"] for b in _filed(stub)] == [["sql-destroy"]]
+
+
+def test_hard_hit_is_never_covered(plugin, tmp_path, stub):
+    cmd = "rm -rf ~"
+    run = Run(plugin, tmp_path, stub.base, grants=[_grant("h1", "rm-rf-outside", "command", _shell_key(cmd))])
+    out = run(_bash(cmd))
+    assert decision(out) == "deny" and "rm-rf-outside" in reason(out)
+    assert not [r for r in run.spool() if r.get("decision") == "granted"]
+
+
+def test_malformed_grants_cover_nothing(plugin, tmp_path, stub):
+    cmd = "git reset --hard"
+    for grants in ("nope", [None, "x", {"id": "g"}, dict(_grant("g1", "git-reset-hard", "command",
+                                                                  _shell_key(cmd)), expires_at="later")]):
+        run = Run(plugin, tmp_path / uuid_dir(), stub.base, grants=grants)
+        out = run(_bash(cmd))
+        assert "a person approved this action" in _context(out), grants
+
+
+def uuid_dir():
+    import uuid as _uuid
+    return _uuid.uuid4().hex[:8]
+
+
+def test_post_answer_approved_with_our_hash_is_approved_at_once(plugin, tmp_path):
+    cmd = "git reset --hard HEAD~3"
+    h = _command_hash("Bash", {"command": cmd})
+    stub = Stub(post_body={"id": "req-9", "status": "approved", "expires_at": "x", "command_hash": h,
+                           "grant_ids": ["g7"]})
+    try:
+        run = Run(plugin, tmp_path, stub.base)
+        out = run(_bash(cmd))
+        assert decision(out) is None and "g7" in _context(out)
+        assert stub.paths("GET") == []  # no polling
+        rec = run.spool()[-1]
+        assert rec["decision"] == "approved" and rec["request_id"] == "req-9" and rec["grant_ids"] == ["g7"]
+    finally:
+        stub.close()
+
+
+@pytest.mark.parametrize("bad_hash", ["0" * 64, None])
+def test_post_answer_approved_with_another_hash_is_refused(plugin, tmp_path, bad_hash):
+    body = {"id": "req-9", "status": "approved", "expires_at": "x", "grant_ids": ["g7"]}
+    if bad_hash is not None:
+        body["command_hash"] = bad_hash
+    stub = Stub(post_body=body)
+    try:
+        run = Run(plugin, tmp_path, stub.base)
+        out = run(_bash("git reset --hard HEAD~3"))
+        assert decision(out) == "deny" and "another action" in reason(out)
+        assert stub.paths("GET") == []
+        assert run.spool()[-1]["status"] == "refused"
+    finally:
+        stub.close()
+
+
+def test_timeout_with_resume_until_gives_the_resume_deny(plugin, tmp_path):
+    stub = Stub(statuses=("pending",), post_body={"id": "req-1", "status": "pending", "expires_at": "x",
+                                                  "resume_until": "2026-11-22T10:00:00+00:00"})
+    try:
+        run = Run(plugin, tmp_path, stub.base, approval_wait_seconds=1.5, on_no_answer="deny_and_resume")
+        out = run(_bash("git stash drop"))
+        r = reason(out)
+        assert decision(out) == "deny"
+        assert r.startswith("CO-GUARD: blocked — request req-1 was filed and is waiting for a person (")
+        assert "(git-stash-drop)" in r and r.endswith("). " + RESUME_TAIL)
+        rec = run.spool()[-1]
+        assert rec["decision"] == "deny" and rec["status"] == "filed" and rec["request_id"] == "req-1"
+        rep = [b for _m, p, _a, b in stub.requests if p == "/guard/report"]
+        assert rep and rep[-1]["status"] == "filed"
+    finally:
+        stub.close()
+
+
+def test_timeout_without_resume_until_is_phase_1(plugin, tmp_path):
+    stub = Stub(statuses=("pending",), post_body={"id": "req-1", "status": "pending", "expires_at": "x",
+                                                  "resume_until": None})
+    try:
+        run = Run(plugin, tmp_path, stub.base, approval_wait_seconds=1.5)
+        out = run(_bash("git stash drop"))
+        assert "no decision in time" in reason(out) and run.spool()[-1]["status"] == "timeout"
+    finally:
+        stub.close()
+
+
+@pytest.mark.parametrize("trust,want", [("external", True), ("own", False), ("odd", True), (None, True)])
+def test_session_start_data_line(plugin, tmp_path, stub, trust, want):
+    run = Run(plugin, tmp_path, stub.base)
+    if trust is None:
+        run.policy.pop("trust")
+    else:
+        run.policy["trust"] = trust
+    (run.tdir / "policy.json").write_text(json.dumps(run.policy))
+    out = run({"hook_event_name": "SessionStart", "source": "compact", "session_id": "s1"}, event="SessionStart")
+    if want:
+        assert out == {"hookSpecificOutput": {"hookEventName": "SessionStart", "additionalContext": co_hook.DATA_LINE}}
+    else:
+        assert out is None
+    assert run.spool()[-1]["event"] == "SessionStart"
+    assert stub.requests == []
+
+
+def test_session_start_without_a_policy_still_adds_the_data_line(run):
+    (run.tdir / "policy.json").unlink()
+    out = run({"hook_event_name": "SessionStart", "source": "startup"}, event="SessionStart")
+    assert out["hookSpecificOutput"]["additionalContext"] == co_hook.DATA_LINE
