@@ -711,6 +711,8 @@ def test_handoff_routes_permissions(client):
     assert r.status_code == 201, r.text
     tid = r.json()["id"]
     wait_task(owner, tid)
+    # _finish commits the status before its snapshot: wait for the handoff row itself
+    assert until(lambda: (r := stored_row(tid)) is not None and r.reason == "run ended")
     got = viewer.get(f"/tasks/{tid}/handoff")
     assert got.status_code == 200, got.text
     body = got.json()
