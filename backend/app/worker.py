@@ -912,6 +912,11 @@ class WorkerManager:
                 return "skipped"
             pgid, start, recoveries = t.run_pgid, t.run_proc_start, t.recoveries or 0
             prev_record = t.recovery
+            # the resume id the step had before its first recovery (a person's Retry puts it back); only
+            # recovery changes a step's resume id, so an earlier record's value stays the original
+            resume_before = (prev_record["resume_before"]
+                             if isinstance(prev_record, dict) and "resume_before" in prev_record
+                             else t.resume_session_id)
             session_id, priority, created_at = t.session_id, t.priority, t.created_at
             workspace = t.workspace_dir or str(settings.workspaces_dir / task_id)
             pid = await effective_project_id(s, t)
@@ -945,7 +950,7 @@ class WorkerManager:
             t = await s.get(Task, task_id)
             if t is None or t.status != Status.RUNNING:
                 return "skipped"
-            t.recovery = {**record, "external": external, "pending": not gave_up}
+            t.recovery = {**record, "external": external, "pending": not gave_up, "resume_before": resume_before}
             t.run_pgid = t.run_proc_start = t.heartbeat_at = None
             if not gave_up:
                 t.recoveries = recoveries + 1

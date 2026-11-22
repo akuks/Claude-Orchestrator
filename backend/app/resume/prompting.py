@@ -159,7 +159,7 @@ async def _others(s, task, secrets) -> str | None:
     root = task.root_id or task.id
     rows = (await s.execute(select(Task).where(
         Task.status == Status.RUNNING, Task.workspace_dir == task.workspace_dir,
-        or_(Task.root_id.is_(None), Task.root_id != root))
+        or_(Task.root_id.is_(None), Task.root_id != root), Task.id != task.id)
         .order_by(Task.started_at.desc()).limit(OTHERS_SCAN))).scalars().all()
     if not rows:
         return None

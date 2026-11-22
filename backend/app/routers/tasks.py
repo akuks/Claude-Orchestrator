@@ -354,10 +354,14 @@ async def retry_task(task_id: str, request: Request):
         task.duration_ms = None
         task.started_at = None
         task.completed_at = None
-        if isinstance(task.recovery, dict) and task.recovery.get("pending"):
-            # the record belongs to the automatic re-run of the crashed attempt (a compose failure
-            # keeps it pending); a person's Retry starts the step over without it
-            task.recovery = {**task.recovery, "pending": False}
+        if isinstance(task.recovery, dict):
+            # the record belongs to the automatic re-run of the crashed attempt (a compose failure keeps
+            # it pending). A person's Retry starts the step over without it, and never resumes the
+            # conversation cut mid-tool: the resume id goes back to what the step had before recovery.
+            if "resume_before" in task.recovery:
+                task.resume_session_id = task.recovery["resume_before"]
+            if task.recovery.get("pending"):
+                task.recovery = {**task.recovery, "pending": False}
         await s.commit()
         await s.refresh(task)
         out = TaskOut.model_validate(task)
