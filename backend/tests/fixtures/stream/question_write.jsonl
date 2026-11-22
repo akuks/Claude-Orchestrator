@@ -1,0 +1,5 @@
+{"type":"system","subtype":"init","session_id":"test-session"}
+{"type":"assistant","message":{"id":"qw1","model":"claude-test","content":[{"type":"tool_use","id":"tuQW","name":"Write","input":{"file_path":"notes-q.txt","content":"x"}}]}}
+{"__spool__": {"event":"PreToolUse","tool_use_id":"tuQW","seen":true,"tool":"Write","what":"notes-q.txt"}}
+{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"tuQW","content":"File created"}]}}
+{"type":"result","subtype":"success","result":"I wrote the first draft.\n\nShould the export be CSV or JSON?","num_turns":1,"total_cost_usd":0.01,"duration_ms":100,"is_error":false,"usage":{"input_tokens":1,"output_tokens":1}}

@@ -18,7 +18,7 @@ from starlette.websockets import WebSocketDisconnect
 
 from app.database import SessionLocal
 from app.main import app
-from app.models import ActionApproval, ActionGrant, Finding, McpCall, Task
+from app.models import ActionApproval, ActionGrant, Finding, McpCall, Task, TaskQuestion
 from conftest import login_as
 from test_lockdown import OPEN_ROUTES, _all_http_routes, _all_ws_routes
 
@@ -163,6 +163,10 @@ def world(client, tmp_path_factory):
         output_tokens=50, model_used=f"cov-model-{tag}", completed_at=datetime.now(timezone.utc),
     ))
     _add(McpCall(task_id=done_id, server=f"cov-mcp-{tag}", tool="t"))
+    # an open question on that P task: GET /questions must not list it, answer/dismiss must refuse
+    (question_id,) = _add(TaskQuestion(
+        task_id=done_id, root_id=done_id, project_id=pid, question=f"cov-question-{tag}?", source="agent",
+    ))
     # A running P task with a pending co-guard action request (owned by the
     # admin, so it is decidable by P's maintainers and listed for them).
     running_id = uuid.uuid4().hex
@@ -204,6 +208,7 @@ def world(client, tmp_path_factory):
         "rule_id": rule["id"],
         "grant_id": grant_id,
         "root_id": running_id,
+        "question_id": question_id,
     }
     # Strings that must never appear in a list the outsider gets back. Agents,
     # templates and workflows are global by spec, so their ids aren't secret.
@@ -213,7 +218,7 @@ def world(client, tmp_path_factory):
         server["id"], f"cov-mcp-{tag}", run["id"], f"cov-run-{tag}",
         done_id, f"cov-done-{tag}", f"cov-model-{tag}",
         running_id, f"cov-running-{tag}", approval_id, f"cov-action-{tag}",
-        rule["id"], f"cov-pattern-{tag}", f"cov-reason-{tag}", grant_id,
+        rule["id"], f"cov-pattern-{tag}", f"cov-reason-{tag}", grant_id, question_id, f"cov-question-{tag}?",
     }
     return {
         "ids": ids, "secrets": secrets, "outsider": outsider, "project": p,
@@ -232,6 +237,8 @@ def _bodies(world) -> dict:
     item = [{"agent": world["ids"]["agent_id"], "prompt": "go"}]
     return {
         ("POST", "/tasks"): {"prompt": "x", "project_id": i["project_id"], "requires_approval": True},
+        ("POST", "/tasks/{task_id}/questions"): {"question": "x?"},
+        ("POST", "/questions/{question_id}/answer"): {"answer": "x"},
         ("POST", "/tasks/{task_id}/followup"): {"prompt": "x"},
         ("POST", "/projects"): {"name": f"cov-new-{_uid()}"},
         ("POST", "/projects/import"): {"directories": ["/tmp"]},
