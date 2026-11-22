@@ -95,6 +95,17 @@ describe('AskCard', () => {
     expect(message.error).toHaveBeenCalledWith('Too many questions; wait a minute')
   })
 
+  it('after a 409 the list is reloaded so the pending ask shows', async () => {
+    api.askTask.mockRejectedValue(Object.assign(new Error('You already have a question pending'), { status: 409 }))
+    const c = await mount()
+    await type($(c, 'ask-input'), 'Hi?')
+    api.taskAsks.mockResolvedValue([ask({ id: 'p1', question: 'Other tab?', status: 'pending' })])
+    await click($(c, 'ask-submit'))
+    await flush()
+    expect(message.error).toHaveBeenCalled()
+    expect($(c, 'ask-pending')).not.toBeNull()
+  })
+
   it('cost formatting', () => {
     expect(askCost(0.0123)).toBe('$0.01')
     expect(askCost(0.001)).toBe('<$0.01')

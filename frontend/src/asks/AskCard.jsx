@@ -49,6 +49,7 @@ export default function AskCard({ taskId }) {
       return true
     } catch (e) {
       message.error(e.message)
+      if (e.status === 409) load() // a pending ask from another tab: show it
       return false
     } finally {
       if (cur.current === taskId) setSending(false)
