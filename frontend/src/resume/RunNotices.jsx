@@ -18,9 +18,9 @@ export default function RunNotices({ task, events, handoff }) {
   if (!list.length) return null
   return (
     <div className="co-resume-notices" data-testid="run-notices">
-      {list.map((n) => (
+      {list.map((n, i) => (
         <Alert
-          key={n.kind}
+          key={`${n.kind}-${i}`}
           showIcon
           type={TYPE[n.kind] || 'info'}
           className={`co-resume-notice-${n.kind}`}

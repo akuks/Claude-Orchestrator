@@ -531,7 +531,7 @@ export default function TaskDetail({ taskId, onClose, onChanged, onOpenTask, onO
       )}
 
       <RunNotices task={task} events={events} handoff={handoff} />
-      <HandoffCard taskId={taskId} onHandoff={setHandoff} />
+      <HandoffCard taskId={taskId} onHandoff={setHandoff} canManage={task?.can_manage === true} />
 
       <Typography.Title level={5}>Live Output</Typography.Title>
       <div

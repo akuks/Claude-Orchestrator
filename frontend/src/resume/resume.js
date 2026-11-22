@@ -8,7 +8,7 @@ const TERMINAL = ['completed', 'failed', 'cancelled']
 
 const payloadOf = (e) => (e && e.payload) || {}
 
-// The notices for a run: [{kind, text}], oldest cause first.
+// The notices for a run: [{kind, text}], oldest cause first. (`task` is kept for the call shape.)
 export function notices(task, events, handoff) {
   const out = []
   const evs = Array.isArray(events) ? events : []
@@ -73,10 +73,13 @@ export function stepLabel(step) {
   return `Step ${step.n} of ${step.m}${text ? `: ${text}` : ''}`
 }
 
-// Who may Continue a step (the server still has the last word: a 409 is shown).
+// Who may Continue a step. The server decides who may act (task.can_manage) and who owns the session
+// (task.can_resume); a 409 is still shown. `user` is kept for the call shape only.
+// eslint-disable-next-line no-unused-vars
 export function canContinue(task, user, thread) {
   const none = { resume: false, fresh: false }
   if (!task || !TERMINAL.includes(task.status) || task.origin === 'agent') return none
   if ((thread || []).some((t) => ACTIVE.includes(t.status))) return none
-  return { resume: !!user && !!task.session_id && user.id === task.created_by, fresh: !!user }
+  const manage = task.can_manage === true
+  return { resume: manage && task.can_resume === true && !!task.session_id, fresh: manage }
 }

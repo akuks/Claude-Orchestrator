@@ -198,7 +198,7 @@ describe('TaskDetail: where it stands (phase 3a)', () => {
   it('mounts the handoff card, the notices and Continue for the owner of a failed step', async () => {
     globalThis.WebSocket = FakeSocket
     api.getTask.mockImplementationOnce(async (id) => ({
-      id, title: 'T', status: 'failed', prompt: 'p', origin: 'user', created_by: 'u1', session_id: 's',
+      id, title: 'T', status: 'failed', prompt: 'p', origin: 'user', created_by: 'u1', session_id: 's', can_manage: true, can_resume: true,
     }))
     api.getHandoff.mockImplementationOnce(async () => ({ status: 'open', content: { task: 'do it', no_commits: true } }))
     view = await render(<TaskDetail inline taskId="a" currentUser={{ id: 'u1' }} />)

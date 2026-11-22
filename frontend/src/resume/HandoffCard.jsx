@@ -24,7 +24,7 @@ function Row({ label, children, testid }) {
 }
 
 // "Where it stands": the thread's handoff, above the run log.
-export default function HandoffCard({ taskId, onHandoff }) {
+export default function HandoffCard({ taskId, onHandoff, canManage = false }) {
   const [handoff, setHandoff] = useState(undefined) // undefined: loading, null: none yet
   const [open, setOpen] = useState(true)
   const [busy, setBusy] = useState(false)
@@ -40,11 +40,12 @@ export default function HandoffCard({ taskId, onHandoff }) {
   useEffect(() => {
     let live = true
     setHandoff(undefined)
+    onHandoff?.(null)
     setError(null)
     api
       .getHandoff(taskId)
       .then((h) => live && apply(h))
-      .catch((e) => live && (setError(e.message), setHandoff(null)))
+      .catch((e) => live && (setError(e.message), apply(null)))
     return () => {
       live = false
     }
@@ -102,7 +103,7 @@ export default function HandoffCard({ taskId, onHandoff }) {
             </Typography.Text>
           ) : (
             <>
-              <Row label="Task" testid="handoff-task">{clean(c.task)}</Row>
+              {c.task && <Row label="Task" testid="handoff-task">{clean(c.task)}</Row>}
               {step && <Row label="Step" testid="handoff-step">{step}</Row>}
               {done.length > 0 && (
                 <Row label="Done" testid="handoff-done">
@@ -154,10 +155,12 @@ export default function HandoffCard({ taskId, onHandoff }) {
             </div>
           )}
           <Space className="co-resume-actions" size="small">
-            <Button size="small" icon={<ReloadOutlined />} loading={busy} onClick={() => run(api.refreshHandoff)} data-testid="handoff-refresh">
-              Refresh
-            </Button>
-            {handoff && !isDone && (
+            {canManage && (
+              <Button size="small" icon={<ReloadOutlined />} loading={busy} onClick={() => run(api.refreshHandoff)} data-testid="handoff-refresh">
+                Refresh
+              </Button>
+            )}
+            {canManage && handoff && !isDone && (
               <Button size="small" icon={<CheckOutlined />} loading={busy} onClick={() => run(api.closeHandoff)} data-testid="handoff-close">
                 Mark done
               </Button>

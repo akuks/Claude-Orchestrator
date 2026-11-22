@@ -30,7 +30,7 @@ const q = (c, id) => c.querySelector(`[data-testid="${id}"]`)
 const click = (el) => act(async () => { el.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
 let view
 const mount = async (props = {}) => {
-  view = await render(<HandoffCard taskId="t1" {...props} />)
+  view = await render(<HandoffCard taskId="t1" canManage {...props} />)
   await flush()
   await flush()
   return view.container
@@ -86,6 +86,12 @@ describe('HandoffCard', () => {
     api.getHandoff.mockResolvedValue(null)
     const c = await mount()
     expect(q(c, 'handoff-empty')).not.toBeNull()
+    expect(q(c, 'handoff-close')).toBeNull()
+  })
+  it('hides Refresh and Mark done from a viewer who cannot manage', async () => {
+    const c = await mount({ canManage: false })
+    expect(q(c, 'handoff-task')).not.toBeNull()
+    expect(q(c, 'handoff-refresh')).toBeNull()
     expect(q(c, 'handoff-close')).toBeNull()
   })
   it('collapses', async () => {

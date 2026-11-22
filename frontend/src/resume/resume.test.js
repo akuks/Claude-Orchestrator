@@ -45,13 +45,18 @@ describe('stepLabel', () => {
 })
 
 describe('canContinue', () => {
-  const task = { id: 't', status: 'failed', origin: 'user', created_by: 'u1', session_id: 's1' }
+  const task = { id: 't', status: 'failed', origin: 'user', created_by: 'u1', session_id: 's1', can_manage: true, can_resume: true }
   const owner = { id: 'u1' }
   it('owner may resume and go fresh', () => {
     expect(canContinue(task, owner, [task])).toEqual({ resume: true, fresh: true })
   })
-  it('non-owner may only go fresh', () => {
-    expect(canContinue(task, { id: 'u2' }, [task])).toEqual({ resume: false, fresh: true })
+  it('a manager who is not the owner may only go fresh', () => {
+    expect(canContinue({ ...task, can_resume: false }, { id: 'u2' }, [task])).toEqual({ resume: false, fresh: true })
+  })
+  it('a viewer the server does not allow (contributor, flags missing) gets neither', () => {
+    expect(canContinue({ ...task, can_manage: false, can_resume: false }, { id: 'u3' }, [task])).toEqual({ resume: false, fresh: false })
+    expect(canContinue({ ...task, can_manage: undefined, can_resume: undefined }, owner, [task])).toEqual({ resume: false, fresh: false })
+    expect(canContinue({ ...task, can_manage: false, can_resume: true }, owner, [task]).resume).toBe(false)
   })
   it('no session: fresh only', () => {
     expect(canContinue({ ...task, session_id: null }, owner, [])).toEqual({ resume: false, fresh: true })
@@ -66,8 +71,5 @@ describe('canContinue', () => {
   })
   it('completed is terminal and allowed here (the button hides it)', () => {
     expect(canContinue({ ...task, status: 'completed' }, owner, []).resume).toBe(true)
-  })
-  it('no user: neither', () => {
-    expect(canContinue(task, null, [])).toEqual({ resume: false, fresh: false })
   })
 })

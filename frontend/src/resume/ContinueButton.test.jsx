@@ -6,7 +6,7 @@ vi.mock('../api', () => ({ api: { continueTask: vi.fn() } }))
 import { api } from '../api'
 import ContinueButton from './ContinueButton'
 
-const task = { id: 't1', status: 'failed', origin: 'user', created_by: 'u1', session_id: 's' }
+const task = { id: 't1', status: 'failed', origin: 'user', created_by: 'u1', session_id: 's', can_manage: true, can_resume: true }
 const q = (id) => document.body.querySelector(`[data-testid="${id}"]`)
 const click = (el) => act(async () => { el.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
 const item = (text) => [...document.body.querySelectorAll('.ant-dropdown-menu-item')].find((e) => e.textContent === text)
@@ -35,6 +35,10 @@ describe('ContinueButton', () => {
     await mount({ thread: [task, { id: 'x', status: 'running' }] })
     expect(q('continue-button')).toBeNull()
   })
+  it('is hidden from a viewer the server does not allow', async () => {
+    await mount({ task: { ...task, can_manage: false, can_resume: false } })
+    expect(q('continue-button')).toBeNull()
+  })
   it('both modes call continueTask and open the child', async () => {
     api.continueTask.mockResolvedValue({ id: 'child' })
     const onContinued = vi.fn()
@@ -50,7 +54,7 @@ describe('ContinueButton', () => {
     expect(api.continueTask).toHaveBeenLastCalledWith('t1', 'fresh')
   })
   it('resume is disabled for a non-owner', async () => {
-    await mount({ user: { id: 'u2' } })
+    await mount({ task: { ...task, can_resume: false } })
     await click(q('continue-button'))
     expect(item('Continue (resume)').className).toContain('disabled')
     expect(item('Continue fresh with the handoff').className).not.toContain('disabled')
