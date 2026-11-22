@@ -1510,8 +1510,14 @@ def test_commit_reminder_on_allowed_commit(plugin, tmp_path, stub):
     assert off(bash("git commit -m x")) is None
 
 
+# A project and home outside every temp root: pytest's tmp_path is under /tmp on Linux, and a temp root that
+# holds the project or home is deliberately no temp root, so /tmp/x would not count as "outside, in temp".
+FAKE_PROJECT = "/srv/co-test-project"
+FAKE_HOME = "/srv/co-test-home"
+
+
 def test_temp_doc_note_once(plugin, tmp_path, stub):
-    run = Run(plugin, tmp_path, stub.base, notes=False)
+    run = Run(plugin, tmp_path, stub.base, notes=False, project_dir=FAKE_PROJECT, home=FAKE_HOME)
 
     def write(path, n):
         return _post(run, n, tool="Write", tool_input={"file_path": path, "content": "x"})
@@ -1521,12 +1527,12 @@ def test_temp_doc_note_once(plugin, tmp_path, stub):
     assert [r["outside_doc"] for r in run.spool() if "outside_doc" in r] == ["/tmp/a.html"]
     assert write("/tmp/a.html", 2) is None
     assert write("/tmp/a.py", 3) is None
-    assert write(str(run.project / "a.html"), 4) is None
+    assert write(FAKE_PROJECT + "/a.html", 4) is None
     assert _ctx(write("/tmp/b.md", 5)) == co_hook.TEMP_DOC_LINE.replace("{path}", "/tmp/b.md")
 
 
 def test_nudge_and_doc_join_with_a_blank_line(plugin, tmp_path, stub):
-    run = Run(plugin, tmp_path, stub.base, notes=True, notes_after=2)
+    run = Run(plugin, tmp_path, stub.base, notes=True, notes_after=2, project_dir=FAKE_PROJECT, home=FAKE_HOME)
     assert _post(run, 1) is None
     out = _post(run, 2, tool="Write", tool_input={"file_path": "/tmp/r.pdf", "content": "x"})
     assert _ctx(out) == co_hook.NOTES_LINE + "\n\n" + co_hook.TEMP_DOC_LINE.replace("{path}", "/tmp/r.pdf")
