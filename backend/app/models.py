@@ -102,7 +102,7 @@ class Task(Base):
     started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
-    # Resume and handoff (phase 3a). origin: user | agent | guard. The rest is
+    # Resume and handoff (phase 3a). origin: user | agent | guard | continue. The rest is
     # written by later tasks (heartbeat/head_at_start: run capture; credential_ref:
     # compose; notes, run_pgid, run_proc_start, recoveries, recovery: recovery).
     origin: Mapped[str] = mapped_column(String(16), default="user", server_default="user")

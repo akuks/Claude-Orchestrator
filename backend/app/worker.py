@@ -22,7 +22,7 @@ from sqlalchemy import func, select
 
 from . import auth, context_store, mcp_manager, memory, notifications, security
 from .access import effective_project_id
-from .agent_env import PROJECT_ENV_BLOCKED, MissingCredential, build_agent_env
+from .agent_env import PROJECT_ENV_BLOCKED, MissingCredential, build_agent_env, credential_ref
 from .config import settings
 from .constants import Priority, Status
 from .database import SessionLocal
@@ -33,7 +33,8 @@ from .guard import runtime as guard_runtime
 from .guard.plugin import ensure_plugin
 from .models import Agent, Artifact, McpCall, Project, SkillPack, Task, TaskEvent, User
 from .redaction import redact, redact_obj, secrets_from_env
-from .resume import gitfacts, handoff
+from .resume import gitfacts, handoff, prompting
+from .resume.texts import CRED_NOTE
 
 log = logging.getLogger(__name__)
 
@@ -145,18 +146,6 @@ def _short(value, secrets: list[str] | None = None) -> str:
     if secrets is not None:  # before the cut, so no secret prefix survives it
         text = redact(text, secrets)
     return text[:_MAX_TOOL_RESULT_CHARS]
-
-
-def _session_file_exists(config_dir: str | None, session_id: str) -> bool:
-    """Whether `<config_dir>/projects/**/<session_id>.jsonl` exists."""
-    # The id becomes a glob pattern: refuse separators and glob characters.
-    if not config_dir or not session_id or any(c in session_id for c in "/\\*?[]"):
-        return False
-    projects = Path(config_dir) / "projects"
-    if not projects.is_dir():
-        return False
-    name = f"{session_id}.jsonl"
-    return any(p.is_file() for p in projects.rglob(name))
 
 
 async def _coordinator_context(s, task_id: str, me_id: str) -> str:
@@ -447,23 +436,43 @@ class WorkerManager:
         workspace.mkdir(parents=True, exist_ok=True)
         await emit("started", {"model": model, "max_turns": max_turns})
 
-        # Resume only a session this account actually has: Claude Code keeps it
-        # as <CLAUDE_CONFIG_DIR>/projects/<cwd>/<id>.jsonl. If it's gone (another
-        # host, cleared config, a different per-user dir), start a fresh session
-        # with the same context a new thread gets instead of failing the resume.
-        if resume_session_id and not _session_file_exists(
-            sub_env.get("CLAUDE_CONFIG_DIR"), resume_session_id
-        ):
-            resume_session_id = None
-            await emit("fresh_session", {"reason": "previous session not available"})
+        # Resume or fresh (F1): resume only a session this account actually has
+        # (<CLAUDE_CONFIG_DIR>/projects/<cwd>/<id>.jsonl), made under the same
+        # credential, by the person who continues the thread. The check reads the
+        # stored credential_ref, so it runs before this run's ref is stored.
+        cred_ref = credential_ref(sub_env)
+        async with SessionLocal() as s:
+            t = await s.get(Task, task_id)
+            resume_session_id, fresh_reason = await prompting.decide_session(
+                s, t, cred_ref, sub_env.get("CLAUDE_CONFIG_DIR"))
+            t.credential_ref = cred_ref
+            await s.commit()
+        if fresh_reason:
+            await emit("fresh_session", {"reason": fresh_reason,
+                                         **({"credentials_changed": True} if fresh_reason == CRED_NOTE else {})})
 
-        # Project tasks: prepend assembled context (instructions + memory + relevant
-        # past-task summaries) so Claude starts with the project's accumulated state.
-        if project_id and not resume_session_id:
-            preamble, ctx_log = await memory.assemble_context(project_id, prompt)
+        # The one composer (app.resume.prompting): project context, the
+        # handoff, the log tail, the recovery record, other runs, git notes.
+        async with SessionLocal() as s:
+            t = await s.get(Task, task_id)
+            recovery_block = self._recovery_block(t)
+            origin = t.origin
+            try:
+                prompt, ctx_log = await prompting.compose(
+                    s, t, base_prompt=prompt, resumed=resume_session_id is not None,
+                    wanted_resume=prompting.wanted_resume(t), recovery_block=recovery_block,
+                    secrets=run_secrets)
+            except Exception as e:  # noqa: BLE001 - a failed composition never stops a run
+                log.warning("prompting: compose failed for %s: %s", task_id, type(e).__name__)
+                ctx_log = {}
+        if ctx_log.get("blocks"):
+            await emit("context", ctx_log)
+        # A fresh guard follow-up keeps today's project preamble (Phase 2).
+        if origin == "guard" and recovery_block is None and project_id and not resume_session_id:
+            preamble, guard_ctx = await memory.assemble_context(project_id, prompt)
             if preamble:
                 prompt = f"{preamble}\n\n---\n\n# Task\n\n{prompt}"
-                await emit("context", ctx_log)
+                await emit("context", guard_ctx)
 
         # Context Store (tiered): write applicable curated docs (L2) to a per-task
         # snapshot dir outside the cwd, and prepend their one-line abstracts (L0)
@@ -781,6 +790,11 @@ class WorkerManager:
         asyncio.create_task(notifications.notify_task_finished(task_id))
 
     # ---- resume: head at start, heartbeat, handoff ---------------------------
+
+    def _recovery_block(self, task: Task) -> str | None:
+        """The rendered recovery record of a step whose recovery is pending
+        (Task 7 renders it with recovery.render_record); None otherwise."""
+        return None
 
     async def _spawn_handoff(self, task_id: str, workspace: Path, secrets: list[str]) -> str | None:
         """Record head_at_start, return the run's outside-commit base (the

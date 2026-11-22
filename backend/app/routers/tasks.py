@@ -27,9 +27,11 @@ from ..guard import runtime as guard_runtime
 from .. import reports
 from ..models import ActionGrant, Artifact, Project, Task, TaskEvent, TaskHandoff
 from ..resume import handoff as resume_handoff
+from ..resume.texts import CONTINUE_PROMPT
 from ..task_service import build_task
 from ..schemas import (
     ArtifactOut,
+    ContinueCreate,
     EventOut,
     FollowupCreate,
     StatsOut,
@@ -362,6 +364,28 @@ async def duplicate_task(task_id: str, request: Request):
     return out
 
 
+def _step_from(parent: Task, *, prompt: str, origin: str, resume: str | None, created_by: str | None) -> Task:
+    """The one builder of a thread step (a follow-up or a Continue): the
+    parent's thread, workspace and run settings, queued."""
+    return Task(
+        title=_default_title(prompt),
+        prompt=prompt,
+        project=parent.project,
+        project_id=parent.project_id,  # an ad-hoc step stays ad-hoc (root rule)
+        priority=parent.priority,
+        tags=list(parent.tags or []),
+        model=parent.model,
+        max_turns=parent.max_turns,
+        parent_task_id=parent.id,
+        origin=origin,
+        root_id=parent.root_id or parent.id,  # join the parent's thread
+        resume_session_id=resume,
+        workspace_dir=parent.workspace_dir,  # same workspace = continues context
+        status=Status.QUEUED,
+        created_by=created_by,
+    )
+
+
 @router.post("/{task_id}/followup", response_model=TaskOut, status_code=201)
 async def followup_task(task_id: str, payload: FollowupCreate, request: Request):
     """Continue a task's Claude session with a new prompt (a resumable thread)."""
@@ -378,28 +402,68 @@ async def followup_task(task_id: str, payload: FollowupCreate, request: Request)
         # credential (same thread and workspace).
         sender = p.user.id
         resume = parent.session_id if sender == parent.created_by else None
-        child = Task(
-            title=_default_title(payload.prompt),
-            prompt=payload.prompt,
-            project=parent.project,
-            project_id=parent.project_id,  # an ad-hoc step stays ad-hoc (root rule)
-            priority=parent.priority,
-            tags=list(parent.tags or []),
-            model=parent.model,
-            max_turns=parent.max_turns,
-            parent_task_id=parent.id,
-            origin="user",
-            root_id=parent.root_id or parent.id,  # join the parent's thread
-            resume_session_id=resume,
-            workspace_dir=parent.workspace_dir,  # same workspace = continues context
-            status=Status.QUEUED,
-            created_by=sender,
-        )
+        child = _step_from(parent, prompt=payload.prompt, origin="user", resume=resume, created_by=sender)
         s.add(child)
         await s.commit()
         await s.refresh(child)
         out = TaskOut.model_validate(child)
     await request.app.state.worker.submit(out.id, out.priority, out.created_at)
+    return out
+
+
+CONTINUE_MODES = ("auto", "resume", "fresh")
+
+
+@router.post("/{task_id}/continue", response_model=TaskOut, status_code=201)
+async def continue_task(task_id: str, request: Request, payload: ContinueCreate | None = None):
+    """Continue a stopped main-line step: a queued ``continue`` step of its
+    thread with the fixed Continue text. ``resume`` needs the sender to own
+    the step's session (409 otherwise); ``auto`` resumes when it can, else
+    starts fresh with the handoff; ``fresh`` never resumes. Same permission
+    as a follow-up."""
+    from ..guard import grants as guard_grants
+
+    mode = (payload.mode if payload is not None else None) or "auto"
+    if mode not in CONTINUE_MODES:
+        raise HTTPException(400, "mode must be auto, resume or fresh")
+    p = request.state.principal
+    async with SessionLocal() as s:
+        parent = await require_task(s, p, task_id)
+        await _require_manage(s, p, parent, need_contributor=True)
+        if parent.origin == "agent":
+            raise HTTPException(409, "A dispatched child cannot be continued; continue its thread")
+        if parent.status not in Status.TERMINAL:
+            raise HTTPException(409, f"Task is still {parent.status}")
+    worker = request.app.state.worker
+    # serialised with deny-and-resume's join / defer / spawn choice
+    async with guard_grants.followup_lock():
+        async with SessionLocal() as s:
+            parent = await require_task(s, p, task_id)
+            root = parent.root_id or parent.id
+            active = (await s.execute(select(Task.id).where(
+                or_(Task.root_id == root, Task.id == root), Task.status.in_(Status.ACTIVE)).limit(1))).first()
+            if active is not None:
+                raise HTTPException(409, "A step of this thread is still active")
+            sender = p.user.id
+            can_resume = bool(parent.session_id) and sender == parent.created_by
+            if mode == "resume" and not can_resume:
+                raise HTTPException(
+                    409, "Only the session's owner can resume it, and the step needs a session")
+            resume = parent.session_id if can_resume and mode != "fresh" else None
+        try:  # where the thread stands, saved before the step is queued
+            await resume_handoff.snapshot(task_id, "continue", secrets=worker._run_secrets.get(task_id),
+                                          since=worker._run_since.get(task_id))
+        except Exception:  # noqa: BLE001 - the Continue still runs (its prompt uses the stored handoff)
+            logging.getLogger(__name__).exception("handoff snapshot before continue failed for %s", task_id)
+        async with SessionLocal() as s:
+            parent = await require_task(s, p, task_id)
+            child = _step_from(parent, prompt=CONTINUE_PROMPT, origin="continue", resume=resume,
+                               created_by=sender)
+            s.add(child)
+            await s.commit()
+            await s.refresh(child)
+            out = TaskOut.model_validate(child)
+    await worker.submit(out.id, out.priority, out.created_at)
     return out
 
 

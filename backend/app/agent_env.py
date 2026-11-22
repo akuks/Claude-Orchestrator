@@ -12,7 +12,7 @@ import os
 import uuid
 from pathlib import Path
 
-from . import credentials
+from . import credentials, crypto
 from .config import settings
 
 log = logging.getLogger(__name__)
@@ -61,6 +61,7 @@ class AgentEnv(dict):
     injected (names only, for the task's `env` event)."""
 
     credentials: list[str]
+    claude_var: str | None = None
 
 
 def user_root(user_id: str) -> Path:
@@ -163,6 +164,7 @@ async def build_agent_env(
 
     # Exactly one Claude variable (project env's were dropped above).
     env[claude[0]] = claude[1]
+    env.claude_var = claude[0]
     labels = [label]
     if gh_token:
         env["GH_TOKEN"] = gh_token
@@ -173,6 +175,16 @@ async def build_agent_env(
         env["GIT_AUTHOR_EMAIL"] = env["GIT_COMMITTER_EMAIL"] = git_email
     env.credentials = labels
     return env
+
+
+def credential_ref(env: AgentEnv) -> str | None:
+    """The fingerprint of the run's Claude credential (its variable's name and
+    value; the secret itself is never stored). None without one."""
+    names = [env.claude_var] if getattr(env, "claude_var", None) else list(credentials.CLAUDE_ENV.values())
+    for name in names:
+        if env.get(name):
+            return crypto.fingerprint(name, env[name])
+    return None
 
 
 async def agent_env_or_none(

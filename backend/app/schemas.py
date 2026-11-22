@@ -78,6 +78,11 @@ class FollowupCreate(BaseModel):
     prompt: str = Field(min_length=1)
 
 
+class ContinueCreate(BaseModel):
+    # auto | resume | fresh (checked by the route: a bad mode is 400)
+    mode: str | None = "auto"
+
+
 class ArtifactOut(BaseModel):
     id: int
     filename: str
