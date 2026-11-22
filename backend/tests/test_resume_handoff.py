@@ -220,7 +220,15 @@ def test_step_from_superpowers_ledger(tmp_path):
     assert handoff.step_progress(evs, tmp_path, None, None)["source"] == "superpowers"
     # a plan written in the project dir (not the workspace) is found there
     evs = [use("Write", {"file_path": str(plans / "2026-11-22-thing.md")})]
-    assert handoff.step_progress(evs, tmp_path / "elsewhere", None, None)["source"] == "superpowers"
+    ws = tmp_path / "ws"
+    ws.mkdir()
+    assert handoff.step_progress(evs, ws, None, None, [str(tmp_path)])["source"] == "superpowers"
+    # ... but a tree outside the workspace, the project dir and the source dirs is never read
+    assert handoff.step_progress(evs, ws, None, None) is None
+    assert handoff.step_progress(evs, ws, None, None, [str(ws)]) is None
+    ledger_out = [use("Edit", {"file_path": str(sdd / "progress.md")})]  # a progress.md outside them: ignored
+    assert handoff.step_progress(ledger_out, ws, None, None, [str(ws / "src")]) is None
+    assert handoff.step_progress(ledger_out, ws, None, None, [str(tmp_path)])["source"] == "superpowers"
 
 
 def test_step_from_notes_header_and_last_prompt(tmp_path):
@@ -887,6 +895,8 @@ def test_snapshot_others_include_a_legacy_row(client, tmp_path):
     root = mk_task(workspace_dir=str(tmp_path), status="running", created_by=owner.user_id)
     mk_task(workspace_dir=str(tmp_path), title="legacy run", status="running", created_by=owner.user_id, root_id=None)
     assert run(handoff.snapshot(root, "working")).content["others"] == ["legacy run"]  # a NULL root_id is another run
+    legacy = mk_task(workspace_dir=str(tmp_path / "solo"), status="running", created_by=owner.user_id, root_id=None)
+    assert run(handoff.snapshot(legacy, "working")).content["others"] == []  # never itself
 
 
 def test_snapshot_children_waiting_others(client, tmp_path):

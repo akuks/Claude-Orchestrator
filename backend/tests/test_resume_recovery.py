@@ -222,11 +222,11 @@ def test_orphan_killed_only_with_matching_start(client, killpg_calls):
 # ---- the requeued run --------------------------------------------------------------------------
 
 
-def _crashed_run(owner, tmp_path, key, *, session_id=None, prompt="original work"):
+def _crashed_run(owner, tmp_path, key, *, session_id=None, prompt="original work", **extra):
     ws = tmp_path / "ws"
     ws.mkdir()
     (ws / "data.txt").write_bytes(b"")  # a Write truncated to 0 bytes
-    tid = mk_task(prompt=prompt, created_by=owner.user_id, session_id=session_id, workspace_dir=str(ws))
+    tid = mk_task(prompt=prompt, created_by=owner.user_id, session_id=session_id, workspace_dir=str(ws), **extra)
     add_events(tid, [
         ("text_output", {"text": "writing the data"}),
         ("tool_use", {"name": "Write", "input": {"file_path": str(ws / "data.txt"), "content": ""}, "id": "tW"}),
@@ -626,9 +626,34 @@ def test_retry_after_compose_failure_drops_the_old_record(client, tmp_path, monk
     assert r.status_code == 200, r.text
     assert get_task(tid).recovery["pending"] is False  # the record itself is kept
     assert wait_task(owner, tid)["status"] == "completed"
-    prompts = [p for p in (probe_prompt(key), probe_prompt(key2)) if p is not None]
-    assert prompts and all(RECORD_START not in p for p in prompts)
-    assert any("original work" in p for p in prompts)  # the step's own prompt, not RECOVERED_CONTINUE
+    prompt = probe_prompt(key2)  # the step's own prompt ran: the record (which holds key's probe) did not
+    assert probe_prompt(key) is None and RECORD_START not in prompt
+    assert prompt.endswith(f"original work [prompt-probe:{key2}]") and RECOVERED_CONTINUE not in prompt
+
+
+def test_retry_of_a_recovered_follow_up_never_resumes_the_cut_session(client, tmp_path):
+    """F1: recovery points a follow-up at its own crashed session; a person's Retry puts the
+    pre-recovery resume id (the parent's session) back and drops the record."""
+    owner = _owner(client)
+    key, key2 = env_probe_key(), env_probe_key()
+    parent = mk_task(prompt="parent work", created_by=owner.user_id, status="completed", session_id="p1")
+    tid = _crashed_run(owner, tmp_path, key, session_id="s1", prompt=f"follow up [prompt-probe:{key2}] [env-probe:{key2}]",
+                       parent_task_id=parent, root_id=parent, origin="user", resume_session_id="p1")
+    session_file(owner.user_id, "s1")
+    session_file(owner.user_id, "p1")
+    out, held = _recover_live(tid)
+    assert out == "requeued" and get_task(tid).resume_session_id == "s1"
+    assert get_task(tid).recovery["resume_before"] == "p1"
+    set_task(tid, status="failed")  # the person retries before (or instead of) the automatic re-run
+    r = owner.post(f"/tasks/{tid}/retry")
+    assert r.status_code == 200, r.text
+    t = get_task(tid)
+    assert t.resume_session_id == "p1" and t.recovery["pending"] is False
+    assert wait_task(owner, tid)["status"] == "completed"
+    args = read_probe_args(key2)
+    assert args is not None and args[args.index("--resume") + 1] == "p1" and "s1" not in args
+    prompt = probe_prompt(key2)  # the step's own prompt: the record's probe (key) never ran
+    assert RECORD_START not in prompt and probe_prompt(key) is None
 
 
 def test_recovery_event_failure_still_enqueues(client, monkeypatch):

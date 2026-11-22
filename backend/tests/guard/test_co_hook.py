@@ -1715,6 +1715,12 @@ def test_compact_handoff_is_redacted_cleaned_then_cut(plugin, tmp_path, stub):
     _handoff(run, body)
     ctx = _ctx_of(_sess(run, source="compact"))
     assert "***" in ctx and "ghp_" not in ctx and "cccc" not in ctx
+    # an all-whitespace file longer than the read is "empty", not an IndexError
+    run = Run(plugin, tmp_path / "blank", stub.base, trust="own")
+    _handoff(run, " \n" * (mx * 3))
+    assert _sess(run, source="compact") is None
+    err = [r for r in run.spool() if r["event"] == "guard_error"]
+    assert len(err) == 1 and err[0]["error"].startswith("ValueError")
 
 
 def test_hook_hidden_chars_equal_the_apps():
