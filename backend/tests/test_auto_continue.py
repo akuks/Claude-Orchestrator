@@ -46,7 +46,7 @@ _clock = [datetime.now(timezone.utc) - timedelta(hours=1)]
 
 
 def _step(owner, *, root=None, parent=None, origin="user", status="completed", auto=False,
-          bands=(("fresh", BAND_TS),), content=OPEN, notes_at=None, peak=152345):
+          bands=(("fresh", BAND_TS),), content=OPEN, notes_at=None, peak=152345, budget=None):
     """A thread step row (created_at strictly increasing), its usage row and the thread's handoff."""
     tid = uuid.uuid4().hex
     _clock[0] += timedelta(seconds=1)
@@ -55,7 +55,7 @@ def _step(owner, *, root=None, parent=None, origin="user", status="completed", a
         async with SessionLocal() as s:
             s.add(Task(id=tid, title="t", prompt="the work", root_id=root or tid, parent_task_id=parent,
                        origin=origin, status=status, auto_continued=auto, created_by=owner.user_id,
-                       session_id=f"s-{tid[:6]}", created_at=_clock[0],
+                       session_id=f"s-{tid[:6]}", created_at=_clock[0], max_budget_usd=budget,
                        notes="Step: 2 of 3" if notes_at else None, notes_updated_at=notes_at))
             if bands is not None:
                 s.add(TaskUsage(task_id=tid, root_id=root or tid, peak_context=peak, context_tokens=peak,
@@ -111,6 +111,20 @@ def test_fresh_band_and_open_todo_queue_one_fresh_continue(client, owner, submit
     # the thread now has an active step: a second call queues nothing
     _auto(tid)
     assert len(_children(tid)) == 1 and submitted == [k.id]
+
+
+def test_automatic_continue_keeps_the_steps_budget(client, owner, submitted):
+    """Found by the phase 3b e2e: the continued step had no max_budget_usd, so an unattended automatic
+    continue ran without the --max-budget-usd cut and without the 80/95 % bands. A thread step (automatic or
+    manual Continue, follow-up, answer) keeps the parent's budget, like its model and max turns."""
+    tid = _step(owner, budget=1.5)
+    _auto(tid)
+    kids = _children(tid)
+    assert len(kids) == 1 and kids[0].max_budget_usd == 1.5
+    other = _step(owner, budget=2.0, bands=None)
+    r = client.post(f"/tasks/{other}/followup", json={"prompt": "and the tests"})
+    assert r.status_code == 201, r.text
+    assert r.json()["max_budget_usd"] == 2.0
 
 
 def test_open_question_on_the_step_waits_for_the_answer(client, owner, submitted):

@@ -417,7 +417,7 @@ async def duplicate_task(task_id: str, request: Request):
 
 def _step_from(parent: Task, *, prompt: str, origin: str, resume: str | None, created_by: str | None) -> Task:
     """The one builder of a thread step (a follow-up or a Continue): the
-    parent's thread, workspace and run settings, queued."""
+    parent's thread, workspace and run settings (model, max turns, max budget), queued."""
     return Task(
         title=_default_title(prompt),
         prompt=prompt,
@@ -427,6 +427,7 @@ def _step_from(parent: Task, *, prompt: str, origin: str, resume: str | None, cr
         tags=list(parent.tags or []),
         model=parent.model,
         max_turns=parent.max_turns,
+        max_budget_usd=parent.max_budget_usd,  # the hard cut and the 80/95 % bands carry on
         parent_task_id=parent.id,
         origin=origin,
         root_id=parent.root_id or parent.id,  # join the parent's thread
