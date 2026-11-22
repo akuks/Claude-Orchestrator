@@ -107,6 +107,8 @@ export const api = {
   openHandoffs: () => req('GET', '/handoffs/open'),
   // ---- Questions inbox (phase 3b) ----
   listQuestions: (status = 'open') => req('GET', `/questions${qs({ status })}`),
+  taskAsks: (id) => req('GET', `/tasks/${id}/asks`),
+  askTask: (id, question) => req('POST', `/tasks/${id}/asks`, { question }),
   taskQuestions: (id) => req('GET', `/tasks/${id}/questions`),
   // body: {answer: str} or {accept: true} -> {question, task}
   answerQuestion: (id, body) => req('POST', `/questions/${id}/answer`, body),

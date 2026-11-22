@@ -162,3 +162,34 @@ def test_agent_token_is_refused(client):
     t.headers["Authorization"] = f"Bearer {_run(mint())}"
     r = t.get("/handoffs/open")
     assert r.status_code == 403
+
+
+def test_open_handoffs_pages_past_scan_max(client, monkeypatch):
+    from app.routers import handoffs as h
+    monkeypatch.setattr(h, "SCAN_MAX", 3)
+    me = login_as(f"oh-pg-{uuid.uuid4().hex[:6]}@test.local")
+    pid = client.post("/projects", json={"name": f"oh-pg-{uuid.uuid4().hex[:6]}"}).json()["id"]
+    keep = [{"subject_type": m["subject_type"], "subject_id": m["subject_id"], "role": m["role"]}
+            for m in client.get(f"/projects/{pid}/members").json()]
+    assert client.put(f"/projects/{pid}/members", json=keep + [
+        {"subject_type": "user", "subject_id": me.user_id, "role": "contributor"}]).status_code == 200
+    admin_id = client.get("/auth/me").json()["id"]
+    mine, _ = _thread(me.user_id, ended_days=2.0)
+    for i in range(4):  # newer, visible to me but not mine to manage: they fill the first page
+        _thread(admin_id, ended_days=0.01 * (i + 1), project_id=pid)
+    assert mine in _roots(me)
+
+
+def test_open_handoffs_no_thread_listed_twice_when_pages_overlap(client, monkeypatch):
+    from app.routers import handoffs as h
+
+    class Overlap(int):  # every page re-reads the first rows, as when data shifts between page queries
+        def __rmul__(self, other):
+            return 0
+
+    monkeypatch.setattr(h, "SCAN_MAX", Overlap(2))
+    me = login_as(f"oh-dup-{uuid.uuid4().hex[:6]}@test.local")
+    for i in range(3):
+        _thread(me.user_id, ended_days=0.1 * (i + 1))
+    roots = _roots(me)
+    assert roots and len(roots) == len(set(roots))

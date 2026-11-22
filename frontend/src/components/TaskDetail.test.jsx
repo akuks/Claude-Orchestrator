@@ -14,6 +14,8 @@ vi.mock('../api', () => ({
     continueTask: vi.fn(),
     getUsage: vi.fn(async () => null),
     taskQuestions: vi.fn(async () => []),
+    taskAsks: vi.fn(async () => []),
+    askTask: vi.fn(),
     answerQuestion: vi.fn(),
     dismissQuestion: vi.fn(),
     userDirectory: vi.fn(async () => [{ id: 'u2', name: 'Bea', email: 'b@x.io' }]),
@@ -340,6 +342,35 @@ describe('TaskDetail: the thread\'s questions (phase 3b)', () => {
     expect(api.answerQuestion).toHaveBeenCalledWith('q1', { accept: true })
     expect(onOpenTask).toHaveBeenCalledWith('child')
     api.taskQuestions.mockImplementation(async () => [])
+    api.getTask.mockReset()
+    api.getTask.mockImplementation(async (id) => ({ id, title: `Task ${id}`, status: 'running', prompt: 'p' }))
+  })
+
+  it('completed event refetches until terminal then reloads questions', async () => {
+    globalThis.WebSocket = FakeSocket
+    view = await render(<TaskDetail inline taskId="a" />)
+    await flush()
+    vi.useFakeTimers()
+    api.getTask.mockReset()
+    api.getTask
+      .mockResolvedValueOnce({ id: 'a', title: 'T', status: 'running', prompt: 'p' })
+      .mockResolvedValue({ id: 'a', title: 'T', status: 'completed', prompt: 'p' })
+    api.taskQuestions.mockClear()
+    api.getThread.mockClear()
+    api.getUsage.mockClear()
+    await act(async () => FakeSocket.all[0].onmessage({ data: JSON.stringify({ seq: 1, type: 'completed', payload: { status: 'completed' } }) }))
+    await act(async () => { await vi.advanceTimersByTimeAsync(0) })
+    expect(api.getTask).toHaveBeenCalledTimes(1)
+    expect(api.taskQuestions).not.toHaveBeenCalled()
+    await act(async () => { await vi.advanceTimersByTimeAsync(500) })
+    expect(api.getTask).toHaveBeenCalledTimes(2)
+    await act(async () => { await vi.advanceTimersByTimeAsync(10) })
+    expect(api.taskQuestions).toHaveBeenCalled()
+    expect(api.getThread).toHaveBeenCalled()
+    expect(api.getUsage).toHaveBeenCalled()
+    await act(async () => { await vi.advanceTimersByTimeAsync(6000) })
+    expect(api.getTask).toHaveBeenCalledTimes(2) // stopped early
+    vi.useRealTimers()
     api.getTask.mockReset()
     api.getTask.mockImplementation(async (id) => ({ id, title: `Task ${id}`, status: 'running', prompt: 'p' }))
   })

@@ -201,3 +201,16 @@ def test_zero_token_synthetic_message_keeps_the_estimate():
     only = UsageTracker()
     only.on_assistant(_asst("s1", _u(0, 0, 0, 0), model="<synthetic>"))
     assert only.est_cost_usd == 0.0
+
+
+def test_synthetic_model_keeps_last_model():
+    """3b parked item: a ``<synthetic>`` message never becomes the last model, and an unnamed message after it
+    is priced as the real model."""
+    t = UsageTracker()
+    t.on_assistant(_asst("m1", _u(0, 0, 0, 0), model="claude-sonnet-5-5"))
+    t.on_assistant(_asst("s1", _u(0, 0, 0, 0), model="<synthetic>"))
+    assert t._last_model == "claude-sonnet-5-5"
+    t.on_assistant(_asst("m2", _u(1_000_000, 0, 0, 0), model=None))
+    assert t.est_cost_usd is not None
+    assert t._msgs["id:m2"]["model"] == "claude-sonnet-5-5"
+    assert t._msgs["id:s1"]["model"] == "claude-sonnet-5-5"

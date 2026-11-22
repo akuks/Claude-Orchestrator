@@ -10,6 +10,7 @@ from sqlalchemy import select
 
 from . import mcp_manager
 from . import auth as auth_mod
+from .asks.service import fail_interrupted_asks
 from .auth import current_principal
 from .config import settings
 from .credentials import credential_status
@@ -31,6 +32,7 @@ from .routers import (
     mcp,
     projects,
     questions,
+    asks,
     schedules,
     skills,
     stream,
@@ -106,6 +108,7 @@ async def lifespan(app: FastAPI):
     guard_runtime.log_approval_address()
     await auth.bootstrap_admin()
     await auth.assign_orphans_to_first_admin()
+    await fail_interrupted_asks()
     worker = WorkerManager()
     app.state.worker = worker
     await worker.start()
@@ -161,6 +164,7 @@ _authed = [Depends(current_principal)]
 for _r in (
     tasks.router,
     questions.router,
+    asks.router,
     handoffs.router,
     mcp.router,
     projects.router,

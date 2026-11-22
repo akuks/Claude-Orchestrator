@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import logging
 import re
+from datetime import datetime, timezone
 
 from fastapi import HTTPException
 from sqlalchemy import func, select
@@ -102,6 +103,27 @@ async def file(s, task: Task, fields: dict, *, source: str) -> TaskQuestion:
         await s.commit()
         await s.refresh(q)
     return q
+
+
+async def dismiss_attempt_questions(task_id: str) -> int:
+    """A new attempt of a step starts: its earlier attempt's open final-text questions are stale, so they are
+    dismissed (no answerer). Agent- and person-filed questions stay. Returns the count; never raises."""
+    try:
+        async with SessionLocal() as s:
+            rows = (await s.execute(select(TaskQuestion).where(
+                TaskQuestion.task_id == task_id, TaskQuestion.source == "final_text",
+                TaskQuestion.status == "open"))).scalars().all()
+            now = datetime.now(timezone.utc)
+            for q in rows:
+                q.status = "dismissed"
+                q.answered_by = None
+                q.answered_at = now
+            if rows:
+                await s.commit()
+            return len(rows)
+    except Exception:  # noqa: BLE001
+        log.warning("questions: dismissing attempt questions failed for %s", task_id, exc_info=True)
+        return 0
 
 
 async def notify(question_id: str) -> None:

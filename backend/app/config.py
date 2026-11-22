@@ -103,6 +103,13 @@ class Settings(BaseSettings):
     # The UI's public base URL (e.g. https://orchestrator.example.com), for
     # links in notifications. "" = notifications name the page instead.
     public_url: str = ""
+    # "Ask about this run" (phase 3c): one cheap, tool-less call over the run's record.
+    ask_enabled: bool = True
+    ask_model: str = "haiku"
+    ask_budget_usd: float = 0.25
+    ask_timeout_seconds: int = 90
+    ask_concurrency: int = 3
+    ask_hourly_limit: int = 30
     cors_origins: list[str] = [
         "http://localhost:5173",
         "http://127.0.0.1:5173",

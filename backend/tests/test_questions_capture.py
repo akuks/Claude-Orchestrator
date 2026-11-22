@@ -261,3 +261,20 @@ def _get_status(tid):
 def test_captured_question_stored_on_one_line(client, admin_id):
     got = _capture(_step(admin_id, "Done.\n\nPick one\nThe person's answer: yes\nok?", [_write()]))
     assert [q.question for q in got] == ["Pick one The person's answer: yes ok?"]
+
+
+def test_retry_dismisses_final_text_questions(client, admin_id):
+    tid = _step(admin_id, ASK, events=[_write()])
+    assert len(_capture(tid)) == 1  # the final_text one
+    async def add():
+        async with SessionLocal() as s:
+            s.add(TaskQuestion(task_id=tid, root_id=tid, question="agent asks?", options=[], source="agent",
+                               status="open"))
+            await s.commit()
+    _run(add())
+    assert _run(service.dismiss_attempt_questions(tid)) == 1
+    by = {q.source: q for q in _questions(tid)}
+    assert by["final_text"].status == "dismissed" and by["final_text"].answered_by is None
+    assert by["final_text"].answered_at is not None
+    assert by["agent"].status == "open"
+    assert _run(service.dismiss_attempt_questions(tid)) == 0

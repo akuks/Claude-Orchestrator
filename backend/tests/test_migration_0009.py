@@ -22,7 +22,7 @@ def test_migration_0009(scratch_url):  # noqa: F811
             " VALUES ('p9', 'old', 'old', '/x', 'sonnet', '{}', '', true, false, false, CURRENT_TIMESTAMP)")
 
     _inspect(url, seed)
-    command.upgrade(_alembic_cfg(url), "head")
+    command.upgrade(_alembic_cfg(url), "0009")
 
     def check_head(sc, insp):
         assert {"task_id", "root_id", "context_tokens", "peak_context", "est_cost_usd", "breakdown", "bands",

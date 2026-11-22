@@ -55,8 +55,8 @@ class UsageTracker:
         if not isinstance(msg, dict):
             return
         model = msg.get("model") if isinstance(msg.get("model"), str) and msg.get("model") else None
-        if model:
-            self._last_model = model
+        if model and model != "<synthetic>":
+            self._last_model = model  # Claude Code's <synthetic> error/interrupt messages are not a model
         content = msg.get("content")
         for block in content if isinstance(content, list) else []:
             if isinstance(block, dict) and block.get("type") == "tool_use" and block.get("id"):
@@ -74,7 +74,7 @@ class UsageTracker:
         else:
             self._anon += 1
             key = f"anon:{self._anon}"
-        self._msgs[key] = {"helper": helper, "model": model or self._last_model, "u": u}
+        self._msgs[key] = {"helper": helper, "model": self._last_model if model == "<synthetic>" else (model or self._last_model), "u": u}
         if helper is None and (ctx := u[0] + u[1] + u[2]) > 0:
             self._context = ctx
             self._peak = max(self._peak or 0, ctx)
