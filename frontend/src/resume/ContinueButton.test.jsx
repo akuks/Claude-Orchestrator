@@ -35,6 +35,10 @@ describe('ContinueButton', () => {
     await mount({ thread: [task, { id: 'x', status: 'running' }] })
     expect(q('continue-button')).toBeNull()
   })
+  it('allowCompleted shows it on a completed step (Home "Open handoffs": an open todo)', async () => {
+    await mount({ task: { ...task, status: 'completed' }, allowCompleted: true })
+    expect(q('continue-button')).not.toBeNull()
+  })
   it('is hidden from a viewer the server does not allow', async () => {
     await mount({ task: { ...task, can_manage: false, can_resume: false } })
     expect(q('continue-button')).toBeNull()

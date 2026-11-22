@@ -13,6 +13,9 @@ vi.mock('../api', () => ({
     closeHandoff: vi.fn(),
     continueTask: vi.fn(),
     getUsage: vi.fn(async () => null),
+    taskQuestions: vi.fn(async () => []),
+    answerQuestion: vi.fn(),
+    dismissQuestion: vi.fn(),
     userDirectory: vi.fn(async () => [{ id: 'u2', name: 'Bea', email: 'b@x.io' }]),
     streamUrl: (id, seq) => `ws://test/tasks/${id}/stream?after=${seq}`,
     reportUrl: () => '#',
@@ -286,5 +289,40 @@ describe('TaskDetail: token care (phase 3b)', () => {
     expect(one('fresh')[0].textContent).toContain('context reached 152k')
     expect(one('auto')[0].textContent).toBe('continued automatically: context reached 152k')
     expect(c.querySelector('.co-terminal').textContent).not.toContain('{"band"')
+  })
+})
+
+describe('TaskDetail: the thread\'s questions (phase 3b)', () => {
+  let view
+  const RealWS = globalThis.WebSocket
+  afterEach(async () => {
+    await view?.unmount()
+    view = null
+    globalThis.WebSocket = RealWS
+    FakeSocket.all = []
+  })
+
+  it('shows an open question as a card; an answer opens the follow-up step', async () => {
+    globalThis.WebSocket = FakeSocket
+    api.getTask.mockImplementation(async (id) => ({ id, title: 'T', status: 'completed', prompt: 'p' }))
+    api.taskQuestions.mockImplementation(async () => [{
+      id: 'q1', task_id: 'a', status: 'open', can_answer: true, question: 'Which table?', options: ['old', 'new'],
+      recommendation: 'new', source: 'final_text', created_at: '2026-11-22T10:00:00Z',
+    }])
+    api.answerQuestion.mockResolvedValue({ question: {}, task: { id: 'child' } })
+    const onOpenTask = vi.fn()
+    view = await render(<TaskDetail inline taskId="a" onOpenTask={onOpenTask} />)
+    await flush()
+    await flush()
+    const card = view.container.querySelector('[data-testid="thread-questions"]')
+    expect(api.taskQuestions).toHaveBeenCalledWith('a')
+    expect(card.textContent).toContain('Which table?')
+    await act(async () => card.querySelector('[data-testid="question-accept"]').dispatchEvent(new MouseEvent('click', { bubbles: true })))
+    await flush()
+    expect(api.answerQuestion).toHaveBeenCalledWith('q1', { accept: true })
+    expect(onOpenTask).toHaveBeenCalledWith('child')
+    api.taskQuestions.mockImplementation(async () => [])
+    api.getTask.mockReset()
+    api.getTask.mockImplementation(async (id) => ({ id, title: `Task ${id}`, status: 'running', prompt: 'p' }))
   })
 })

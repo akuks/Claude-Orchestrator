@@ -7,6 +7,9 @@ import { api } from '../api'
 import { layoutComets } from '../comets/layout'
 import Comets3D from '../comets/Comets3D'
 import { displayName, greetingFor, parseTime, useHomeData } from './useHomeData'
+import QuestionsSection from '../questions/QuestionsSection'
+import ContinueButton from '../resume/ContinueButton'
+import { stepLabel } from '../resume/resume'
 import './home.css'
 
 dayjs.extend(relativeTime)
@@ -65,8 +68,10 @@ function Empty({ title, text, children }) {
   )
 }
 
-export default function HomeView({ user, navigate, onOpenCredentials, onApprovalsChanged, refreshSignal }) {
-  const { needsYou, live, recent, stats, loading, errors, reload } = useHomeData(user, { refreshSignal })
+export default function HomeView({ user, navigate, onOpenCredentials, onApprovalsChanged, onQuestionsChanged, refreshSignal }) {
+  const { needsYou, questions, openHandoffs, live, recent, stats, loading, errors, reload } = useHomeData(user, {
+    refreshSignal,
+  })
   const [approving, setApproving] = useState(null)
   const { comets, overflow } = useMemo(() => layoutComets(live), [live])
 
@@ -177,6 +182,65 @@ export default function HomeView({ user, navigate, onOpenCredentials, onApproval
               </ul>
             )}
           </Panel>
+
+          {!loading && (questions.length > 0 || errors.questions) && (
+            <Panel
+              title="Questions"
+              testId="home-questions"
+              extra={questions.length ? <span className="co-home-hint">{plural(questions.length, 'open question', 'open questions')}</span> : null}
+            >
+              {errors.questions && <InlineError text="Couldn't load the open questions." onRetry={reload} />}
+              <QuestionsSection
+                questions={questions}
+                onChanged={() => {
+                  onQuestionsChanged?.()
+                  reload()
+                }}
+              />
+            </Panel>
+          )}
+
+          {!loading && (openHandoffs.length > 0 || errors.handoffs) && (
+            <Panel title="Open handoffs" testId="home-handoffs">
+              {errors.handoffs && <InlineError text="Couldn't load the open handoffs." onRetry={reload} />}
+              <ul className="co-home-rows">
+                {openHandoffs.map((h) => {
+                  const tag = RECENT_TAG[h.task?.status] || { color: 'default', text: h.task?.status }
+                  const label = stepLabel(h.step)
+                  return (
+                    <li key={h.root_id} className="co-home-row" data-testid="handoff-row">
+                      <div className="co-home-row-main">
+                        <Tag color={tag.color} bordered={false}>
+                          {tag.text}
+                        </Tag>
+                        <div className="co-home-row-text">
+                          <a className="co-home-row-title" href={`#/tasks/${encodeURIComponent(h.task?.id)}`} title={h.title}>
+                            {h.title}
+                          </a>
+                          <div className="co-home-row-detail" title={label || undefined}>
+                            {[label, h.ended_at ? when(h.ended_at).fromNow() : null].filter(Boolean).join(' · ')}
+                          </div>
+                        </div>
+                      </div>
+                      <div className="co-home-row-actions">
+                        <ContinueButton
+                          task={h.task}
+                          user={user}
+                          thread={[]}
+                          allowCompleted
+                          onContinued={(child) => {
+                            message.success('Continuing')
+                            reload()
+                            navigate({ page: 'tasks', id: child.id })
+                          }}
+                        />
+                      </div>
+                    </li>
+                  )
+                })}
+              </ul>
+            </Panel>
+          )}
 
           <Panel title="Recent" testId="home-recent">
             {errors.recent && <InlineError text="Couldn't load your recent tasks." onRetry={reload} />}

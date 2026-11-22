@@ -51,6 +51,7 @@ import RunNotices from '../resume/RunNotices'
 import UsageChips from '../usage/UsageChips'
 import SoFarLine from '../usage/SoFarLine'
 import TokensPanel from '../usage/TokensPanel'
+import { ThreadQuestions } from '../questions/QuestionsSection'
 import { usageLine, useUsage } from '../usage/usage'
 
 // co-guard lines in the run log: one icon per kind (guard.js guardLine).
@@ -552,6 +553,15 @@ export default function TaskDetail({ taskId, onClose, onChanged, onOpenTask, onO
       )}
 
       <RunNotices task={task} events={events} handoff={handoff} />
+      <ThreadQuestions
+        taskId={taskId}
+        refreshKey={task?.status}
+        onChanged={onChanged}
+        onAnswered={(child) => {
+          onChanged?.()
+          onOpenTask?.(child.id) // the answer continues the thread in a new step
+        }}
+      />
       <HandoffCard taskId={taskId} onHandoff={setHandoff} canManage={task?.can_manage === true} />
 
       <Typography.Title level={5}>Live Output</Typography.Title>

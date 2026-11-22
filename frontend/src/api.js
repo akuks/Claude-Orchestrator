@@ -103,6 +103,14 @@ export const api = {
   closeHandoff: (id) => req('POST', `/tasks/${id}/handoff/close`),
   getNotes: (id) => req('GET', `/tasks/${id}/notes`),
   continueTask: (id, mode = 'auto') => req('POST', `/tasks/${id}/continue`, { mode }),
+  // Home "Open handoffs" (phase 3b): threads to pick up again, each with its latest step.
+  openHandoffs: () => req('GET', '/handoffs/open'),
+  // ---- Questions inbox (phase 3b) ----
+  listQuestions: (status = 'open') => req('GET', `/questions${qs({ status })}`),
+  taskQuestions: (id) => req('GET', `/tasks/${id}/questions`),
+  // body: {answer: str} or {accept: true} -> {question, task}
+  answerQuestion: (id, body) => req('POST', `/questions/${id}/answer`, body),
+  dismissQuestion: (id) => req('POST', `/questions/${id}/dismiss`),
   getGitState: (projectId) => req('GET', `/projects/${encodeURIComponent(projectId)}/git-state`),
   getArtifacts: (id) => req('GET', `/tasks/${id}/artifacts`),
   stats: () => req('GET', '/tasks/stats'),

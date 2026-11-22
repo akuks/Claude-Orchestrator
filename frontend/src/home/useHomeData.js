@@ -2,8 +2,10 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { api } from '../api'
 import { parseTime } from '../time'
 import { actionTitle, revealHidden, ruleName } from '../guard/guard'
+import { openQuestions } from '../questions/questions'
 
-// Data behind Home: what needs the viewer, live workflows, their recent work
+// Data behind Home: what needs the viewer, the open questions agents asked,
+// threads to pick up again (open handoffs), live workflows, their recent work
 // and today's cost. Every source is fetched independently (one failing never
 // blanks the page) and polled every 10s while the tab is visible — except the
 // usage summary (a heavier aggregate that changes slowly), refreshed every 60s.
@@ -121,6 +123,8 @@ const SOURCES = {
   live: () => api.liveRuns(),
   tasks: () => api.listTasks({ limit: 100 }),
   usage: () => api.usageSummary(),
+  questions: () => api.listQuestions('open'),
+  handoffs: () => api.openHandoffs(),
 }
 // Sources polled less often than POLL_MS.
 const SLOW = { usage: USAGE_POLL_MS }
@@ -134,6 +138,8 @@ const SECTION = {
   live: 'live',
   tasks: 'recent',
   usage: 'stats',
+  questions: 'questions',
+  handoffs: 'handoffs',
 }
 
 const isHidden = () => typeof document !== 'undefined' && document.visibilityState === 'hidden'
@@ -226,7 +232,9 @@ export function useHomeData(user, { refreshSignal, intervalMs = POLL_MS } = {}) 
     () => ({ costToday: costToday(raw.usage), liveCount: raw.live ? raw.live.length : null }),
     [raw.usage, raw.live],
   )
+  const questions = useMemo(() => openQuestions(raw.questions), [raw.questions])
+  const openHandoffs = useMemo(() => (Array.isArray(raw.handoffs) ? raw.handoffs : []), [raw.handoffs])
   const error = Object.values(errors)[0] || null
 
-  return { needsYou, live, recent, stats, loading, error, errors, reload: load }
+  return { needsYou, questions, openHandoffs, live, recent, stats, loading, error, errors, reload: load }
 }
