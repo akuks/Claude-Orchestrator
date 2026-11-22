@@ -86,6 +86,44 @@ class ContinueCreate(BaseModel):
     mode: str | None = "auto"
 
 
+class QuestionCreate(BaseModel):
+    # the lengths are checked after redaction and cleaning (questions.service.clean_fields): 422
+    question: str
+    options: list[str] = Field(default_factory=list)
+    recommendation: Optional[str] = None
+    blocks: Optional[str] = None
+    reversible: Optional[bool] = None
+
+
+class QuestionAnswer(BaseModel):
+    # exactly one of: a free answer, or accept=true (checked by the route: 422)
+    answer: Optional[str] = None
+    accept: Optional[bool] = None
+
+
+class QuestionOut(BaseModel):
+    id: str
+    task_id: str
+    root_id: str
+    project_id: Optional[str]
+    question: str
+    options: list[str]
+    recommendation: Optional[str]
+    blocks: Optional[str]
+    reversible: Optional[bool]
+    source: str
+    status: str
+    answer: Optional[str]
+    answered_by: Optional[str]
+    answered_at: Optional[datetime]
+    followup_task_id: Optional[str]
+    created_at: datetime
+    task_title: Optional[str] = None
+    can_answer: bool = False
+
+    model_config = {"from_attributes": True}
+
+
 class ArtifactOut(BaseModel):
     id: int
     filename: str

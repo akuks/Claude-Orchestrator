@@ -2,8 +2,9 @@
 
 Kept dependency-free (urllib in a thread). Email and other channels are future
 work; this covers the Phase 4 "notify on completion / failure" requirement,
-and co-guard action requests waiting for a person (the schedule's webhook,
-unless its notify policy is "never").
+co-guard action requests waiting for a person, and questions filed for a
+person (phase 3b; both: the schedule's webhook, unless its notify policy is
+"never").
 """
 
 import asyncio
@@ -16,7 +17,7 @@ from sqlalchemy import select
 from .config import settings
 from .constants import Status
 from .database import SessionLocal
-from .models import ActionApproval, Schedule, Task
+from .models import ActionApproval, Schedule, Task, TaskQuestion
 
 
 def _post_webhook(url: str, text: str) -> None:
@@ -78,6 +79,32 @@ async def action_waiting_message(s, a: ActionApproval, task: Task) -> tuple[str,
         f"{link}"
     )
     return schedule.notify_webhook, text
+
+
+async def notify_question(question_id: str) -> None:
+    """Event ``question``: a question was filed on a task. Sent to the thread's scheduled run's webhook (the
+    step's own schedule, else its root's), unless the policy is "never"; only the stored, redacted question's
+    first line (<= 200 chars) goes out. Fire and forget."""
+    async with SessionLocal() as s:
+        q = await s.get(TaskQuestion, question_id)
+        task = await s.get(Task, q.task_id) if q is not None else None
+        if task is None:
+            return
+        schedule_id = task.schedule_id
+        if not schedule_id and task.root_id and task.root_id != task.id:
+            root = await s.get(Task, task.root_id)
+            schedule_id = root.schedule_id if root is not None else None
+        schedule = await s.get(Schedule, schedule_id) if schedule_id else None
+        if schedule is None or not schedule.notify_webhook or schedule.notify == "never":
+            return
+        first = (q.question or "").split("\n", 1)[0]
+        if len(first) > 200:
+            first = first[:199] + "…"
+        base = (settings.public_url or "").rstrip("/")
+        link = f"{base}/#/tasks/{task.id}" if base else f"Task `{task.id}`"
+        text = f"❓ Agent question waiting for an answer: {task.title}\n> {first}\n{link}"
+        webhook = schedule.notify_webhook
+    post_in_background(webhook, text)
 
 
 def post_in_background(webhook: str, text: str) -> None:

@@ -36,6 +36,8 @@ from ..schemas import (
     ContinueCreate,
     EventOut,
     FollowupCreate,
+    QuestionCreate,
+    QuestionOut,
     StatsOut,
     TaskCreate,
     TaskOut,
@@ -679,6 +681,66 @@ async def put_notes(task_id: str, request: Request):
     except Exception:  # noqa: BLE001
         logging.getLogger(__name__).exception("handoff snapshot after notes failed for %s", task_id)
     return out
+
+
+# ---- questions (phase 3b): the agent's own token may file and read its own task's questions
+# (auth._AGENT_QUESTIONS); a manager may file one; people read the thread's. Answer and dismiss live in
+# routers/questions.py (people only).
+
+
+async def _question_task(s, p, task_id: str) -> Task:
+    """The task a question call is about: the agent token's own task only (403 otherwise), or a task the
+    person can see (404 otherwise)."""
+    if p.is_agent:
+        if p.token.task_id != task_id:
+            raise HTTPException(403, "Token not allowed for this task")
+        task = await s.get(Task, task_id)
+        if task is None:
+            raise HTTPException(404, "Task not found")
+        return task
+    return await require_task(s, p, task_id)
+
+
+@router.post("/{task_id}/questions", response_model=QuestionOut, status_code=201)
+async def file_question(task_id: str, payload: QuestionCreate, request: Request):
+    from ..questions import service as questions
+
+    p = request.state.principal
+    async with SessionLocal() as s:
+        task = await _question_task(s, p, task_id)
+        if not p.is_agent:
+            await _require_manage(s, p, task)
+        fields = questions.clean_fields(payload, request.app.state.worker._run_secrets.get(task_id))
+        q = await questions.file(s, task, fields, source="agent")
+        out = questions.out(q, task_title=task.title,
+                            can_answer=not p.is_agent and (await _manage_allowed(s, p, task, need_contributor=True))[0])
+    await questions.notify(out.id)
+    return out
+
+
+@router.get("/{task_id}/questions", response_model=list[QuestionOut])
+async def list_task_questions(task_id: str, request: Request):
+    """The agent token: its own task's questions. A person: the questions of the task's thread, on the steps
+    they can see, oldest first."""
+    from ..questions import service as questions
+
+    p = request.state.principal
+    async with SessionLocal() as s:
+        task = await _question_task(s, p, task_id)
+        if p.is_agent:
+            rows = (await s.execute(select(TaskQuestion, Task.title).join(Task, Task.id == TaskQuestion.task_id)
+                                    .where(TaskQuestion.task_id == task_id)
+                                    .order_by(TaskQuestion.created_at.asc()))).all()
+            return [questions.out(q, task_title=title) for q, title in rows]
+        rows = (await s.execute(
+            select(TaskQuestion, Task).join(Task, Task.id == TaskQuestion.task_id)
+            .where(TaskQuestion.root_id == (task.root_id or task.id), await task_visibility_clause(s, p))
+            .order_by(TaskQuestion.created_at.asc()))).all()
+        res = []
+        for q, t in rows:
+            can = q.status == "open" and (await _manage_allowed(s, p, t, need_contributor=True))[0]
+            res.append(questions.out(q, task_title=t.title, can_answer=can))
+        return res
 
 
 @router.get("/{task_id}/handoff")

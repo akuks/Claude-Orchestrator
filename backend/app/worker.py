@@ -1712,6 +1712,13 @@ class WorkerManager:
             await guard_grants.after_task_finished(task_id, submit=self.submit)
         except Exception:  # noqa: BLE001 - never breaks a finish
             pass
+        # Questions inbox: the final text's trailing question (never raises; the guard is belt and braces)
+        try:
+            from .questions import service as questions
+
+            await questions.capture_final(task_id)
+        except Exception as e:  # noqa: BLE001 - never breaks a finish
+            log.warning("questions: capture failed for %s: %s", task_id, e)
         # token care: a step that crossed the fresh-session threshold continues in a fresh session
         await self._maybe_auto_continue(task_id)
 

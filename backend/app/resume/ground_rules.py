@@ -1,7 +1,7 @@
 """Ground rules: the short rules every agent is given (Phase 3a, forge F21/F93/F98).
 
 Org settings (``GuardOrgSettings.ground_rules``, admin-only to change):
-``{"grounding": bool, "short_answers": bool, "usage_care": bool, "notes": bool, "extra": str}``.
+``{"grounding": bool, "short_answers": bool, "usage_care": bool, "notes": bool, "questions": bool, "extra": str}``.
 
 * ``main_text(cfg)`` goes to the main session's ``--append-system-prompt`` (the system prompt survives
   compaction, so it is never re-sent there).
@@ -23,8 +23,9 @@ from ..guard.co_hook import DATA_LINE, NOTES_LINE
 from ..redaction import clean_text
 
 GROUND_EXTRA_MAX = 2000
-SWITCHES = ("grounding", "short_answers", "usage_care", "notes")
-DEFAULTS = {"grounding": True, "short_answers": True, "usage_care": True, "notes": True, "extra": ""}
+SWITCHES = ("grounding", "short_answers", "usage_care", "notes", "questions")
+DEFAULTS = {"grounding": True, "short_answers": True, "usage_care": True, "notes": True, "questions": True,
+            "extra": ""}
 
 GROUNDING = (
     "co-orchestrator grounding rule:\n"
@@ -55,6 +56,15 @@ USAGE_CARE_HELPER = (
 )
 # the notes rule for the main session: the hook's nudge, asking for short notes instead of an update now
 NOTES_RULE = NOTES_LINE.replace("update your notes now", "keep short notes")
+# phase 3b Questions inbox: how the main session files a blocking question (Global Constraints, verbatim).
+# Main session only: a helper reports to the main session, which decides what to ask.
+QUESTIONS_RULE = (
+    "If you need a decision from a person to go on, file it once and end your turn: curl -s -X POST "
+    "\"$CO_API_BASE/tasks/$CO_TASK_ID/questions\" -H \"Authorization: Bearer $CO_API_TOKEN\" -H "
+    "'Content-Type: application/json' -d '{\"question\": \"...\", \"options\": [\"...\"], "
+    "\"recommendation\": \"...\", \"blocks\": \"what waits on it\", \"reversible\": true}'. "
+    "Always give a recommendation."
+)
 # forge v0.7.0's PRECEDENCE_LINE (forge.js l.253-256), "JSPARK Forge" -> "co-orchestrator", nothing else changed.
 # The main session gets it when the superpowers plugin is loaded (helpers do not, as in forge).
 PRECEDENCE_LINE = (
@@ -133,6 +143,7 @@ def main_text(cfg: dict) -> str:
              SHORT_ANSWERS if cfg["short_answers"] else None,
              USAGE_CARE_MAIN if cfg["usage_care"] else None,
              NOTES_RULE if cfg["notes"] else None,
+             QUESTIONS_RULE if cfg["questions"] else None,
              cfg["extra"].strip()]
     return "\n\n".join(p for p in parts if p)
 
