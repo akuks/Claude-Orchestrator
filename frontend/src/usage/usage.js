@@ -26,14 +26,15 @@ export function contextChip(step) {
   return { text: `context ${kOf(n)}`, level }
 }
 
-// "budget 41 % est." of the step's max budget; "est." only while it runs.
+// "budget 41 % est." of the step's max budget; "est." whenever the server marks
+// the cost an estimate (running, or finished without a result cost).
 // Hidden without a max budget or a cost figure. Amber at 80 %, red at 95 %
 // (the bands co-guard tells the agent about).
-export function budgetChip(step, live) {
+export function budgetChip(step) {
   if (!step || !num(step.max_budget_usd) || !num(step.est_cost_usd) || !num(step.budget_pct)) return null
   const pct = step.budget_pct
   const level = pct >= 95 ? 'red' : pct >= 80 ? 'amber' : 'none'
-  return { text: `budget ${Math.round(pct)} %${live ? ' est.' : ''}`, level }
+  return { text: `budget ${Math.round(pct)} %${step.cost_is_estimate === true ? ' est.' : ''}`, level }
 }
 
 export function fmtDuration(ms) {

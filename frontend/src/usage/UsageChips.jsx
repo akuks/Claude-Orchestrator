@@ -4,10 +4,10 @@ import './usage.css'
 const n = (v) => Number(v).toLocaleString('en-US')
 
 // The step's context and budget chips (task header).
-export default function UsageChips({ report, live }) {
+export default function UsageChips({ report }) {
   const step = report?.step
   const ctx = contextChip(step)
-  const budget = budgetChip(step, live)
+  const budget = budgetChip(step)
   if (!ctx && !budget) return null
   const ctxTitle =
     ctx &&

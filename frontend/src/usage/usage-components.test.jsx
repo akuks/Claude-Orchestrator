@@ -48,31 +48,35 @@ const mount = async (el) => {
 
 describe('UsageChips', () => {
   it('shows the context chip without colour when there is no threshold, and the budget estimate', async () => {
-    const c = await mount(<UsageChips report={report()} live />)
+    const c = await mount(<UsageChips report={report()} />)
     expect(q(c, 'usage-context').textContent).toBe('context 63k')
     expect(q(c, 'usage-context').className).toContain('co-usage-chip-none')
     expect(q(c, 'usage-budget').textContent).toBe('budget 41 % est.')
   })
   it('colours the context chip amber then red against the threshold', async () => {
-    let c = await mount(<UsageChips report={report({ fresh_session_tokens: 75000 })} live />)
+    let c = await mount(<UsageChips report={report({ fresh_session_tokens: 75000 })} />)
     expect(q(c, 'usage-context').className).toContain('co-usage-chip-amber')
     await view.unmount()
-    c = await mount(<UsageChips report={report({ context_tokens: 151000, fresh_session_tokens: 150000 })} live />)
+    c = await mount(<UsageChips report={report({ context_tokens: 151000, fresh_session_tokens: 150000 })} />)
     expect(q(c, 'usage-context').className).toContain('co-usage-chip-red')
   })
-  it('drops "est." after the finish and hides the budget chip without a max budget', async () => {
-    let c = await mount(<UsageChips report={report({ cost_is_estimate: false })} live={false} />)
-    expect(q(c, 'usage-budget').textContent).toBe('budget 41 %')
+  it('follows the server: "est." for a finished step without a result cost, none with one', async () => {
+    let c = await mount(<UsageChips report={report({ cost_is_estimate: true })} />)
+    expect(q(c, 'usage-budget').textContent).toBe('budget 41 % est.')
     await view.unmount()
-    c = await mount(<UsageChips report={report({ max_budget_usd: null, budget_pct: null })} live />)
+    c = await mount(<UsageChips report={report({ cost_is_estimate: false })} />)
+    expect(q(c, 'usage-budget').textContent).toBe('budget 41 %')
+  })
+  it('hides the budget chip without a max budget', async () => {
+    const c = await mount(<UsageChips report={report({ max_budget_usd: null, budget_pct: null })} />)
     expect(q(c, 'usage-budget')).toBeNull()
     expect(q(c, 'usage-context')).not.toBeNull()
   })
   it('renders nothing without a report or figures', async () => {
-    let c = await mount(<UsageChips report={null} live />)
+    let c = await mount(<UsageChips report={null} />)
     expect(c.textContent).toBe('')
     await view.unmount()
-    c = await mount(<UsageChips report={report({ context_tokens: null, max_budget_usd: null, budget_pct: null })} live />)
+    c = await mount(<UsageChips report={report({ context_tokens: null, max_budget_usd: null, budget_pct: null })} />)
     expect(q(c, 'usage-chips')).toBeNull()
   })
 })

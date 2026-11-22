@@ -35,21 +35,20 @@ describe('contextChip', () => {
 
 describe('budgetChip', () => {
   const step = { max_budget_usd: 2, budget_pct: 41.2, est_cost_usd: 0.82, cost_is_estimate: true }
-  it('says "budget {pct} % est." while the step runs', () => {
-    expect(budgetChip(step, true)).toEqual({ text: 'budget 41 % est.', level: 'none' })
+  it('says "est." whenever the server marks the cost an estimate (running, or finished without a result cost)', () => {
+    expect(budgetChip(step)).toEqual({ text: 'budget 41 % est.', level: 'none' })
   })
-  it('drops "est." after the finish', () => {
-    expect(budgetChip({ ...step, cost_is_estimate: false }, false).text).toBe('budget 41 %')
-    expect(budgetChip(step, false).text).toBe('budget 41 %')
+  it('drops "est." when the cost is the real one', () => {
+    expect(budgetChip({ ...step, cost_is_estimate: false }).text).toBe('budget 41 %')
   })
   it('is hidden without a max budget or an estimate', () => {
-    expect(budgetChip(null, true)).toBeNull()
-    expect(budgetChip({ ...step, max_budget_usd: null, budget_pct: null }, true)).toBeNull()
-    expect(budgetChip({ ...step, est_cost_usd: null, budget_pct: null }, true)).toBeNull()
+    expect(budgetChip(null)).toBeNull()
+    expect(budgetChip({ ...step, max_budget_usd: null, budget_pct: null })).toBeNull()
+    expect(budgetChip({ ...step, est_cost_usd: null, budget_pct: null })).toBeNull()
   })
   it('turns amber at 80 % and red at 95 %', () => {
-    expect(budgetChip({ ...step, budget_pct: 80 }, true).level).toBe('amber')
-    expect(budgetChip({ ...step, budget_pct: 95 }, true).level).toBe('red')
+    expect(budgetChip({ ...step, budget_pct: 80 }).level).toBe('amber')
+    expect(budgetChip({ ...step, budget_pct: 95 }).level).toBe('red')
   })
 })
 
