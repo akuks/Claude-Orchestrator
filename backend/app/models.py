@@ -368,6 +368,26 @@ class TaskQuestion(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
 
 
+class RunAsk(Base):
+    """A person's private question about a run, answered from the run's record (phase 3c).
+    status pending | answered | failed."""
+
+    __tablename__ = "run_asks"
+    __table_args__ = (Index("ix_run_asks_user_id_created_at", "user_id", "created_at"),)
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=_uuid)
+    task_id: Mapped[str] = mapped_column(ForeignKey("tasks.id", ondelete="CASCADE"), index=True)
+    user_id: Mapped[str] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    question: Mapped[str] = mapped_column(Text)
+    answer: Mapped[str | None] = mapped_column(Text, nullable=True)
+    status: Mapped[str] = mapped_column(String(12), default="pending", server_default="pending")
+    error: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    cost_usd: Mapped[float | None] = mapped_column(Float, nullable=True)
+    model: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+    answered_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
 class ActionGrant(Base):
     """A person's approval that covers later calls (Phase 2). scope "run": the
     whole thread (root_id) until expires_at; "once": one call of task_id.
