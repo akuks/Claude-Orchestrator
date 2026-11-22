@@ -633,7 +633,7 @@ count cache reads and writes for a running step as for a finished one. The run l
 line when a band fires (*budget about 80 % used ($0.83): the agent was told to
 save its notes*) and on an automatic continue (*continued automatically: context
 reached 160k*). The figures are polled every 5 s while the step runs
-(`GET /tasks/{id}/usage`).
+(`GET /tasks/{id}/usage`). When a run ends the page waits for the finished status before it reloads, so the closing question shows.
 
 **Budget bands.** co-guard's `PostToolUse` hook reads `usage.json`, which the
 worker writes into the run's task dir (at most every 2 s; ignored when older
@@ -681,12 +681,12 @@ answer. On a card you can **type an answer**, **accept the recommendation** or
 **Dismiss**. An answer marks the question answered and queues a follow-up step in
 the thread: it resumes the step's session when you started that step, otherwise
 it starts fresh with the handoff. Its prompt quotes the question as a record
-and states your answer as yours. Dismiss closes it with no step. Who may answer
+and states your answer as yours. Dismiss closes it with no step. When a step is retried, the open final-text questions from its earlier attempt are dismissed. Who may answer
 or dismiss is the same as for Continue (the step's creator, a maintainer on it
 or an admin, with at least contributor on its project); the agent token may
 only file and read its own task's questions.
 
-**Open handoffs.** **Home → Open handoffs** lists, newest first and at most 10,
+**Open handoffs.** **Home → Open handoffs** lists, newest first and at most 10 (it reads candidates 500 at a time, up to 5 pages, so a busy project does not hide yours),
 the threads you started or may manage whose latest step ended in the last 14
 days, is not running, and whose handoff is still open (an open todo, or a step
 that did not complete), each with its **Continue** button
@@ -703,6 +703,66 @@ before you rely on them. Whether the result's token totals include helper
 agents' tokens is **unverified**, so the so-far line's token sum may count them
 differently from the panel. When a stream carries no per-message usage, the
 step falls back to the result's totals.
+
+---
+
+## Ask about this run
+
+Phase 3c of the forge port. A running `claude -p` step cannot be talked to, and
+a follow-up waits until it ends. What people usually want mid-run is *what is it
+doing, why did it do that, how far is it*. The **Ask about this run** card on a
+task's page answers that from the run's record, on a running or a finished
+step. It never reaches the agent: nothing is sent to the running session, and
+nothing is added to the run log, the handoff, the next step's prompt, the
+task's cost or the 3b figures.
+
+**What it reads.** One separate, cheap, tool-less model call gets a record built
+from: the step (title, status, times, model, the first 4 000 characters of the
+prompt), the thread's handoff, the usage figures, the newest run-log events
+(assistant text up to 600 characters, tool calls with the first 200 characters
+of input, tool results up to 300, guard decisions, errors; at most 40 000
+characters, older ones dropped with a count), your last 3 answered asks on this
+task, and your question last, quoted. The whole prompt is capped at 60 000
+characters. Everything is redacted and cleaned (common secret shapes only, see
+[Seatbelt limits](#seatbelt-limits)). It does **not** see the code and cannot
+run anything: the call runs with `--max-turns 1`, a list of disallowed tools
+(Bash, Edit, Write, Read, search and web tools, helper agents) and an empty
+temp folder as its working directory, with no co-guard plugin and no skill
+packs. A fixed system text tells it the record is data, not instructions, to say
+so when the record does not show the answer, and to answer in 150 words or
+fewer.
+
+**Who may ask, who pays.** Anyone who can see the task, as a person: the agent
+token cannot ask. The **asker's own Claude credential** pays (the project's
+environment when the task has a project, as for memory calls); without one the
+ask is refused with 422 *Add your Claude credential to ask about runs*. The
+cost is shown on the ask only.
+
+**Private.** The asks are yours alone: `GET /tasks/{id}/asks` returns only your
+newest 20 on that task, and nobody else sees them or their answers.
+
+**Limits and settings.** One pending ask per person per task (409), 30 asks per
+person per hour (429), a question of 1 to 2 000 characters (422). The call runs
+in the background (`POST /tasks/{id}/asks` returns 202; the card polls every 2 s
+while one is pending). A call that times out, exits non-zero or returns nothing
+shows a short reason, with **Try again** to re-ask. An ask still pending at
+server start is marked failed (*interrupted*). Settings (`backend/.env`):
+
+| Setting | Default |
+|---|---|
+| `CO_ASK_ENABLED` | `true` (off: 503) |
+| `CO_ASK_MODEL` | `haiku` |
+| `CO_ASK_BUDGET_USD` | `0.25` per call |
+| `CO_ASK_TIMEOUT_SECONDS` | `90` |
+| `CO_ASK_CONCURRENCY` | `3` calls at once, server-wide |
+| `CO_ASK_HOURLY_LIMIT` | `30` per person |
+
+**Not yet checked against the real CLI.** The tests use a mock. That the
+`--output-format json` result carries `result` and `total_cost_usd` as assumed
+(a non-JSON reply is shown as the answer with the cost unknown), and that the
+disallowed tools are really off, are checked on the first live use. Try one
+ask on a real run and look at its answer and cost before you rely on it.
+Live steering of a running session is not part of this phase.
 
 ---
 
