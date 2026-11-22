@@ -7,8 +7,23 @@
 # (CO_CLAUDE_BIN="$DIR/claude"). Seams, all keyed on the task prompt:
 #   [env-probe:KEY] [call-probe:KEY] [prompt-probe:KEY] [guard-spool] [guard-tool:MODE]
 #   [env-echo] [env-echo-fail] [stream-fixture:NAME] [hang] [usage-probe:KEY]
+#   (ask calls, `--output-format json`:) [ask-probe:KEY] [ask-raw] [ask-fail] [ask-sleep]
 args="$*"
 prompt="$(cat)"
+# Ask calls (--output-format json, not stream-json): [ask-probe:KEY] records argv to
+# PROBES/KEY.args and stdin to KEY.prompt, then answers as the CLI's json does.
+if [[ "$args" == *"--output-format json"* && "$args" != *"stream-json"* ]]; then
+  if [[ "$prompt" == *"[ask-sleep]"* ]]; then sleep 5; exit 0; fi
+  if [[ "$prompt" == *"[ask-fail]"* ]]; then exit 1; fi
+  if [[ "$prompt" == *"[ask-raw]"* ]]; then printf 'plain answer\n'; exit 0; fi
+  if [[ "$prompt" =~ \[ask-probe:([A-Za-z0-9_-]+)\] ]]; then
+    k="${BASH_REMATCH[1]}"
+    printf '%s\n' "$@" >"__PROBES__/$k.args"
+    printf '%s' "$prompt" >"__PROBES__/$k.prompt"
+    printf '{"type":"result","result":"answer for %s","total_cost_usd":0.0123}\n' "$k"
+    exit 0
+  fi
+fi
 # [prompt-probe:KEY] (stream-json runs only): the prompt that came in on stdin
 # is written to PROBES/KEY.prompt.
 if [[ "$args" == *"stream-json"* && "$prompt" =~ \[prompt-probe:([A-Za-z0-9_-]+)\] ]]; then
