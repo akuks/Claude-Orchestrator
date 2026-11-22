@@ -426,8 +426,8 @@ def read_spool(task_id: str) -> list[dict]:
                 except ValueError:
                     continue
                 if not isinstance(rec, dict) or rec.get("seen") is True or rec.get("done") is True \
-                        or "outside_doc" in rec:
-                    continue  # bookkeeping (watchdog, done, temp-doc note): never counts against the cap
+                        or "outside_doc" in rec or "band" in rec or "nudge" in rec:
+                    continue  # bookkeeping (watchdog, done, temp-doc note, token care): never counts against the cap
                 if kept >= MAX_SPOOL_LINES:
                     out.append({"event": "spool", "decision": "truncated"})
                     break

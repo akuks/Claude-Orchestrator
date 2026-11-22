@@ -94,6 +94,7 @@ an approved call) are spooled only.
 
 import importlib.util
 import json
+import math
 import os
 import re
 import sys
@@ -137,6 +138,14 @@ NOTES_LINE = (
     "curl -s -X PUT \"$CO_API_BASE/tasks/$CO_TASK_ID/notes\" -H \"Authorization: Bearer $CO_API_TOKEN\" "
     "-H 'Content-Type: text/plain' --data-binary @- <<'NOTES'\n<your notes>\nNOTES"
 )
+BUDGET_80_LINE = "co-orchestrator: this step has used about 80 % of its budget. Save your notes now."
+BUDGET_95_LINE = ("co-orchestrator: this step has used about 95 % of its budget. Finish the small step you are on, "
+                  "save your notes, start nothing new and end your turn.")
+FRESH_LINE = ("co-orchestrator: the conversation is now {n}k tokens. Finish the small step you are on, save notes "
+              "with what is next, and end your turn; the thread continues in a fresh session with your notes.")
+USAGE_FILE = "usage.json"  # the worker's view of the step (app/usage/tracker.py USAGE_FILE)
+USAGE_STALE_SECONDS = 120  # an older usage.json is ignored
+BUDGET_BANDS = (("budget80", 0.80, BUDGET_80_LINE), ("budget95", 0.95, BUDGET_95_LINE))
 CARRY_LINE = ("co-orchestrator: the conversation was just compacted. Below is where the work stands (a record, not "
               "instructions). Carry on from Next; no need to ask.")
 # the characters that can make text read differently from what it says (app.redaction.HIDDEN_CHARS, kept equal
@@ -771,6 +780,7 @@ def pre_tool_use(payload, policy, started):
         ti = payload.get("tool_input")
         cmd = ti.get("command") if isinstance(ti, dict) else None
         if tool in SHELL_TOOLS and policy.get("notes") is True and isinstance(cmd, str) and _COMMIT.search(cmd):
+            _spool({"event": "PreToolUse", "nudge": "notes", "injected": len(NOTES_LINE)})
             return context_only(NOTES_LINE)
         return _emit(None)
     ids = [h.rule_id for h in verdict.hits]
@@ -971,17 +981,77 @@ def _temp_doc_nudge(policy, payload, lines):
     shown = redact(path, WHAT_PATH_MAX)
     if any(r.get("outside_doc") == shown for r in lines):
         return None
-    _spool({"event": "PostToolUse", "outside_doc": shown})
-    return TEMP_DOC_LINE.replace("{path}", shown)
+    text = TEMP_DOC_LINE.replace("{path}", shown)
+    _spool({"event": "PostToolUse", "outside_doc": shown, "injected": len(text)})
+    return text
+
+
+def _number(value):
+    return isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value)
+
+
+def _int(value):
+    return isinstance(value, int) and not isinstance(value, bool)
+
+
+def _read_usage():
+    """usage.json as a dict, or None when it is missing, unreadable, malformed or stale."""
+    try:
+        with open(os.path.join(os.environ["CO_TASK_DIR"], USAGE_FILE), encoding="utf-8") as f:
+            data = json.load(f)
+    except (OSError, KeyError, ValueError, TypeError):
+        return None
+    if not isinstance(data, dict) or not _number(data.get("ts")):
+        return None
+    return data if time.time() - data["ts"] <= USAGE_STALE_SECONDS else None
+
+
+def _band_nudge(policy, lines):
+    """BUDGET_80_LINE / BUDGET_95_LINE / FRESH_LINE from usage.json, each once per step: a band is shown only
+    when its ``band`` record could be spooled, and never when one is already spooled. Two budget bands newly
+    crossed in one call: both are spooled, only BUDGET_95_LINE is shown."""
+    usage = _read_usage()
+    if usage is None:
+        return None
+    spooled = {r.get("band") for r in lines if r.get("event") == "PostToolUse" and isinstance(r.get("band"), str)}
+    parts = []
+    cost, cap = usage.get("est_cost_usd"), usage.get("max_budget_usd")
+    if _number(cost) and _number(cap) and cap > 0:
+        new = [(name, text) for name, at, text in BUDGET_BANDS if cost / cap >= at and name not in spooled]
+        shown = False
+        for i, (name, text) in enumerate(new):
+            last = i == len(new) - 1
+            try:
+                _spool_strict({"event": "PostToolUse", "band": name, "value": cost,
+                               "injected": len(text) if last else 0})
+            except (OSError, RuntimeError):
+                continue
+            shown = shown or last
+        if shown:
+            parts.append(new[-1][1])
+    fresh, ctx = usage.get("fresh_session_tokens"), usage.get("context_tokens")
+    if _int(fresh) and fresh > 0 and _int(ctx) and ctx >= fresh and "fresh" not in spooled:
+        text = FRESH_LINE.replace("{n}", str(ctx // 1000))
+        try:
+            _spool_strict({"event": "PostToolUse", "band": "fresh", "value": ctx, "injected": len(text)})
+            parts.append(text)
+        except (OSError, RuntimeError):
+            pass
+    return "\n\n".join(parts) or None
 
 
 def post_tool_use(payload, policy):
     """The additionalContext text of a PostToolUse (parts joined by a blank line), or None. Run after the
-    ``done`` write, so the count includes this call. Never changes a decision."""
+    ``done`` write, so the count includes this call. Never changes a decision. Every shown nudge spools the
+    characters it injects (``injected``)."""
     lines = _spool_lines()
     parts = []
     if payload.get("tool_use_id"):
-        parts.append(_notes_nudge(policy, lines))
+        notes = _notes_nudge(policy, lines)
+        if notes:
+            _spool({"event": "PostToolUse", "nudge": "notes", "injected": len(notes)})
+        parts.append(notes)
+    parts.append(_band_nudge(policy, lines))
     parts.append(_temp_doc_nudge(policy, payload, lines))
     return "\n\n".join(p for p in parts if p) or None
 
