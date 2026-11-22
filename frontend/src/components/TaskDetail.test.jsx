@@ -12,6 +12,7 @@ vi.mock('../api', () => ({
     refreshHandoff: vi.fn(),
     closeHandoff: vi.fn(),
     continueTask: vi.fn(),
+    getUsage: vi.fn(async () => null),
     userDirectory: vi.fn(async () => [{ id: 'u2', name: 'Bea', email: 'b@x.io' }]),
     streamUrl: (id, seq) => `ws://test/tasks/${id}/stream?after=${seq}`,
     reportUrl: () => '#',
@@ -208,5 +209,80 @@ describe('TaskDetail: where it stands (phase 3a)', () => {
     expect(c.querySelector('[data-testid="handoff-card"]').textContent).toContain('do it')
     expect(c.querySelector('[data-testid="notice-no_commits"]')).not.toBeNull()
     expect(c.querySelector('[data-testid="continue-button"]')).not.toBeNull()
+  })
+})
+
+describe('TaskDetail: token care (phase 3b)', () => {
+  let view
+  const RealWS = globalThis.WebSocket
+  afterEach(async () => {
+    vi.useRealTimers()
+    await view?.unmount()
+    view = null
+    globalThis.WebSocket = RealWS
+    FakeSocket.all = []
+    api.getUsage.mockReset()
+    api.getUsage.mockImplementation(async () => null)
+  })
+  const send = (ev) => act(async () => FakeSocket.all.at(-1).onmessage({ data: JSON.stringify(ev) }))
+  const usage = {
+    step: { context_tokens: 130000, peak_context: 130000, est_cost_usd: 0.5, cost_is_estimate: true, max_budget_usd: 1, budget_pct: 50, fresh_session_tokens: 150000, breakdown: null },
+    thread: { steps: 3, duration_ms: 41 * 60000, cost_usd: 2.1, tokens: 1_200_000, last: { title: 'T', duration_ms: 18 * 60000, cost_usd: 1.4 } },
+    tips: ['keep the start of prompts stable'],
+  }
+
+  it('shows the chips in the header, the so-far line and the tokens panel', async () => {
+    globalThis.WebSocket = FakeSocket
+    api.getUsage.mockImplementation(async () => usage)
+    view = await render(<TaskDetail inline taskId="a" />)
+    await flush()
+    const c = view.container
+    const head = c.querySelector('.co-task-inline-head')
+    expect(head.querySelector('[data-testid="usage-context"]').textContent).toBe('context 130k')
+    expect(head.querySelector('[data-testid="usage-context"]').className).toContain('co-usage-chip-amber')
+    expect(head.querySelector('[data-testid="usage-budget"]').textContent).toBe('budget 50 % est.')
+    expect(c.querySelector('[data-testid="usage-so-far"]').textContent).toContain('3 steps · 41 min · $2.10 · 1.2M tokens')
+    expect(c.querySelector('[data-testid="tokens-panel"]')).not.toBeNull()
+    expect(api.getUsage).toHaveBeenCalledWith('a')
+  })
+
+  it('polls the usage every 5 s while the step runs, once otherwise', async () => {
+    vi.useFakeTimers()
+    globalThis.WebSocket = FakeSocket
+    api.getUsage.mockImplementation(async () => usage)
+    view = await render(<TaskDetail inline taskId="a" />)
+    await flush()
+    const n0 = api.getUsage.mock.calls.length
+    await act(async () => vi.advanceTimersByTime(5000))
+    expect(api.getUsage.mock.calls.length).toBe(n0 + 1)
+    await act(async () => vi.advanceTimersByTime(5000))
+    expect(api.getUsage.mock.calls.length).toBe(n0 + 2)
+    await view.unmount()
+    api.getTask.mockImplementationOnce(async (id) => ({ id, title: 'Done', status: 'completed', prompt: 'p' }))
+    api.getUsage.mockClear()
+    view = await render(<TaskDetail inline taskId="b" />)
+    await flush()
+    await act(async () => vi.advanceTimersByTime(20000))
+    expect(api.getUsage.mock.calls.length).toBe(1)
+  })
+
+  it('renders usage_band and auto_continue events as their own lines', async () => {
+    globalThis.WebSocket = FakeSocket
+    view = await render(<TaskDetail inline taskId="a" />)
+    await flush()
+    await send({ seq: 1, type: 'usage_band', payload: { band: 'budget80', value: 0.8 } })
+    await send({ seq: 2, type: 'usage_band', payload: { band: 'budget95', value: 0.95 } })
+    await send({ seq: 3, type: 'usage_band', payload: { band: 'fresh', value: 152000 } })
+    await send({ seq: 4, type: 'auto_continue', payload: { text: 'continued automatically: context reached 152k', context_tokens: 152000 } })
+    const c = view.container
+    const one = (kind) => c.querySelectorAll(`[data-testid="usage-line-${kind}"]`)
+    for (const kind of ['budget80', 'budget95', 'fresh', 'auto']) {
+      expect(one(kind).length, kind).toBe(1)
+      expect(one(kind)[0].querySelector('.anticon'), kind).not.toBeNull()
+    }
+    expect(one('budget80')[0].textContent).toContain('budget about 80 % used ($0.80)')
+    expect(one('fresh')[0].textContent).toContain('context reached 152k')
+    expect(one('auto')[0].textContent).toBe('continued automatically: context reached 152k')
+    expect(c.querySelector('.co-terminal').textContent).not.toContain('{"band"')
   })
 })

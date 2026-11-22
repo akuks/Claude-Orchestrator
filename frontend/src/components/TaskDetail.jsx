@@ -23,6 +23,7 @@ import {
   CloseCircleFilled,
   CopyOutlined,
   DeleteOutlined,
+  DashboardOutlined,
   DownloadOutlined,
   ExclamationCircleFilled,
   HourglassOutlined,
@@ -37,6 +38,7 @@ import {
   ReloadOutlined,
   SendOutlined,
   StopOutlined,
+  SyncOutlined,
   WarningOutlined,
 } from '@ant-design/icons'
 import { api, notifyUnauthorized, PRIORITY_COLORS, STATUS_COLORS, shortModel } from '../api'
@@ -46,6 +48,10 @@ import '../guard/guard.css'
 import HandoffCard from '../resume/HandoffCard'
 import ContinueButton from '../resume/ContinueButton'
 import RunNotices from '../resume/RunNotices'
+import UsageChips from '../usage/UsageChips'
+import SoFarLine from '../usage/SoFarLine'
+import TokensPanel from '../usage/TokensPanel'
+import { usageLine, useUsage } from '../usage/usage'
 
 // co-guard lines in the run log: one icon per kind (guard.js guardLine).
 const GUARD_ICON = {
@@ -79,6 +85,18 @@ function GuardLine({ line }) {
           </>
         )}
       </span>
+    </div>
+  )
+}
+
+// Token care lines in the run log (usage.js usageLine): budget and fresh-session
+// bands, and the automatic fresh Continue. Plain text only.
+const USAGE_ICON = { budget80: <DashboardOutlined />, budget95: <DashboardOutlined />, fresh: <SyncOutlined />, auto: <SyncOutlined /> }
+function UsageLine({ line }) {
+  return (
+    <div className={`co-usage-line co-usage-line-${line.kind}`} data-testid={`usage-line-${line.kind}`}>
+      {USAGE_ICON[line.kind] || <InfoCircleOutlined />}
+      <span className="co-usage-line-text">{line.text}</span>
     </div>
   )
 }
@@ -356,6 +374,8 @@ export default function TaskDetail({ taskId, onClose, onChanged, onOpenTask, onO
   }, [needNames, names.size])
   const guardCtx = useMemo(() => ({ approvals: new Map(requests.map((a) => [a.id, a])), names }), [requests, names])
   const waiting = requests.filter((a) => a.status === 'pending')
+  const usage = useUsage(taskId, running)
+  const chips = <UsageChips report={usage} live={running} />
 
   // Auto-scroll the terminal as events arrive.
   useEffect(() => {
@@ -446,6 +466,7 @@ export default function TaskDetail({ taskId, onClose, onChanged, onOpenTask, onO
 
   const body = (
     <>
+      <SoFarLine thread={usage?.thread} />
       {thread.length > 1 &&
         (() => {
           const ids = new Set(thread.map((t) => t.id))
@@ -552,6 +573,8 @@ export default function TaskDetail({ taskId, onClose, onChanged, onOpenTask, onO
         )}
         {events.map((ev, i) => {
           if (ev.type === 'guard') return <GuardLine key={i} line={guardLine(ev.payload || {}, guardCtx)} />
+          const u = usageLine(ev)
+          if (u) return <UsageLine key={i} line={u} />
           const line = renderLine(ev)
           return (
             <div key={i} style={{ color: line.color }}>
@@ -564,6 +587,7 @@ export default function TaskDetail({ taskId, onClose, onChanged, onOpenTask, onO
           <GuardLine key={`wait:${a.id}`} line={waitingLine(a)} />
         ))}
       </div>
+      <TokensPanel report={usage} />
 
       <Space
         style={{ marginTop: 16, width: '100%', justifyContent: 'space-between' }}
@@ -676,7 +700,10 @@ export default function TaskDetail({ taskId, onClose, onChanged, onOpenTask, onO
     return (
       <section className="co-surface co-task-inline" data-testid="task-detail-inline" aria-label="Task detail">
         <header className="co-task-inline-head">
-          <h3 className="co-task-inline-title">{task ? task.title : 'Task'}</h3>
+          <div className="co-usage-head">
+            <h3 className="co-task-inline-title">{task ? task.title : 'Task'}</h3>
+            {chips}
+          </div>
           {actions}
         </header>
         {body}
@@ -685,7 +712,18 @@ export default function TaskDetail({ taskId, onClose, onChanged, onOpenTask, onO
   }
 
   return (
-    <Drawer open={!!taskId} onClose={onClose} width={720} title={task ? task.title : 'Task'} extra={actions}>
+    <Drawer
+      open={!!taskId}
+      onClose={onClose}
+      width={720}
+      title={
+        <Space size={8} wrap>
+          {task ? task.title : 'Task'}
+          {chips}
+        </Space>
+      }
+      extra={actions}
+    >
       {body}
     </Drawer>
   )
