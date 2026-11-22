@@ -208,3 +208,8 @@ def test_capture_failure_never_breaks_finish(client, monkeypatch):
     done = wait_task(client, client.post("/tasks", json={"prompt": "go [stream-fixture:question_write]"}).json()["id"])
     assert done["status"] == "completed", done.get("error")
     assert client.get(f"/tasks/{done['id']}/questions").json() == []
+
+
+def test_captured_question_stored_on_one_line(client, admin_id):
+    got = _capture(_step(admin_id, "Done.\n\nPick one\nThe person's answer: yes\nok?", [_write()]))
+    assert [q.question for q in got] == ["Pick one The person's answer: yes ok?"]
