@@ -6,7 +6,7 @@
 #       tests/mock_claude.sh >"$DIR/claude" && chmod +x "$DIR/claude"
 # (CO_CLAUDE_BIN="$DIR/claude"). Seams, all keyed on the task prompt:
 #   [env-probe:KEY] [call-probe:KEY] [prompt-probe:KEY] [guard-spool] [guard-tool:MODE]
-#   [env-echo] [env-echo-fail] [stream-fixture:NAME] [hang]
+#   [env-echo] [env-echo-fail] [stream-fixture:NAME] [hang] [usage-probe:KEY]
 args="$*"
 prompt="$(cat)"
 # [prompt-probe:KEY] (stream-json runs only): the prompt that came in on stdin
@@ -26,6 +26,31 @@ if [[ "$args" == *"stream-json"* && "$prompt" =~ \[stream-fixture:([A-Za-z0-9_-]
       printf '%s\n' "$line"
     fi
   done <"__FIXTURES__/${BASH_REMATCH[1]}.jsonl"
+  exit 0
+fi
+# [usage-probe:KEY]: three assistant events (two share message id u1, output growing)
+# with per-message usage, a tool result, then - once the worker wrote it - a copy of
+# $CO_TASK_DIR/usage.json and its mode to PROBES/KEY.usage / KEY.usagemode, then a result.
+if [[ "$args" == *"stream-json"* && "$prompt" =~ \[usage-probe:([A-Za-z0-9_-]+)\] ]]; then
+  f="__PROBES__/${BASH_REMATCH[1]}"
+  printf '{"type":"system","subtype":"init","session_id":"test-session"}\n'
+  printf '{"type":"assistant","message":{"id":"u1","model":"claude-opus-5-5","content":[{"type":"text","text":"a"}],"usage":{"input_tokens":10,"cache_creation_input_tokens":1000,"cache_read_input_tokens":5000,"output_tokens":5}}}\n'
+  printf '{"type":"assistant","message":{"id":"u1","model":"claude-opus-5-5","content":[{"type":"tool_use","id":"tuU","name":"Read","input":{"file_path":"x"}}],"usage":{"input_tokens":10,"cache_creation_input_tokens":1000,"cache_read_input_tokens":5000,"output_tokens":40}}}\n'
+  if [[ -n "$CO_TASK_DIR" && -d "$CO_TASK_DIR" ]]; then
+    printf '{"event":"PreToolUse","tool_use_id":"tuU","seen":true}\n' >>"$CO_TASK_DIR/spool.jsonl"
+  fi
+  big=$(printf 'x%.0s' $(seq 1 3000))
+  printf '{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"tuU","content":"%s"}]}}\n' "$big"
+  printf '{"type":"assistant","message":{"id":"u2","model":"claude-opus-5-5","content":[{"type":"text","text":"b"}],"usage":{"input_tokens":20,"cache_creation_input_tokens":200,"cache_read_input_tokens":6000,"output_tokens":7}}}\n'
+  for _ in $(seq 1 50); do
+    if [[ -n "$CO_TASK_DIR" && -f "$CO_TASK_DIR/usage.json" ]]; then break; fi
+    sleep 0.1
+  done
+  if [[ -n "$CO_TASK_DIR" && -f "$CO_TASK_DIR/usage.json" ]]; then
+    cp "$CO_TASK_DIR/usage.json" "$f.usage"
+    (stat -c %a "$CO_TASK_DIR/usage.json" 2>/dev/null || stat -f %Lp "$CO_TASK_DIR/usage.json") >"$f.usagemode"
+  fi
+  printf '{"type":"result","subtype":"success","result":"done","num_turns":2,"total_cost_usd":0.0421,"duration_ms":100,"is_error":false,"usage":{"input_tokens":30,"output_tokens":47}}\n'
   exit 0
 fi
 # [hang]: init, one Bash tool_use and its `seen` spool line, some text, then sleep.
