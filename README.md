@@ -94,6 +94,27 @@ cost caps, security reviews, and reusable agent roles.
 > - **The server must stay a single process** (no `--workers`, no replicas):
 >   crash recovery assumes it is the only one that owns running rows.
 
+> **Upgrading to the token-care release (3b)?** Steps now report their token
+> use and agents can ask you questions ([Token care and questions](#token-care-and-questions)).
+> What changes for you:
+>
+> - **Migration `0009_tokens` runs on start** (SQLite and Postgres). It adds the
+>   per-step usage and question tables and a few columns; its downgrade drops
+>   them. Take your usual database backup first.
+> - **A follow-up, Continue or answer step now keeps its parent's
+>   `max_budget_usd`** (as it already kept the model and max turns). Before, a
+>   later step of a thread ran with no budget cap.
+> - **The system prompt gains a *Questions* ground rule** (file a blocking
+>   question with a recommendation, then end the turn). An admin can switch it
+>   off in **Agent guard → Ground rules**.
+> - **Two new agent-token routes**, for the run's own task only:
+>   `POST /tasks/{id}/questions` and `GET /tasks/{id}/questions`. An agent can
+>   never answer or dismiss a question.
+> - **Nothing continues on its own until you set it**: the automatic fresh
+>   Continue needs a project's *Fresh session at* setting, which is off by default.
+> - **The figures are not yet checked against the real `claude` CLI** (see the
+>   section): treat them as estimates until your first live run confirms them.
+
 ---
 
 ## What it does
@@ -578,8 +599,103 @@ co-orchestrator the guard rails), listed as `precedence`.
 a transcript: a long tool output or a file's content is not in it. Files
 written to a temp folder are listed
 as "may vanish". Secrets are masked with the same rules as the run log, which
-know common shapes only (see [Seatbelt limits](#seatbelt-limits)). Phase **3b**
-is next.
+know common shapes only (see [Seatbelt limits](#seatbelt-limits)). Phase 3b
+(below) adds token care and the Questions inbox.
+
+---
+
+## Token care and questions
+
+Phase 3b of the forge port: agents run headless, so nobody sees the context
+grow or the spend near the `--max-budget-usd` cut, and a closing question in the
+log goes unread. The server sees every stream message, so it keeps the figures,
+warns the agent before it hits a wall, hands a long conversation over to a fresh
+session, and collects the agent's questions in an inbox.
+
+**What you see on a task.** The header has two chips: **context 63k** (the size
+of the latest main conversation turn; amber at 80 % of the project's
+fresh-session threshold, red past it, plain when no threshold is set) and
+**budget 41 % est.** (the step's cost against its `max_budget_usd`; amber at
+80 %, red at 95 %; hidden when the step has no budget). Under the title, the
+**so-far line** sums the thread: *4 steps · 41 min · $2.10 · 1.2M tokens — last:
+&lt;title&gt;, 18 min, $1.40*; a running step adds its live estimate. The
+collapsible **Where the tokens went** panel splits the step's tokens (input,
+cache write, cache read, output) into the main session and each kind of helper
+agent (by its `subagent_type`, e.g. *helper: Explore*), per model, lists the 5
+largest tool results with their original length, says how many characters
+co-orchestrator injected itself, and gives up to three tips (a tool result over
+20 000 characters; a peak context over the threshold, or 150 000 when none is
+set; cache reads under half of input across 20+ messages). The run log shows a
+line when a band fires (*budget about 80 % used ($0.83): the agent was told to
+save its notes*) and on an automatic continue (*continued automatically: context
+reached 160k*). The figures are polled every 5 s while the step runs
+(`GET /tasks/{id}/usage`).
+
+**Budget bands.** co-guard's `PostToolUse` hook reads `usage.json`, which the
+worker writes into the run's task dir (at most every 2 s; ignored when older
+than 120 s). At **80 %** of the step's `max_budget_usd` it tells the agent to save
+its notes now; at **95 %** to finish the small step it is on, save notes, start
+nothing new and end its turn. Each band fires at most once per step and never
+changes a tool decision. The project's monthly `budget_usd` keeps its own
+alerts; it is not a band. A model missing from the price table has no
+estimate, so its steps get no budget band (tokens only).
+
+**Fresh session and the automatic Continue.** A maintainer sets **Fresh session
+at (tokens)** on a project (Projects → edit; empty is off, which is the
+default; 50 000 to 900 000; 150 000 is a good start). When a step's context
+reaches it, co-guard tells the agent once to finish the small step, save notes
+with what is next and end its turn. When that step then **completes** (not
+failed, cancelled or timed out) and the handoff has an open todo, or the notes
+were saved after the warning, the server queues a **Continue fresh with the
+handoff** as the step's owner. Limits:
+
+- **At most 3 automatic continues in a row** per thread; any step a person
+  starts (a follow-up, a Continue, an answer) resets the count.
+- **An open question pauses it**: a step that filed a question (or whose final
+  text was captured as one) waits for the answer instead.
+- Only one step of a thread runs at a time; an automatic continue is never
+  queued while one is active.
+
+**Questions inbox.** An agent asks in two ways. (a) It files the question
+itself with its own agent token (`POST /tasks/{id}/questions`: the question, up
+to 4 options, a recommendation, what is waiting on it and whether it is
+reversible), as the *Questions* ground rule tells it to, then ends its turn. (b)
+When a run ends and the step touched files or made a commit, a final reply whose
+last paragraph ends with `?` is filed for it (*from the agent's last reply*),
+unless the agent already filed one in that step. Every text is redacted and
+cleaned; a thread holds at most **5** open questions (409 beyond). When the
+thread came from a schedule with a notification webhook, filing one sends it
+with event `question` (the question's first line only), unless the schedule's
+policy is *never*.
+
+Open questions show on **Home → Questions** (with a link to the task) and on the
+task's page; the Home icon in the rail carries a badge with the number you may
+answer. On a card you can **type an answer**, **accept the recommendation** or
+**Dismiss**. An answer marks the question answered and queues a follow-up step in
+the thread: it resumes the step's session when you started that step, otherwise
+it starts fresh with the handoff. Its prompt quotes the question as a record
+and states your answer as yours. Dismiss closes it with no step. Who may answer
+or dismiss is the same as for Continue (the step's creator, a maintainer on it
+or an admin, with at least contributor on its project); the agent token may
+only file and read its own task's questions.
+
+**Open handoffs.** **Home → Open handoffs** lists, newest first and at most 10,
+the threads you started or may manage whose latest step ended in the last 14
+days, is not running, and whose handoff is still open (an open todo, or a step
+that did not complete), each with its **Continue** button
+(`GET /handoffs/open`).
+
+**How far to trust the figures.** Token figures come from the per-message
+`usage` in Claude's stream (each message id counted once, with its last usage),
+and the running cost is an **estimate from a price table**
+(`backend/app/usage/prices.py`), replaced by the result's `total_cost_usd` when
+the step finishes. Neither has been checked against the real `claude` CLI yet:
+the tests and the end-to-end check use a mock, so **the first live run is the
+check**. Compare a finished step's panel and cost with what Claude reports
+before you rely on them. Whether the result's token totals include helper
+agents' tokens is **unverified**, so the so-far line's token sum may count them
+differently from the panel. When a stream carries no per-message usage, the
+step falls back to the result's totals.
 
 ---
 
@@ -597,6 +713,11 @@ Full interactive docs at `/docs`. Highlights:
 | `POST` | `/tasks/{id}/continue` | Continue a stopped step (`mode`: `auto`, `resume`, `fresh`) |
 | `GET` · `POST` | `/tasks/{id}/handoff` · `/handoff/refresh` · `/handoff/close` | Where the thread stands |
 | `GET` · `PUT` | `/tasks/{id}/notes` | The agent's notes (`PUT` is also open to the run's own agent token) |
+| `GET` | `/tasks/{id}/usage` | The step's token figures, the thread's so-far totals and tips |
+| `GET` · `POST` | `/tasks/{id}/questions` | The thread's questions / file one (also open to the run's own agent token) |
+| `GET` | `/questions` | Questions you can see (`?status=open\|answered\|dismissed\|all`, default `open`) |
+| `POST` | `/questions/{id}/answer` · `/dismiss` | Answer (`{"answer": …}` or `{"accept": true}`) and continue the thread / close it |
+| `GET` | `/handoffs/open` | Threads to pick up again (Home) |
 | `DELETE` | `/tasks/{id}` | Delete a task (or thread); cleans sandbox workspace |
 | `GET` | `/tasks/{id}/report?format=pdf\|docx` | Download the result as PDF / DOCX |
 | `GET` | `/tasks/{id}/artifacts[/{path}]` | List / download output files |
