@@ -9,6 +9,7 @@ results + output artifacts. No external broker/queue needed for Phase 1.
 import asyncio
 import json
 import logging
+import math
 import mimetypes
 import os
 import signal
@@ -216,6 +217,8 @@ class WorkerManager:
         self._run_since: dict[str, str | None] = {}
         # task_id -> the live run's UsageTracker (phase 3b); _finish stores its last figures.
         self._usage: dict[str, usage_tracker.UsageTracker] = {}
+        # task_id -> the live run's read state of co-guard's token-care spool lines (_new_usage_spool)
+        self._usage_spool: dict[str, dict] = {}
         # task ids a live _run_guarded holds (the sweep never recovers them),
         # and ids a recover() is working on (never two side by side)
         self._active: set[str] = set()
@@ -716,6 +719,7 @@ class WorkerManager:
         stderr_task = asyncio.create_task(read_stderr())
 
         tracker = self._usage[task_id] = usage_tracker.UsageTracker()  # fresh per attempt
+        self._usage_spool[task_id] = self._new_usage_spool()
         ctx = {
             "task_id": task_id,
             "mcp_ids": {},
@@ -799,6 +803,7 @@ class WorkerManager:
                 await auth.revoke_task_tokens(s, task_id)
                 await s.commit()
             self._usage.pop(task_id, None)  # the next attempt counts afresh
+            self._usage_spool.pop(task_id, None)  # (its spool was wiped by the ingest)
             asyncio.create_task(
                 self._retry_after(task_id, backoff, task_priority, task_created_at)
             )
@@ -1027,6 +1032,8 @@ class WorkerManager:
                     or time.monotonic() - ctx["usage_written"] >= self.USAGE_FILE_EVERY):
                 ctx["usage_written"] = time.monotonic()
                 self._write_usage_json(ctx)
+            if ctx.get("guard"):
+                await self._ingest_usage_spool(task_id, ctx["guard"]["emit"])  # bands and injected, live
             try:
                 n = ctx["run"]["events"]
                 if n != snapped and time.monotonic() - last >= handoff.HANDOFF_EVERY_SECONDS:
@@ -1302,6 +1309,7 @@ class WorkerManager:
         live = self._guard_live.get(task_id)
         reported = live["reported"] if live else Counter()
         try:
+            await self._ingest_usage_spool(task_id, emit)  # bands + injected, before the spool goes
             await self._spend_spool_grants(task_id)  # every granted line, durably (retries wipe the spool)
             for rec in guard_runtime.read_spool(task_id):
                 if rec.get("seen") is True:
@@ -1492,6 +1500,83 @@ class WorkerManager:
         except Exception as e:  # noqa: BLE001
             log.warning("usage: persist failed for %s: %s", task_id, e)
 
+    USAGE_BANDS = ("budget80", "budget95", "fresh")
+
+    @staticmethod
+    def _new_usage_spool() -> dict:
+        return {"offset": 0, "pending": [], "lock": asyncio.Lock()}
+
+    async def _ingest_usage_spool(self, task_id: str, emit) -> None:
+        """co-guard's token-care spool lines since the last read (by byte offset, so each complete line once,
+        whether read live by the heartbeat or at the final ingest): ``injected`` chars -> the live tracker,
+        each ``band`` -> a ``usage_band`` event {band, value} and a TaskUsage.bands entry {band, ts}, at most
+        once per band name (the row decides). With no live state (a crashed run's recovery) the whole spool
+        is read and only bands are recorded. Never raises."""
+        state = self._usage_spool.get(task_id) or self._new_usage_spool()
+        async with state["lock"]:
+            try:
+                self._read_usage_lines(task_id, state, self._usage.get(task_id))
+                while state["pending"]:
+                    band, value, ts = state["pending"][0]
+                    if await self._record_band(task_id, band, ts):
+                        await emit("usage_band", {"band": band, "value": value})
+                    state["pending"].pop(0)
+            except Exception as e:  # noqa: BLE001 - usage bookkeeping never stops a run
+                log.warning("usage: band ingest failed for %s: %s", task_id, e)
+
+    @staticmethod
+    def _finite(v) -> bool:
+        return isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v)
+
+    @classmethod
+    def _read_usage_lines(cls, task_id: str, state: dict, tracker) -> None:
+        try:
+            with open(guard_runtime.task_dir(task_id) / guard_runtime.SPOOL_NAME, "rb") as f:
+                f.seek(state["offset"])
+                data = f.read()
+        except OSError:
+            return
+        end = data.rfind(b"\n")
+        if end < 0:
+            return
+        state["offset"] += end + 1
+        for line in data[: end + 1].splitlines():
+            try:
+                rec = json.loads(line)
+            except ValueError:
+                continue
+            if not isinstance(rec, dict):
+                continue
+            band = rec.get("band")
+            if band is not None and band not in cls.USAGE_BANDS:
+                continue  # not a record co-guard writes
+            if tracker is not None and "injected" in rec:
+                tracker.add_injected(rec["injected"])
+            if band is not None:
+                value, ts = rec.get("value"), rec.get("ts")
+                state["pending"].append((band, value if cls._finite(value) else None,
+                                         float(ts) if cls._finite(ts) else None))
+
+    @staticmethod
+    async def _record_band(task_id: str, band: str, ts) -> bool:
+        """Append {band, ts} to the step's TaskUsage.bands; False when that band is already there (or the
+        task is gone)."""
+        async with SessionLocal() as s:
+            row = await s.get(TaskUsage, task_id)
+            if row is None:
+                t = await s.get(Task, task_id)
+                if t is None:
+                    return False
+                row = TaskUsage(task_id=task_id, root_id=t.root_id or t.id, bands=[])
+                s.add(row)
+            bands = list(row.bands or [])
+            if any(isinstance(b, dict) and b.get("band") == band for b in bands):
+                return False
+            row.bands = bands + [{"band": band, "ts": ts}]
+            row.updated_at = _now()
+            await s.commit()
+            return True
+
     async def _store_model_used(self, task_id: str, model_used: str) -> None:
         async with SessionLocal() as s:
             task = await s.get(Task, task_id)
@@ -1555,6 +1640,7 @@ class WorkerManager:
         if error:
             error = redact(error, secrets or [])
         tracker = self._usage.pop(task_id, None)  # the live run's usage (stored below)
+        self._usage_spool.pop(task_id, None)
         context_store.cleanup(task_id)  # drop this task's knowledge snapshot
         await self._spend_spool_grants(task_id)  # a spool not ingested (error paths): its once grants stay spent
         guard_runtime.remove_task_dir(task_id)  # co-guard policy + spool (normally gone already)
