@@ -646,3 +646,54 @@ def test_continue_joins_guard_deny_and_resume(client, submitted):
 async def _grants(tid):
     async with SessionLocal() as s:
         return list((await s.execute(select(ActionGrant).where(ActionGrant.task_id == tid))).scalars().all())
+
+
+# ---- can_manage / can_resume on the task reads ---------------------------------------------------
+
+
+def test_can_manage_matches_continue(client, submitted):
+    tag = _uid()
+    owner = login_as(f"rp-fo-{tag}@test.local")
+    maint = login_as(f"rp-fm-{tag}@test.local")
+    contrib = login_as(f"rp-fc-{tag}@test.local")
+    outsider = login_as(f"rp-fx-{tag}@test.local")
+    lapsed = login_as(f"rp-fl-{tag}@test.local")
+    pid = _project(client)
+    for u, role in ((owner, "contributor"), (maint, "maintainer"), (contrib, "contributor")):
+        _grant(client, pid, u.user_id, role)
+
+    def failed(by):
+        return mk_task(prompt="work", status="failed", created_by=by.user_id, session_id=f"s-{_uid()}",
+                       project_id=pid)
+
+    # (viewer, task creator) -> (can_manage, can_resume)
+    cases = [
+        ("owner", owner, owner, True, True),
+        ("maintainer", maint, owner, True, False),
+        ("admin", client, owner, True, False),
+        ("contributor", contrib, owner, False, False),
+    ]
+    for name, viewer, creator, manage, resume in cases:
+        tid = failed(creator)
+        t = viewer.get(f"/tasks/{tid}")
+        assert t.status_code == 200, name
+        assert (t.json()["can_manage"], t.json()["can_resume"]) == (manage, resume), name
+        th = viewer.get(f"/tasks/{tid}/thread").json()
+        assert [(x["can_manage"], x["can_resume"]) for x in th] == [(manage, resume)], name
+        r = viewer.post(f"/tasks/{tid}/continue", json={"mode": "fresh"})
+        assert (r.status_code == 201) == manage, (name, r.status_code)
+        if not manage:
+            assert r.status_code == 403
+    # an outsider cannot see the task at all
+    tid = failed(owner)
+    assert outsider.get(f"/tasks/{tid}").status_code == 404
+    assert outsider.post(f"/tasks/{tid}/continue", json={}).status_code == 404
+    # a creator who lost every project role: the flag and the endpoint agree (403)
+    tid = failed(lapsed)
+    t = lapsed.get(f"/tasks/{tid}")
+    if t.status_code == 200:
+        assert t.json()["can_manage"] is False and t.json()["can_resume"] is False
+        assert lapsed.post(f"/tasks/{tid}/continue", json={}).status_code == 403
+    # the owner of a step with no session cannot resume
+    tid = mk_task(prompt="w", status="failed", created_by=owner.user_id, project_id=pid)
+    assert owner.get(f"/tasks/{tid}").json()["can_resume"] is False
