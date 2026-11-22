@@ -104,4 +104,34 @@ describe('AskCard', () => {
     expect(askCost(0)).toBeNull()
     expect(askCost(null)).toBeNull()
   })
+
+  it('a late response for the previous task does not touch the new task', async () => {
+    let resolveA
+    api.taskAsks.mockImplementation((id) =>
+      id === 'a' ? new Promise((r) => (resolveA = r)) : Promise.resolve([ask({ id: 'b1', task_id: 'b', question: 'B?', answer: 'bee' })]),
+    )
+    view = await render(<AskCard taskId="a" />)
+    await flush()
+    await view.rerender(<AskCard taskId="b" />)
+    await flush()
+    await act(async () => resolveA([ask({ id: 'a1', question: 'A?', answer: 'ay' })]))
+    const c = view.container
+    expect($(c, 'ask-b1')).not.toBeNull()
+    expect($(c, 'ask-a1')).toBeNull()
+  })
+
+  it('a late ask response for the previous task is dropped and sending resets', async () => {
+    let resolveAsk
+    api.askTask.mockImplementation(() => new Promise((r) => (resolveAsk = r)))
+    view = await render(<AskCard taskId="a" />)
+    await flush()
+    await type($(view.container, 'ask-input'), 'Hi?')
+    await click($(view.container, 'ask-submit'))
+    await view.rerender(<AskCard taskId="b" />)
+    await flush()
+    await act(async () => resolveAsk(ask({ id: 'a9', question: 'Hi?', status: 'pending' })))
+    expect($(view.container, 'ask-a9')).toBeNull()
+    await type($(view.container, 'ask-input'), 'Next?')
+    expect($(view.container, 'ask-submit').disabled).toBe(false)
+  })
 })

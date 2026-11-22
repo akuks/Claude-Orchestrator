@@ -301,20 +301,22 @@ export default function TaskDetail({ taskId, onClose, onChanged, onOpenTask, onO
   const termRef = useRef(null)
   const lastSeqRef = useRef(0)
   const endTimers = useRef([])
+  const endGen = useRef(0)
 
   const endRefresh = (id, isClosed, setT, finish) => {
     endTimers.current.forEach(clearTimeout)
     endTimers.current = []
+    const gen = ++endGen.current
     let stopped = false
     END_REFRESH_MS.forEach((ms, i) => {
       endTimers.current.push(
         setTimeout(async () => {
-          if (stopped || isClosed()) return
+          if (stopped || gen !== endGen.current || isClosed()) return
           let t = null
           try {
             t = await api.getTask(id)
           } catch (_) {}
-          if (stopped || isClosed()) return
+          if (stopped || gen !== endGen.current || isClosed()) return
           if (t) setT(t)
           const last = i === END_REFRESH_MS.length - 1
           if ((t && TERMINAL_STATUSES.includes(t.status)) || last) {

@@ -15,23 +15,21 @@ export default function AskCard({ taskId }) {
   const [asks, setAsks] = useState([])
   const [text, setText] = useState('')
   const [sending, setSending] = useState(false)
-  const live = useRef(true)
+  const cur = useRef(taskId) // the task the card shows now; a late response for another task is dropped
+  cur.current = taskId
 
   const load = useCallback(async () => {
     try {
       const rows = await api.taskAsks(taskId)
-      if (live.current) setAsks(Array.isArray(rows) ? rows : [])
+      if (cur.current === taskId) setAsks(Array.isArray(rows) ? rows : [])
     } catch (_) {}
   }, [taskId])
 
   useEffect(() => {
-    live.current = true
     setAsks([])
     setText('')
+    setSending(false)
     if (taskId) load()
-    return () => {
-      live.current = false
-    }
   }, [taskId, load])
 
   const pending = asks.some((a) => a.status === 'pending')
@@ -47,17 +45,17 @@ export default function AskCard({ taskId }) {
     setSending(true)
     try {
       const a = await api.askTask(taskId, q)
-      if (live.current) setAsks((prev) => [a, ...prev.filter((x) => x.id !== a.id)])
+      if (cur.current === taskId) setAsks((prev) => [a, ...prev.filter((x) => x.id !== a.id)])
       return true
     } catch (e) {
       message.error(e.message)
       return false
     } finally {
-      if (live.current) setSending(false)
+      if (cur.current === taskId) setSending(false)
     }
   }
   const ask = async () => {
-    if (await submit(text)) setText('')
+    if ((await submit(text)) && cur.current === taskId) setText('')
   }
   const blocked = pending || sending
 
