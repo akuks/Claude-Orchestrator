@@ -76,8 +76,8 @@ It works on running and finished steps.
    `answered_at` now, in the same place 3b resets the usage row (`Worker._reset_usage_row`'s caller).
 3. **`<synthetic>` model.** A message whose model is `<synthetic>` never becomes the tracker's last model, so
    it never switches off the estimate of the next unnamed message.
-4. **Open handoffs scan.** Filter by the caller (started by me, or in a project/team I may manage) in SQL
-   before the `SCAN_MAX` limit, so a busy project cannot hide the caller's own threads.
+4. **Open handoffs scan.** Page through candidates `SCAN_MAX` at a time (at most 5 pages) until 10 are found,
+   so a busy project cannot hide the caller's own threads (the manage check stays in Python).
 
 ## Goals
 1. Ask model, migration, routes, limits, startup sweep, settings.
