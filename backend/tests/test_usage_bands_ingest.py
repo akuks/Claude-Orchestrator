@@ -141,3 +141,70 @@ def test_recovery_style_ingest_without_live_state_dedupes_bands_by_the_row(clien
     assert [p for t, p in emitted if t == "usage_band"] == [{"band": "budget95", "value": 4.9},
                                                             {"band": "fresh", "value": None}]
     assert _usage(tid).bands == [{"band": "budget95", "ts": 5.0}, {"band": "fresh", "ts": None}]
+
+
+def test_crash_path_finish_ingests_bands_and_injected(client):
+    """_run_guarded's crash handler goes straight to _finish: the spool's bands and injected chars are
+    still ingested (once: a line the heartbeat already read is not counted again)."""
+    from app import worker as worker_mod
+    from app.usage.tracker import UsageTracker
+
+    tid = _task_row()
+    w = worker_mod.WorkerManager()
+    tracker = w._usage[tid] = UsageTracker()
+    w._usage_spool[tid] = w._new_usage_spool()
+    d = guard_runtime.make_task_dir(tid)
+    spool = d / guard_runtime.SPOOL_NAME
+    spool.write_text(json.dumps({"event": "PostToolUse", "nudge": "notes", "injected": 40, "ts": 1.0}) + "\n")
+
+    async def noop(*a):
+        pass
+
+    asyncio.run(w._ingest_usage_spool(tid, noop))  # a heartbeat read before the crash
+    with open(spool, "a", encoding="utf-8") as f:
+        f.write(json.dumps({"event": "PostToolUse", "band": "fresh", "value": 160000, "injected": 200,
+                            "ts": 2.0}) + "\n")
+
+    async def boom(task_id):
+        raise RuntimeError("kaboom")
+
+    w._run_job = boom
+    w._sem = asyncio.Semaphore(1)
+
+    async def crash():
+        await w._sem.acquire()
+        await w._run_guarded(tid)
+
+    asyncio.run(crash())
+    assert not d.exists()
+    row = _usage(tid)
+    assert row.bands == [{"band": "fresh", "ts": 2.0}]
+    assert row.breakdown["injected_chars"] == 240
+    assert tracker.injected_chars == 240
+    assert [e.payload for e in _events(tid) if e.type == "usage_band"] == [{"band": "fresh", "value": 160000}]
+
+
+def test_rerun_clears_the_earlier_attempts_bands(client):
+    """A step run again starts with empty bands and figures: the new attempt's crossing is recorded,
+    the earlier attempt's fresh band is gone."""
+    r = client.post("/tasks", json={"prompt": "go [stream-fixture:usage_band80]"})
+    assert r.status_code == 201, r.text
+    tid = r.json()["id"]
+    done = wait_task(client, tid)
+    assert done["status"] == "completed", done.get("error")
+
+    async def stale():
+        async with SessionLocal() as s:
+            row = await s.get(TaskUsage, tid)
+            row.bands = [{"band": "fresh", "ts": 1.0}, {"band": "budget80", "ts": 1.0}]
+            row.context_tokens, row.peak_context = 999999, 999999
+            await s.commit()
+
+    asyncio.run(stale())
+    r = client.post(f"/tasks/{tid}/retry")
+    assert r.status_code in (200, 201, 202), r.text
+    rerun = wait_task(client, r.json().get("id", tid))
+    assert rerun["status"] == "completed", rerun.get("error")
+    row = _usage(rerun["id"])
+    assert row.bands == [{"band": "budget80", "ts": 1790000001.0}]
+    assert row.peak_context != 999999
