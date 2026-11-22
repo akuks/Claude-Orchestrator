@@ -98,6 +98,8 @@ export const api = {
       throw e
     }),
   refreshHandoff: (id) => req('POST', `/tasks/${id}/handoff/refresh`),
+  // Token care (phase 3b): the step's figures, the thread's "so far" totals and tips.
+  getUsage: (id) => req('GET', `/tasks/${id}/usage`),
   closeHandoff: (id) => req('POST', `/tasks/${id}/handoff/close`),
   getNotes: (id) => req('GET', `/tasks/${id}/notes`),
   continueTask: (id, mode = 'auto') => req('POST', `/tasks/${id}/continue`, { mode }),
