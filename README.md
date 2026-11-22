@@ -101,9 +101,12 @@ cost caps, security reviews, and reusable agent roles.
 > - **Migration `0009_tokens` runs on start** (SQLite and Postgres). It adds the
 >   per-step usage and question tables and a few columns; its downgrade drops
 >   them. Take your usual database backup first.
-> - **A follow-up, Continue or answer step now keeps its parent's
->   `max_budget_usd`** (as it already kept the model and max turns). Before, a
->   later step of a thread ran with no budget cap.
+> - **Every later step of a thread now keeps its parent's `max_budget_usd`**
+>   (follow-up, Continue, automatic Continue, answer and co-guard follow-up
+>   steps), as it already kept the model and max turns. Before, a later step of
+>   a thread ran with no budget cap. **Duplicate** now copies the source's
+>   budget too, or applies `CO_DEFAULT_TASK_BUDGET_USD` when the source had none,
+>   the way a new task does.
 > - **The system prompt gains a *Questions* ground rule** (file a blocking
 >   question with a recommendation, then end the turn). An admin can switch it
 >   off in **Agent guard → Ground rules**.
@@ -253,7 +256,7 @@ any other origin must be added, or live task streams are rejected.
 | `CO_WORKER_CONCURRENCY` | `3` | Max simultaneous tasks |
 | `CO_TASK_TIMEOUT_SECONDS` | `1800` | Kill tasks exceeding this |
 | `CO_CLAUDE_PERMISSION_MODE` | `bypassPermissions` | Permission mode passed to the CLI |
-| `CO_DEFAULT_TASK_BUDGET_USD` | *(unset)* | Default per-task spend cap (`--max-budget-usd`) |
+| `CO_DEFAULT_TASK_BUDGET_USD` | `2.0` | Default per-task spend cap (`--max-budget-usd`) |
 | `CO_FALLBACK_MODEL` | *(unset)* | Fallback model if the primary is unavailable |
 | `CO_RETRY_MAX_ATTEMPTS` / `CO_RETRY_BACKOFF_SECONDS` | `2` / `30` | Auto-retry transient failures |
 | `CO_RECOVERY_SWEEP_SECONDS` | `60` | How often `RUNNING` steps with no live worker are recovered ([Resume and handoff](#resume-and-handoff)) |
@@ -625,7 +628,8 @@ agent (by its `subagent_type`, e.g. *helper: Explore*), per model, lists the 5
 largest tool results with their original length, says how many characters
 co-orchestrator injected itself, and gives up to three tips (a tool result over
 20 000 characters; a peak context over the threshold, or 150 000 when none is
-set; cache reads under half of input across 20+ messages). The run log shows a
+set; cache reads under half of input across 20+ messages). The so-far tokens
+count cache reads and writes for a running step as for a finished one. The run log shows a
 line when a band fires (*budget about 80 % used ($0.83): the agent was told to
 save its notes*) and on an automatic continue (*continued automatically: context
 reached 160k*). The figures are polled every 5 s while the step runs
@@ -660,9 +664,12 @@ handoff** as the step's owner. Limits:
 itself with its own agent token (`POST /tasks/{id}/questions`: the question, up
 to 4 options, a recommendation, what is waiting on it and whether it is
 reversible), as the *Questions* ground rule tells it to, then ends its turn. (b)
-When a run ends and the step touched files or made a commit, a final reply whose
-last paragraph ends with `?` is filed for it (*from the agent's last reply*),
-unless the agent already filed one in that step. Every text is redacted and
+When a run ends (completed, failed, cancelled or timed out) and the step touched
+files or made a commit, a final reply whose last paragraph ends with `?` is
+filed for it (*from the agent's last reply*), unless the agent already filed one
+in that step; a last paragraph over 600 characters is skipped, not cut. It is
+filed before the step's final status is saved, so the task page shows it as the
+run ends. Every text is redacted and
 cleaned; a thread holds at most **5** open questions (409 beyond). When the
 thread came from a schedule with a notification webhook, filing one sends it
 with event `question` (the question's first line only), unless the schedule's
