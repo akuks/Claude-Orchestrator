@@ -66,12 +66,15 @@ export const GROUND_SWITCHES = [
   ['short_answers', 'Short answers', 'Keep replies short and to the point.'],
   ['usage_care', 'Usage care', 'Avoid wasteful work; helpers get the same habit.'],
   ['notes', 'Notes', 'Ask the agent to keep short notes of where it stands.'],
+  ['questions', 'Questions', 'Ask the agent to file a blocking question, with a recommendation, and end its turn.'],
 ]
 export const GROUND_EXTRA_MAX = 2000
-const GROUND_DEFAULTS = { grounding: true, short_answers: true, usage_care: true, notes: true, extra: '' }
+const GROUND_DEFAULTS = {
+  grounding: true, short_answers: true, usage_care: true, notes: true, questions: true, extra: '',
+}
 
 // Ground rules: the standing instructions every run gets. Always saved whole
-// (all five keys); the server refuses a bad value and says why.
+// (all six keys); the server refuses a bad value and says why.
 export function GroundRulesCard({ canEdit, initial, onSaved }) {
   const [saved, setSaved] = useState({ ...GROUND_DEFAULTS, ...(initial || {}) })
   const [cfg, setCfg] = useState(saved)
@@ -92,6 +95,7 @@ export function GroundRulesCard({ canEdit, initial, onSaved }) {
         short_answers: !!cfg.short_answers,
         usage_care: !!cfg.usage_care,
         notes: !!cfg.notes,
+        questions: !!cfg.questions,
         extra: cfg.extra || '',
       }
       const out = await api.saveGuardOrgSettings({ ground_rules: body })
