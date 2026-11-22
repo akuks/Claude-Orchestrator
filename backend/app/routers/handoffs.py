@@ -42,6 +42,7 @@ async def open_handoffs(request: Request):
         recent = (select(thread_of.label("root"), func.max(Task.completed_at).label("ended"))
                   .where(Task.completed_at >= cutoff).group_by(thread_of).subquery())
         out = []
+        seen: set[str] = set()  # paging by offset can repeat a row if the data shifts
         for page in range(SCAN_PAGES):
             rows = (await s.execute(
                 select(TaskHandoff, Task)
@@ -76,6 +77,8 @@ async def open_handoffs(request: Request):
             found.sort(key=lambda r: r[0], reverse=True)
 
             for ended, h, root, latest, todo in found:
+                if h.root_id in seen:
+                    continue
                 if not await can_see_task(s, p, latest):
                     continue
                 started = root.created_by is not None and root.created_by == p.user.id
@@ -84,6 +87,7 @@ async def open_handoffs(request: Request):
                 step = (h.content or {}).get("step")
                 step = ({"n": step.get("n"), "m": step.get("m"), "text": step.get("text") or ""}
                         if isinstance(step, dict) and step.get("n") is not None and step.get("m") else None)
+                seen.add(h.root_id)
                 out.append({
                     "root_id": h.root_id,
                     "title": root.title,

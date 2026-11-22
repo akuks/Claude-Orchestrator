@@ -19,6 +19,9 @@ TEXT_MAX = 600
 TOOL_INPUT_MAX = 200
 TOOL_RESULT_MAX = 300
 PRIOR_ASKS = 3
+HANDOFF_MAX = 6000
+PRIOR_ANSWER_MAX = 1500
+QUESTION_MAX = 2000
 _PAGE = 500
 
 
@@ -109,7 +112,7 @@ async def build_record(s, task: Task, question: str, prior: list[tuple[str, str]
     root = task.root_id or task.id
     handoff = (await s.execute(select(TaskHandoff).where(TaskHandoff.root_id == root))).scalar_one_or_none()
     if handoff is not None and isinstance(handoff.content, dict) and handoff.content:
-        parts.append("## Where it stands\n" + _txt(render(handoff.content, level=1), secrets, keep_newlines=True))
+        parts.append("## Where it stands\n" + _txt(render(handoff.content, level=1), secrets, HANDOFF_MAX, keep_newlines=True))
 
     usage = await s.get(TaskUsage, task.id)
     if usage is not None:
@@ -130,9 +133,9 @@ async def build_record(s, task: Task, question: str, prior: list[tuple[str, str]
     if prior:
         pl = ["## Earlier questions you asked"]
         for q, a in prior[-PRIOR_ASKS:]:
-            pl.append(f"Q: {_txt(q, secrets, 2000)}\nA: {_txt(a, secrets, 8000, keep_newlines=True)}")
+            pl.append(f"Q: {_txt(q, secrets, QUESTION_MAX)}\nA: {_txt(a, secrets, PRIOR_ANSWER_MAX, keep_newlines=True)}")
         tail.append("\n".join(pl))
-    quoted = "\n".join("> " + ln for ln in _txt(question, secrets, 2000, keep_newlines=True).split("\n"))
+    quoted = "\n".join("> " + ln for ln in _txt(question, secrets, QUESTION_MAX, keep_newlines=True).split("\n"))
     tail.append("Question from the person:\n" + quoted)
 
     fixed = len("\n\n".join(parts + tail)) + len("## Run log (newest last)\n") + 80
@@ -143,4 +146,8 @@ async def build_record(s, task: Task, question: str, prior: list[tuple[str, str]
         log.append(f"({dropped} earlier events not shown)")
     log.extend(lines)
     parts.append("\n".join(log))
-    return "\n\n".join(parts + tail)
+    out = "\n\n".join(parts + tail)
+    if len(out) > RECORD_MAX_CHARS:  # safety net: cut the front, keep the question at the end
+        tail_text = "\n\n".join(tail[-1:])
+        out = out[: max(RECORD_MAX_CHARS - len(tail_text) - 2, 0)] + "\n\n" + tail_text
+    return out

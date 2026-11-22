@@ -48,11 +48,11 @@ def _parse(text: str) -> AskResult:
     except ValueError:
         obj = None
     if isinstance(obj, dict):
-        if obj.get("is_error"):
-            return AskResult(error="no answer")
-        ans = obj.get("result")
         cost = obj.get("total_cost_usd")
         cost = float(cost) if isinstance(cost, (int, float)) and not isinstance(cost, bool) else None
+        if obj.get("is_error"):
+            return AskResult(error="no answer", cost_usd=cost)
+        ans = obj.get("result")
         if isinstance(ans, str) and ans.strip():
             return AskResult(answer=ans.strip(), cost_usd=cost)
         return AskResult(error="no answer")
@@ -85,7 +85,7 @@ async def run_ask(prompt: str, env: dict) -> AskResult:
             raise
         text = out.decode(errors="replace").strip()
         if proc.returncode != 0 or not text:
-            return AskResult(error="no answer")
+            return AskResult(error="no answer", cost_usd=_parse(text).cost_usd if text else None)
         return _parse(text)
     finally:
         shutil.rmtree(cwd, ignore_errors=True)

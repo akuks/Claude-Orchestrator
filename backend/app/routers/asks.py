@@ -9,7 +9,7 @@ from ..asks import service
 from ..config import settings
 from ..database import SessionLocal
 from ..models import RunAsk
-from ..redaction import clean_text
+from ..redaction import clean_text, redact
 from ..schemas import AskIn, AskOut
 
 router = APIRouter(prefix="/tasks", tags=["asks"])
@@ -22,7 +22,7 @@ async def create_ask(task_id: str, body: AskIn, request: Request):
     p = request.state.principal
     async with SessionLocal() as s:
         await require_task(s, p, task_id)
-    q = clean_text(body.question).strip()
+    q = redact(clean_text(body.question), []).strip()
     if not 1 <= len(q) <= service.QUESTION_MAX:
         raise HTTPException(422, f"The question must be 1 to {service.QUESTION_MAX} characters")
     return await service.start_ask(task_id, p.user.id, q)
