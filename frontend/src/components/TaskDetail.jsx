@@ -375,7 +375,7 @@ export default function TaskDetail({ taskId, onClose, onChanged, onOpenTask, onO
   const guardCtx = useMemo(() => ({ approvals: new Map(requests.map((a) => [a.id, a])), names }), [requests, names])
   const waiting = requests.filter((a) => a.status === 'pending')
   const usage = useUsage(taskId, running)
-  const chips = <UsageChips report={usage} live={running} />
+  const chips = <UsageChips report={usage} />
 
   // Auto-scroll the terminal as events arrive.
   useEffect(() => {

@@ -264,6 +264,8 @@ describe('TaskDetail: token care (phase 3b)', () => {
     await flush()
     await act(async () => vi.advanceTimersByTime(20000))
     expect(api.getUsage.mock.calls.length).toBe(1)
+    // finished without a result cost: still an estimate (the server says so)
+    expect(view.container.querySelector('[data-testid="usage-budget"]').textContent).toBe('budget 50 % est.')
   })
 
   it('renders usage_band and auto_continue events as their own lines', async () => {
