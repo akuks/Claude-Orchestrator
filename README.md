@@ -734,8 +734,10 @@ fewer.
 
 **Who may ask, who pays.** Anyone who can see the task, as a person: the agent
 token cannot ask. The **asker's own Claude credential** pays (the project's
-environment when the task has a project, as for memory calls); without one the
-ask is refused with 422 *Add your Claude credential to ask about runs*. The
+environment when the task has a project, as for memory calls), or the
+organisation's fallback key when one is set and the asker has no credential,
+the same way it pays for the person's own tasks; with neither the ask is
+refused with 422 *Add your Claude credential to ask about runs*. The
 cost is shown on the ask only.
 
 **Private.** The asks are yours alone: `GET /tasks/{id}/asks` returns only your
@@ -784,6 +786,7 @@ Full interactive docs at `/docs`. Highlights:
 | `GET` · `POST` | `/tasks/{id}/questions` | The thread's questions / file one (also open to the run's own agent token) |
 | `GET` | `/questions` | Questions you can see (`?status=open\|answered\|dismissed\|all`, default `open`) |
 | `POST` | `/questions/{id}/answer` · `/dismiss` | Answer (`{"answer": …}` or `{"accept": true}`) and continue the thread / close it |
+| `GET` · `POST` | `/tasks/{id}/asks` | Your private asks on a step (newest 20) / ask a question about the run (202; 409, 422, 429 limits) |
 | `GET` | `/handoffs/open` | Threads to pick up again (Home) |
 | `DELETE` | `/tasks/{id}` | Delete a task (or thread); cleans sandbox workspace |
 | `GET` | `/tasks/{id}/report?format=pdf\|docx` | Download the result as PDF / DOCX |

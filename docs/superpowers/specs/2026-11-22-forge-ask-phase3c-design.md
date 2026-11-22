@@ -19,8 +19,9 @@ It works on running and finished steps.
   Forge's "stay reachable" rule text is **not** added to ground rules (inventory: doesn't translate under `-p`).
 - **Who may ask:** anyone who can see the task (`can_see_task`). People only: the agent token is never allowed
   (not on the agent allowlist). The answer reads only what the asker can already see on the page.
-- **Whose credential pays:** the asker's (`agent_env.agent_env_or_none(s, asker_id, project_env=…,
-  purpose="ask")`; the project's env when the task has a project, as memory calls do). No credential → 422
+- **Whose credential pays:** the asker's own Claude credential, or the organisation's fallback key when one is set and the
+  asker has none, as for the person's own tasks (`agent_env.agent_env_or_none(s, asker_id, project_env=…,
+  purpose="ask")`; the project's env when the task has a project, as memory calls do). Neither → 422
   "Add your Claude credential to ask about runs". The cost is recorded on the ask, never added to the task,
   its thread totals or 3b usage.
 - **Private to the asker.** `GET` lists only the caller's own asks on that task. Asks never enter the run log,
