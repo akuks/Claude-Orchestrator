@@ -115,6 +115,8 @@ class Task(Base):
     recovery: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     credential_ref: Mapped[str | None] = mapped_column(String(32), nullable=True)
     head_at_start: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    # Token care (phase 3b): this step was queued by the automatic fresh continue.
+    auto_continued: Mapped[bool] = mapped_column(Boolean, default=False, server_default=false())
 
     events: Mapped[list["TaskEvent"]] = relationship(
         back_populates="task", cascade="all, delete-orphan"
@@ -204,6 +206,9 @@ class Project(Base):
     on_no_answer: Mapped[str] = mapped_column(String(20), default="deny", server_default="deny")
     readonly_paths: Mapped[list] = mapped_column(JSON, default=list, server_default="[]")
     reference_project_ids: Mapped[list] = mapped_column(JSON, default=list, server_default="[]")
+    # Token care (phase 3b): context size (tokens) at which a step is handed to a
+    # fresh session; null = off. Allowed 50000-900000.
+    fresh_session_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
 
 
@@ -318,6 +323,48 @@ class TaskHandoff(Base):
     prev_text: Mapped[str | None] = mapped_column(Text, nullable=True)
     closed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     closed_by: Mapped[str | None] = mapped_column(String(32), nullable=True)
+
+
+class TaskUsage(Base):
+    """A step's token figures (phase 3b), one row per step: the latest
+    main-thread context size, its peak, the running cost estimate (the result's
+    total_cost_usd once finished), the breakdown (UsageTracker.snapshot) and the
+    bands co-guard fired ([{"band", "ts"}])."""
+
+    __tablename__ = "task_usage"
+
+    task_id: Mapped[str] = mapped_column(ForeignKey("tasks.id", ondelete="CASCADE"), primary_key=True)
+    root_id: Mapped[str] = mapped_column(String(32), index=True)
+    context_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    peak_context: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    est_cost_usd: Mapped[float | None] = mapped_column(Float, nullable=True)
+    breakdown: Mapped[dict] = mapped_column(JSON, default=dict, server_default="{}")
+    bands: Mapped[list] = mapped_column(JSON, default=list, server_default="[]")
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now, onupdate=_now)
+
+
+class TaskQuestion(Base):
+    """A question an agent needs a person to answer (phase 3b Questions inbox).
+    source agent | final_text; status open | answered | dismissed."""
+
+    __tablename__ = "task_questions"
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=_uuid)
+    task_id: Mapped[str] = mapped_column(ForeignKey("tasks.id", ondelete="CASCADE"), index=True)
+    root_id: Mapped[str] = mapped_column(String(32), index=True)
+    project_id: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    question: Mapped[str] = mapped_column(Text)
+    options: Mapped[list] = mapped_column(JSON, default=list, server_default="[]")
+    recommendation: Mapped[str | None] = mapped_column(Text, nullable=True)
+    blocks: Mapped[str | None] = mapped_column(Text, nullable=True)
+    reversible: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    source: Mapped[str] = mapped_column(String(16), default="agent")
+    status: Mapped[str] = mapped_column(String(12), default="open", server_default="open")
+    answer: Mapped[str | None] = mapped_column(Text, nullable=True)
+    answered_by: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    answered_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    followup_task_id: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
 
 
 class ActionGrant(Base):
