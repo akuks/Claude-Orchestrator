@@ -117,3 +117,32 @@ def test_outsider_gets_404(client):
     tid = _mk(project_id=p["id"], usage={"breakdown": _bd()})
     assert owner.get(f"/tasks/{tid}/usage").status_code == 200
     assert outsider.get(f"/tasks/{tid}/usage").status_code == 404
+
+
+def test_finished_step_stored_cost_wins_over_estimate(client):
+    tid = _mk(total_cost_usd=1.0, max_budget_usd=4.0, usage={"est_cost_usd": 0.6, "breakdown": _bd()})
+    st = _get(client, tid)["step"]
+    assert st["est_cost_usd"] == pytest.approx(1.0) and st["cost_is_estimate"] is False
+    assert st["budget_pct"] == 25.0
+
+
+def test_tips_come_from_the_asked_step_only(client):
+    root = _mk(usage={"peak_context": 200_000, "breakdown": _bd(results=[{"tool": "Read", "chars": 30_000, "id": "z"}])})
+    later = _mk(root=root, usage={"peak_context": 10, "breakdown": _bd()})
+    assert _get(client, root)["tips"] == [TIP_NARROW, TIP_FRESH]
+    assert _get(client, later)["tips"] == []
+
+
+def test_awaiting_approval_counts_as_live(client):
+    tid = _mk(status="awaiting_approval", usage={"est_cost_usd": 0.2, "breakdown": _bd({"input": 5, "output": 6})})
+    body = _get(client, tid)
+    assert body["step"]["cost_is_estimate"] is True and body["step"]["budget_pct"] is None
+    assert body["thread"]["tokens"] == 11
+
+
+def test_thread_fallbacks(client):
+    root = _mk(usage={"est_cost_usd": 0.3, "breakdown": _bd()}, input_tokens=1, output_tokens=2)  # finished, no result cost
+    _mk(root=root, status="running")  # running, no TaskUsage row
+    body = _get(client, root)
+    assert body["thread"]["cost_usd"] == pytest.approx(0.3) and body["thread"]["tokens"] == 3
+    assert body["thread"]["steps"] == 2

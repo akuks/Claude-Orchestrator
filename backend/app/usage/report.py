@@ -23,7 +23,7 @@ def breakdown_tokens(breakdown: dict) -> int:
 
 
 def tips(usages: list, fresh_tokens: int | None) -> list[str]:
-    """Up to three tips over the thread's steps' TaskUsage rows."""
+    """Up to three tips over the given TaskUsage rows (the asked step's)."""
     out: list[str] = []
     if any((r.get("chars") or 0) > BIG_RESULT_CHARS
            for u in usages for r in ((u.breakdown or {}).get("largest_results") or [])):
@@ -48,10 +48,12 @@ def build(task, usage, steps: list, usages: list, fresh_tokens: int | None) -> d
     """``task``/``usage``: the asked step and its TaskUsage (or None); ``steps``: the thread's steps
     oldest first; ``usages``: the thread's TaskUsage rows."""
     by_id = {u.task_id: u for u in usages}
-    running = task.status in (Status.QUEUED, Status.RUNNING)
-    cost = usage.est_cost_usd if usage is not None and usage.est_cost_usd is not None else task.total_cost_usd
+    live = task.status in Status.ACTIVE
+    est = usage.est_cost_usd if usage is not None else None
+    # a finished step's stored result cost wins over the running estimate
+    cost = est if live and est is not None else (task.total_cost_usd if task.total_cost_usd is not None else est)
     # an estimate while the step runs, or when the finished step reported no result cost
-    estimate = running or task.total_cost_usd is None
+    estimate = live or task.total_cost_usd is None
     pct = None
     if task.max_budget_usd and cost is not None:
         pct = round(cost / task.max_budget_usd * 100, 1)
@@ -69,8 +71,7 @@ def build(task, usage, steps: list, usages: list, fresh_tokens: int | None) -> d
     last = None
     for t in steps:
         u = by_id.get(t.id)
-        live = t.status in Status.ACTIVE
-        if live:  # a running step has no stored totals yet: its live estimate stands in
+        if t.status in Status.ACTIVE:  # a running step has no stored totals yet: its live estimate stands in
             c = (u.est_cost_usd if u and u.est_cost_usd is not None else t.total_cost_usd) or 0.0
             tk = breakdown_tokens(u.breakdown) if u else 0
         else:
@@ -83,4 +84,4 @@ def build(task, usage, steps: list, usages: list, fresh_tokens: int | None) -> d
         last = {"title": t.title, "duration_ms": d, "cost_usd": c}
     thread = {"steps": len(steps), "duration_ms": dur, "cost_usd": round(cost_sum, 6), "tokens": tokens,
               "last": last}
-    return {"step": step, "thread": thread, "tips": tips(usages, fresh_tokens)[:3]}
+    return {"step": step, "thread": thread, "tips": tips([usage] if usage else [], fresh_tokens)[:3]}
