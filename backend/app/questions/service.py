@@ -1,8 +1,8 @@
 """Questions inbox (phase 3b, forge F22 + F99): filing, the shared limits and cleaning, and the capture of a
 question from a step's final text.
 
-Every text is redacted (the run's secrets plus token shapes) and cleaned of hidden characters before it is
-stored, and its length is checked after that (422). At most ``OPEN_MAX`` questions are open per thread (409);
+Every text is redacted (the run's secrets plus token shapes), cleaned of hidden characters and made one line
+before it is stored, and its length is checked after that (422). At most ``OPEN_MAX`` questions are open per thread (409);
 the count and the insert run under the global follow-up lock, so two filings cannot both take the last slot."""
 
 from __future__ import annotations
@@ -36,14 +36,21 @@ _BLANK_LINE = re.compile(r"\n[ \t]*\n")
 
 
 def clean(text, secrets=None) -> str:
-    """Hidden characters stripped, the secrets and token shapes masked, outer space trimmed."""
+    """Hidden characters stripped, the secrets and token shapes masked, outer space trimmed (line breaks
+    kept: a person's free answer)."""
     return redact(clean_text(text), list(secrets or [])).strip()
+
+
+def one_line(text, secrets=None) -> str:
+    """``clean`` and every run of white space (line breaks too) made one space: how a question's texts are
+    stored, so a later prompt that quotes them cannot gain a line (e.g. a fake "The person's answer:")."""
+    return " ".join(clean(text, secrets).split())
 
 
 def _limited(text, secrets, limit: int, what: str) -> str | None:
     if text is None:
         return None
-    out = clean(text, secrets)
+    out = one_line(text, secrets)
     if len(out) > limit:
         raise HTTPException(422, f"{what} is at most {limit} characters")
     return out or None
@@ -151,7 +158,7 @@ async def capture_final(task_id: str) -> None:
             para = last_paragraph(task.result_text)
             # the stored result_text is already redacted with the run's secrets (_finish); this masks
             # token shapes again and strips hidden characters
-            para = clean(para) if para else None
+            para = one_line(para) if para else None
             if not para or not para.endswith("?") or len(para) > QUESTION_MAX:
                 return
             filed = (await s.execute(select(TaskQuestion.id).where(TaskQuestion.task_id == task_id).limit(1))

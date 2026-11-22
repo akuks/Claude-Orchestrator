@@ -78,7 +78,8 @@ async def answer_question(question_id: str, payload: QuestionAnswer, request: Re
         if payload.accept:
             if not q.recommendation:
                 raise HTTPException(409, "The question has no recommendation to accept")
-            answer = ACCEPT_ANSWER.format(recommendation=q.recommendation)
+            # one line even for a row stored before the one-line rule
+            answer = ACCEPT_ANSWER.format(recommendation=" ".join(q.recommendation.split()))
         else:
             answer = questions.clean(payload.answer)
             if not answer:
@@ -103,6 +104,10 @@ async def answer_question(question_id: str, payload: QuestionAnswer, request: Re
                 or_(Task.root_id == root, Task.id == root), Task.origin != "agent")
                 .order_by(Task.created_at.desc()).limit(1))).scalar_one_or_none()
             step_parent = newest or parent
+            if step_parent.id != parent.id:  # the step actually continued needs the same permission
+                ok, why = await _manage_allowed(s, p, step_parent, need_contributor=True)
+                if not ok:
+                    raise HTTPException(403, why)
             # the follow-up rule on that step: only its session's owner resumes it; anyone else starts fresh
             sender = p.user.id
             resume = (step_parent.session_id if step_parent.session_id and sender == step_parent.created_by

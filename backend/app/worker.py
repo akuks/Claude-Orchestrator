@@ -1743,8 +1743,9 @@ class WorkerManager:
     async def _maybe_auto_continue(self, task_id: str) -> None:
         """The automatic fresh Continue: the step completed (not a dispatched child), co-guard fired its
         ``fresh`` band, the step has no open question (the thread waits for the person's answer), and either
-        the handoff has an open todo or the step's notes were saved after the band; no step of the thread is active and fewer than AUTO_CONTINUE_MAX of the thread's newest
-        main-line steps in a row were automatic. The step runs as the parent's owner, mode fresh, with an
+        the handoff has an open todo or the step's notes were saved after the band; no step of the thread is
+        active and fewer than AUTO_CONTINUE_MAX of the thread's newest main-line steps in a row were
+        automatic. The step runs as the parent's owner, mode fresh, with an
         ``auto_continue`` run-log event. Never raises."""
         try:
             from fastapi import HTTPException

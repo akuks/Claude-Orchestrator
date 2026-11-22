@@ -345,7 +345,8 @@ class TaskUsage(Base):
 
 class TaskQuestion(Base):
     """A question an agent needs a person to answer (phase 3b Questions inbox).
-    source agent | final_text; status open | answered | dismissed."""
+    source agent (the agent token) | person (filed by a person) | final_text; status open | answered |
+    dismissed."""
 
     __tablename__ = "task_questions"
 

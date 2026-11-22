@@ -1,6 +1,6 @@
 from datetime import datetime
 import re
-from typing import Literal, Optional
+from typing import Annotated, Literal, Optional
 
 from pydantic import BaseModel, Field, field_validator, model_validator
 
@@ -87,17 +87,18 @@ class ContinueCreate(BaseModel):
 
 
 class QuestionCreate(BaseModel):
-    # the lengths are checked after redaction and cleaning (questions.service.clean_fields): 422
-    question: str
-    options: list[str] = Field(default_factory=list)
-    recommendation: Optional[str] = None
-    blocks: Optional[str] = None
+    # raw size caps (422) before any work; the stored limits are checked after redaction and cleaning
+    # (questions.service.clean_fields): 422
+    question: str = Field(max_length=10000)
+    options: list[Annotated[str, Field(max_length=2000)]] = Field(default_factory=list, max_length=20)
+    recommendation: Optional[str] = Field(default=None, max_length=2000)
+    blocks: Optional[str] = Field(default=None, max_length=3000)
     reversible: Optional[bool] = None
 
 
 class QuestionAnswer(BaseModel):
     # exactly one of: a free answer, or accept=true (checked by the route: 422)
-    answer: Optional[str] = None
+    answer: Optional[str] = Field(default=None, max_length=10000)
     accept: Optional[bool] = None
 
 

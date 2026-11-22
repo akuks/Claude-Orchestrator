@@ -711,7 +711,7 @@ async def file_question(task_id: str, payload: QuestionCreate, request: Request)
         if not p.is_agent:
             await _require_manage(s, p, task)
         fields = questions.clean_fields(payload, request.app.state.worker._run_secrets.get(task_id))
-        q = await questions.file(s, task, fields, source="agent")
+        q = await questions.file(s, task, fields, source="agent" if p.is_agent else "person")
         out = questions.out(q, task_title=task.title,
                             can_answer=not p.is_agent and (await _manage_allowed(s, p, task, need_contributor=True))[0])
     await questions.notify(out.id)
