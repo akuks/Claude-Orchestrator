@@ -1725,20 +1725,8 @@ class WorkerManager:
 
     AUTO_CONTINUE_MAX = 3  # automatic continues in a row per thread
 
-    @staticmethod
-    def _open_todo(content: dict, task_id: str) -> bool:
-        """The stored handoff describes this step and its progress has an item not completed: a ``next``
-        one, a current one that is not "all steps done", or (from the notes' header) n below m."""
-        if not isinstance(content, dict) or content.get("step_task_id") != task_id:
-            return False
-        st = content.get("step") if isinstance(content.get("step"), dict) else {}
-        if st.get("source") in (None, "prompt") or not st.get("m"):
-            return False
-        if content.get("next"):
-            return True
-        if st.get("source") == "notes":
-            return isinstance(st.get("n"), int) and st["n"] < st["m"]
-        return st.get("text") != "all steps done"
+    # the handoff has an open todo for this step (shared with Home "Open handoffs")
+    _open_todo = staticmethod(handoff.open_todo)
 
     async def _maybe_auto_continue(self, task_id: str) -> None:
         """The automatic fresh Continue: the step completed (not a dispatched child), co-guard fired its

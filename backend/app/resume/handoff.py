@@ -724,3 +724,18 @@ async def snapshot(task_id: str, reason: str, *, secrets=None, since=None):
             if attempt == 2:
                 raise
     return None
+
+
+def open_todo(content: dict, task_id: str) -> bool:
+    """(Phase 3b: the automatic Continue and Home "Open handoffs".) The stored handoff describes this step and its progress has an item not completed: a ``next``
+    one, a current one that is not "all steps done", or (from the notes' header) n below m."""
+    if not isinstance(content, dict) or content.get("step_task_id") != task_id:
+        return False
+    st = content.get("step") if isinstance(content.get("step"), dict) else {}
+    if st.get("source") in (None, "prompt") or not st.get("m"):
+        return False
+    if content.get("next"):
+        return True
+    if st.get("source") == "notes":
+        return isinstance(st.get("n"), int) and st["n"] < st["m"]
+    return st.get("text") != "all steps done"
