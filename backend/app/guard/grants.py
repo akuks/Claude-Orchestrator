@@ -26,7 +26,9 @@ its prompt carries one ``followup_block`` per approved request plus a once
 grant per request. At most one follow-up per thread at a time:
 
 * a queued follow-up of the thread (one an approval created, or the thread
-  owner's queued Continue step) is joined:
+  owner's queued Continue step - which runs in the session the Continue
+  chose: the continued step's, or a fresh one with the handoff, not
+  necessarily the owner's latest) is joined:
   one more block appended to its prompt (only while it is still queued) and
   one more once grant;
 * while any other step of the thread is active the approval is deferred

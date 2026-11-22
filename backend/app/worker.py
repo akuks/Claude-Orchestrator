@@ -462,10 +462,10 @@ class WorkerManager:
                     s, t, base_prompt=prompt, resumed=resume_session_id is not None,
                     wanted_resume=prompting.wanted_resume(t), recovery_block=recovery_block,
                     secrets=run_secrets)
-            except Exception as e:  # noqa: BLE001 - a failed composition never stops a run
-                log.warning("prompting: compose failed for %s: %s", task_id, type(e).__name__)
-                ctx_log = {}
-        if ctx_log.get("blocks"):
+            except Exception:  # noqa: BLE001 - a failed composition never stops a run
+                log.exception("prompting: compose failed for %s; running with the step's own prompt", task_id)
+                ctx_log = {"blocks": [], "compose_failed": True}
+        if ctx_log.get("blocks") or ctx_log.get("compose_failed"):
             await emit("context", ctx_log)
         # A fresh guard follow-up keeps today's project preamble (Phase 2).
         if origin == "guard" and recovery_block is None and project_id and not resume_session_id:

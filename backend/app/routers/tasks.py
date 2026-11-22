@@ -435,6 +435,13 @@ async def continue_task(task_id: str, request: Request, payload: ContinueCreate 
         if parent.status not in Status.TERMINAL:
             raise HTTPException(409, f"Task is still {parent.status}")
     worker = request.app.state.worker
+    # Where the thread stands, saved before the step is queued and outside the
+    # global follow-up lock (it runs git). The step is terminal, so it has no
+    # live run secrets or outside-commit base to pass.
+    try:
+        await resume_handoff.snapshot(task_id, "continue")
+    except Exception:  # noqa: BLE001 - the Continue still runs (its prompt uses the stored handoff)
+        logging.getLogger(__name__).exception("handoff snapshot before continue failed for %s", task_id)
     # serialised with deny-and-resume's join / defer / spawn choice
     async with guard_grants.followup_lock():
         async with SessionLocal() as s:
@@ -450,11 +457,6 @@ async def continue_task(task_id: str, request: Request, payload: ContinueCreate 
                 raise HTTPException(
                     409, "Only the session's owner can resume it, and the step needs a session")
             resume = parent.session_id if can_resume and mode != "fresh" else None
-        try:  # where the thread stands, saved before the step is queued
-            await resume_handoff.snapshot(task_id, "continue", secrets=worker._run_secrets.get(task_id),
-                                          since=worker._run_since.get(task_id))
-        except Exception:  # noqa: BLE001 - the Continue still runs (its prompt uses the stored handoff)
-            logging.getLogger(__name__).exception("handoff snapshot before continue failed for %s", task_id)
         async with SessionLocal() as s:
             parent = await require_task(s, p, task_id)
             child = _step_from(parent, prompt=CONTINUE_PROMPT, origin="continue", resume=resume,
