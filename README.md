@@ -70,6 +70,30 @@ cost caps, security reviews, and reusable agent roles.
 > - **Task-level risk (`classify_risk`) is unchanged**: prompts that mention
 >   pushes, merges or deletes are still gated before the task starts.
 
+
+> **Upgrading to the resume release (3a)?** Runs now keep a record of where
+> they stand ([Resume and handoff](#resume-and-handoff)). What changes for you:
+>
+> - **Migration `0008_resume` runs on start** (`alembic upgrade head`; SQLite and
+>   Postgres). It adds columns and one table (`task_handoffs`), and its downgrade
+>   drops them. Take your usual database backup first.
+> - **A run cut off by a server restart or crash now resumes its own Claude
+>   session** (with a note of what was in flight) instead of starting over from
+>   the original prompt. It is tried at most **2** times; the third interruption
+>   fails the step and says to use Continue.
+> - **A fresh continuation now carries the handoff.** A follow-up that cannot
+>   resume (another person's step, a missing session file) and a new
+>   *Continue fresh* start with where the thread stands, not just the prompt.
+> - **A changed Claude credential forces a fresh session.** The old session
+>   belonged to the old account; the step starts fresh with the handoff and the
+>   run log says why.
+> - **The system prompt gains the ground rules** (grounding, short answers,
+>   usage care and note keeping), plus any extra text an admin adds. An admin can
+>   switch each one off in **Agent guard → Ground rules**.
+> - **One new agent-token route**: `PUT /tasks/{id}/notes`, for the run's own
+>   task only. Everything else on the API stays for people only.
+> - **The server must stay a single process** (no `--workers`, no replicas):
+>   crash recovery assumes it is the only one that owns running rows.
 ---
 
 ## What it does
@@ -211,6 +235,7 @@ any other origin must be added, or live task streams are rejected.
 | `CO_DEFAULT_TASK_BUDGET_USD` | *(unset)* | Default per-task spend cap (`--max-budget-usd`) |
 | `CO_FALLBACK_MODEL` | *(unset)* | Fallback model if the primary is unavailable |
 | `CO_RETRY_MAX_ATTEMPTS` / `CO_RETRY_BACKOFF_SECONDS` | `2` / `30` | Auto-retry transient failures |
+| `CO_RECOVERY_SWEEP_SECONDS` | `60` | How often `RUNNING` steps with no live worker are recovered ([Resume and handoff](#resume-and-handoff)) |
 | `CO_GATE_CRITICAL_APPROVAL` | `true` | Force approval for critical-risk tasks (merge/deploy/delete) |
 | `CO_GITHUB_WEBHOOK_SECRET` | *(unset)* | HMAC secret for the GitHub PR webhook (required: the endpoint returns 503 while unset) |
 | `CO_SECRET_KEY` | *(auto)* | AES-256 vault key (else generated to `.secret.key`) |
@@ -464,6 +489,94 @@ phase.
 
 ---
 
+## Resume and handoff
+
+Phase 3a of the forge port: a thread can be stopped, crash or be handed to
+someone else, and the next step still knows where it stands.
+
+**What you see.** A task's page shows a **Where it stands** card (collapsible):
+the task, *Step n of m* and the next action (from the agent's todo list, plan
+file or tasks), what is done, what is running or waiting, the last reply, files
+touched, Claude's own notes with the time they were written, recent actions
+and who else is active in the directory. **Refresh** rebuilds it now,
+**Mark done** closes it. Above it, short notices say when a step was recovered
+after an interruption (or given up on), when commits were made outside the
+thread, when a step started a fresh session and why (credentials changed,
+another person continued it, the session was not available), and, in a
+project's drawer, that the repo has **no commits yet**. The card is redacted
+and cut to 600 words; it is saved when a run ends, when notes arrive, about
+every 60 s while a run is active and before a Continue.
+
+**Continue.** A stopped, failed or cancelled step of a thread (never a
+completed one, never an agent's dispatched child) has a **Continue** button:
+
+- **Continue (resume)** carries on in the step's own Claude session with the
+  handoff and the last log lines. Only the person whose credential started that
+  session may do it, and the session file must still exist (otherwise 409).
+- **Continue fresh with the handoff** starts a new session with the handoff,
+  the log tail and the original request. Anyone who may follow up can do it.
+- The API's `auto` mode (`POST /tasks/{id}/continue`, body `{"mode":
+  "auto"|"resume"|"fresh"}`) resumes when it can and starts fresh otherwise.
+
+Who may use it is the same as for a follow-up: an admin, the project's
+maintainers and contributors, and the task's owner. The buttons follow the
+server's `can_manage` / `can_resume` on the task. Only one step of a thread
+runs at a time (409 while one is active).
+
+A plain follow-up with an intact session gets no handoff, only a one-line
+note when commits were made outside the thread since the last step. A repo
+with no commits at all gets a warning line in the run's prompt (a bad edit
+cannot be undone with git until the first commit). Git facts are read-only
+(`status`, ancestry, `log`) with a 5 s timeout; on a timeout they say "unknown".
+
+**Crash recovery.** The server marks a `RUNNING` step interrupted when its
+worker is gone (a restart, a crash or `kill -9`) and requeues it to resume its
+own session. The agent is told when it was cut off, what was in flight (a
+shell command "may have half run", a file "may be half written"), what was
+running and is now gone, and to run `git status` before repeating anything.
+Limits:
+
+- **At most 2 automatic recoveries per step.** The third interruption fails
+  the step ("interrupted 3 times by server restarts; use Continue to resume
+  it").
+- **A leftover Claude process is killed only when its start time matches** the
+  one recorded for the run (`ps lstart`). A mismatch or a dead pid is never
+  signalled, so a reused pid is safe.
+- If the session file is gone, or the credential changed, the step starts
+  fresh with the handoff.
+- Once-grants that a step already used stay spent. A command that was
+  half-way through is not rolled back: the agent has to check its effect.
+- It needs the server to be a **single process** (no `--workers`, no
+  replicas) and runs a sweep every `CO_RECOVERY_SWEEP_SECONDS` (default 60).
+- A recovery is visible as a `recovery` event and as a notice on the card.
+
+**Notes.** The agent keeps short notes (what it is doing, what was agreed,
+what is next, cautions with what was measured). It saves them with its own
+agent token: `PUT /tasks/{id}/notes` (plain text or `{"text": …}`, 16 KB at
+most; own task only; cleaned and redacted). co-guard's `PostToolUse` hook
+reminds it after every 12 tool calls, and re-injects the handoff after a
+context compaction (`SessionStart compact`). The notes show on the card with
+their time and are treated as a record to re-check, not as instructions. A
+person can also write them (`PUT` with a session, maintainers and above).
+
+**Ground rules (admin).** **Agent guard → Ground rules** sets the standing
+instructions every run gets in its system prompt: *Grounding* (cite
+`path:line` for what was read), *Short answers*, *Usage care* (helper habits),
+*Notes* (the note-keeping reminder), and up to 2000 characters of extra text.
+Each switch defaults to on; only admins save them
+(`PUT /guard/org-settings`, `ground_rules`). A run's log has a
+`ground_rules` event listing what was included.
+
+**Limits.** The handoff is a record rebuilt from the run's events and git, not
+a transcript: a long tool output or a file's content is not in it. Outside
+commits are those since the last saved handoff head, so pressing **Refresh**
+between steps counts them as seen. Files written to a temp folder are listed
+as "may vanish". Secrets are masked with the same rules as the run log, which
+know common shapes only (see [Seatbelt limits](#seatbelt-limits)). Phase **3b**
+is next.
+
+---
+
 ## REST API
 
 Full interactive docs at `/docs`. Highlights:
@@ -475,6 +588,9 @@ Full interactive docs at `/docs`. Highlights:
 | `POST` / `GET` | `/tasks` | Create + queue / list (`?status=`, `?project_id=`, `?roots_only=`) |
 | `GET` | `/tasks/{id}` · `/events` | Detail / full event log (`?after_seq=`) |
 | `POST` | `/tasks/{id}/cancel` · `/retry` · `/duplicate` · `/followup` | Lifecycle actions |
+| `POST` | `/tasks/{id}/continue` | Continue a stopped step (`mode`: `auto`, `resume`, `fresh`) |
+| `GET` · `POST` | `/tasks/{id}/handoff` · `/handoff/refresh` · `/handoff/close` | Where the thread stands |
+| `GET` · `PUT` | `/tasks/{id}/notes` | The agent's notes (`PUT` is also open to the run's own agent token) |
 | `DELETE` | `/tasks/{id}` | Delete a task (or thread); cleans sandbox workspace |
 | `GET` | `/tasks/{id}/report?format=pdf\|docx` | Download the result as PDF / DOCX |
 | `GET` | `/tasks/{id}/artifacts[/{path}]` | List / download output files |
