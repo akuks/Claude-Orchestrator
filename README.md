@@ -70,7 +70,6 @@ cost caps, security reviews, and reusable agent roles.
 > - **Task-level risk (`classify_risk`) is unchanged**: prompts that mention
 >   pushes, merges or deletes are still gated before the task starts.
 
-
 > **Upgrading to the resume release (3a)?** Runs now keep a record of where
 > they stand ([Resume and handoff](#resume-and-handoff)). What changes for you:
 >
@@ -94,6 +93,7 @@ cost caps, security reviews, and reusable agent roles.
 >   task only. Everything else on the API stays for people only.
 > - **The server must stay a single process** (no `--workers`, no replicas):
 >   crash recovery assumes it is the only one that owns running rows.
+
 ---
 
 ## What it does
@@ -507,12 +507,15 @@ project's drawer, that the repo has **no commits yet**. The card is redacted
 and cut to 600 words; it is saved when a run ends, when notes arrive, about
 every 60 s while a run is active and before a Continue.
 
-**Continue.** A stopped, failed or cancelled step of a thread (never a
-completed one, never an agent's dispatched child) has a **Continue** button:
+**Continue.** A finished step of a thread (the API accepts a completed, failed
+or cancelled one, never an agent's dispatched child; the button is shown on
+stopped, failed and cancelled steps) has a **Continue** button:
 
 - **Continue (resume)** carries on in the step's own Claude session with the
-  handoff and the last log lines. Only the person whose credential started that
-  session may do it, and the session file must still exist (otherwise 409).
+  handoff and the last log lines. Only the person who started the step may do
+  it, and the step needs a session (otherwise 409). If the session file has
+  vanished by then, or the credential changed, the new step starts fresh with
+  the handoff and a notice says why.
 - **Continue fresh with the handoff** starts a new session with the handoff,
   the log tail and the original request. Anyone who may follow up can do it.
 - The API's `auto` mode (`POST /tasks/{id}/continue`, body `{"mode":
@@ -554,7 +557,8 @@ Limits:
 **Notes.** The agent keeps short notes (what it is doing, what was agreed,
 what is next, cautions with what was measured). It saves them with its own
 agent token: `PUT /tasks/{id}/notes` (plain text or `{"text": …}`, 4 KB at
-most; own task only; cleaned and redacted). co-guard's `PostToolUse` hook
+most; own task only; cleaned and redacted; stored notes are cut to 120 words
+and 1000 characters). co-guard's `PostToolUse` hook
 reminds it after every 12 tool calls, and re-injects the handoff after a
 context compaction (`SessionStart compact`). The notes show on the card with
 their time and are treated as a record to re-check, not as instructions. A
