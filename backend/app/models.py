@@ -373,7 +373,12 @@ class RunAsk(Base):
     status pending | answered | failed."""
 
     __tablename__ = "run_asks"
-    __table_args__ = (Index("ix_run_asks_user_id_created_at", "user_id", "created_at"),)
+    __table_args__ = (
+        Index("ix_run_asks_user_id_created_at", "user_id", "created_at"),
+        # One pending ask per person per run, enforced by the database (a double-click files one).
+        Index("uq_run_asks_one_pending", "task_id", "user_id", unique=True,
+              sqlite_where=text("status = 'pending'"), postgresql_where=text("status = 'pending'")),
+    )
 
     id: Mapped[str] = mapped_column(String(32), primary_key=True, default=_uuid)
     task_id: Mapped[str] = mapped_column(ForeignKey("tasks.id", ondelete="CASCADE"), index=True)

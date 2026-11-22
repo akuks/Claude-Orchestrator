@@ -5,7 +5,8 @@ import logging
 from datetime import datetime, timedelta, timezone
 
 from fastapi import HTTPException
-from sqlalchemy import delete, func, select, update
+from sqlalchemy import func, select, update
+from sqlalchemy.exc import IntegrityError
 
 from ..access import effective_project_id
 from ..agent_env import agent_env_or_none
@@ -18,6 +19,7 @@ from .runner import run_ask
 
 log = logging.getLogger(__name__)
 
+PENDING_MSG = "You already have a question being answered on this run"
 NO_CREDENTIAL = "Add your Claude credential to ask about runs"
 QUESTION_MAX = 2000
 ANSWER_MAX = 8000
@@ -54,7 +56,7 @@ async def start_ask(task_id: str, user_id: str, question: str) -> RunAsk:
         pending = select(func.count()).select_from(RunAsk).where(
             RunAsk.task_id == task_id, RunAsk.user_id == user_id, RunAsk.status == "pending")
         if (await s.execute(pending)).scalar_one():
-            raise HTTPException(409, "You already have a question being answered on this run")
+            raise HTTPException(409, PENDING_MSG)
         since = datetime.now(timezone.utc) - timedelta(hours=1)
         recent = (await s.execute(select(func.count()).select_from(RunAsk).where(
             RunAsk.user_id == user_id, RunAsk.created_at >= since))).scalar_one()
@@ -63,16 +65,12 @@ async def start_ask(task_id: str, user_id: str, question: str) -> RunAsk:
         ask = RunAsk(task_id=task_id, user_id=user_id, question=question, status="pending",
                      model=settings.ask_model)
         s.add(ask)
-        await s.commit()
+        try:
+            await s.commit()  # the partial unique index lets only one pending ask per person and run in
+        except IntegrityError:
+            await s.rollback()
+            raise HTTPException(409, PENDING_MSG) from None
         ask_id = ask.id
-        # A double-click: two pendings can both commit. The lowest id stays, the other withdraws.
-        ids = (await s.execute(select(RunAsk.id).where(
-            RunAsk.task_id == task_id, RunAsk.user_id == user_id, RunAsk.status == "pending")
-            .order_by(RunAsk.id))).scalars().all()
-        if len(ids) > 1 and ids[0] != ask_id:
-            await s.execute(delete(RunAsk).where(RunAsk.id == ask_id))
-            await s.commit()
-            raise HTTPException(409, "You already have a question being answered on this run")
         await s.refresh(ask)
         s.expunge(ask)
     t = asyncio.create_task(_execute(ask_id))
@@ -96,6 +94,8 @@ async def _execute(ask_id: str) -> None:
                 ask = await s.get(RunAsk, ask_id)
                 task = await s.get(Task, ask.task_id) if ask else None
                 if ask is None or task is None:
+                    if ask is not None:
+                        await _finish(ask_id, status="failed", error="task not found")
                     return
                 env = await agent_env_or_none(s, ask.user_id, project_env=await _project_env(s, task),
                                               purpose="ask")
@@ -121,7 +121,7 @@ async def _execute(ask_id: str) -> None:
         try:
             await _finish(ask_id, status="failed", error="failed")
         except Exception:
-            pass
+            log.exception("ask %s: could not record the failure", ask_id)
 
 
 async def fail_interrupted_asks() -> int:
