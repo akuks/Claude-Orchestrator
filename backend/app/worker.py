@@ -720,6 +720,7 @@ class WorkerManager:
 
         tracker = self._usage[task_id] = usage_tracker.UsageTracker()  # fresh per attempt
         self._usage_spool[task_id] = self._new_usage_spool()
+        await self._reset_usage_row(task_id)  # an earlier attempt's bands and figures are not this one's
         ctx = {
             "task_id": task_id,
             "mcp_ids": {},
@@ -1159,24 +1160,34 @@ class WorkerManager:
         self._signal_group(g["proc"], signal.SIGKILL)  # claude and every tool it started
 
     @staticmethod
-    def _guard_read_spool(g) -> None:
-        """Read the spool's new complete lines; collect the ids co-guard saw."""
+    def _spool_new_lines(path, state: dict) -> list[dict]:
+        """The spool's complete lines after ``state["offset"]`` (advanced past them; a half-written last
+        line waits for its newline), as dicts."""
         try:
-            with open(g["spool"], "rb") as f:
-                f.seek(g["offset"])
+            with open(path, "rb") as f:
+                f.seek(state["offset"])
                 data = f.read()
         except OSError:
-            return
+            return []
         end = data.rfind(b"\n")
         if end < 0:
-            return
-        g["offset"] += end + 1
+            return []
+        state["offset"] += end + 1
+        out = []
         for line in data[: end + 1].splitlines():
             try:
                 rec = json.loads(line)
             except ValueError:
                 continue
-            if isinstance(rec, dict) and rec.get("seen") is True and rec.get("tool_use_id"):
+            if isinstance(rec, dict):
+                out.append(rec)
+        return out
+
+    @classmethod
+    def _guard_read_spool(cls, g) -> None:
+        """Read the spool's new complete lines; collect the ids co-guard saw."""
+        for rec in cls._spool_new_lines(g["spool"], g):
+            if rec.get("seen") is True and rec.get("tool_use_id"):
                 g["seen"].add(str(rec["tool_use_id"]))
 
     def _guard_checked(self, g, tid: str) -> bool:
@@ -1503,6 +1514,22 @@ class WorkerManager:
     USAGE_BANDS = ("budget80", "budget95", "fresh")
 
     @staticmethod
+    async def _reset_usage_row(task_id: str) -> None:
+        """At a run's start: the step's TaskUsage row (from an earlier attempt: transient retry, Retry,
+        recovery re-run) loses its bands and running figures. Never raises."""
+        try:
+            async with SessionLocal() as s:
+                row = await s.get(TaskUsage, task_id)
+                if row is not None:
+                    row.bands = []
+                    row.context_tokens = row.peak_context = row.est_cost_usd = None
+                    row.breakdown = {}
+                    row.updated_at = _now()
+                    await s.commit()
+        except Exception as e:  # noqa: BLE001 - usage bookkeeping never stops a run
+            log.warning("usage: reset failed for %s: %s", task_id, e)
+
+    @staticmethod
     def _new_usage_spool() -> dict:
         return {"offset": 0, "pending": [], "lock": asyncio.Lock()}
 
@@ -1530,23 +1557,7 @@ class WorkerManager:
 
     @classmethod
     def _read_usage_lines(cls, task_id: str, state: dict, tracker) -> None:
-        try:
-            with open(guard_runtime.task_dir(task_id) / guard_runtime.SPOOL_NAME, "rb") as f:
-                f.seek(state["offset"])
-                data = f.read()
-        except OSError:
-            return
-        end = data.rfind(b"\n")
-        if end < 0:
-            return
-        state["offset"] += end + 1
-        for line in data[: end + 1].splitlines():
-            try:
-                rec = json.loads(line)
-            except ValueError:
-                continue
-            if not isinstance(rec, dict):
-                continue
+        for rec in cls._spool_new_lines(guard_runtime.task_dir(task_id) / guard_runtime.SPOOL_NAME, state):
             band = rec.get("band")
             if band is not None and band not in cls.USAGE_BANDS:
                 continue  # not a record co-guard writes
@@ -1639,6 +1650,10 @@ class WorkerManager:
             result_text = redact(result_text, secrets or [])
         if error:
             error = redact(error, secrets or [])
+        # token care: the spool's lines not ingested yet (a crash skips _ingest_guard_spool; elsewhere the
+        # spool is gone already and this reads nothing) - same lock and offset, so each line once
+        live = self._guard_live.get(task_id)
+        await self._ingest_usage_spool(task_id, live["emit"] if live else self._emit_offline_for(task_id))
         tracker = self._usage.pop(task_id, None)  # the live run's usage (stored below)
         self._usage_spool.pop(task_id, None)
         context_store.cleanup(task_id)  # drop this task's knowledge snapshot
