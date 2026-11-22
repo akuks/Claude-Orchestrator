@@ -28,6 +28,7 @@ from ..guard import runtime as guard_runtime
 from .. import reports
 from ..models import ActionGrant, Artifact, Project, Task, TaskEvent, TaskHandoff, TaskQuestion, TaskUsage
 from ..resume import handoff as resume_handoff
+from ..usage import report as usage_report
 from ..resume.texts import CONTINUE_PROMPT
 from ..task_service import build_task
 from ..schemas import (
@@ -276,6 +277,28 @@ async def get_thread(task_id: str, request: Request):
             )
         ).scalars().all()
         return [await _viewer_flags(s, p, TaskOut.model_validate(t), t) for t in rows]
+
+
+@router.get("/{task_id}/usage")
+async def get_usage(task_id: str, request: Request):
+    """Token care: this step's figures, the thread's totals so far and up to three tips."""
+    async with SessionLocal() as s:
+        p = request.state.principal
+        task = await require_task(s, p, task_id)
+        root = task.root_id or task.id
+        steps = (
+            await s.execute(
+                select(Task)
+                .where(Task.root_id == root, await task_visibility_clause(s, p))
+                .order_by(Task.created_at.asc())
+            )
+        ).scalars().all()
+        ids = [t.id for t in steps] or [task.id]
+        usages = list((await s.execute(select(TaskUsage).where(TaskUsage.task_id.in_(ids)))).scalars().all())
+        pid = await effective_project_id(s, task)
+        proj = await s.get(Project, pid) if pid else None
+        usage = next((u for u in usages if u.task_id == task.id), None) or await s.get(TaskUsage, task.id)
+        return usage_report.build(task, usage, steps, usages, proj.fresh_session_tokens if proj else None)
 
 
 @router.get("/{task_id}/events", response_model=list[EventOut])
