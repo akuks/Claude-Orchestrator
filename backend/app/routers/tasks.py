@@ -218,17 +218,34 @@ async def _may_manage(s, p, task: Task) -> bool:
     )
 
 
+async def _manage_allowed(s, p, task: Task, *, need_contributor: bool = False) -> tuple[bool, str | None]:
+    """(allowed, why not): the one rule behind ``_require_manage`` and the per-viewer
+    ``can_manage`` flag on a task."""
+    if not await _may_manage(s, p, task):
+        return False, "Not allowed to modify this task"
+    pid = await effective_project_id(s, task)
+    if need_contributor and pid is not None and await project_role(s, p, pid) is None:
+        return False, "Contributor role required on the task's project"
+    return True, None
+
+
 async def _require_manage(s, p, task: Task, *, need_contributor: bool = False) -> None:
     """Creator, maintainer on the task, or admin may act on it (else 403).
 
     Follow-up/duplicate also need contributor on the effective project (the
     task's own, or its thread root's for an ad-hoc step) since they run in that
     project's repo/session. The task is already visible, so a missing role is 403."""
-    if not await _may_manage(s, p, task):
-        raise HTTPException(403, "Not allowed to modify this task")
-    pid = await effective_project_id(s, task)
-    if need_contributor and pid is not None and await project_role(s, p, pid) is None:
-        raise HTTPException(403, "Contributor role required on the task's project")
+    ok, why = await _manage_allowed(s, p, task, need_contributor=need_contributor)
+    if not ok:
+        raise HTTPException(403, why)
+
+
+async def _viewer_flags(s, p, out: TaskOut, task: Task) -> TaskOut:
+    """Per-viewer ``can_manage`` (what ``POST /continue`` and follow-ups allow) and ``can_resume``
+    (the viewer owns the step's session)."""
+    out.can_manage = (await _manage_allowed(s, p, task, need_contributor=True))[0]
+    out.can_resume = bool(out.can_manage and task.session_id and task.created_by == p.user.id)
+    return out
 
 
 @router.get("/{task_id}", response_model=TaskOut)
@@ -240,7 +257,7 @@ async def get_task(task_id: str, request: Request):
         counts = await _thread_counts(s, [task.root_id or task.id], visible)
         out = TaskOut.model_validate(task)
         out.thread_count = counts.get(task.root_id or task.id, 1)
-        return out
+        return await _viewer_flags(s, p, out, task)
 
 
 @router.get("/{task_id}/thread", response_model=list[TaskOut])
@@ -257,7 +274,7 @@ async def get_thread(task_id: str, request: Request):
                 .order_by(Task.created_at.asc())
             )
         ).scalars().all()
-    return [TaskOut.model_validate(t) for t in rows]
+        return [await _viewer_flags(s, p, TaskOut.model_validate(t), t) for t in rows]
 
 
 @router.get("/{task_id}/events", response_model=list[EventOut])

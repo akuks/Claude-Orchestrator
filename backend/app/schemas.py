@@ -67,6 +67,9 @@ class TaskOut(BaseModel):
     notes_updated_at: Optional[datetime] = None
     recoveries: int = 0
     recovery: Optional[dict] = None
+    # per viewer, set on the task and thread reads only: may the viewer follow up / Continue, and own the session
+    can_manage: bool = False
+    can_resume: bool = False
     created_at: datetime
     started_at: Optional[datetime]
     completed_at: Optional[datetime]
