@@ -616,6 +616,15 @@ def until(fn, timeout=15.0, step=0.1):
     return fn()
 
 
+def wait_handoff(step_id, reason="run ended"):
+    """_finish commits the status before its snapshot: wait (bounded) for the stored handoff
+    that belongs to this step and reason, not just for the step's terminal status."""
+    got = until(lambda: (r := stored_row(step_id)) is not None and r.task_id == step_id
+                and r.reason == reason and r)
+    assert got, f"no {reason!r} handoff stored for step {step_id}"
+    return got
+
+
 def start(client, prompt, **body):
     r = client.post("/tasks", json={"prompt": prompt, **body})
     assert r.status_code == 201, r.text
@@ -640,7 +649,7 @@ def test_heartbeat_loop_cadence(client, monkeypatch):
     assert md.read_text().startswith(texts.HANDOFF_HEAD)
     assert client.post(f"/tasks/{tid}/cancel").status_code == 200
     assert wait_task(client, tid)["status"] == "cancelled"
-    assert until(lambda: stored_row(tid).reason == "cut off")  # the finish snapshot
+    wait_handoff(tid, "cut off")  # the finish snapshot
 
 
 def test_finish_reason_cut_off_vs_run_ended(client):
@@ -649,7 +658,7 @@ def test_finish_reason_cut_off_vs_run_ended(client):
 
     done = wait_task(client, start(client, "a plain run"))
     assert done["status"] == "completed"
-    row = stored_row(done["id"])
+    row = wait_handoff(done["id"])
     assert row.reason == "run ended" and row.content["step_status"] == "completed"
     assert row.content["ended"] == "session ended (completed)"
     assert WorkerManager._finish_reason(Status.CANCELLED, None) == "cut off"
@@ -662,7 +671,8 @@ def test_handoff_md_written_at_spawn(client):
     from app.resume import texts
 
     root = wait_task(client, start(client, "md root"))
-    assert root["status"] == "completed" and stored_row(root["id"]) is not None
+    assert root["status"] == "completed"
+    wait_handoff(root["id"])
     key = conftest.env_probe_key()
     fu = client.post(f"/tasks/{root['id']}/followup", json={"prompt": f"next [env-probe:{key}]"})
     assert fu.status_code == 201, fu.text
@@ -677,10 +687,10 @@ def test_handoff_md_written_at_spawn(client):
 
 def test_finish_snapshots_and_thread_delete_removes(client):
     done = wait_task(client, start(client, "delete me"))
-    assert stored_row(done["id"]) is not None
+    wait_handoff(done["id"])
     fu = client.post(f"/tasks/{done['id']}/followup", json={"prompt": "and more"})
     step2 = wait_task(client, fu.json()["id"])
-    row = stored_row(done["id"])
+    row = wait_handoff(step2["id"])
     assert row.task_id == step2["id"] and row.content["task"] == "and more"
     assert row.content["before"] == ["delete me"]
     assert client.delete(f"/tasks/{done['id']}").status_code == 204
@@ -755,10 +765,12 @@ def _handoff(client, task_id):
 def test_fixture_todo_and_taskcreate(client):
     todo = wait_task(client, start(client, "todo [stream-fixture:todo]"))
     assert todo["status"] == "completed", todo.get("error")
+    wait_handoff(todo["id"])
     st = _handoff(client, todo["id"])["content"]["step"]
     assert (st["n"], st["m"], st["text"]) == (2, 4, "Writing the parser")
     tasks = wait_task(client, start(client, "tasks [stream-fixture:taskcreate]"))
     assert tasks["status"] == "completed", tasks.get("error")
+    wait_handoff(tasks["id"])
     st = _handoff(client, tasks["id"])["content"]["step"]
     assert (st["n"], st["m"], st["text"]) == (2, 3, "Build")
     assert "Step 2 of 3: Build" in _handoff(client, tasks["id"])["text"]
@@ -767,6 +779,7 @@ def test_fixture_todo_and_taskcreate(client):
 def test_fixture_plan_then_newer_notes(client):
     done = wait_task(client, start(client, "plan [stream-fixture:plan]"))
     assert done["status"] == "completed", done.get("error")
+    wait_handoff(done["id"])
     ws = task_row(done["id"]).workspace_dir
     _plan_file(__import__("pathlib").Path(ws), mtime=time.time() - 60)
     st = client.post(f"/tasks/{done['id']}/handoff/refresh").json()["content"]["step"]
@@ -789,15 +802,18 @@ def test_fixture_commit_bg_and_outside_doc(client):
 
     c = wait_task(client, start(client, "commit [stream-fixture:commit]"))
     assert c["status"] == "completed", c.get("error")
+    wait_handoff(c["id"])
     content = _handoff(client, c["id"])["content"]
     assert "commit 1a2b3c4 add feature" in content["done"]
     assert any(" COMMIT [main 1a2b3c4] add feature" in ln for ln in content["recent"])
     b = wait_task(client, start(client, "bg [stream-fixture:bg]"))
     assert b["status"] == "completed", b.get("error")
+    wait_handoff(b["id"])
     running = _handoff(client, b["id"])["content"]["running"]
     assert running == ["helper explorer: map the repo", "background: npm run dev"]
     o = wait_task(client, start(client, "doc [stream-fixture:outside_doc]"))
     assert o["status"] == "completed", o.get("error")
+    wait_handoff(o["id"])
     content = _handoff(client, o["id"])["content"]
     ws = task_row(o["id"]).workspace_dir
     policy = {"project_dir": ws, "home": runtime.real_home(), "tmpdir": os.environ.get("TMPDIR")}

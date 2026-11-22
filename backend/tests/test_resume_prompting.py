@@ -7,6 +7,7 @@ Token fixtures are built at runtime (F14); no key-shaped literal is written."""
 import asyncio
 import os
 import subprocess
+import time
 import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -119,6 +120,27 @@ def events(task_id, etype=None):
             return list((await s.execute(q)).scalars().all())
 
     return [e for e in run(go()) if etype is None or e.type == etype]
+
+
+def wait_handoff(step_id, reason="run ended"):
+    """_finish commits the status before its snapshot: wait (bounded, 15 s) for the stored
+    handoff that belongs to this step and reason before a follow-up reads it."""
+    def row():
+        async def go():
+            async with SessionLocal() as s:
+                t = await s.get(Task, step_id)
+                return (await s.execute(select(TaskHandoff).where(TaskHandoff.root_id == (t.root_id or t.id)))
+                        ).scalar_one_or_none()
+
+        return run(go())
+
+    deadline = time.time() + 15.0
+    while time.time() < deadline:
+        r = row()
+        if r is not None and r.task_id == step_id and r.reason == reason:
+            return r
+        time.sleep(0.1)
+    raise AssertionError(f"no {reason!r} handoff stored for step {step_id}")
 
 
 def put_handoff(root_id, text):
@@ -388,6 +410,7 @@ def test_credentials_change_forces_fresh(client):
     assert r.status_code == 201, r.text
     one = wait_task(owner, r.json()["id"])
     assert one["status"] == "completed" and one["session_id"]
+    wait_handoff(one["id"])
     ref_a = get_task(one["id"]).credential_ref
     assert ref_a == crypto.fingerprint("CLAUDE_CODE_OAUTH_TOKEN", tok_a)
     session_file(owner.user_id, one["session_id"])
@@ -442,6 +465,7 @@ def test_missing_session_gets_handoff_not_bare(client):
     r = owner.post("/tasks", json={"prompt": "parent work"})
     parent = wait_task(owner, r.json()["id"])
     assert parent["status"] == "completed" and parent["session_id"]
+    wait_handoff(parent["id"])
     key = env_probe_key()
     r = owner.post(f"/tasks/{parent['id']}/followup", json={"prompt": f"more [prompt-probe:{key}] [env-probe:{key}]"})
     done = wait_task(owner, r.json()["id"])
@@ -462,6 +486,7 @@ def test_other_sender_fresh_with_handoff(client):
     r = owner.post("/tasks", json={"prompt": "owner work", "project_id": pid})
     parent = wait_task(owner, r.json()["id"])
     assert parent["status"] == "completed" and parent["session_id"]
+    wait_handoff(parent["id"])
     session_file(owner.user_id, parent["session_id"])
     key = env_probe_key()
     r = other.post(f"/tasks/{parent['id']}/followup", json={"prompt": f"my turn [prompt-probe:{key}] [env-probe:{key}]"})
