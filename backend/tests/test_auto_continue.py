@@ -127,6 +127,22 @@ def test_automatic_continue_keeps_the_steps_budget(client, owner, submitted):
     assert r.json()["max_budget_usd"] == 2.0
 
 
+def test_duplicate_keeps_the_budget_or_takes_the_default(client, owner, submitted):
+    """Final review I1: Duplicate copies the source's max_budget_usd; a source without one gets
+    default_task_budget_usd, the way task creation does."""
+    from app.config import settings
+
+    src = _step(owner, budget=1.75, bands=None)
+    r = client.post(f"/tasks/{src}/duplicate")
+    assert r.status_code == 201, r.text
+    assert r.json()["max_budget_usd"] == 1.75
+    bare = _step(owner, budget=None, bands=None)
+    r = client.post(f"/tasks/{bare}/duplicate")
+    assert r.status_code == 201, r.text
+    assert settings.default_task_budget_usd is not None
+    assert r.json()["max_budget_usd"] == settings.default_task_budget_usd
+
+
 def test_open_question_on_the_step_waits_for_the_answer(client, owner, submitted):
     """Fresh band + open todo, but the agent asked a person (filed or captured): no automatic continue."""
     for source in ("agent", "final_text"):

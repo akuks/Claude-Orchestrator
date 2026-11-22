@@ -7,7 +7,7 @@ import pytest
 
 from app.database import SessionLocal
 from app.models import Task, TaskUsage
-from app.usage.report import TIP_CACHE, TIP_FRESH, TIP_NARROW
+from app.usage.report import TIP_CACHE, TIP_FRESH, TIP_FRESH_SET, TIP_NARROW
 from conftest import login_as
 
 B0 = {"messages": 0, "input": 0, "cache_write": 0, "cache_read": 0, "output": 0}
@@ -62,7 +62,7 @@ def test_thread_totals_with_running_step_and_budget(client):
     assert step["fresh_session_tokens"] is None and step["breakdown"]["main"]["output"] == 30
     th = body["thread"]
     assert th["steps"] == 3 and th["duration_ms"] == 90_000
-    assert th["cost_usd"] == pytest.approx(1.9) and th["tokens"] == 150 + 15 + 50
+    assert th["cost_usd"] == pytest.approx(1.9) and th["tokens"] == 150 + 15 + 20 + 30 + 999  # the running step counts cache tokens too
     assert th["last"] == {"title": "three", "duration_ms": 0, "cost_usd": pytest.approx(0.4)}
     assert body["tips"] == []
 
@@ -95,7 +95,7 @@ def test_tips_trigger_and_not(client):
     p = _project(client, fresh_session_tokens=50000)
     low = _mk(project_id=p["id"], usage={"peak_context": 50001, "breakdown": _bd()})
     ok = _mk(project_id=p["id"], usage={"peak_context": 50000, "breakdown": _bd()})
-    assert _get(client, low)["tips"] == [TIP_FRESH] and _get(client, ok)["tips"] == []
+    assert _get(client, low)["tips"] == [TIP_FRESH_SET] and _get(client, ok)["tips"] == []
     poor = _mk(usage={"peak_context": 1, "breakdown": _bd({"input": 10, "cache_write": 50, "cache_read": 40}, messages=20)})
     assert _get(client, poor)["tips"] == [TIP_CACHE]
     good = _mk(usage={"peak_context": 1, "breakdown": _bd({"input": 10, "cache_write": 40, "cache_read": 50}, messages=20)})
@@ -146,3 +146,25 @@ def test_thread_fallbacks(client):
     body = _get(client, root)
     assert body["thread"]["cost_usd"] == pytest.approx(0.3) and body["thread"]["tokens"] == 3
     assert body["thread"]["steps"] == 2
+
+
+def test_fresh_tip_text_depends_on_the_threshold(client):
+    """Final review M4: a project that already has a fresh-session threshold is not told to set one."""
+    assert "set a fresh-session threshold" in TIP_FRESH and "set a fresh-session threshold" not in TIP_FRESH_SET
+    assert TIP_FRESH_SET == ("Context got large; this project's fresh-session threshold will hand long work to a "
+                             "fresh session.")
+    unset = _mk(usage={"peak_context": 150_001, "breakdown": _bd()})
+    assert _get(client, unset)["tips"] == [TIP_FRESH]
+    p = _project(client, fresh_session_tokens=100_000)
+    over = _mk(project_id=p["id"], usage={"peak_context": 100_001, "breakdown": _bd()})
+    assert _get(client, over)["tips"] == [TIP_FRESH_SET]
+
+
+def test_running_and_finished_step_count_tokens_alike(client):
+    """Final review M1: the so-far tokens count a running step's cache tokens the way the finished step's
+    stored Task.input_tokens does, so the total does not jump when the step ends."""
+    bd = _bd({"input": 20, "cache_write": 300, "cache_read": 4000, "output": 50})
+    run = _mk(status="running", usage={"breakdown": bd})
+    # what the worker stores at the end for the same figures: input + cache read + cache write, and output
+    done = _mk(input_tokens=20 + 300 + 4000, output_tokens=50, usage={"breakdown": bd})
+    assert _get(client, run)["thread"]["tokens"] == _get(client, done)["thread"]["tokens"] == 4370

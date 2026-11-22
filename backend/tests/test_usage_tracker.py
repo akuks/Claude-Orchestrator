@@ -170,3 +170,34 @@ def test_write_usage_file_atomic_0600(tmp_path, monkeypatch):
     assert json.loads(p.read_text()) == {"context_tokens": 5, "ts": 1.0}
     assert stat.S_IMODE(os.stat(p).st_mode) == 0o600
     assert not (tmp_path / "planted").exists()
+
+
+def test_helper_kind_and_tool_names_are_redacted_and_cleaned():
+    """Final review M2: the helper kind (free model text) is stored in the breakdown and served to every
+    viewer: run secrets and token shapes are masked and hidden characters stripped before it is kept."""
+    secret = "hunter2-run-secret-value"
+    t = UsageTracker(secrets=[secret])
+    t.on_tool_use_main("tuA", "Agent", {"description": f"use {secret}​ now"})
+    t.on_tool_use_main("tuB", "Task", {"subagent_type": "ghp_" + "a" * 36})
+    t.on_tool_use_main("tuC", f"Bash‮{secret}", {})
+    t.on_assistant(_asst("h1", _u(1, 0, 0, 1), parent="tuA"))
+    t.on_assistant(_asst("h2", _u(1, 0, 0, 1), parent="tuB"))
+    t.on_tool_result("tuC", None, 30_000)
+    snap = t.snapshot()
+    assert sorted(snap["helpers"]) == ["***", "use *** now"]
+    assert snap["largest_results"][0]["tool"] == "Bash***"
+    assert secret not in json.dumps(snap)
+
+
+def test_zero_token_synthetic_message_keeps_the_estimate():
+    """Final review M3: Claude Code's ``<synthetic>`` messages (an error or interrupt text) carry no tokens;
+    they cost nothing and must not turn the estimate (and so the budget bands) off for the step."""
+    t = UsageTracker()
+    t.on_assistant(_asst("m1", _u(1_000_000, 0, 0, 0)))
+    t.on_assistant(_asst("s1", _u(0, 0, 0, 0), model="<synthetic>"))
+    assert t.est_cost_usd == pytest.approx(4.0)
+    t.on_assistant(_asst("m2", _u(1, 0, 0, 0), model="gpt-x"))
+    assert t.est_cost_usd is None  # tokens from an unknown model: no estimate
+    only = UsageTracker()
+    only.on_assistant(_asst("s1", _u(0, 0, 0, 0), model="<synthetic>"))
+    assert only.est_cost_usd == 0.0

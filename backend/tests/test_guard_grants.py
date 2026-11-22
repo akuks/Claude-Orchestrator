@@ -754,6 +754,20 @@ def test_followup_resumes_the_latest_owner_session(world, submitted):
     assert _get(Task, fu).resume_session_id == "new-sess"
 
 
+def test_followup_keeps_the_parent_steps_budget(world, submitted):
+    """Final review I1: the deny-and-resume follow-up is a later step of the thread: it keeps the parent's
+    max_budget_usd (the --max-budget-usd cut and the 80/95 % bands), like its model and max turns."""
+    root = _task(world["o"].user_id, world["r"]["id"], status="completed", session_id="b-old", max_budget_usd=9.0)
+    step = _task(world["o"].user_id, world["r"]["id"], root_id=root, parent_task_id=root, session_id="b-new",
+                 max_budget_usd=1.25)
+    agent = _bearer(_mint(world["o"].user_id, step))
+    rid = _file(agent, step).json()["id"]
+    _to_resume(rid, step)
+    fu = world["m"].post(f"/guard/approvals/{rid}/approve").json()["followup_task_id"]
+    t = _get(Task, fu)
+    assert t.parent_task_id == step and t.max_budget_usd == 1.25
+
+
 def test_followup_policy_carries_the_once_grant(world, rtask, submitted):
     from app.guard import policy_inputs
 

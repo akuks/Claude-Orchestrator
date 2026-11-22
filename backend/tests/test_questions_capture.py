@@ -3,6 +3,7 @@ and whose final text's last paragraph ends with ``?`` files that paragraph as a 
 unless the agent filed one during that step; and the worker's ``_finish`` runs it."""
 
 import asyncio
+import time
 import uuid
 
 import pytest
@@ -11,6 +12,8 @@ from sqlalchemy import select
 from app import notifications
 from app.database import SessionLocal
 from app.models import Task, TaskEvent, TaskHandoff, TaskQuestion
+from app.constants import Status
+from app.main import app
 from app.questions import service
 from conftest import wait_task
 
@@ -186,8 +189,19 @@ def test_webhook_on_capture(client, admin_id, sent, monkeypatch):
 # ---- through the worker --------------------------------------------------------------------------
 
 
+def _settled(client, tid, timeout=30.0):
+    """The step is terminal and its _finish has fully returned (the worker's _active cleared): a read made
+    after the status alone can land before _finish's tail on a loaded runner."""
+    deadline = time.time() + timeout
+    t = wait_task(client, tid, timeout)
+    while time.time() < deadline and tid in app.state.worker._active:
+        time.sleep(0.05)
+    assert tid not in app.state.worker._active, f"{tid} still finishing"
+    return t
+
+
 def test_worker_finish_captures(client):
-    done = wait_task(client, client.post("/tasks", json={"prompt": "go [stream-fixture:question_write]"}).json()["id"])
+    done = _settled(client, client.post("/tasks", json={"prompt": "go [stream-fixture:question_write]"}).json()["id"])
     assert done["status"] == "completed", done.get("error")
     qs = client.get(f"/tasks/{done['id']}/questions").json()
     assert [(q["question"], q["source"]) for q in qs] == [("Should the export be CSV or JSON?", "final_text")]
@@ -195,19 +209,53 @@ def test_worker_finish_captures(client):
 
 def test_worker_finish_untouched_step_not_captured(client):
     tid = client.post("/tasks", json={"prompt": "go [stream-fixture:question_nowrite]"}).json()["id"]
-    done = wait_task(client, tid)
+    done = _settled(client, tid)
     assert done["status"] == "completed", done.get("error")
     assert client.get(f"/tasks/{done['id']}/questions").json() == []
 
 
 def test_capture_failure_never_breaks_finish(client, monkeypatch):
-    async def boom(task_id):
+    calls = []
+
+    async def boom(task_id, **kw):
+        calls.append(task_id)
         raise RuntimeError("capture broke")
 
     monkeypatch.setattr(service, "capture_final", boom)
-    done = wait_task(client, client.post("/tasks", json={"prompt": "go [stream-fixture:question_write]"}).json()["id"])
+    done = _settled(client, client.post("/tasks", json={"prompt": "go [stream-fixture:question_write]"}).json()["id"])
     assert done["status"] == "completed", done.get("error")
+    assert calls == [done["id"]]  # it ran (and broke): not a vacuous pass
     assert client.get(f"/tasks/{done['id']}/questions").json() == []
+
+
+def test_finish_files_the_question_before_the_terminal_status(client, admin_id, sent, monkeypatch):
+    """Final review I2: the closing question is filed before the terminal status is committed, so the task
+    page's refetch on the status change already sees it. The step is still running when the capture runs; it
+    reads the final text _finish was given (not yet stored)."""
+    from app.worker import WorkerManager
+
+    tid = _step(admin_id, None, [_write()], status="running")
+    seen = []
+    real = service.capture_final
+
+    async def spy(task_id, **kw):
+        async with SessionLocal() as s:
+            seen.append((await s.get(Task, task_id)).status)
+        await real(task_id, **kw)
+
+    monkeypatch.setattr(service, "capture_final", spy)
+    _run(WorkerManager()._finish(tid, Status.COMPLETED, result_text="Done.\n\nCSV or JSON?"))
+    assert seen == ["running"]
+    assert [(q.question, q.source) for q in _questions(tid)] == [("CSV or JSON?", "final_text")]
+    assert _get_status(tid) == "completed"
+
+
+def _get_status(tid):
+    async def go():
+        async with SessionLocal() as s:
+            return (await s.get(Task, tid)).status
+
+    return _run(go())
 
 
 def test_captured_question_stored_on_one_line(client, admin_id):
