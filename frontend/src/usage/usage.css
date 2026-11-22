@@ -1,0 +1,133 @@
+/* Token care: chips, the "so far" line, the tokens panel and run-log lines. Theme variables only. */
+.co-usage-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  min-width: 0;
+}
+.co-usage-chips {
+  display: inline-flex;
+  gap: 6px;
+  flex-wrap: wrap;
+  vertical-align: middle;
+}
+.co-usage-chip {
+  display: inline-block;
+  padding: 0 8px;
+  border: 1px solid var(--co-border);
+  border-radius: var(--co-radius);
+  background: var(--co-surface);
+  color: var(--co-text-secondary);
+  font-size: 12px;
+  font-weight: 400;
+  line-height: 20px;
+  white-space: nowrap;
+}
+.co-usage-chip-amber {
+  border-color: var(--co-warning);
+  color: var(--co-warning-text);
+}
+.co-usage-chip-red {
+  border-color: var(--co-danger);
+  color: var(--co-danger-text);
+}
+.co-usage-so-far {
+  margin-bottom: 12px;
+  color: var(--co-text-secondary);
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+.co-usage-so-far-label {
+  color: var(--co-text-muted);
+}
+.co-usage-panel {
+  margin-top: 12px;
+  border: 1px solid var(--co-border);
+  border-radius: var(--co-radius);
+  background: var(--co-surface);
+  padding: 6px 12px;
+}
+.co-usage-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--co-text);
+  font: inherit;
+  font-weight: 600;
+  cursor: pointer;
+}
+.co-usage-body {
+  margin-top: 8px;
+  display: grid;
+  gap: 6px;
+  font-size: 12.5px;
+  color: var(--co-text);
+  overflow-x: auto;
+}
+.co-usage-table {
+  border-collapse: collapse;
+  width: 100%;
+}
+.co-usage-table th,
+.co-usage-table td {
+  padding: 2px 6px;
+  text-align: right;
+  white-space: nowrap;
+  border-bottom: 1px solid var(--co-border);
+}
+.co-usage-table th {
+  color: var(--co-text-secondary);
+  font-weight: 500;
+}
+.co-usage-table .co-usage-name {
+  text-align: left;
+  overflow-wrap: anywhere;
+  white-space: normal;
+}
+.co-usage-sub {
+  margin-top: 4px;
+  color: var(--co-text-secondary);
+  font-weight: 500;
+}
+.co-usage-list {
+  margin: 0;
+  padding-left: 18px;
+  overflow-wrap: anywhere;
+}
+.co-usage-mono {
+  font-family: var(--co-mono);
+}
+.co-usage-note {
+  color: var(--co-text-muted);
+}
+/* run-log lines (inside the dark terminal) */
+.co-usage-line {
+  display: flex;
+  gap: 6px;
+  align-items: baseline;
+  margin: 2px 0;
+}
+.co-usage-line .anticon {
+  flex: 0 0 auto;
+}
+.co-usage-line-text {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.co-usage-line-budget80,
+.co-usage-line-fresh {
+  color: var(--co-warning);
+}
+.co-usage-line-budget95 {
+  color: var(--co-terminal-error);
+}
+.co-usage-line-auto {
+  color: var(--co-terminal-accent);
+}
+.co-usage-line-band {
+  color: var(--co-terminal-muted);
+}
