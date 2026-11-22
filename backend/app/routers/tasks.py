@@ -25,7 +25,7 @@ from ..constants import VALID_MODELS, Priority, Status
 from ..database import SessionLocal
 from ..guard import runtime as guard_runtime
 from .. import reports
-from ..models import ActionGrant, Artifact, Project, Task, TaskEvent, TaskHandoff
+from ..models import ActionGrant, Artifact, Project, Task, TaskEvent, TaskHandoff, TaskQuestion, TaskUsage
 from ..resume import handoff as resume_handoff
 from ..resume.texts import CONTINUE_PROMPT
 from ..task_service import build_task
@@ -546,6 +546,9 @@ async def delete_task(task_id: str, request: Request):
             await s.delete(m)
         # the deleted threads' handoffs (no FK either)
         await s.execute(delete(TaskHandoff).where(TaskHandoff.root_id.in_(deleted)))
+        # their usage rows and questions (FK cascade on Postgres; SQLite does not enforce it)
+        await s.execute(delete(TaskUsage).where(TaskUsage.task_id.in_(deleted)))
+        await s.execute(delete(TaskQuestion).where(TaskQuestion.task_id.in_(deleted)))
         # co-guard grants of the deleted thread / steps (no FK: they would be orphans)
         await s.execute(delete(ActionGrant).where(
             or_(ActionGrant.root_id.in_(deleted),

@@ -273,6 +273,8 @@ class ProjectUpdate(BaseModel):
     on_no_answer: Optional[str] = None
     readonly_paths: Optional[list["ReadonlyPathIn"]] = None
     reference_project_ids: Optional[list[str]] = None
+    # token care (phase 3b, maintainer-editable): null turns the fresh-session hand-over off.
+    fresh_session_tokens: Optional[int] = Field(None, ge=50000, le=900000)
 
 
 class ReadonlyPathIn(BaseModel):
@@ -307,6 +309,7 @@ class ProjectOut(BaseModel):
     on_no_answer: str = "deny"
     readonly_paths: list = []
     reference_project_ids: list = []
+    fresh_session_tokens: Optional[int] = None
     # create/import only: why suggest_trust chose `trust`
     trust_reason: Optional[str] = None
     task_count: int = 0

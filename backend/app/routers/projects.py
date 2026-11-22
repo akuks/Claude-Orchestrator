@@ -61,6 +61,7 @@ MAINTAINER_FIELDS = {
     "on_no_answer",
     "readonly_paths",
     "reference_project_ids",
+    "fresh_session_tokens",
 }
 ADMIN_FIELDS = {"directory", "env", "archived"}
 MASK = "••••"
