@@ -42,6 +42,7 @@ export default function HandoffCard({ taskId, onHandoff, canManage = false }) {
     setHandoff(undefined)
     onHandoff?.(null)
     setError(null)
+    if (!taskId) return undefined // no task selected (the drawer is closed): nothing to ask for
     api
       .getHandoff(taskId)
       .then((h) => live && apply(h))
@@ -64,7 +65,7 @@ export default function HandoffCard({ taskId, onHandoff, canManage = false }) {
     }
   }
 
-  if (handoff === undefined) return null
+  if (!taskId || handoff === undefined) return null
   const c = (handoff && handoff.content) || {}
   const step = stepLabel(c.step)
   const done = list(c.done)

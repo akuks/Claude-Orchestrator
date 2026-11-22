@@ -48,6 +48,12 @@ afterEach(async () => {
 })
 
 describe('HandoffCard', () => {
+  it('asks for no handoff while no task is selected', async () => {
+    const c = await mount({ taskId: null })
+    expect(api.getHandoff).not.toHaveBeenCalled()
+    expect(q(c, 'handoff-card')).toBeNull()
+  })
+
   it('renders the fields and the notes time from content.notes.at', async () => {
     const onHandoff = vi.fn()
     const c = await mount({ onHandoff })
