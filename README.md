@@ -570,12 +570,13 @@ instructions every run gets in its system prompt: *Grounding* (cite
 *Notes* (the note-keeping reminder), and up to 2000 characters of extra text.
 Each switch defaults to on; only admins save them
 (`PUT /guard/org-settings`, `ground_rules`). A run's log has a
-`ground_rules` event listing what was included.
+`ground_rules` event listing what was included. When the *superpowers* skill pack is loaded, the
+main session also gets forge's precedence line (superpowers sets the method,
+co-orchestrator the guard rails), listed as `precedence`.
 
 **Limits.** The handoff is a record rebuilt from the run's events and git, not
-a transcript: a long tool output or a file's content is not in it. Outside
-commits are those since the last saved handoff head, so pressing **Refresh**
-between steps counts them as seen. Files written to a temp folder are listed
+a transcript: a long tool output or a file's content is not in it. Files
+written to a temp folder are listed
 as "may vanish". Secrets are masked with the same rules as the run log, which
 know common shapes only (see [Seatbelt limits](#seatbelt-limits)). Phase **3b**
 is next.
