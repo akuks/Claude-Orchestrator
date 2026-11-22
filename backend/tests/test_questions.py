@@ -261,6 +261,24 @@ def test_answer_queues_followup_with_answer_prompt(client, admin_id, submitted):
     assert client.post(f"/questions/{qid}/dismiss").status_code == 409
 
 
+def test_answer_continues_from_the_threads_newest_main_line_step(client, admin_id, submitted):
+    from datetime import datetime, timedelta, timezone
+
+    t0 = datetime.now(timezone.utc) - timedelta(minutes=5)
+    step1 = _task(admin_id, session_id="sess-1", created_at=t0)
+    qid = client.post(f"/tasks/{step1}/questions", json=Q).json()["id"]
+    step2 = _task(admin_id, root_id=step1, parent_task_id=step1, session_id="sess-2",
+                  created_at=t0 + timedelta(minutes=1))
+    # a newer dispatched child is not the main line
+    _task(admin_id, root_id=step1, parent_task_id=step2, origin="agent", session_id="sess-child",
+          created_at=t0 + timedelta(minutes=2))
+    r = client.post(f"/questions/{qid}/answer", json={"answer": "go"})
+    assert r.status_code == 201, r.text
+    step = r.json()["task"]
+    assert step["parent_task_id"] == step2 and step["root_id"] == step1
+    assert _get(Task, step["id"]).resume_session_id == "sess-2"  # the answerer owns step 2's session
+
+
 def test_answer_by_another_person_starts_fresh(client, submitted):
     member = login_as(f"q-{uuid.uuid4().hex[:8]}@test.local")
     tid = _task(member.user_id, session_id="sess-member")

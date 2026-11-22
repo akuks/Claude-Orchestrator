@@ -12,7 +12,7 @@ from sqlalchemy import select
 
 from app.database import SessionLocal
 from app.main import app
-from app.models import Task, TaskEvent, TaskHandoff, TaskUsage
+from app.models import Task, TaskEvent, TaskHandoff, TaskQuestion, TaskUsage
 from app.resume import logfmt
 from app.resume.texts import AUTO_CONTINUE_LINE, CONTINUE_PROMPT
 from conftest import login_as, wait_task
@@ -111,6 +111,22 @@ def test_fresh_band_and_open_todo_queue_one_fresh_continue(client, owner, submit
     # the thread now has an active step: a second call queues nothing
     _auto(tid)
     assert len(_children(tid)) == 1 and submitted == [k.id]
+
+
+def test_open_question_on_the_step_waits_for_the_answer(client, owner, submitted):
+    """Fresh band + open todo, but the agent asked a person (filed or captured): no automatic continue."""
+    for source in ("agent", "final_text"):
+        tid = _step(owner)
+
+        async def ask():
+            async with SessionLocal() as s:
+                s.add(TaskQuestion(task_id=tid, root_id=tid, question="Which one?", source=source))
+                await s.commit()
+
+        run(ask())
+        _auto(tid)
+        assert _children(tid) == [], source
+    assert submitted == []
 
 
 def test_no_fresh_band_none(client, owner, submitted):
