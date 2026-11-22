@@ -49,3 +49,8 @@ MAYBE_MORE = "maybe more"
 # fresh_session reasons (besides CRED_NOTE)
 OTHER_SENDER_NOTE = "a different person continues this thread"
 NO_SESSION_NOTE = "previous session not available"
+
+# ---- token care (phase 3b) -----------------------------------------------------------------------
+
+# the run-log line of an automatic fresh Continue (its step's ``auto_continue`` event)
+AUTO_CONTINUE_LINE = "continued automatically: context reached {n}k"

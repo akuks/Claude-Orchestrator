@@ -33,7 +33,7 @@ from .guard import grants as guard_grants
 from .guard import policy_inputs
 from .guard import runtime as guard_runtime
 from .guard.plugin import ensure_plugin
-from .models import Agent, Artifact, McpCall, Project, SkillPack, Task, TaskEvent, TaskUsage, User
+from .models import Agent, Artifact, McpCall, Project, SkillPack, Task, TaskEvent, TaskHandoff, TaskUsage, User
 from .redaction import redact, redact_obj, secrets_from_env
 from .resume import gitfacts, ground_rules, handoff, prompting, recovery
 from .resume.texts import CRED_NOTE, RECOVERED_CONTINUE
@@ -1712,3 +1712,88 @@ class WorkerManager:
             await guard_grants.after_task_finished(task_id, submit=self.submit)
         except Exception:  # noqa: BLE001 - never breaks a finish
             pass
+        # token care: a step that crossed the fresh-session threshold continues in a fresh session
+        await self._maybe_auto_continue(task_id)
+
+    AUTO_CONTINUE_MAX = 3  # automatic continues in a row per thread
+
+    @staticmethod
+    def _open_todo(content: dict, task_id: str) -> bool:
+        """The stored handoff describes this step and its progress has an item not completed: a ``next``
+        one, a current one that is not "all steps done", or (from the notes' header) n below m."""
+        if not isinstance(content, dict) or content.get("step_task_id") != task_id:
+            return False
+        st = content.get("step") if isinstance(content.get("step"), dict) else {}
+        if st.get("source") in (None, "prompt") or not st.get("m"):
+            return False
+        if content.get("next"):
+            return True
+        if st.get("source") == "notes":
+            return isinstance(st.get("n"), int) and st["n"] < st["m"]
+        return st.get("text") != "all steps done"
+
+    async def _maybe_auto_continue(self, task_id: str) -> None:
+        """The automatic fresh Continue: the step completed (not a dispatched child), co-guard fired its
+        ``fresh`` band, and either the handoff has an open todo or the step's notes were saved after the
+        band; no step of the thread is active and fewer than AUTO_CONTINUE_MAX of the thread's newest
+        main-line steps in a row were automatic. The step runs as the parent's owner, mode fresh, with an
+        ``auto_continue`` run-log event. Never raises."""
+        try:
+            from fastapi import HTTPException
+
+            from .resume.texts import AUTO_CONTINUE_LINE
+            from .routers import tasks as tasks_router
+
+            async with SessionLocal() as s:
+                task = await s.get(Task, task_id)
+                if task is None or task.status != Status.COMPLETED or task.origin == "agent":
+                    return
+                usage = await s.get(TaskUsage, task_id)
+                fresh = next((b for b in ((usage.bands or []) if usage is not None else [])
+                              if isinstance(b, dict) and b.get("band") == "fresh"), None)
+                if fresh is None:
+                    return
+                root = task.root_id or task.id
+                row = (await s.execute(select(TaskHandoff).where(TaskHandoff.root_id == root))
+                       ).scalar_one_or_none()
+                band_ts = fresh.get("ts")
+                noted = task.notes_updated_at
+                if noted is not None and noted.tzinfo is None:
+                    noted = noted.replace(tzinfo=timezone.utc)
+                notes_after = (noted is not None and self._finite(band_ts) and noted.timestamp() > band_ts)
+                if not (notes_after or (row is not None and self._open_todo(row.content, task_id))):
+                    return
+                steps = (await s.execute(
+                    select(Task.auto_continued).where(
+                        (Task.root_id == root) | (Task.id == root), Task.origin != "agent")
+                    .order_by(Task.created_at.desc()))).scalars().all()
+                streak = 0
+                for auto in steps:
+                    if not auto:
+                        break
+                    streak += 1
+                if streak >= self.AUTO_CONTINUE_MAX:
+                    log.info("auto-continue: %s reached %d in a row; not continuing", root, streak)
+                    return
+                try:
+                    child = await tasks_router.queue_continue(s, task, mode="fresh", sender=task.created_by,
+                                                              auto=True)
+                except HTTPException:
+                    return  # a step of the thread is active
+                child_id, priority, created_at = child.id, child.priority, child.created_at
+                # the size co-guard reported with the band (its usage_band event), else the step's peak
+                tokens = next((e.get("value") for e in (await s.execute(
+                    select(TaskEvent.payload).where(TaskEvent.task_id == task_id, TaskEvent.type == "usage_band")
+                )).scalars() if isinstance(e, dict) and e.get("band") == "fresh"), None)
+                if not self._finite(tokens):
+                    tokens = usage.peak_context or usage.context_tokens
+            tokens = tokens if self._finite(tokens) else None
+            n = int(tokens) // 1000 if tokens is not None else "?"
+            try:  # the step is committed: a failed event never leaves it queued without a submit
+                await self._emit_offline(child_id, "auto_continue", {
+                    "text": AUTO_CONTINUE_LINE.format(n=n), "context_tokens": tokens, "continued_from": task_id})
+            except Exception as e:  # noqa: BLE001
+                log.warning("auto-continue: event failed for %s: %s", child_id, e)
+            await self.submit(child_id, priority, created_at)
+        except Exception as e:  # noqa: BLE001 - never breaks a finish
+            log.warning("auto-continue: failed for %s: %s", task_id, e)

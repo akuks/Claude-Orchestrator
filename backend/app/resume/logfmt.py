@@ -114,6 +114,8 @@ def _kind(ev: dict) -> tuple[str, str] | None:
         return "FRESH", p.get("reason") or ""
     if etype == "usage_band":
         return _band(p)
+    if etype == "auto_continue":
+        return "AUTO", p.get("text") or ""
     return None
 
 

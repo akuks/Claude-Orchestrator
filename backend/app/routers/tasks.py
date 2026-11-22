@@ -431,6 +431,35 @@ async def followup_task(task_id: str, payload: FollowupCreate, request: Request)
 CONTINUE_MODES = ("auto", "resume", "fresh")
 
 
+async def queue_continue(s, parent: Task, *, mode: str, sender: str | None, auto: bool) -> Task:
+    """Add a queued ``continue`` step to ``parent``'s thread (committed; the caller submits it to the
+    worker). Under the global follow-up lock (serialised with deny-and-resume's join / defer / spawn
+    choice) it re-checks for an active step of the thread (409). ``resume`` needs ``sender`` to own the
+    parent's session (409); ``fresh`` never resumes; ``auto`` resumes when it can. ``auto=True``: the
+    automatic fresh Continue (marked ``auto_continued``)."""
+    from ..guard import grants as guard_grants
+
+    async with guard_grants.followup_lock():
+        await s.refresh(parent)
+        root = parent.root_id or parent.id
+        active = (await s.execute(select(Task.id).where(
+            or_(Task.root_id == root, Task.id == root), Task.status.in_(Status.ACTIVE)).limit(1))).first()
+        if active is not None:
+            raise HTTPException(409, "A step of this thread is still active")
+        can_resume = bool(parent.session_id) and sender == parent.created_by
+        if mode == "resume" and not can_resume:
+            raise HTTPException(
+                409, "Only the session's owner can resume it, and the step needs a session")
+        resume = parent.session_id if can_resume and mode != "fresh" else None
+        child = _step_from(parent, prompt=CONTINUE_PROMPT, origin="continue", resume=resume,
+                           created_by=sender)
+        child.auto_continued = bool(auto)
+        s.add(child)
+        await s.commit()
+        await s.refresh(child)
+        return child
+
+
 @router.post("/{task_id}/continue", response_model=TaskOut, status_code=201)
 async def continue_task(task_id: str, request: Request, payload: ContinueCreate | None = None):
     """Continue a stopped main-line step: a queued ``continue`` step of its
@@ -438,8 +467,6 @@ async def continue_task(task_id: str, request: Request, payload: ContinueCreate 
     the step's session (409 otherwise); ``auto`` resumes when it can, else
     starts fresh with the handoff; ``fresh`` never resumes. Same permission
     as a follow-up."""
-    from ..guard import grants as guard_grants
-
     mode = (payload.mode if payload is not None else None) or "auto"
     if mode not in CONTINUE_MODES:
         raise HTTPException(400, "mode must be auto, resume or fresh")
@@ -466,29 +493,10 @@ async def continue_task(task_id: str, request: Request, payload: ContinueCreate 
         await resume_handoff.snapshot(task_id, "continue")
     except Exception:  # noqa: BLE001 - the Continue still runs (its prompt uses the stored handoff)
         logging.getLogger(__name__).exception("handoff snapshot before continue failed for %s", task_id)
-    # serialised with deny-and-resume's join / defer / spawn choice
-    async with guard_grants.followup_lock():
-        async with SessionLocal() as s:
-            parent = await require_task(s, p, task_id)
-            root = parent.root_id or parent.id
-            active = (await s.execute(select(Task.id).where(
-                or_(Task.root_id == root, Task.id == root), Task.status.in_(Status.ACTIVE)).limit(1))).first()
-            if active is not None:
-                raise HTTPException(409, "A step of this thread is still active")
-            sender = p.user.id
-            can_resume = bool(parent.session_id) and sender == parent.created_by
-            if mode == "resume" and not can_resume:
-                raise HTTPException(
-                    409, "Only the session's owner can resume it, and the step needs a session")
-            resume = parent.session_id if can_resume and mode != "fresh" else None
-        async with SessionLocal() as s:
-            parent = await require_task(s, p, task_id)
-            child = _step_from(parent, prompt=CONTINUE_PROMPT, origin="continue", resume=resume,
-                               created_by=sender)
-            s.add(child)
-            await s.commit()
-            await s.refresh(child)
-            out = TaskOut.model_validate(child)
+    async with SessionLocal() as s:
+        parent = await require_task(s, p, task_id)
+        child = await queue_continue(s, parent, mode=mode, sender=p.user.id, auto=False)
+        out = TaskOut.model_validate(child)
     await worker.submit(out.id, out.priority, out.created_at)
     return out
 
