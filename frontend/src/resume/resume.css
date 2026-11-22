@@ -1,0 +1,77 @@
+/* Where it stands, Continue and run notices. Theme variables only. */
+.co-resume-card {
+  margin-bottom: 12px;
+  border: 1px solid var(--co-border);
+  border-radius: var(--co-radius);
+  background: var(--co-surface);
+  padding: 8px 12px;
+}
+.co-resume-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.co-resume-title {
+  font-weight: 600;
+  color: var(--co-text);
+}
+.co-resume-meta {
+  color: var(--co-text-muted);
+  font-size: 12px;
+}
+.co-resume-body {
+  margin-top: 8px;
+  display: grid;
+  gap: 6px;
+  font-size: 13px;
+  color: var(--co-text);
+}
+.co-resume-row {
+  display: flex;
+  gap: 8px;
+  min-width: 0;
+}
+.co-resume-label {
+  flex: none;
+  width: 92px;
+  color: var(--co-text-secondary);
+}
+.co-resume-text {
+  min-width: 0;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.co-resume-mono {
+  font-family: var(--co-mono);
+  font-size: 12px;
+}
+.co-resume-warn {
+  color: var(--co-warning-text);
+}
+.co-resume-actions {
+  margin-top: 4px;
+}
+.co-resume-notices {
+  display: grid;
+  gap: 8px;
+  margin-bottom: 12px;
+}
+.co-resume-notice-recovered,
+.co-resume-notice-credentials_changed,
+.co-resume-notice-outside_commits {
+  border-left: 3px solid var(--co-info);
+}
+.co-resume-notice-gave_up {
+  border-left: 3px solid var(--co-danger);
+}
+.co-resume-notice-history_rewritten,
+.co-resume-notice-no_commits,
+.co-resume-notice-temp_files {
+  border-left: 3px solid var(--co-warning);
+}
+.co-resume-error {
+  color: var(--co-danger-text);
+  font-size: 12.5px;
+}

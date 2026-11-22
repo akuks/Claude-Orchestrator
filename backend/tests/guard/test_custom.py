@@ -10,6 +10,7 @@ import threading
 import time
 
 import pytest
+from conftest import time_limit
 
 from app.guard import custom
 from app.guard.custom import (ONLY_RULES, REGEX_BUDGET_MS, clean_reason, match_rules, parse_rules_md, rule_id,
@@ -260,10 +261,8 @@ def test_budget_timeout_counts_as_timeout_and_is_shared():
     slow = R("repo.slow", SLOW, "regex", kind="never")
     later = R("repo.later", "b$", "regex")
     text_rule = R("repo.txt", "aaa")
-    t0 = time.monotonic()
-    got = match_rules(SLOW_TEXT, [slow, later, text_rule], 100)
-    took = time.monotonic() - t0
-    assert took < 3.0, took  # load-tolerant bound (final wave)
+    with time_limit(3.0):  # load-tolerant bound: wall or CPU time
+        got = match_rules(SLOW_TEXT, [slow, later, text_rule], 100)
     verdicts = {r["id"]: v for r, v in got}
     assert verdicts["repo.slow"] == "timeout"
     assert verdicts["repo.later"] == "timeout"  # the budget is shared: nothing left for it
@@ -422,9 +421,8 @@ def test_p11_each_source_has_its_own_budget():
     proj = R("project.b", "b$", "regex")
     repo_fast = R("repo.fast", "b$", "regex")
     repo_slow = R("repo.slow", SLOW, "regex")
-    t0 = time.monotonic()
-    got = {r["id"]: v for r, v in match_rules(SLOW_TEXT, [repo_fast, repo_slow, org_slow, proj], 60)}
-    assert time.monotonic() - t0 < 3.0  # load-tolerant bound (final wave)
+    with time_limit(3.0):  # load-tolerant bound: wall or CPU time
+        got = {r["id"]: v for r, v in match_rules(SLOW_TEXT, [repo_fast, repo_slow, org_slow, proj], 60)}
     # org + project share one budget (spent by org.slow); the repo budget is separate
     assert got == {"org.slow": "timeout", "project.b": "timeout", "repo.fast": "match", "repo.slow": "timeout"}
 

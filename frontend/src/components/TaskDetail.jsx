@@ -43,6 +43,9 @@ import { api, notifyUnauthorized, PRIORITY_COLORS, STATUS_COLORS, shortModel } f
 import { statusVar } from '../theme/tokens'
 import { guardLine, revealHidden, waitingLine } from '../guard/guard'
 import '../guard/guard.css'
+import HandoffCard from '../resume/HandoffCard'
+import ContinueButton from '../resume/ContinueButton'
+import RunNotices from '../resume/RunNotices'
 
 // co-guard lines in the run log: one icon per kind (guard.js guardLine).
 const GUARD_ICON = {
@@ -260,13 +263,14 @@ function DelegationTree({ thread, currentId, onOpenTask }) {
 // The task drawer (Tasks page), or with `inline` the same content as a panel
 // (embedded on the run page). One component, so live output, follow-ups and
 // actions behave the same in both places.
-export default function TaskDetail({ taskId, onClose, onChanged, onOpenTask, onOpenCredentials, inline = false }) {
+export default function TaskDetail({ taskId, onClose, onChanged, onOpenTask, onOpenCredentials, currentUser, inline = false }) {
   const [task, setTask] = useState(null)
   const [events, setEvents] = useState([])
   const [artifacts, setArtifacts] = useState([])
   const [thread, setThread] = useState([])
   const [followup, setFollowup] = useState('')
   const [sending, setSending] = useState(false)
+  const [handoff, setHandoff] = useState(null)
   const [requests, setRequests] = useState([]) // this task's co-guard approval requests
   const [names, setNames] = useState(() => new Map())
   const wsRef = useRef(null)
@@ -401,6 +405,18 @@ export default function TaskDetail({ taskId, onClose, onChanged, onOpenTask, onO
         </Button>
       )}
       {task && !isActive && (
+        <ContinueButton
+          task={task}
+          user={currentUser}
+          thread={thread}
+          onContinued={(child) => {
+            message.success('Continuing')
+            onChanged?.()
+            onOpenTask?.(child.id)
+          }}
+        />
+      )}
+      {task && !isActive && (
         <Button icon={<ReloadOutlined />} onClick={() => act(api.retryTask, 'Retrying')}>
           Retry
         </Button>
@@ -513,6 +529,9 @@ export default function TaskDetail({ taskId, onClose, onChanged, onOpenTask, onO
           )}
         </Descriptions>
       )}
+
+      <RunNotices task={task} events={events} handoff={handoff} />
+      <HandoffCard taskId={taskId} onHandoff={setHandoff} canManage={task?.can_manage === true} />
 
       <Typography.Title level={5}>Live Output</Typography.Title>
       <div

@@ -102,6 +102,20 @@ class Task(Base):
     started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
+    # Resume and handoff (phase 3a). origin: user | agent | guard | continue. The rest is
+    # written by later tasks (heartbeat/head_at_start: run capture; credential_ref:
+    # compose; notes, run_pgid, run_proc_start, recoveries, recovery: recovery).
+    origin: Mapped[str] = mapped_column(String(16), default="user", server_default="user")
+    notes: Mapped[str | None] = mapped_column(Text, nullable=True)
+    notes_updated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    heartbeat_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    run_pgid: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    run_proc_start: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    recoveries: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
+    recovery: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    credential_ref: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    head_at_start: Mapped[str | None] = mapped_column(String(64), nullable=True)
+
     events: Mapped[list["TaskEvent"]] = relationship(
         back_populates="task", cascade="all, delete-orphan"
     )
@@ -279,8 +293,31 @@ class GuardOrgSettings(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True, default=1, autoincrement=False)
     disabled_rules: Mapped[list] = mapped_column(JSON, default=list, server_default="[]")
     dev_db_patterns: Mapped[list] = mapped_column(JSON, default=list, server_default="[]")
+    ground_rules: Mapped[dict] = mapped_column(JSON, default=dict, server_default="{}")
     updated_by: Mapped[str | None] = mapped_column(String(32), nullable=True)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now, onupdate=_now)
+
+
+class TaskHandoff(Base):
+    """Where a thread stands (one row per thread, root_id unique): a structured
+    `content` and its rendered `text`, with the previous version kept so an edit
+    can be undone. status open | closed."""
+
+    __tablename__ = "task_handoffs"
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=_uuid)
+    root_id: Mapped[str] = mapped_column(String(32), unique=True, index=True)
+    task_id: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    version: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
+    status: Mapped[str] = mapped_column(String(8), default="open", server_default="open")
+    reason: Mapped[str] = mapped_column(String(16), default="", server_default="")
+    saved_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+    content: Mapped[dict] = mapped_column(JSON, default=dict, server_default="{}")
+    text: Mapped[str] = mapped_column(Text, default="", server_default="")
+    prev_content: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    prev_text: Mapped[str | None] = mapped_column(Text, nullable=True)
+    closed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    closed_by: Mapped[str | None] = mapped_column(String(32), nullable=True)
 
 
 class ActionGrant(Base):

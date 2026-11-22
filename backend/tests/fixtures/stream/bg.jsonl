@@ -1,0 +1,8 @@
+{"type":"system","subtype":"init","session_id":"test-session"}
+{"type":"assistant","message":{"id":"m1","model":"claude-test","content":[{"type":"tool_use","id":"tuA","name":"Agent","input":{"subagent_type":"explorer","description":"map the repo","prompt":"look around"}}]}}
+{"__spool__": {"event":"PreToolUse","tool_use_id":"tuA","seen":true,"tool":"Agent","what":"explorer"}}
+{"type":"assistant","message":{"id":"m2","model":"claude-test","content":[{"type":"tool_use","id":"tuB","name":"Bash","input":{"command":"npm run dev","description":"Start the dev server","run_in_background":true}}]}}
+{"__spool__": {"event":"PreToolUse","tool_use_id":"tuB","seen":true,"tool":"Bash","what":"Start the dev server :: npm run dev"}}
+{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"tuB","content":"Command running in background with ID: b1"}]}}
+{"__spool__": {"event":"Stop","background":[{"id":"b1","what":"npm run dev"}]}}
+{"type":"result","subtype":"success","result":"server started","num_turns":1,"total_cost_usd":0.01,"duration_ms":100,"is_error":false,"usage":{"input_tokens":1,"output_tokens":1}}

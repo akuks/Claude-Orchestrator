@@ -62,6 +62,14 @@ class TaskOut(BaseModel):
     created_by: Optional[str] = None
     decided_by: Optional[str] = None
     thread_count: int = 1  # number of steps in this task's thread
+    origin: str = "user"
+    notes: Optional[str] = None
+    notes_updated_at: Optional[datetime] = None
+    recoveries: int = 0
+    recovery: Optional[dict] = None
+    # per viewer, set on the task and thread reads only: may the viewer follow up / Continue, and own the session
+    can_manage: bool = False
+    can_resume: bool = False
     created_at: datetime
     started_at: Optional[datetime]
     completed_at: Optional[datetime]
@@ -71,6 +79,11 @@ class TaskOut(BaseModel):
 
 class FollowupCreate(BaseModel):
     prompt: str = Field(min_length=1)
+
+
+class ContinueCreate(BaseModel):
+    # auto | resume | fresh (checked by the route: a bad mode is 400)
+    mode: str | None = "auto"
 
 
 class ArtifactOut(BaseModel):

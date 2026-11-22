@@ -86,6 +86,34 @@ describe('OrgGuardView (Settings → Agent guard)', () => {
     expect(q(c, 'org-guard-error').textContent).toContain('matches every database')
   })
 
+  it('saves the ground rules with all five keys and shows the 400', async () => {
+    api.guardOrgSettings.mockImplementation(async () => ({
+      disabled_rules: [], dev_db_patterns: [],
+      ground_rules: { grounding: true, short_answers: true, usage_care: true, notes: true, extra: '' },
+    }))
+    api.saveGuardOrgSettings.mockImplementation(async (b) => b)
+    const c = await mount({ isAdmin: true })
+    await click(q(c, 'ground-short_answers'))
+    await click(q(c, 'ground-rules-save'))
+    await flush()
+    expect(api.saveGuardOrgSettings).toHaveBeenCalledWith({
+      ground_rules: { grounding: true, short_answers: false, usage_care: true, notes: true, extra: '' },
+    })
+    api.saveGuardOrgSettings.mockImplementation(async () => {
+      throw Object.assign(new Error('extra is at most 2000 characters'), { status: 400 })
+    })
+    await click(q(c, 'ground-notes'))
+    await click(q(c, 'ground-rules-save'))
+    await flush()
+    expect(q(c, 'ground-rules-error').textContent).toContain('extra is at most 2000 characters')
+  })
+
+  it('ground rules are read-only for non-admins', async () => {
+    const c = await mount({ isAdmin: false })
+    expect(q(c, 'ground-rules-save')).toBeNull()
+    expect(q(c, 'ground-grounding').disabled).toBe(true)
+  })
+
   it('has dev pattern syntax help', async () => {
     const c = await mount({ isAdmin: true })
     expect(q(c, 'dev-db-help').textContent).toMatch(/host:<pattern>/)

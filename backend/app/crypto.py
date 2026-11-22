@@ -6,6 +6,8 @@ a random key is generated once and persisted to CO_SECRET_KEY_FILE (0600).
 """
 
 import base64
+import hashlib
+import hmac
 import json
 import os
 import secrets
@@ -58,3 +60,10 @@ def decrypt_json(blob: str | None) -> dict:
     nonce, ct = raw[:12], raw[12:]
     aes = AESGCM(_load_key())
     return json.loads(aes.decrypt(nonce, ct, None).decode())
+
+
+def fingerprint(*parts: str) -> str:
+    """A keyed, one-way id of ``parts`` (HMAC-SHA256 with the app key over
+    ``"\\0".join(parts)``, first 24 hex chars): compares credentials without
+    storing them."""
+    return hmac.new(_load_key(), "\0".join(parts).encode(), hashlib.sha256).hexdigest()[:24]

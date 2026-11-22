@@ -1,0 +1,10 @@
+{"type":"system","subtype":"init","session_id":"test-session"}
+{"type":"assistant","message":{"id":"m1","model":"claude-test","content":[{"type":"tool_use","id":"tc1","name":"TaskCreate","input":{"subject":"Plan","description":"plan it"}},{"type":"tool_use","id":"tc2","name":"TaskCreate","input":{"subject":"Build","description":"build it"}},{"type":"tool_use","id":"tc3","name":"TaskCreate","input":{"subject":"Check","description":"check it"}}]}}
+{"__spool__": {"event":"PreToolUse","tool_use_id":"tc1","seen":true,"tool":"TaskCreate","what":"TaskCreate"}}
+{"__spool__": {"event":"PreToolUse","tool_use_id":"tc2","seen":true,"tool":"TaskCreate","what":"TaskCreate"}}
+{"__spool__": {"event":"PreToolUse","tool_use_id":"tc3","seen":true,"tool":"TaskCreate","what":"TaskCreate"}}
+{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"tc1","content":"Task #1 created"},{"type":"tool_result","tool_use_id":"tc2","content":"Task #2 created"},{"type":"tool_result","tool_use_id":"tc3","content":"Task #3 created"}]}}
+{"type":"assistant","message":{"id":"m2","model":"claude-test","content":[{"type":"tool_use","id":"tu2","name":"TaskUpdate","input":{"taskId":"2","status":"in_progress"}}]}}
+{"__spool__": {"event":"PreToolUse","tool_use_id":"tu2","seen":true,"tool":"TaskUpdate","what":"TaskUpdate"}}
+{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"tu2","content":"Updated task #2 status"}]}}
+{"type":"result","subtype":"success","result":"building","num_turns":1,"total_cost_usd":0.01,"duration_ms":100,"is_error":false,"usage":{"input_tokens":1,"output_tokens":1}}

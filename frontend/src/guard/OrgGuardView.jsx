@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
-import { Alert, Button, Card, Checkbox, Select, Space, Tag, Tooltip, Typography, message } from 'antd'
+import { Alert, Button, Card, Checkbox, Input, Select, Space, Switch, Tag, Tooltip, Typography, message } from 'antd'
 import { LockOutlined, SafetyOutlined } from '@ant-design/icons'
 import { api } from '../api'
 import RuleTable from './RuleTable'
@@ -61,6 +61,99 @@ export function BuiltinList({ builtins, disabled, canEdit, onChange }) {
   )
 }
 
+export const GROUND_SWITCHES = [
+  ['grounding', 'Grounding', 'Say what was checked and what was not; do not state guesses as facts.'],
+  ['short_answers', 'Short answers', 'Keep replies short and to the point.'],
+  ['usage_care', 'Usage care', 'Avoid wasteful work; helpers get the same habit.'],
+  ['notes', 'Notes', 'Ask the agent to keep short notes of where it stands.'],
+]
+export const GROUND_EXTRA_MAX = 2000
+const GROUND_DEFAULTS = { grounding: true, short_answers: true, usage_care: true, notes: true, extra: '' }
+
+// Ground rules: the standing instructions every run gets. Always saved whole
+// (all five keys); the server refuses a bad value and says why.
+export function GroundRulesCard({ canEdit, initial, onSaved }) {
+  const [saved, setSaved] = useState({ ...GROUND_DEFAULTS, ...(initial || {}) })
+  const [cfg, setCfg] = useState(saved)
+  const [saving, setSaving] = useState(false)
+  const [error, setError] = useState(null)
+  useEffect(() => {
+    const v = { ...GROUND_DEFAULTS, ...(initial || {}) }
+    setSaved(v)
+    setCfg(v)
+  }, [initial])
+  const dirty = GROUND_SWITCHES.some(([k]) => cfg[k] !== saved[k]) || cfg.extra !== saved.extra
+  const save = async () => {
+    setSaving(true)
+    setError(null)
+    try {
+      const body = {
+        grounding: !!cfg.grounding,
+        short_answers: !!cfg.short_answers,
+        usage_care: !!cfg.usage_care,
+        notes: !!cfg.notes,
+        extra: cfg.extra || '',
+      }
+      const out = await api.saveGuardOrgSettings({ ground_rules: body })
+      const v = { ...body, ...(out?.ground_rules || {}) }
+      setSaved(v)
+      setCfg(v)
+      onSaved?.(v)
+      message.success('Ground rules saved')
+    } catch (e) {
+      setError(e.message)
+    } finally {
+      setSaving(false)
+    }
+  }
+  return (
+    <Card
+      className="co-guard-panel"
+      title="Ground rules"
+      size="small"
+      data-testid="ground-rules"
+      extra={
+        canEdit && (
+          <Button type="primary" size="small" loading={saving} disabled={!dirty} onClick={save} data-testid="ground-rules-save">
+            Save
+          </Button>
+        )
+      }
+    >
+      <Typography.Paragraph type="secondary" className="co-guard-help">
+        Standing instructions added to every run's system prompt. Only admins can change them.
+      </Typography.Paragraph>
+      <Space direction="vertical" style={{ width: '100%' }}>
+        {GROUND_SWITCHES.map(([k, label, help]) => (
+          <div key={k}>
+            <Switch
+              checked={!!cfg[k]}
+              disabled={!canEdit}
+              onChange={(v) => setCfg((c) => ({ ...c, [k]: v }))}
+              aria-label={label}
+              data-testid={`ground-${k}`}
+            />{' '}
+            <strong>{label}</strong>
+            <div className="co-guard-builtin-why">{help}</div>
+          </div>
+        ))}
+        <Input.TextArea
+          value={cfg.extra}
+          disabled={!canEdit}
+          maxLength={GROUND_EXTRA_MAX}
+          showCount
+          autoSize={{ minRows: 2, maxRows: 8 }}
+          placeholder="Anything else every run should know"
+          aria-label="Extra ground rules"
+          data-testid="ground-extra"
+          onChange={(e) => setCfg((c) => ({ ...c, extra: e.target.value }))}
+        />
+      </Space>
+      {error && <Alert type="error" showIcon message={error} data-testid="ground-rules-error" style={{ marginTop: 12 }} />}
+    </Card>
+  )
+}
+
 // Settings → Agent guard (admins edit; the server refuses everyone else).
 export default function OrgGuardView({ isAdmin = false }) {
   const [builtins, setBuiltins] = useState([])
@@ -70,6 +163,7 @@ export default function OrgGuardView({ isAdmin = false }) {
   const [error, setError] = useState(null)
   const [saving, setSaving] = useState(false)
   const [health, setHealth] = useState(null)
+  const [ground, setGround] = useState(null)
 
   const load = useCallback(async () => {
     try {
@@ -79,6 +173,7 @@ export default function OrgGuardView({ isAdmin = false }) {
       setSaved(cur)
       setDisabled(cur.disabled_rules)
       setPatterns(cur.dev_db_patterns)
+      setGround(s?.ground_rules || {})
     } catch (e) {
       setError(e.message)
     }
@@ -202,6 +297,7 @@ export default function OrgGuardView({ isAdmin = false }) {
           </Typography.Text>
         </Space>
       </Card>
+      {ground && <GroundRulesCard canEdit={isAdmin} initial={ground} />}
       {error && <Alert type="error" showIcon message={error} data-testid="org-guard-error" style={{ marginTop: 12 }} />}
     </div>
   )

@@ -25,7 +25,10 @@ when that session is the owner's: Claude sessions belong to an account), and
 its prompt carries one ``followup_block`` per approved request plus a once
 grant per request. At most one follow-up per thread at a time:
 
-* a queued follow-up of the thread (one an approval created) is joined:
+* a queued follow-up of the thread (one an approval created, or the thread
+  owner's queued Continue step - which runs in the session the Continue
+  chose: the continued step's, or a fresh one with the handoff, not
+  necessarily the owner's latest) is joined:
   one more block appended to its prompt (only while it is still queued) and
   one more once grant;
 * while any other step of the thread is active the approval is deferred
@@ -351,10 +354,19 @@ async def _thread_root(s, task: Task) -> Task:
     return root or task
 
 
-async def _queued_followup(s, root_id: str) -> Task | None:
+async def _queued_followup(s, root_id: str, owner=None) -> Task | None:
+    """The thread's queued follow-up an approval may join: one an approval
+    created, or a queued Continue step of the thread owner (it runs on the
+    owner's credentials, as a follow-up must; another person's Continue is
+    an active step, so the approval is deferred). A step that already ran (a
+    recovered step queued again) is never joined: its resumed prompt is
+    RECOVERED_CONTINUE, so the approval is deferred and spawned after it."""
     made = select(ActionApproval.followup_task_id).where(ActionApproval.followup_task_id.is_not(None))
+    joinable = Task.id.in_(made)
+    if owner is not None:
+        joinable = or_(joinable, and_(Task.origin == "continue", Task.created_by == owner))
     return (await s.execute(
-        select(Task).where(Task.root_id == root_id, Task.status == Status.QUEUED, Task.id.in_(made))
+        select(Task).where(Task.root_id == root_id, Task.status == Status.QUEUED, Task.started_at.is_(None), joinable)
         .order_by(Task.created_at.desc()).limit(1)
     )).scalar_one_or_none()
 
@@ -414,6 +426,7 @@ async def _spawn(s, approvals: list[ActionApproval], root: Task, decider_id) -> 
         model=parent.model,
         max_turns=parent.max_turns,
         parent_task_id=parent.id,
+        origin="guard",
         root_id=root.id,
         # the owner's own session only (Claude sessions belong to an account)
         resume_session_id=parent.session_id if parent.created_by == owner else None,
@@ -448,7 +461,7 @@ async def create_resume_followup(s, approval: ActionApproval, decider_id, *, spa
     if task is None:
         return None
     root = await _thread_root(s, task)
-    queued = await _queued_followup(s, root.id)
+    queued = await _queued_followup(s, root.id, root.created_by)
     if queued is not None:
         res = await s.execute(
             update(Task).where(Task.id == queued.id, Task.status == Status.QUEUED)

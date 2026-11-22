@@ -527,6 +527,7 @@ function AppInner({ user, onLogout }) {
       <ChangePasswordModal open={pwOpen} onClose={() => setPwOpen(false)} />
       <MyCredentials open={credsOpen} onClose={() => setCredsOpen(false)} onChanged={onCredsChanged} />
       <TaskDetail
+        currentUser={user}
         taskId={selected}
         onClose={() => returnTo({ page: 'tasks' }, navigate)}
         onChanged={refresh}

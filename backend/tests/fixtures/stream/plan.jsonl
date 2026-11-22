@@ -1,0 +1,5 @@
+{"type":"system","subtype":"init","session_id":"test-session"}
+{"type":"assistant","message":{"id":"m1","model":"claude-test","content":[{"type":"tool_use","id":"tuP","name":"Write","input":{"file_path":"PLAN.md","content":"# Plan"}}]}}
+{"__spool__": {"event":"PreToolUse","tool_use_id":"tuP","seen":true,"tool":"Write","what":"PLAN.md"}}
+{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"tuP","content":"File created successfully at: PLAN.md"}]}}
+{"type":"result","subtype":"success","result":"planned","num_turns":1,"total_cost_usd":0.01,"duration_ms":100,"is_error":false,"usage":{"input_tokens":1,"output_tokens":1}}

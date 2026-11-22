@@ -14,6 +14,9 @@ API
 ---
 ``evaluate(tool_name, tool_input, policy, cwd) -> Verdict``
 
+``temp_roots(policy) -> list[str]`` and ``path_in_temp(path, policy) -> bool``:
+the temp folders below (a file strictly inside one can vanish).
+
 ``Verdict{decision, hits}``  ``decision`` is ``"deny"`` if any hit is hard
 (``hard`` = never approvable) or is ``mcp-block``; else ``"approve"`` (a person
 must approve it live) if there is any hit; else ``"allow"``. Hits are listed
@@ -87,6 +90,12 @@ Policy (a dict, as written by the worker into ``policy.json``)::
       "regex_budget_ms": 250,              #   shared budget for every custom regex in
                                            #   one evaluate (at most 1000; a non-number
                                            #   means 250, <= 0 means every regex times out)
+      "notes": true, "notes_after": 12,    #   the hook nudges for notes every 12 calls (notes
+                                           #   false or missing: never); never denies anything
+      "helper_context": "...",             #   text SubagentStart hands every helper ("" or
+                                           #   missing: the data line unless trust is own)
+      "compact": true,                     #   false: no handoff re-injection after a compaction
+                                           #   (missing or malformed means true)
       "env_paths": {"CO_POLICY_FILE": "/abs/...", "CO_TASK_DIR": "/abs/...",
                     "CLAUDE_CONFIG_DIR": "/abs/...", "CLAUDE_PLUGIN_ROOT": "/abs/..."}
                                            #   values of the agent's env vars that
@@ -877,6 +886,52 @@ def _glob_reaches(pattern, folder, as_ancestor=False):
     return len(pp) >= len(fc) or as_ancestor
 
 
+def _home_project(policy):
+    """The policy's home and project dir, absolute with symlinks resolved."""
+    home = policy.get("home") or os.path.expanduser("~")
+    project = policy.get("project_dir") or policy.get("cwd") or os.getcwd()
+    return _real(os.path.abspath(str(home))), _real(os.path.abspath(str(project)))
+
+
+def temp_roots(policy):
+    """The temp roots for ``policy``: /tmp, /private/tmp, $TMPDIR (this
+    process's env, else policy "tmpdir") and policy "tmpdir". A root that is
+    (or holds) home or the project, is / or a top-level folder, or is
+    /private/var/folders or one of its first two levels, is no temp root."""
+    policy = policy if isinstance(policy, dict) else {}
+    home, project = _home_project(policy)
+    policy_tmpdir = policy.get("tmpdir")
+    tmpdir = os.environ.get("TMPDIR") or policy_tmpdir
+    roots = {_real(r) for r in _TEMP_ROOTS} | set(_TEMP_ROOTS)  # '/tmp' as named (a link on macOS)
+    extra = {_real(os.path.abspath(str(t))) for t in (tmpdir, policy_tmpdir) if t}
+    roots |= {r for r in extra if r and r.count("/") >= 2 and not _within(_VAR_FOLDERS, r)
+              and not (_inside(r, _VAR_FOLDERS) and r.count("/") < 6)}
+    return sorted(r for r in roots if r != "/" and not _within(home, r) and not _within(project, r))
+
+
+def _var_folders_root(path, home, project):
+    """{the macOS per-user temp dir /private/var/folders/<a>/<b>/T that holds
+    ``path``}, unless it holds home or the project; else an empty set."""
+    parts = path.split("/")
+    if path.startswith(_VAR_FOLDERS + "/") and len(parts) > 6 and parts[6] == "T":
+        root = "/".join(parts[:7])
+        if not _within(home, root) and not _within(project, root):
+            return {root}
+    return set()
+
+
+def path_in_temp(path, policy):
+    """``path`` (symlinks resolved) is strictly inside a temp root of
+    ``policy`` (a file there can vanish)."""
+    if not path or not isinstance(path, str) or "\0" in path:
+        return False
+    policy = policy if isinstance(policy, dict) else {}
+    home, project = _home_project(policy)
+    p = _real(os.path.abspath(path))
+    roots = set(temp_roots(policy)) | _var_folders_root(p, home, project)
+    return any(_inside(p, r) for r in roots)
+
+
 def _brace_expand(word):
     """One level of {a,b} expansion, or None when it is not that simple."""
     m = re.fullmatch(r"([^{}]*)\{([^{}]*,[^{}]*)\}([^{}]*)", word)
@@ -976,14 +1031,8 @@ class _Ctx:
         self._var_re = re.compile(r"^\$(?:\{(" + names + r")(?:[:]?[-?=+][^}]*)?\}|(" + names + r"))(?=/|$)")
 
     def _temp_roots(self, policy_tmpdir=None):
-        """Fixed temp roots plus $TMPDIR; a root that is (or holds) home or
-        the project, is / or a top-level folder, or is /private/var/folders
-        or one of its first two levels, is no temp root."""
-        roots = {_real(r) for r in _TEMP_ROOTS} | set(_TEMP_ROOTS)  # '/tmp' as named (a link on macOS)
-        extra = {self.tmpdir} | ({_real(os.path.abspath(str(policy_tmpdir)))} if policy_tmpdir else set())
-        roots |= {r for r in extra if r and r.count("/") >= 2 and not _within(_VAR_FOLDERS, r)
-                  and not (_inside(r, _VAR_FOLDERS) and r.count("/") < 6)}
-        return {r for r in roots if r != "/" and not _within(self.home, r) and not _within(self.project, r)}
+        """The module-level ``temp_roots`` for this home and project."""
+        return set(temp_roots({"home": self.home, "project_dir": self.project, "tmpdir": policy_tmpdir}))
 
     def distrust_tmpdir(self):
         """The command may set TMPDIR itself: do not expand $TMPDIR."""
@@ -998,12 +1047,7 @@ class _Ctx:
             return False
         if _within(self.home, path) or _within(self.project, path) or path == self.project + "/.git":
             return False
-        roots = set(self.temp_roots)
-        parts = path.split("/")
-        if path.startswith(_VAR_FOLDERS + "/") and len(parts) > 6 and parts[6] == "T":
-            root = "/".join(parts[:7])  # /private/var/folders/<a>/<b>/T
-            if not _within(self.home, root) and not _within(self.project, root):
-                roots.add(root)
+        roots = set(self.temp_roots) | _var_folders_root(path, self.home, self.project)
         return any(_inside(path, r) if whole else _within(path, r) for r in roots)
 
     # -- hits --------------------------------------------------------------

@@ -8,30 +8,36 @@ results + output artifacts. No external broker/queue needed for Phase 1.
 
 import asyncio
 import json
+import logging
 import mimetypes
 import os
 import signal
 import time
 from collections import Counter
 from types import SimpleNamespace
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from sqlalchemy import func, select
 
 from . import auth, context_store, mcp_manager, memory, notifications, security
 from .access import effective_project_id
-from .agent_env import PROJECT_ENV_BLOCKED, MissingCredential, build_agent_env
+from .agent_env import PROJECT_ENV_BLOCKED, MissingCredential, build_agent_env, credential_ref
 from .config import settings
 from .constants import Priority, Status
 from .database import SessionLocal
 from .events import broker
+from .guard import co_hook as guard_co_hook
 from .guard import grants as guard_grants
 from .guard import policy_inputs
 from .guard import runtime as guard_runtime
 from .guard.plugin import ensure_plugin
 from .models import Agent, Artifact, McpCall, Project, SkillPack, Task, TaskEvent, User
 from .redaction import redact, redact_obj, secrets_from_env
+from .resume import gitfacts, ground_rules, handoff, prompting, recovery
+from .resume.texts import CRED_NOTE, RECOVERED_CONTINUE
+
+log = logging.getLogger(__name__)
 
 _MAX_TOOL_RESULT_CHARS = 2000
 
@@ -143,18 +149,6 @@ def _short(value, secrets: list[str] | None = None) -> str:
     return text[:_MAX_TOOL_RESULT_CHARS]
 
 
-def _session_file_exists(config_dir: str | None, session_id: str) -> bool:
-    """Whether `<config_dir>/projects/**/<session_id>.jsonl` exists."""
-    # The id becomes a glob pattern: refuse separators and glob characters.
-    if not config_dir or not session_id or any(c in session_id for c in "/\\*?[]"):
-        return False
-    projects = Path(config_dir) / "projects"
-    if not projects.is_dir():
-        return False
-    name = f"{session_id}.jsonl"
-    return any(p.is_file() for p in projects.rglob(name))
-
-
 async def _coordinator_context(s, task_id: str, me_id: str) -> str:
     """Build the registry + delegation instructions injected into a coordinator's
     prompt: the other agents it can delegate to, and how to dispatch to them."""
@@ -211,13 +205,22 @@ class WorkerManager:
         # emits through the run's own emit (same seq, same redaction), and the
         # spool ingestion skips what was already reported (Counter of keys).
         self._guard_live: dict[str, dict] = {}
+        # task_id -> the run's outside-commit base, fixed at spawn (F9); the
+        # finish snapshot uses it too.
+        self._run_since: dict[str, str | None] = {}
+        # task ids a live _run_guarded holds (the sweep never recovers them),
+        # and ids a recover() is working on (never two side by side)
+        self._active: set[str] = set()
+        self._recovering: set[str] = set()
         self._dispatcher: asyncio.Task | None = None
+        self._sweeper: asyncio.Task | None = None
 
     # ---- lifecycle -------------------------------------------------------
 
     async def start(self) -> None:
         self._dispatcher = asyncio.create_task(self._dispatch_loop())
         await self._requeue_pending()
+        self._sweeper = asyncio.create_task(self._sweep_loop())
 
     @staticmethod
     def _signal_group(proc, sig: int) -> None:
@@ -234,22 +237,29 @@ class WorkerManager:
     async def stop(self) -> None:
         if self._dispatcher:
             self._dispatcher.cancel()
+        if self._sweeper:
+            self._sweeper.cancel()
         for proc in list(self._running.values()):
             self._signal_group(proc, signal.SIGTERM)
 
     async def _requeue_pending(self) -> None:
-        """On boot, re-queue anything left QUEUED, and reset orphaned RUNNING."""
+        """On boot, re-queue anything left QUEUED; a RUNNING row was cut off
+        by the restart and goes through ``recover``."""
         async with SessionLocal() as s:
             rows = (
                 await s.execute(
-                    select(Task).where(Task.status.in_([Status.QUEUED, Status.RUNNING]))
+                    select(Task.id, Task.status, Task.priority, Task.created_at)
+                    .where(Task.status.in_([Status.QUEUED, Status.RUNNING]))
                 )
-            ).scalars().all()
-            for t in rows:
-                if t.status == Status.RUNNING:
-                    t.status = Status.QUEUED
-                await self._enqueue(t.id, t.priority, t.created_at)
-            await s.commit()
+            ).all()
+        for tid, status, priority, created_at in rows:
+            if status == Status.QUEUED:
+                await self._enqueue(tid, priority, created_at)
+                continue
+            try:
+                await self.recover(tid, "server restart")
+            except Exception:  # noqa: BLE001 - one bad row never stops the boot (the sweep retries it)
+                log.exception("recovery: %s failed at boot", tid)
 
     # ---- public control --------------------------------------------------
 
@@ -282,6 +292,7 @@ class WorkerManager:
             asyncio.create_task(self._run_guarded(task_id))
 
     async def _run_guarded(self, task_id: str) -> None:
+        self._active.add(task_id)
         try:
             await self._run_job(task_id)
         except Exception as exc:  # noqa: BLE001 - never let the pool die
@@ -294,6 +305,8 @@ class WorkerManager:
         finally:
             self._run_secrets.pop(task_id, None)
             self._guard_live.pop(task_id, None)
+            self._run_since.pop(task_id, None)
+            self._active.discard(task_id)
             self._sem.release()
 
     # ---- execution -------------------------------------------------------
@@ -315,10 +328,12 @@ class WorkerManager:
         # redact by exact value too.
         run_secrets: list[str] = []
         self._run_secrets[task_id] = run_secrets
+        run_state = {"events": 0}  # events emitted by this run (the heartbeat's "new events")
 
         async def emit(etype: str, payload: dict) -> None:
             nonlocal seq
             seq += 1
+            run_state["events"] += 1
             payload = redact_obj(payload, run_secrets)
             async with SessionLocal() as s:
                 s.add(TaskEvent(task_id=task_id, seq=seq, type=etype, payload=payload))
@@ -357,6 +372,7 @@ class WorkerManager:
                 return
             task.status = Status.RUNNING
             task.started_at = _now()
+            task.run_pgid = task.run_proc_start = None  # this run's are recorded at spawn
             prompt = task.prompt
             model = task.model
             max_turns = task.max_turns
@@ -402,7 +418,7 @@ class WorkerManager:
                     coordinator_block = await _coordinator_context(s, task_id, me.id)
             # Enabled skill packs (Claude Code plugins) for this task: global ones
             # plus any scoped to this task's project.
-            plugin_dirs = []
+            plugin_dirs, loaded_packs = [], []
             packs = (
                 await s.execute(select(SkillPack).where(SkillPack.enabled.is_(True)))
             ).scalars().all()
@@ -410,6 +426,9 @@ class WorkerManager:
                 if p.scope == "global" or (p.scope == "project" and p.project_id == task.project_id):
                     if Path(p.local_path).exists():
                         plugin_dirs.append(p.local_path)
+                        loaded_packs.append(p)
+            # forge v0.7.0: with superpowers loaded, the main session gets the precedence line
+            superpowers = ground_rules.has_superpowers(loaded_packs)
             await s.commit()
         # Re-read the prompt now that the task is marked running: a co-guard
         # resume approval may have joined this queued follow-up (its update
@@ -437,23 +456,51 @@ class WorkerManager:
         workspace.mkdir(parents=True, exist_ok=True)
         await emit("started", {"model": model, "max_turns": max_turns})
 
-        # Resume only a session this account actually has: Claude Code keeps it
-        # as <CLAUDE_CONFIG_DIR>/projects/<cwd>/<id>.jsonl. If it's gone (another
-        # host, cleared config, a different per-user dir), start a fresh session
-        # with the same context a new thread gets instead of failing the resume.
-        if resume_session_id and not _session_file_exists(
-            sub_env.get("CLAUDE_CONFIG_DIR"), resume_session_id
-        ):
-            resume_session_id = None
-            await emit("fresh_session", {"reason": "previous session not available"})
+        # Resume or fresh (F1): resume only a session this account actually has
+        # (<CLAUDE_CONFIG_DIR>/projects/<cwd>/<id>.jsonl), made under the same
+        # credential, by the person who continues the thread. The check reads the
+        # stored credential_ref, so it runs before this run's ref is stored.
+        cred_ref = credential_ref(sub_env)
+        async with SessionLocal() as s:
+            t = await s.get(Task, task_id)
+            resume_session_id, fresh_reason = await prompting.decide_session(
+                s, t, cred_ref, sub_env.get("CLAUDE_CONFIG_DIR"))
+            t.credential_ref = cred_ref
+            await s.commit()
+        if fresh_reason:
+            await emit("fresh_session", {"reason": fresh_reason,
+                                         **({"credentials_changed": True} if fresh_reason == CRED_NOTE else {})})
 
-        # Project tasks: prepend assembled context (instructions + memory + relevant
-        # past-task summaries) so Claude starts with the project's accumulated state.
-        if project_id and not resume_session_id:
-            preamble, ctx_log = await memory.assemble_context(project_id, prompt)
+        # The one composer (app.resume.prompting): project context, the
+        # handoff, the log tail, the recovery record, other runs, git notes.
+        async with SessionLocal() as s:
+            t = await s.get(Task, task_id)
+            recovery_block = self._recovery_block(t)
+            origin = t.origin
+            try:
+                prompt, ctx_log = await prompting.compose(
+                    s, t, base_prompt=prompt, resumed=resume_session_id is not None,
+                    wanted_resume=prompting.wanted_resume(t), recovery_block=recovery_block,
+                    secrets=run_secrets)
+            except Exception:  # noqa: BLE001 - a failed composition never stops a run
+                log.exception("prompting: compose failed for %s; running with the step's own prompt", task_id)
+                ctx_log = {"blocks": [], "compose_failed": True}
+                if recovery_block is not None:
+                    # a recovered step is never a bare re-run: the record still goes in
+                    prompt = (f"{redact(recovery_block, run_secrets)}{prompting.SEP}"
+                              f"{RECOVERED_CONTINUE if resume_session_id else prompt}")
+            if recovery_block is not None and prompting.recovering(t) and not ctx_log.get("compose_failed"):
+                # the record goes into this prompt once
+                t.recovery = {**t.recovery, "pending": False}
+                await s.commit()
+        if ctx_log.get("blocks") or ctx_log.get("compose_failed"):
+            await emit("context", ctx_log)
+        # A fresh guard follow-up keeps today's project preamble (Phase 2).
+        if origin == "guard" and recovery_block is None and project_id and not resume_session_id:
+            preamble, guard_ctx = await memory.assemble_context(project_id, prompt)
             if preamble:
                 prompt = f"{preamble}\n\n---\n\n# Task\n\n{prompt}"
-                await emit("context", ctx_log)
+                await emit("context", guard_ctx)
 
         # Context Store (tiered): write applicable curated docs (L2) to a per-task
         # snapshot dir outside the cwd, and prepend their one-line abstracts (L0)
@@ -484,7 +531,12 @@ class WorkerManager:
         if guard_plugin is None:
             return
         # external projects: forge's data line (also re-added by the SessionStart hook)
-        system_prompt = "\n\n".join(filter(None, [system_prompt, guard_inputs.data_line]))
+        main_text, included = guard_inputs.main_text, list(guard_inputs.ground_included)
+        if superpowers:
+            main_text = "\n\n".join(filter(None, [main_text, ground_rules.PRECEDENCE_LINE]))
+            included.append("precedence")
+        system_prompt = "\n\n".join(filter(None, [system_prompt, guard_inputs.data_line, main_text]))
+        await emit("ground_rules", {"included": included})
 
         # Repo-backed project tasks: skip artifact diffing (git tracks changes and
         # scanning a whole repo is slow/noisy). Sandbox tasks still collect outputs.
@@ -607,6 +659,11 @@ class WorkerManager:
                 await s.commit()
             run_secrets[:] = secrets_from_env(sub_env)
 
+        # Resume bookkeeping (F8-F10): the head this run starts from, the
+        # outside-commit base held for the whole run, and handoff.md from the
+        # stored handoff (so an early compaction finds it).
+        since = await self._spawn_handoff(task_id, workspace, run_secrets)
+
         try:
             proc = await asyncio.create_subprocess_exec(
                 *cmd,
@@ -629,6 +686,7 @@ class WorkerManager:
             return
 
         self._running[task_id] = proc
+        await self._record_spawn(task_id, proc.pid)
 
         try:
             proc.stdin.write(prompt.encode())
@@ -651,12 +709,15 @@ class WorkerManager:
             "task_id": task_id,
             "mcp_ids": {},
             "secrets": run_secrets,
+            "since": since,
+            "run": run_state,
             # co-guard watchdog (Ruling R21): tool_use ids checked through the spool
             "guard": {"calls": {}, "lanes": {}, "done": set(), "seen": set(), "offset": 0, "violation": None,
                       "proc": proc, "emit": emit,
                       "spool": guard_runtime.task_dir(task_id) / guard_runtime.SPOOL_NAME},
         }
         watch = asyncio.create_task(self._guard_watch(ctx))
+        beat = asyncio.create_task(self._heartbeat_loop(task_id, ctx))
         try:
             await asyncio.wait_for(
                 self._consume_stdout(proc, emit, result, ctx),
@@ -664,6 +725,7 @@ class WorkerManager:
             )
             await proc.wait()
         except asyncio.TimeoutError:
+            beat.cancel()
             self._signal_group(proc, signal.SIGKILL)
             await proc.wait()
             await stderr_task
@@ -674,6 +736,7 @@ class WorkerManager:
             return
         finally:
             watch.cancel()
+            beat.cancel()
             await stderr_task
 
         self._running.pop(task_id, None)
@@ -759,6 +822,203 @@ class WorkerManager:
         # Notify if this run came from a schedule (honors its notify policy).
         asyncio.create_task(notifications.notify_task_finished(task_id))
 
+    # ---- resume: head at start, heartbeat, handoff ---------------------------
+
+    def _recovery_block(self, task: Task) -> str | None:
+        """The rendered recovery record of a step whose recovery is pending;
+        None otherwise. (``external`` was stored with the record by recover.)"""
+        if not prompting.recovering(task):
+            return None
+        return recovery.render_record(task.recovery, external=bool(task.recovery.get("external")))
+
+    @staticmethod
+    async def _record_spawn(task_id: str, pid: int) -> None:
+        """The claude process group and its start time, so a recovery can stop
+        a surviving copy (and only that process: the start time must match)."""
+        try:
+            start = await asyncio.to_thread(recovery.proc_start, pid)
+            async with SessionLocal() as s:
+                t = await s.get(Task, task_id)
+                if t is not None:
+                    t.run_pgid, t.run_proc_start = pid, start
+                    await s.commit()
+        except Exception as e:  # noqa: BLE001 - bookkeeping never stops a run
+            log.warning("recovery: spawn bookkeeping failed for %s: %s", task_id, e)
+
+    # ---- crash recovery ----------------------------------------------------------
+
+    async def _emit_offline(self, task_id: str, etype: str, payload: dict) -> None:
+        """An event of a task with no live run: the next seq, redacted by
+        token shapes (no run secrets exist here), stored and published."""
+        payload = redact_obj(payload, [])
+        async with SessionLocal() as s:
+            seq = ((await s.execute(select(func.max(TaskEvent.seq)).where(TaskEvent.task_id == task_id))
+                    ).scalar() or 0) + 1
+            s.add(TaskEvent(task_id=task_id, seq=seq, type=etype, payload=payload))
+            await s.commit()
+        await broker.publish(task_id, {"seq": seq, "type": etype, "payload": payload})
+
+    def _emit_offline_for(self, task_id: str):
+        async def emit(etype: str, payload: dict) -> None:
+            await self._emit_offline(task_id, etype, payload)
+
+        return emit
+
+    async def recover(self, task_id: str, why: str) -> str:
+        """A RUNNING step whose run is gone (server restart, lost worker):
+        stop a surviving claude group (start time verified), record what was
+        in flight from the raw spool BEFORE the spool is ingested and wiped,
+        snapshot the handoff and queue the step again to resume its own
+        session with the record. After MAX_RECOVERIES the step fails.
+        ``"requeued"``, ``"failed"`` or ``"skipped"`` (not RUNNING, held by a
+        live run, or already being recovered)."""
+        if task_id in self._active or task_id in self._recovering:
+            return "skipped"
+        self._recovering.add(task_id)
+        try:
+            return await self._recover(task_id, why)
+        finally:
+            self._recovering.discard(task_id)
+
+    async def _recover(self, task_id: str, why: str) -> str:
+        async with SessionLocal() as s:
+            t = await s.get(Task, task_id)
+            if t is None or t.status != Status.RUNNING:
+                return "skipped"
+            pgid, start, recoveries = t.run_pgid, t.run_proc_start, t.recoveries or 0
+            session_id, priority, created_at = t.session_id, t.priority, t.created_at
+            workspace = t.workspace_dir or str(settings.workspaces_dir / task_id)
+            pid = await effective_project_id(s, t)
+            proj = await s.get(Project, pid) if pid else None
+            external = proj is not None and (proj.trust == "external" or bool(proj.quarantine))
+            project_dir = proj.directory if proj is not None else None
+            rows = (await s.execute(select(TaskEvent).where(TaskEvent.task_id == task_id)
+                                    .order_by(TaskEvent.seq.desc()).limit(handoff.EVENTS_SCAN_MAX))).scalars().all()
+            evs = [{"type": e.type, "payload": e.payload or {}, "created_at": e.created_at} for e in reversed(rows)]
+        # 1. a surviving claude group: SIGKILL, only when its start time still matches
+        orphan_killed = await asyncio.to_thread(recovery.kill_orphan, pgid, start)
+        # 2. the raw spool, before anything wipes it
+        spool_raw = guard_runtime.read_spool_raw(task_id)
+        # 3. the record
+        saved = await handoff.stored(task_id)
+        now = _now()
+        record = recovery.build_record(None, evs, spool_raw, workspace, saved.saved_at if saved else None, now,
+                                       why=why, project_dir=project_dir)
+        # 4. the spool's guard records as events, its once grants spent, the task dir removed
+        await self._ingest_guard_spool(task_id, self._emit_offline_for(task_id))
+        gave_up = recoveries >= recovery.MAX_RECOVERIES
+        if not gave_up:
+            # 5. where the thread stands
+            try:
+                await handoff.snapshot(task_id, "recovered", secrets=[])
+            except Exception as e:  # noqa: BLE001
+                log.warning("handoff: recovered snapshot failed for %s: %s", task_id, e)
+        # 6.-7. the record, the count, its own session; queued again
+        async with SessionLocal() as s:
+            t = await s.get(Task, task_id)
+            if t is None or t.status != Status.RUNNING:
+                return "skipped"
+            t.recovery = {**record, "external": external, "pending": not gave_up}
+            t.run_pgid = t.run_proc_start = t.heartbeat_at = None
+            if not gave_up:
+                t.recoveries = recoveries + 1
+                if session_id:
+                    t.resume_session_id = session_id
+                t.status = Status.QUEUED
+            await s.commit()
+        # 8. the recovery event (before the enqueue: the next run's seq follows it)
+        try:
+            await self._emit_offline(task_id, "recovery", {
+                "why": record["why"], "at": record["at"], "in_flight": len(record["in_flight"]),
+                "orphan_killed": orphan_killed, "recoveries": recoveries if gave_up else recoveries + 1,
+                "gave_up": gave_up})
+        except Exception:  # noqa: BLE001 - the finish / requeue below must always run
+            log.exception("recovery: event for %s failed", task_id)
+        if gave_up:
+            await self._finish(task_id, Status.FAILED, error=recovery.GAVE_UP_ERROR.format(n=recoveries + 1),
+                               secrets=[])
+            return "failed"
+        await self._enqueue(task_id, priority, created_at)
+        return "requeued"
+
+    async def _sweep_once(self) -> None:
+        """RUNNING rows no live run holds whose heartbeat (else start) is
+        older than STALE_SECONDS: the run lost its worker."""
+        cutoff = _now() - timedelta(seconds=recovery.STALE_SECONDS)
+        async with SessionLocal() as s:
+            rows = (await s.execute(select(Task.id, Task.heartbeat_at, Task.started_at)
+                                    .where(Task.status == Status.RUNNING))).all()
+        for tid, beat, started in rows:
+            if tid in self._active:
+                continue
+            last = recovery.aware(beat or started)
+            if last is not None and last > cutoff:
+                continue
+            try:
+                await self.recover(tid, "lost its worker")
+            except Exception:  # noqa: BLE001 - the next sweep tries again
+                log.exception("recovery: sweep of %s failed", tid)
+
+    async def _sweep_loop(self) -> None:
+        while True:
+            await asyncio.sleep(settings.recovery_sweep_seconds or recovery.SWEEP_SECONDS)
+            try:
+                await self._sweep_once()
+            except Exception:  # noqa: BLE001 - the loop never dies
+                log.exception("recovery: sweep failed")
+
+    async def _spawn_handoff(self, task_id: str, workspace: Path, secrets: list[str]) -> str | None:
+        """Record head_at_start, return the run's outside-commit base (the
+        stored handoff's head, else head_at_start) and write handoff.md from
+        the stored handoff. Never raises (None: no base)."""
+        since = None
+        try:
+            f = await asyncio.to_thread(gitfacts.facts, workspace, gitfacts.Budget())
+            async with SessionLocal() as s:
+                t = await s.get(Task, task_id)
+                if t is not None:
+                    t.head_at_start = f.head
+                    await s.commit()
+            since = await handoff.boundary(task_id)
+            self._run_since[task_id] = since
+            row = await handoff.stored(task_id)
+            if row is not None and row.text:
+                handoff.write_file(task_id, row.text, secrets)
+        except Exception as e:  # noqa: BLE001 - resume bookkeeping never stops a run
+            log.warning("handoff: spawn bookkeeping failed for %s: %s", task_id, e)
+        return since
+
+    async def _heartbeat_loop(self, task_id: str, ctx) -> None:
+        """Every HEARTBEAT_SECONDS: Task.heartbeat_at = now; when new events
+        arrived and HANDOFF_EVERY_SECONDS passed since the last snapshot, a
+        ``working`` snapshot and a fresh handoff.md. Never raises."""
+        snapped, last = ctx["run"]["events"], time.monotonic()
+        while True:
+            await asyncio.sleep(handoff.HEARTBEAT_SECONDS)
+            try:
+                async with SessionLocal() as s:
+                    t = await s.get(Task, task_id)
+                    if t is not None:
+                        t.heartbeat_at = _now()
+                        await s.commit()
+            except Exception as e:  # noqa: BLE001
+                log.warning("heartbeat: %s: %s", task_id, e)
+            try:
+                n = ctx["run"]["events"]
+                if n != snapped and time.monotonic() - last >= handoff.HANDOFF_EVERY_SECONDS:
+                    snapped, last = n, time.monotonic()
+                    row = await handoff.snapshot(task_id, "working", secrets=ctx["secrets"], since=ctx["since"])
+                    if row is not None:
+                        handoff.write_file(task_id, row.text, ctx["secrets"])
+            except Exception as e:  # noqa: BLE001
+                log.warning("handoff: working snapshot failed for %s: %s", task_id, e)
+
+    @staticmethod
+    def _finish_reason(status: str, error: str | None) -> str:
+        if status == Status.CANCELLED or error == "Task exceeded time limit":
+            return "cut off"
+        return "run ended"
+
     # ---- co-guard ----------------------------------------------------------
 
     GUARD_REPORT_CAP = 500  # live /guard/report events per run (the spool still has the rest)
@@ -767,6 +1027,7 @@ class WorkerManager:
         "event", "decision", "rule_ids", "grant_ids", "tool", "summary", "reason", "status", "request_id",
         "tool_use_id", "agent_id", "agent_type", "source", "ts",
         "hook_event", "error",  # guard_error records (a hook other than PreToolUse failed)
+        "background", "what",  # Stop: background tasks still running; seen: what the call was
     )
 
     async def _prepare_guard(self, task_id, guard_project, workspace, sub_env, mcp, emit, owner_id=None):
@@ -975,6 +1236,10 @@ class WorkerManager:
         for k, v in list(payload.items()):
             if k in ("rule_ids", "grant_ids"):
                 payload[k] = [str(x)[:64] for x in v][:guard_grants.MAX_GRANT_IDS] if isinstance(v, list) else []
+            elif k == "background":
+                payload[k] = [{"id": str(b["id"])[:200], "what": str(b.get("what") or "")[:200]}
+                              for b in v if isinstance(b, dict) and b.get("id") is not None
+                              ][:guard_co_hook.BACKGROUND_MAX] if isinstance(v, list) else []
             elif isinstance(v, str):
                 payload[k] = v[:2000]
             elif not isinstance(v, (int, float, bool)) and v is not None:
@@ -1109,7 +1374,8 @@ class WorkerManager:
                     await emit("text_output", {"text": block["text"]})
                 elif block.get("type") == "tool_use":
                     name = block.get("name")
-                    await emit("tool_use", {"name": name, "input": block.get("input")})
+                    await emit("tool_use", {"name": name, "input": block.get("input"),
+                                            "id": block.get("id"), "parent": obj.get("parent_tool_use_id") or None})
                     if name and name.startswith("mcp__"):
                         await self._record_mcp_call(ctx, name, block.get("id"))
         elif etype == "user":
@@ -1119,7 +1385,10 @@ class WorkerManager:
                     if isinstance(block, dict) and block.get("type") == "tool_result":
                         await emit(
                             "tool_result",
-                            {"content": _short(block.get("content"), ctx.get("secrets") or [])},
+                            {"content": _short(block.get("content"), ctx.get("secrets") or []),
+                             "tool_use_id": block.get("tool_use_id"),
+                             "is_error": bool(block.get("is_error")),
+                             "parent": obj.get("parent_tool_use_id") or None},
                         )
                         if block.get("is_error"):
                             call_id = ctx["mcp_ids"].get(block.get("tool_use_id"))
@@ -1214,6 +1483,7 @@ class WorkerManager:
                 return
             task.status = status
             task.completed_at = _now()
+            task.run_pgid = task.run_proc_start = task.heartbeat_at = None
             if exit_code is not None:
                 task.exit_code = exit_code
             if result_text is not None:
@@ -1241,6 +1511,14 @@ class WorkerManager:
                     )
                 )
             await s.commit()
+        # where the thread stands now (the run's outside-commit base when one is held)
+        try:
+            # the cut-off callers (cancel, timeout) pass no secrets: use the run's
+            await handoff.snapshot(task_id, self._finish_reason(status, error),
+                                   secrets=secrets if secrets is not None else self._run_secrets.get(task_id),
+                                   since=self._run_since.get(task_id))
+        except Exception as e:  # noqa: BLE001 - never breaks a finish
+            log.warning("handoff: finish snapshot failed for %s: %s", task_id, e)
         # co-guard deny-and-resume: follow-ups deferred while this step was active
         try:
             await guard_grants.after_task_finished(task_id, submit=self.submit)

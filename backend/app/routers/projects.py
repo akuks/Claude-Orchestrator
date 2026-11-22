@@ -25,6 +25,7 @@ from ..access import (
 from ..guard import custom as guard_custom
 from ..guard import policy_store
 from ..guard import trust as guard_trust
+from ..resume import gitfacts
 from ..models import ActionRule, McpServer, Project, ProjectMember, Task, TaskSummary, Team, User, UserCredential
 from ..schemas import (
     MemberIn,
@@ -663,6 +664,17 @@ async def get_rules_file(project_id: str, request: Request):
                 "confirm": [], "never": [], "errors": []}
     out = await asyncio.to_thread(policy_store.read_repo_rules, project.directory)
     return {**out, "read": True}
+
+
+@router.get("/{project_id}/git-state")
+async def get_git_state(project_id: str, request: Request):
+    """Read-only git facts for the project's directory (never raises)."""
+    async with SessionLocal() as s:
+        await require_project_role(s, request.state.principal, project_id)
+        project = await _get_or_404(s, project_id)
+    f = await asyncio.to_thread(gitfacts.facts, project.directory, gitfacts.Budget())
+    return {"is_repo": f.is_repo, "no_commits": f.no_commits, "branch": f.branch, "head": f.head,
+            "dirty": f.dirty, "dirty_capped": f.dirty_capped, "error": f.error}
 
 
 @router.get("/{project_id}/servers", response_model=list[ServerEntry])

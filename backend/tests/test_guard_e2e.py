@@ -181,8 +181,9 @@ out({"type": "system", "subtype": "init", "session_id": "s-real-hook"})
 # its policy file, args and prompt and writes results-<name>.jsonl
 calls, results = json.load(open(os.path.join(here, "calls.json"))), "results.jsonl"
 if isinstance(calls, dict):
-    m = re.search(r"\[e2e:([a-z0-9-]+)\]", _prompt)
-    name = m.group(1) if m else "followup"
+    # the LAST marker: a fresh step's prompt quotes the thread's earlier request in its handoff first
+    m = re.findall(r"\[e2e:([a-z0-9-]+)\]", _prompt)
+    name = m[-1] if m else "followup"
     calls, results = calls.get(name, []), f"results-{name}.jsonl"
     shutil.copy(os.environ["CO_POLICY_FILE"], os.path.join(here, f"policy-{name}.json"))
     json.dump({"args": args, "prompt": _prompt}, open(os.path.join(here, f"run-{name}.json"), "w"))

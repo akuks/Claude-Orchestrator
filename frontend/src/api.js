@@ -90,6 +90,18 @@ export const api = {
   followupTask: (id, prompt) => req('POST', `/tasks/${id}/followup`, { prompt }),
   getEvents: (id, afterSeq = 0) => req('GET', `/tasks/${id}/events?after_seq=${afterSeq}`),
   getThread: (id) => req('GET', `/tasks/${id}/thread`),
+  // ---- resume (phase 3a): where it stands, Continue, notes, git state ----
+  // A thread with no handoff yet is a 404: that resolves to null.
+  getHandoff: (id) =>
+    req('GET', `/tasks/${id}/handoff`).catch((e) => {
+      if (e.status === 404) return null
+      throw e
+    }),
+  refreshHandoff: (id) => req('POST', `/tasks/${id}/handoff/refresh`),
+  closeHandoff: (id) => req('POST', `/tasks/${id}/handoff/close`),
+  getNotes: (id) => req('GET', `/tasks/${id}/notes`),
+  continueTask: (id, mode = 'auto') => req('POST', `/tasks/${id}/continue`, { mode }),
+  getGitState: (projectId) => req('GET', `/projects/${encodeURIComponent(projectId)}/git-state`),
   getArtifacts: (id) => req('GET', `/tasks/${id}/artifacts`),
   stats: () => req('GET', '/tasks/stats'),
   artifactUrl: (id, relPath) => `/tasks/${id}/artifacts/${relPath}`,

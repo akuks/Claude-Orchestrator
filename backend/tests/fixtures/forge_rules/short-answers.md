@@ -1,0 +1,1 @@
+JSPARK Forge short-by-default rule: lead with the answer; use bullets or a table for lists; keep an explanation to one line unless asked for more; always state warnings, risks, decisions and blockers, one line each. Short never means leaving one of those out.

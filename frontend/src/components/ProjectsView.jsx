@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState } from 'react'
 import {
+  Alert,
   Button,
   Drawer,
   Empty,
@@ -328,11 +329,40 @@ function MemoryPane({ project, canEdit, onSaved }) {
 }
 
 // Per-project drawer: Members, Memory and Guard tabs.
-function ProjectDrawer({ project, tab, onTab, currentUser, onClose, onSaved }) {
+// "No commits yet": a bad edit cannot be undone with git until the first commit.
+export function GitStateWarning({ projectId }) {
+  const [noCommits, setNoCommits] = useState(false)
+  useEffect(() => {
+    let live = true
+    setNoCommits(false)
+    if (projectId)
+      Promise.resolve()
+        .then(() => api.getGitState(projectId))
+        .then((g) => live && setNoCommits(g?.no_commits === true))
+        .catch(() => {})
+    return () => {
+      live = false
+    }
+  }, [projectId])
+  if (!noCommits) return null
+  return (
+    <Alert
+      type="warning"
+      showIcon
+      style={{ marginBottom: 12 }}
+      data-testid="no-commits-warning"
+      message="No commits yet"
+      description="A bad edit cannot be undone with git until the first commit."
+    />
+  )
+}
+
+export function ProjectDrawer({ project, tab, onTab, currentUser, onClose, onSaved }) {
   const canEdit = project?.my_role === 'maintainer'
 
   return (
     <Drawer open={!!project} onClose={onClose} width={680} title={project?.name || ''} destroyOnHidden>
+      {project && <GitStateWarning projectId={project.id} />}
       {project && (
         <Tabs
           activeKey={tab}

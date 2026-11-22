@@ -157,7 +157,9 @@ def run(plugin, tmp_path, stub):
 def test_allow_prints_nothing_and_does_not_touch_the_network(run, stub):
     assert run(bash("ls -la && git status")) is None
     assert stub.requests == []
-    assert run.spool() == [{"event": "PreToolUse", "tool_use_id": "tu1", "seen": True, "ts": run.spool()[0]["ts"]}]
+    sp = run.spool()
+    assert sp == [{"event": "PreToolUse", "tool_use_id": "tu1", "seen": True, "tool": "Bash",
+                   "what": "ls -la && git status", "ts": sp[0]["ts"]}]
     assert run({"hook_event_name": "PreToolUse", "tool_name": "mcp__db__list", "tool_input": {}}) is None
 
 
@@ -382,7 +384,7 @@ def test_post_tool_use_spools_only_approved_calls(plugin, tmp_path):
         run(bash("git reset --hard"))  # approved, tool_use_id tu1
         run({"tool_name": "Bash", "tool_use_id": "tu1", "tool_response": {}}, event="PostToolUse")
         run({"tool_name": "Bash", "tool_use_id": "tu2", "tool_response": {}}, event="PostToolUse")
-        posts = [r for r in run.spool() if r["event"] == "PostToolUse"]
+        posts = [r for r in run.spool() if r["event"] == "PostToolUse" and not r.get("done")]
         assert [(r["tool_use_id"], r["decision"]) for r in posts] == [("tu1", "ran")]
     finally:
         stub.close()
@@ -595,7 +597,8 @@ def test_config_change_other_edits_are_allowed(run, tmp_path, content):
 def test_seen_record_is_written_before_evaluation(run):
     run(bash("rm -rf ~"))
     sp = run.spool()
-    assert sp[0] == {"event": "PreToolUse", "tool_use_id": "tu1", "seen": True, "ts": sp[0]["ts"]}
+    assert sp[0] == {"event": "PreToolUse", "tool_use_id": "tu1", "seen": True, "tool": "Bash",
+                     "what": "rm -rf ~", "ts": sp[0]["ts"]}
 
 
 def test_seen_write_failure_denies(run):
@@ -1207,7 +1210,7 @@ def test_session_start_data_line(plugin, tmp_path, stub, trust, want):
     else:
         run.policy["trust"] = trust
     (run.tdir / "policy.json").write_text(json.dumps(run.policy))
-    out = run({"hook_event_name": "SessionStart", "source": "compact", "session_id": "s1"}, event="SessionStart")
+    out = run({"hook_event_name": "SessionStart", "source": "startup", "session_id": "s1"}, event="SessionStart")
     if want:
         assert out == {"hookSpecificOutput": {"hookEventName": "SessionStart", "additionalContext": co_hook.DATA_LINE}}
     else:
@@ -1366,3 +1369,383 @@ def test_spool_writes_are_fsynced(tmp_path, monkeypatch):
     co_hook._spool_strict({"event": "y"})
     assert len(synced) == 1 and synced[0] in [fd for fd, n, _d in kinds if n == "spool.jsonl"]  # file only
     assert [json.loads(x)["event"] for x in (tdir / "spool.jsonl").read_text().splitlines()] == ["x", "y"]
+
+
+# ---- phase 3a: what a call was, done lines, Stop background -------------------------
+
+
+def _pre(tool, tool_input, tid="tu1"):
+    return {"hook_event_name": "PreToolUse", "tool_name": tool, "tool_input": tool_input, "tool_use_id": tid,
+            "session_id": "s1"}
+
+
+def test_seen_line_has_tool_and_what(run):
+    tok = "ghp_" + "a" * 36
+    run.env["GH_TOKEN"] = tok
+    run(_pre("Bash", {"command": "echo " + tok, "description": "say hi"}, "t1"))
+    first = run.spool()[0]
+    assert first["seen"] is True and first["tool"] == "Bash" and first["tool_use_id"] == "t1"
+    assert tok not in first["what"] and "***" in first["what"] and first["what"].startswith("say hi :: echo ")
+    assert run.spool()[0] is not None and "seen" in run.spool()[0]  # still the first spool line
+    # the token starts at char 190 of the command: redacted before the cut, so no prefix survives
+    long_cmd = "x" * 190 + tok
+    run(_pre("Bash", {"command": long_cmd}, "t2"))
+    what = [r for r in run.spool() if r.get("seen") and r["tool_use_id"] == "t2"][0]["what"]
+    assert len(what) <= 200 and "***" in what
+    for n in range(5, len(tok) + 1):
+        assert tok[:n] not in what
+    # a file tool: the path
+    run(_pre("Write", {"file_path": "/work/a/b.py", "content": "x"}, "t3"))
+    what = [r for r in run.spool() if r.get("seen") and r["tool_use_id"] == "t3"][0]
+    assert what["what"] == "/work/a/b.py" and what["tool"] == "Write"
+    run(_pre("Agent", {"subagent_type": "Explore", "prompt": "p"}, "t4"))
+    assert [r for r in run.spool() if r.get("seen") and r["tool_use_id"] == "t4"][0]["what"] == "Explore"
+    run(_pre("mcp__db__list", {}, "t5"))
+    assert [r for r in run.spool() if r.get("seen") and r["tool_use_id"] == "t5"][0]["what"] == "mcp__db__list"
+
+
+def test_what_of_unit():
+    assert co_hook.what_of("Bash", {"command": "ls"}) == "ls"
+    assert co_hook.what_of("Monitor", {"command": "tail -f x", "description": "watch"}) == "watch :: tail -f x"
+    assert len(co_hook.what_of("Bash", {"command": "y" * 500})) <= co_hook.WHAT_MAX
+    assert len(co_hook.what_of("Edit", {"file_path": "/p" * 400})) <= co_hook.WHAT_PATH_MAX
+    assert co_hook.what_of("Weird", None) == "Weird"
+
+
+def test_seen_record_without_what_when_what_of_raises(monkeypatch):
+    def boom(tool, tool_input):
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(co_hook, "what_of", boom)
+    rec = co_hook.seen_record({"tool_use_id": "t9", "tool_name": "Bash", "tool_input": {"command": "ls"}})
+    assert rec == {"event": "PreToolUse", "tool_use_id": "t9", "seen": True}
+
+
+def test_post_tool_use_done_line_every_call(plugin, tmp_path):
+    stub = Stub(statuses=("approved",))
+    try:
+        run = Run(plugin, tmp_path, stub.base)
+        run(bash("git reset --hard"))  # approved, tool_use_id tu1
+        run({"tool_name": "Bash", "tool_use_id": "tu1", "tool_response": {}}, event="PostToolUse")
+        run({"tool_name": "Bash", "tool_use_id": "tu2", "tool_response": {}}, event="PostToolUse")
+        posts = [r for r in run.spool() if r["event"] == "PostToolUse"]
+        assert [(r["tool_use_id"], r.get("done"), r.get("decision")) for r in posts] == [
+            ("tu1", True, None), ("tu1", None, "ran"), ("tu2", True, None)]
+    finally:
+        stub.close()
+
+
+_BG = [
+    ([{"id": "b1", "command": "npm run dev", "status": "running"}, {"id": "b2", "status": "completed"}],
+     [{"id": "b1", "what": "npm run dev"}]),
+    (["b1", "b2"], [{"id": "b1", "what": "b1"}, {"id": "b2", "what": "b2"}]),
+    ({"b1": {"command": "x"}}, [{"id": "b1", "what": "x"}]),
+    ([{"id": "d1", "description": "dev server"}, {"id": "d2"}],
+     [{"id": "d1", "what": "dev server"}, {"id": "d2", "what": "d2"}]),
+    ([{"id": f"r{i}", "status": "running", "command": f"c{i}"} for i in range(15)],
+     [{"id": f"r{i}", "what": f"c{i}"} for i in range(10)]),
+    ([{"id": "x", "command": "echo ghp_" + "a" * 36}], [{"id": "x", "what": "echo ***"}]),
+]
+
+
+@pytest.mark.parametrize("given,want", _BG)
+def test_stop_background_shapes(run, given, want):
+    run({"hook_event_name": "Stop", "background_tasks": given}, event="Stop")
+    assert run.spool()[-1]["background"] == want
+
+
+@pytest.mark.parametrize("payload", [{}, {"background_tasks": None}])
+def test_stop_background_absent(run, payload):
+    run(dict(payload, hook_event_name="Stop"), event="Stop")
+    rec = run.spool()[-1]
+    assert rec["event"] == "Stop" and "background" not in rec
+
+
+# ---- phase 3a task 4: notes and temp-document nudges -----------------------------------------
+
+
+def _post(run, n, tool="Bash", **extra):
+    payload = {"tool_name": tool, "tool_use_id": f"p{n}", "tool_response": {}, **extra}
+    return run(payload, event="PostToolUse")
+
+
+def _ctx(out):
+    return out["hookSpecificOutput"]["additionalContext"] if out else None
+
+
+def test_nudge_every_12_calls(plugin, tmp_path, stub):
+    run = Run(plugin, tmp_path, stub.base, notes=True, notes_after=12)
+    for i in range(1, 12):
+        assert _post(run, i) is None
+    out = _post(run, 12)
+    assert out["hookSpecificOutput"]["hookEventName"] == "PostToolUse" and _ctx(out) == co_hook.NOTES_LINE
+    assert _post(run, 13) is None
+    # a stamp newer than the first call of the window silences the 24th call
+    for i in range(14, 24):
+        assert _post(run, i) is None
+    (run.tdir / "notes.stamp").write_text("")
+    assert _post(run, 24) is None
+    # an older stamp does not
+    first = [r for r in run.spool() if r.get("done")][12]["ts"]
+    os.utime(run.tdir / "notes.stamp", (first - 100, first - 100))
+    for i in range(25, 36):
+        assert _post(run, i) is None
+    assert _ctx(_post(run, 36)) == co_hook.NOTES_LINE
+    # org switch off: nothing
+    off = Run(plugin, tmp_path / "off", stub.base, notes=False, notes_after=12)
+    assert all(_post(off, i) is None for i in range(1, 13))
+
+
+def test_commit_reminder_on_allowed_commit(plugin, tmp_path, stub):
+    run = Run(plugin, tmp_path, stub.base, notes=True)
+    out = run(bash("git commit -m x"))
+    assert decision(out) is None and _ctx(out) == co_hook.NOTES_LINE
+    assert out["hookSpecificOutput"]["hookEventName"] == "PreToolUse"
+    out = run(bash("rm -rf ~ && git commit -m x"))
+    assert decision(out) == "deny" and "additionalContext" not in out["hookSpecificOutput"]
+    assert "NOTES" not in reason(out)
+    assert _ctx(run(bash('echo "git commit"'))) == co_hook.NOTES_LINE  # pinned false positive
+    assert run(bash("git status")) is None
+    off = Run(plugin, tmp_path / "off", stub.base, notes=False)
+    assert off(bash("git commit -m x")) is None
+
+
+# A project and home outside every temp root: pytest's tmp_path is under /tmp on Linux, and a temp root that
+# holds the project or home is deliberately no temp root, so /tmp/x would not count as "outside, in temp".
+FAKE_PROJECT = "/srv/co-test-project"
+FAKE_HOME = "/srv/co-test-home"
+
+
+def test_temp_doc_note_once(plugin, tmp_path, stub):
+    run = Run(plugin, tmp_path, stub.base, notes=False, project_dir=FAKE_PROJECT, home=FAKE_HOME)
+
+    def write(path, n):
+        return _post(run, n, tool="Write", tool_input={"file_path": path, "content": "x"})
+
+    out = write("/tmp/a.html", 1)
+    assert _ctx(out) == co_hook.TEMP_DOC_LINE.replace("{path}", "/tmp/a.html")
+    assert [r["outside_doc"] for r in run.spool() if "outside_doc" in r] == ["/tmp/a.html"]
+    assert write("/tmp/a.html", 2) is None
+    assert write("/tmp/a.py", 3) is None
+    assert write(FAKE_PROJECT + "/a.html", 4) is None
+    assert _ctx(write("/tmp/b.md", 5)) == co_hook.TEMP_DOC_LINE.replace("{path}", "/tmp/b.md")
+
+
+def test_nudge_and_doc_join_with_a_blank_line(plugin, tmp_path, stub):
+    run = Run(plugin, tmp_path, stub.base, notes=True, notes_after=2, project_dir=FAKE_PROJECT, home=FAKE_HOME)
+    assert _post(run, 1) is None
+    out = _post(run, 2, tool="Write", tool_input={"file_path": "/tmp/r.pdf", "content": "x"})
+    assert _ctx(out) == co_hook.NOTES_LINE + "\n\n" + co_hook.TEMP_DOC_LINE.replace("{path}", "/tmp/r.pdf")
+
+
+def test_hook_single_answer_matrix(plugin, tmp_path, stub):
+    # nudge + doc: one JSON line
+    run = Run(plugin, tmp_path / "a", stub.base, notes=True, notes_after=1)
+    p = subprocess.run([sys.executable, "-I", "-S", str(plugin / "hooks" / "co_hook.py"), "PostToolUse"],
+                       input=json.dumps({"tool_name": "Write", "tool_use_id": "q1",
+                                         "tool_input": {"file_path": "/tmp/m.html"}}),
+                       capture_output=True, text=True, env=run.env, cwd=str(run.project), timeout=60)
+    assert len(p.stdout.strip().splitlines()) == 1 and p.returncode == 0
+    # commit: one line
+    run = Run(plugin, tmp_path / "b", stub.base, notes=True)
+    p = subprocess.run([sys.executable, "-I", "-S", str(plugin / "hooks" / "co_hook.py"), "PreToolUse"],
+                       input=json.dumps(bash("git commit -m x")), capture_output=True, text=True, env=run.env,
+                       cwd=str(run.project), timeout=60)
+    assert len(p.stdout.strip().splitlines()) == 1
+    # broken policy: PostToolUse spools a guard_error and prints nothing; PreToolUse still denies
+    run = Run(plugin, tmp_path / "c", stub.base, notes=True)
+    (run.tdir / "policy.json").write_text("{not json")
+    assert _post(run, 1) is None
+    assert [r["event"] for r in run.spool()][-1] == "guard_error"
+    assert decision(run(bash("git commit -m x"))) == "deny"
+    # spool unwritable: PostToolUse gives no nudge and no crash
+    run = Run(plugin, tmp_path / "d", stub.base, notes=True, notes_after=1)
+    (run.tdir / "spool.jsonl").mkdir()
+    assert _post(run, 1) is None
+    # SessionStart compact (with and without handoff.md), SubagentStart, a broken policy, a bad payload (F30)
+    def raw(run, event, payload):
+        p = subprocess.run([sys.executable, "-I", "-S", str(plugin / "hooks" / "co_hook.py"), event],
+                           input=json.dumps(payload), capture_output=True, text=True, env=run.env,
+                           cwd=str(run.project), timeout=60)
+        assert p.returncode == 0, p.stderr
+        return p.stdout.strip().splitlines()
+
+    with_file = Run(plugin, tmp_path / "sa", stub.base, trust="external", notes=True)
+    _handoff(with_file)
+    assert len(raw(with_file, "SessionStart", {"source": "compact"})) == 1
+    without = Run(plugin, tmp_path / "sb", stub.base, trust="external", notes=True)
+    assert len(raw(without, "SessionStart", {"source": "compact"})) == 1
+    sub = Run(plugin, tmp_path / "sc", stub.base, trust="external", helper_context="h")
+    assert len(raw(sub, "SubagentStart", {"agent_id": "a"})) == 1
+    broken = Run(plugin, tmp_path / "sd", stub.base, trust="external", notes=True)
+    (broken.tdir / "policy.json").write_text("{nope")
+    assert len(raw(broken, "SessionStart", {"source": "compact"})) == 1
+    assert len(raw(broken, "SubagentStart", {"agent_id": "a"})) == 1
+    assert len(raw(broken, "SessionStart", "not-a-dict")) == 1  # bad payload: still one answer
+
+
+def test_plugin_lib_has_no_app_imports():
+    """Every file the plugin generator copies (the guard lib and co_hook) imports only the stdlib."""
+    import ast
+    import pathlib
+
+    from app.guard import plugin as plugin_mod
+
+    files = [pathlib.Path(co_hook.__file__)] + [pathlib.Path(co_hook.__file__).parent / f"{n}.py"
+                                                for n in plugin_mod.LIB_MODULES]
+    assert len(files) == 5
+    for f in files:
+        for node in ast.walk(ast.parse(f.read_text(encoding="utf-8"))):
+            if isinstance(node, ast.Import):
+                names = [a.name for a in node.names]
+            elif isinstance(node, ast.ImportFrom):
+                assert node.level == 0, f"{f.name}: no relative imports"
+                names = [node.module]
+            else:
+                continue
+            for n in names:
+                assert n.split(".")[0] in sys.stdlib_module_names or n == "__future__", (f.name, n)
+
+
+# ---- Phase 3a task 5: helper context, compaction re-injection --------------------------------
+
+
+def _sess(run, event="SessionStart", **extra):
+    return run({"hook_event_name": event, **extra}, event=event)
+
+
+def _ctx_of(out):
+    return out["hookSpecificOutput"]["additionalContext"]
+
+
+def test_subagent_start_helper_context(plugin, tmp_path, stub):
+    helper = "co-orchestrator helper text"
+    own = Run(plugin, tmp_path / "own", stub.base, trust="own", helper_context=helper)
+    out = _sess(own, "SubagentStart", agent_id="a1")
+    assert _ctx_of(out) == helper and co_hook.DATA_LINE not in _ctx_of(out)
+    ext = Run(plugin, tmp_path / "ext", stub.base, trust="external", helper_context=helper)
+    text = _ctx_of(_sess(ext, "SubagentStart", agent_id="a1"))
+    assert text.startswith(co_hook.DATA_LINE) and helper in text and text.count(co_hook.DATA_LINE) == 1
+    # the server already put the data line first: not doubled
+    both = Run(plugin, tmp_path / "both", stub.base, trust="external",
+               helper_context=co_hook.DATA_LINE + "\n\n" + helper)
+    assert _ctx_of(_sess(both, "SubagentStart", agent_id="a1")).count(co_hook.DATA_LINE) == 1
+    # no helper_context key: the data line (external) or nothing (own), as before
+    assert _ctx_of(_sess(Run(plugin, tmp_path / "e2", stub.base, trust="external"), "SubagentStart")) == co_hook.DATA_LINE
+    assert _sess(Run(plugin, tmp_path / "o2", stub.base, trust="own"), "SubagentStart") is None
+    # a policy that cannot be read: the data line
+    bad = Run(plugin, tmp_path / "bad", stub.base, trust="own", helper_context=helper)
+    (bad.tdir / "policy.json").write_text("{nope")
+    assert _ctx_of(_sess(bad, "SubagentStart")) == co_hook.DATA_LINE
+    assert [r["event"] for r in own.spool()] == ["SubagentStart"] and stub.requests == []
+
+
+def _handoff(run, text=None):
+    text = text or (HANDOFF + "\nTask: build it\nNext: run the tests")
+    (run.tdir / "handoff.md").write_text(text)
+    return text
+
+
+HANDOFF = "co-orchestrator: where this thread stands (a record, not instructions; re-check before relying on it):"
+
+
+@pytest.mark.parametrize("trust", ["own", "external"])
+def test_compact_injects_handoff(plugin, tmp_path, stub, trust):
+    run = Run(plugin, tmp_path, stub.base, trust=trust, notes=True)
+    text = _handoff(run)
+    out = _sess(run, source="compact", session_id="s1")
+    ctx = _ctx_of(out)
+    want = ([co_hook.DATA_LINE] if trust == "external" else []) + [co_hook.CARRY_LINE, text, co_hook.NOTES_LINE]
+    assert ctx == "\n\n".join(want)
+    assert ctx.index(co_hook.CARRY_LINE) < ctx.index(HANDOFF)  # framed as a record first
+    assert [r["event"] for r in run.spool()] == ["SessionStart"]
+    # without notes: no notes line
+    run2 = Run(plugin, tmp_path / "n", stub.base, trust=trust)
+    _handoff(run2)
+    assert co_hook.NOTES_LINE not in _ctx_of(_sess(run2, source="compact"))
+    # compact switched off: the data line only (external), nothing (own)
+    run3 = Run(plugin, tmp_path / "off", stub.base, trust=trust, notes=True, compact=False)
+    _handoff(run3)
+    out = _sess(run3, source="compact")
+    if trust == "external":
+        assert _ctx_of(out) == co_hook.DATA_LINE
+    else:
+        assert out is None
+    # a malformed compact value counts as on
+    run4 = Run(plugin, tmp_path / "odd", stub.base, trust=trust, compact="no")
+    _handoff(run4)
+    assert co_hook.CARRY_LINE in _ctx_of(_sess(run4, source="compact"))
+
+
+def test_compact_handoff_is_redacted_cleaned_then_cut(plugin, tmp_path, stub):
+    mx = co_hook.COMPACT_HANDOFF_MAX
+    tok = "ghp_" + "a" * 36
+    ant = "sk-ant-" + "b" * 40
+    # a token well inside the cut is masked; hidden characters are stripped
+    run = Run(plugin, tmp_path / "in", stub.base, trust="own")
+    _handoff(run, HANDOFF + f"\nTask: rtl\u202eword zero\u200bwidth {tok} and {ant}\nNext: go")
+    ctx = _ctx_of(_sess(run, source="compact"))
+    assert tok not in ctx and ant not in ctx and "***" in ctx
+    assert "\u202e" not in ctx and "\u200b" not in ctx and "rtlword" in ctx and "zerowidth" in ctx
+    # a token that straddles char 8000 of the file: no prefix of it survives (redact first, then cut)
+    for secret in (tok, ant):
+        for into in (1, 4, 8, len(secret) - 1):  # how many chars of the secret fall inside the cut
+            run = Run(plugin, tmp_path / f"s{secret[:4]}{into}", stub.base, trust="own")
+            head = HANDOFF + "\n"
+            body = head + "x" * (mx - len(head) - into) + secret + " tail " + "y" * 200
+            assert body.index(secret) < mx < body.index(secret) + len(secret)
+            _handoff(run, body)
+            ctx = _ctx_of(_sess(run, source="compact"))
+            assert secret[:6] not in ctx and secret[:4] not in ctx.replace(co_hook.CARRY_LINE, "")[-mx:]
+            assert "ghp_" not in ctx and "sk-ant-" not in ctx and "aaaa" not in ctx and "bbbb" not in ctx
+            assert len(ctx) <= len(co_hook.CARRY_LINE) + mx + 4
+
+
+def test_hook_hidden_chars_equal_the_apps():
+    from app import redaction
+
+    assert co_hook.HIDDEN_CHARS.pattern == redaction.HIDDEN_CHARS.pattern
+
+
+@pytest.mark.parametrize("trust", ["own", "external"])
+def test_compact_without_handoff_file(plugin, tmp_path, stub, trust):
+    run = Run(plugin, tmp_path, stub.base, trust=trust, notes=True)
+    out = _sess(run, source="compact")
+    if trust == "external":
+        assert _ctx_of(out) == co_hook.DATA_LINE
+    else:
+        assert out is None
+    assert [r["event"] for r in run.spool()] == ["SessionStart", "guard_error"]
+
+
+def test_session_context_error_single_answer(plugin, tmp_path, stub):
+    run = Run(plugin, tmp_path, stub.base, trust="external", notes=True)
+    (run.tdir / "handoff.md").mkdir()  # reading it raises
+    p = subprocess.run([sys.executable, "-I", "-S", str(plugin / "hooks" / "co_hook.py"), "SessionStart"],
+                       input=json.dumps({"source": "compact"}), capture_output=True, text=True, env=run.env,
+                       cwd=str(run.project), timeout=60)
+    assert p.returncode == 0 and len(p.stdout.strip().splitlines()) == 1
+    assert json.loads(p.stdout)["hookSpecificOutput"]["additionalContext"] == co_hook.DATA_LINE
+    assert run.spool()[-1]["event"] == "guard_error"
+
+
+def test_session_context_internal_error_is_one_answer(plugin, tmp_path, stub):
+    """An error anywhere in the compact branch (a policy whose helper fields are the wrong shape) still answers once."""
+    run = Run(plugin, tmp_path, stub.base, trust="external", notes=True, helper_context=["not", "a", "str"])
+    out = _sess(run, "SubagentStart")
+    assert _ctx_of(out) == co_hook.DATA_LINE
+
+
+def test_startup_and_resume_unchanged(plugin, tmp_path, stub):
+    for source in ("startup", "resume", "clear", None):
+        ext = Run(plugin, tmp_path / f"e{source}", stub.base, trust="external", notes=True)
+        _handoff(ext)
+        extra = {} if source is None else {"source": source}
+        assert _ctx_of(_sess(ext, **extra)) == co_hook.DATA_LINE
+        assert [r["event"] for r in ext.spool()] == ["SessionStart"]
+        own = Run(plugin, tmp_path / f"o{source}", stub.base, trust="own", notes=True)
+        _handoff(own)
+        assert _sess(own, **extra) is None
+    assert stub.requests == []
+
+

@@ -8,6 +8,10 @@ vi.mock('../api', () => ({
     getThread: vi.fn(async () => []),
     getArtifacts: vi.fn(async () => []),
     taskActionApprovals: vi.fn(async () => []),
+    getHandoff: vi.fn(async () => null),
+    refreshHandoff: vi.fn(),
+    closeHandoff: vi.fn(),
+    continueTask: vi.fn(),
     userDirectory: vi.fn(async () => [{ id: 'u2', name: 'Bea', email: 'b@x.io' }]),
     streamUrl: (id, seq) => `ws://test/tasks/${id}/stream?after=${seq}`,
     reportUrl: () => '#',
@@ -178,5 +182,31 @@ describe('TaskDetail: approvals enrichment refetch', () => {
     await act(async () => document.dispatchEvent(new Event('visibilitychange')))
     expect(api.taskActionApprovals.mock.calls.length).toBe(before + 1)
     await view.unmount()
+  })
+})
+
+describe('TaskDetail: where it stands (phase 3a)', () => {
+  let view
+  const RealWS = globalThis.WebSocket
+  afterEach(async () => {
+    await view?.unmount()
+    view = null
+    globalThis.WebSocket = RealWS
+    FakeSocket.all = []
+  })
+
+  it('mounts the handoff card, the notices and Continue for the owner of a failed step', async () => {
+    globalThis.WebSocket = FakeSocket
+    api.getTask.mockImplementationOnce(async (id) => ({
+      id, title: 'T', status: 'failed', prompt: 'p', origin: 'user', created_by: 'u1', session_id: 's', can_manage: true, can_resume: true,
+    }))
+    api.getHandoff.mockImplementationOnce(async () => ({ status: 'open', content: { task: 'do it', no_commits: true } }))
+    view = await render(<TaskDetail inline taskId="a" currentUser={{ id: 'u1' }} />)
+    await flush()
+    await flush()
+    const c = view.container
+    expect(c.querySelector('[data-testid="handoff-card"]').textContent).toContain('do it')
+    expect(c.querySelector('[data-testid="notice-no_commits"]')).not.toBeNull()
+    expect(c.querySelector('[data-testid="continue-button"]')).not.toBeNull()
   })
 })

@@ -1,0 +1,4 @@
+{"__spool__": {"event":"Stop","background":[{"id":"b1","what":"npm run dev"}]}}
+{"type":"system","subtype":"init","session_id":"test-session"}
+{"type":"assistant","message":{"model":"claude-test","content":[{"type":"text","text":"working"}]}}
+{"type":"result","subtype":"success","result":"done","num_turns":1,"total_cost_usd":0.01,"duration_ms":100,"is_error":false,"usage":{"input_tokens":1,"output_tokens":1}}
