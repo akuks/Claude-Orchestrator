@@ -30,9 +30,14 @@ def upgrade() -> None:
     op.create_index("ix_run_asks_task_id", "run_asks", ["task_id"])
     op.create_index("ix_run_asks_user_id", "run_asks", ["user_id"])
     op.create_index("ix_run_asks_user_id_created_at", "run_asks", ["user_id", "created_at"])
+    op.create_index(
+        "uq_run_asks_one_pending", "run_asks", ["task_id", "user_id"], unique=True,
+        sqlite_where=sa.text("status = 'pending'"), postgresql_where=sa.text("status = 'pending'"),
+    )
 
 
 def downgrade() -> None:
+    op.drop_index("uq_run_asks_one_pending", "run_asks")
     op.drop_index("ix_run_asks_user_id_created_at", "run_asks")
     op.drop_index("ix_run_asks_user_id", "run_asks")
     op.drop_index("ix_run_asks_task_id", "run_asks")
