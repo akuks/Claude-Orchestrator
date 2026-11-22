@@ -5,7 +5,9 @@ import time
 import uuid
 
 from fastapi.testclient import TestClient
+import pytest
 from sqlalchemy import func, select
+from sqlalchemy.exc import IntegrityError
 
 from app import auth
 from app.config import settings
@@ -198,7 +200,6 @@ def test_ask_never_touches_task(client):
 def test_ask_answer_redacted(client, monkeypatch):
     u = _user(client)
     tid = _task(u.user_id)
-    # the mock answers "plain answer" for [ask-raw]; make that text a token shape via the runner
     from app.asks import service
     from app.asks.runner import AskResult
 
@@ -209,3 +210,19 @@ def test_ask_answer_redacted(client, monkeypatch):
     assert u.post(f"/tasks/{tid}/asks", json={"question": "q"}).status_code == 202
     row = _wait(u, tid)
     assert "sk-ant-api03" not in row["answer"] and "\nline two" in row["answer"]
+
+
+def test_second_pending_row_violates_unique_index(client):
+    u = _user(client)
+    tid = _task(u.user_id)
+
+    async def add(status):
+        async with SessionLocal() as s:
+            s.add(RunAsk(task_id=tid, user_id=u.user_id, question="q", status=status))
+            await s.commit()
+
+    _run(add("pending"))
+    with pytest.raises(IntegrityError):
+        _run(add("pending"))
+    _run(add("answered"))  # only pending rows are limited
+    _run(add("answered"))
