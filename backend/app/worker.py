@@ -911,6 +911,7 @@ class WorkerManager:
             if t is None or t.status != Status.RUNNING:
                 return "skipped"
             pgid, start, recoveries = t.run_pgid, t.run_proc_start, t.recoveries or 0
+            prev_record = t.recovery
             session_id, priority, created_at = t.session_id, t.priority, t.created_at
             workspace = t.workspace_dir or str(settings.workspaces_dir / task_id)
             pid = await effective_project_id(s, t)
@@ -929,6 +930,7 @@ class WorkerManager:
         now = _now()
         record = recovery.build_record(None, evs, spool_raw, workspace, saved.saved_at if saved else None, now,
                                        why=why, project_dir=project_dir)
+        record = recovery.carry_over(record, prev_record)
         # 4. the spool's guard records as events, its once grants spent, the task dir removed
         await self._ingest_guard_spool(task_id, self._emit_offline_for(task_id))
         gave_up = recoveries >= recovery.MAX_RECOVERIES
@@ -976,7 +978,8 @@ class WorkerManager:
         for tid, beat, started in rows:
             if tid in self._active:
                 continue
-            last = recovery.aware(beat or started)
+            # the newer of the two: a leftover heartbeat of an earlier run never outranks a fresh start
+            last = max((x for x in (recovery.aware(beat), recovery.aware(started)) if x is not None), default=None)
             if last is not None and last > cutoff:
                 continue
             try:
@@ -1663,12 +1666,27 @@ class WorkerManager:
         async with SessionLocal() as s:
             await auth.revoke_task_tokens(s, task_id)
             await s.commit()
+        # the step's last usage figures (the result's cost replaces the estimate)
+        if tracker is not None:
+            await self._persist_usage(task_id, tracker, final=True, total_cost_usd=total_cost_usd)
+        # where the thread stands now (the run's outside-commit base when one is held), stored before
+        # the terminal status: a follow-up created the moment the status flips composes with it
+        completed_at = _now()
+        ending = {"status": status, "completed_at": completed_at,
+                  **({"result_text": result_text} if result_text is not None else {})}
+        try:
+            # the cut-off callers (cancel, timeout) pass no secrets: use the run's
+            await handoff.snapshot(task_id, self._finish_reason(status, error),
+                                   secrets=secrets if secrets is not None else self._run_secrets.get(task_id),
+                                   since=self._run_since.get(task_id), ending=ending)
+        except Exception as e:  # noqa: BLE001 - never breaks a finish
+            log.warning("handoff: finish snapshot failed for %s: %s", task_id, e)
         async with SessionLocal() as s:
             task = await s.get(Task, task_id)
             if task is None:
                 return
             task.status = status
-            task.completed_at = _now()
+            task.completed_at = completed_at
             task.run_pgid = task.run_proc_start = task.heartbeat_at = None
             if exit_code is not None:
                 task.exit_code = exit_code
@@ -1697,17 +1715,6 @@ class WorkerManager:
                     )
                 )
             await s.commit()
-        # the step's last usage figures (the result's cost replaces the estimate)
-        if tracker is not None:
-            await self._persist_usage(task_id, tracker, final=True, total_cost_usd=total_cost_usd)
-        # where the thread stands now (the run's outside-commit base when one is held)
-        try:
-            # the cut-off callers (cancel, timeout) pass no secrets: use the run's
-            await handoff.snapshot(task_id, self._finish_reason(status, error),
-                                   secrets=secrets if secrets is not None else self._run_secrets.get(task_id),
-                                   since=self._run_since.get(task_id))
-        except Exception as e:  # noqa: BLE001 - never breaks a finish
-            log.warning("handoff: finish snapshot failed for %s: %s", task_id, e)
         # co-guard deny-and-resume: follow-ups deferred while this step was active
         try:
             await guard_grants.after_task_finished(task_id, submit=self.submit)

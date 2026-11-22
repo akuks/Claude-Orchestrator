@@ -851,7 +851,9 @@ def _compact_handoff():
     """The task dir's handoff.md (redacted, then cut), or raises OSError / ValueError when it is missing,
     not a file, or empty."""
     with open(os.path.join(os.environ["CO_TASK_DIR"], "handoff.md"), encoding="utf-8", errors="replace") as f:
-        text = f.read(COMPACT_HANDOFF_MAX * 4)
+        text = f.read(COMPACT_HANDOFF_MAX * 4 + 1)
+    if len(text) > COMPACT_HANDOFF_MAX * 4:  # the bounded read cut a word: drop it (it may be a token's prefix)
+        text = text[: COMPACT_HANDOFF_MAX * 4].rsplit(None, 1)[0]
     text = HIDDEN_CHARS.sub("", text).strip()
     if not text:
         raise ValueError("handoff.md is empty")

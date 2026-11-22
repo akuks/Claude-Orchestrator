@@ -17,8 +17,6 @@ from __future__ import annotations
 import json
 import os
 
-from fastapi import HTTPException
-
 from ..guard.co_hook import DATA_LINE, NOTES_LINE
 from ..redaction import clean_text
 
@@ -112,22 +110,22 @@ def normalized(stored) -> dict:
 
 
 def validate(value) -> dict:
-    """A PUT body's ``ground_rules``: 400 for an unknown key, a non-bool switch or a long ``extra``. The result
+    """A PUT body's ``ground_rules``: ValueError (the router's 400) for an unknown key, a non-bool switch or a long ``extra``. The result
     replaces the stored object: a key left out takes its default."""
     if not isinstance(value, dict):
-        raise HTTPException(400, "ground_rules must be an object")
+        raise ValueError("ground_rules must be an object")
     unknown = sorted(str(k) for k in value if k not in DEFAULTS)
     if unknown:
-        raise HTTPException(400, f"unknown ground rule: {', '.join(unknown)}")
+        raise ValueError(f"unknown ground rule: {', '.join(unknown)}")
     for k in SWITCHES:
         if k in value and not isinstance(value[k], bool):
-            raise HTTPException(400, f"{k} must be true or false")
+            raise ValueError(f"{k} must be true or false")
     out = dict(DEFAULTS) | value
     if not isinstance(out["extra"], str):
-        raise HTTPException(400, "extra must be text")
+        raise ValueError("extra must be text")
     out["extra"] = clean_text(out["extra"]).strip()
     if len(out["extra"]) > GROUND_EXTRA_MAX:
-        raise HTTPException(400, f"extra is at most {GROUND_EXTRA_MAX} characters")
+        raise ValueError(f"extra is at most {GROUND_EXTRA_MAX} characters")
     return out
 
 
