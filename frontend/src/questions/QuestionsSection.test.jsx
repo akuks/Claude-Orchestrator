@@ -62,4 +62,10 @@ describe('ThreadQuestions (TaskDetail)', () => {
     await flush()
     expect(view.container.querySelector('[data-testid="thread-questions"]')).toBeNull()
   })
+  it('asks for nothing while no task is selected (found by the phase 3b e2e: GET /tasks/null/questions)', async () => {
+    view = await render(<ThreadQuestions taskId={null} />)
+    await flush()
+    expect(api.taskQuestions).not.toHaveBeenCalled()
+    expect(view.container.querySelector('[data-testid="thread-questions"]')).toBeNull()
+  })
 })

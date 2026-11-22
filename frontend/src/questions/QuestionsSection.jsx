@@ -35,6 +35,7 @@ export function ThreadQuestions({ taskId, refreshKey, onAnswered, onChanged }) {
   const [tick, setTick] = useState(0)
   useEffect(() => setList([]), [taskId]) // never show the previous task's questions
   useEffect(() => {
+    if (!taskId) return undefined // no task selected (TaskDetail stays mounted): no request
     let live = true
     api
       .taskQuestions(taskId)

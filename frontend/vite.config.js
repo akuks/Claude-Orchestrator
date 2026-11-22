@@ -21,6 +21,8 @@ export default defineConfig({
       '/skills': { target, changeOrigin: true },
       '/context-docs': { target, changeOrigin: true },
       '/approvals': { target, changeOrigin: true },
+      '/questions': { target, changeOrigin: true },
+      '/handoffs': { target, changeOrigin: true },
       '/guard': { target, changeOrigin: true },
       '/usage': { target, changeOrigin: true },
       '/findings': { target, changeOrigin: true },
