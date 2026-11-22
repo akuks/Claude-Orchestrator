@@ -355,6 +355,7 @@ export default function RunView({ id, user, projects = [], navigate, onOpenCrede
             {selTask ? (
               <TaskDetail
                 inline
+                currentUser={user}
                 taskId={selTask}
                 onClose={() => setTaskId(null)}
                 onChanged={load}
