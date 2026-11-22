@@ -141,6 +141,17 @@ def test_guard_payload_bounds_and_redacts_background():
     assert TaskWorker.guard_payload({"event": "Stop", "background": "nope"})["background"] == []
 
 
+def test_guard_payload_background_missing_what_or_id():
+    """T1-2: an entry without ``what`` stores "" (never "None"); one without ``id`` is dropped."""
+    from app.guard import co_hook
+    from app.worker import WorkerManager as TaskWorker
+
+    p = TaskWorker.guard_payload({"event": "Stop", "background": [{"id": "b1"}, {"what": "x"}, {"id": None},
+                                                                   {"id": "b2", "what": None}]})
+    assert p["background"] == [{"id": "b1", "what": ""}, {"id": "b2", "what": ""}]
+    assert not hasattr(TaskWorker, "BACKGROUND_MAX") and co_hook.BACKGROUND_MAX == 10
+
+
 def test_clean_text():
     assert redaction.clean_text("a‮b​c\nd\te") == "abc\nd\te"
     assert redaction.clean_text(None) == ""

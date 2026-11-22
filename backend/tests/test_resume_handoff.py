@@ -339,7 +339,7 @@ def _words(n, w="ab"):
 def _full_content(**over):
     from app.resume import handoff
 
-    steps = [_step("user", "first ask"), _step("user", "second ask", notes=_words(100, "nn"),
+    steps = [_step("user", "first ask"), _step("user", "second ask", notes=_words(100, "word"),
                                                 notes_updated_at=T0, result_text=_words(80, "rr"))]
     evs = [use("Write", {"file_path": f"/work/ws/file{i}.py"}) for i in range(10)]
     evs += [ev("text_output", {"text": f"said {i}"}) for i in range(12)]
@@ -352,11 +352,14 @@ def test_render_caps_and_trims():
     from app.resume import handoff, texts
 
     c = _full_content()
-    for k, v in c.items():  # every field is at most 200 characters
+    for k, v in c.items():  # every field but the notes is at most 200 characters
+        if k == "notes":
+            continue
         for s in (v if isinstance(v, list) else [v]):
             if isinstance(s, str):
                 assert len(s) <= handoff.FIELD_MAX, k
-    assert len(c["notes"]["text"]) <= handoff.FIELD_MAX
+    assert len(c["notes"]["text"]) <= handoff.NOTES_MAX_CHARS
+    assert c["notes"]["text"] == _words(100, "word")  # the stored notes reach the handoff whole
     r0 = handoff.render(c)
     assert r0.splitlines()[0] == texts.HANDOFF_HEAD
     assert "said 11" in r0 and "file3.py" in r0 and "Other run one" in r0
@@ -368,7 +371,7 @@ def test_render_caps_and_trims():
     r3 = handoff.render(c, 3)
     notes_line = [ln for ln in r3.splitlines() if ln.startswith("Claude's notes")][0]
     reply_line = [ln for ln in r3.splitlines() if ln.startswith("Claude's last reply")][0]
-    assert notes_line.count("nn") == 60 and reply_line.count("rr") == 35  # 3: notes 60, reply 35 words
+    assert notes_line.count("word") == 60 and reply_line.count("rr") == 35  # 3: notes 60, reply 35 words
     assert "Other run one" in r3
     r4 = handoff.render(c, 4)
     assert "Other run one" not in r4 and notes_line in r4  # 4: also active dropped
@@ -377,6 +380,31 @@ def test_render_caps_and_trims():
                         files=[f"/work/ws/{'p' * 20}/{_words(8, 'ff')}{i}" for i in range(50)])
     assert len(handoff.render(big, 0).split()) <= handoff.HANDOFF_MAX_WORDS
     assert handoff.render(big).splitlines()[0] == texts.HANDOFF_HEAD
+
+
+def test_render_lists_newest_8_files():
+    """F111 (forge v0.7.0): render lists the newest FILES_SHOWN (8) files,
+    FILES_TRIMMED (5) from level 2; the stored list (the card's) stays whole."""
+    from app.resume import handoff
+
+    evs = [use("Write", {"file_path": f"/work/ws/file{i}.py"}) for i in range(12)]
+    c = handoff.build(_input(steps=[_step("user", "ask")], step_events=evs))
+    assert len(c["files"]) == 12 and handoff.FILES_SHOWN == 8
+
+    def listed(text):
+        lines = text.splitlines()
+        i = lines.index("Files touched (newest first):") + 1
+        out = []
+        while i < len(lines) and lines[i].startswith("- ") and ".py" in lines[i]:
+            out.append(lines[i])
+            i += 1
+        return out
+
+    r0 = handoff.render(c, 0)
+    assert [ln[2:].rsplit("/", 1)[-1] for ln in listed(r0)] == [f"file{i}.py" for i in range(11, 3, -1)]
+    assert "- (and 4 more)" in r0
+    r2 = handoff.render(c, 2)
+    assert len(listed(r2)) == 5 and "- (and 7 more)" in r2
 
 
 def test_handoff_redacted_and_cleaned():
@@ -399,9 +427,10 @@ def test_handoff_redacted_and_cleaned():
     content = handoff.build(_input(steps=steps, step_events=[ev("text_output", {"text": straddle})]))
     assert content["last_reply"].endswith("***") and "sk-an" not in content["last_reply"]
     assert len(content["last_reply"]) <= handoff.FIELD_MAX
-    steps[-1]["notes"] = "n" * 195 + " " + tok
+    steps[-1]["notes"] = "n" * (handoff.NOTES_MAX_CHARS - 5) + " " + tok
     content = handoff.build(_input(steps=steps))
-    assert len(content["notes"]["text"]) <= handoff.FIELD_MAX and "ghp_a" not in content["notes"]["text"]
+    assert len(content["notes"]["text"]) <= handoff.NOTES_MAX_CHARS and "ghp_a" not in content["notes"]["text"]
+    assert content["notes"]["text"].endswith("***")
     # the run's exact secrets too
     steps[-1]["notes"] = "the value is a-run-secret-value"
     content = handoff.build(_input(steps=steps, secrets=["a-run-secret-value"]))
@@ -510,6 +539,37 @@ def test_outside_since_held_for_the_run(client, tmp_path):
     rw = run(handoff.snapshot(step2, "working", since=h3[:12]))
     assert rw.content["history_rewritten"] is True and rw.content["outside_commits"] == []
     assert "history changed" in rw.text
+
+
+def test_refresh_keeps_outside_base(client, tmp_path):
+    """I4: a person's Refresh (or notes save) between steps never moves the
+    outside-commit base, so their hand commit reaches the next follow-up."""
+    from app.resume import handoff, prompting
+
+    d = tmp_path / "repo"
+    d.mkdir()
+    git(d, "init", "-q", "-b", "main")
+    _, h1 = commit(d, "a.txt")
+    step1 = mk_task(workspace_dir=str(d), prompt="step one", head_at_start=h1[:12])
+    run(handoff.snapshot(step1, "run ended"))
+    _, h2 = commit(d, "person.txt", "a person's hand commit")
+    refreshed = run(handoff.snapshot(step1, "manual"))
+    run(handoff.snapshot(step1, "notes"))
+    assert refreshed.content["head"] == h2[:12]
+    step2 = mk_task(workspace_dir=str(d), prompt="step two", root_id=step1, parent_task_id=step1,
+                    status="queued", created_at=datetime.now(timezone.utc))
+
+    async def outside():
+        async with SessionLocal() as s:
+            return await prompting._outside(await s.get(Task, step2))
+
+    line = run(outside())
+    assert line and h2[:7] in line and "a person's hand commit" in line
+    assert stored_row(step1).content["base_head"] == h1[:12]
+    # a run's own snapshot moves the base to the new head
+    ended = run(handoff.snapshot(step1, "run ended"))
+    assert ended.content["base_head"] == ended.content["head"] == h2[:12]
+    assert run(handoff.boundary(step2)) == h2[:12]
 
 
 def test_snapshot_versioning_and_prev(client, tmp_path):

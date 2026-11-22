@@ -24,8 +24,9 @@ from app.database import SessionLocal
 from app.guard import runtime as guard_runtime
 from app.main import app
 from app.models import ActionGrant, Project, Task, TaskEvent
-from app.resume import recovery
-from app.resume.texts import GUEST_TAIL, HANDOFF_HEAD, RECORD_HEAD, RECORD_TAIL
+from app.resume import handoff as handoff_mod
+from app.resume import prompting, recovery
+from app.resume.texts import GUEST_TAIL, HANDOFF_HEAD, RECORD_HEAD, RECORD_TAIL, RECOVERED_CONTINUE
 from app.worker import WorkerManager
 from conftest import env_probe_key, login_as, read_probe_args, read_probe_file, wait_task
 
@@ -477,3 +478,123 @@ def test_recent_write_marks(tmp_path, tmp_path_factory):
     assert marks == {"gone.txt": "missing", "empty.txt": "empty (0 bytes)", "nul.bin": "ends in NUL bytes",
                      "ok.txt": "ok"}
     assert recovery.render_record(rec, external=False).count("a hint, not proof") == 1
+
+
+# ---- final-review fixes (I1, I5, I6, M1) -------------------------------------------------------
+
+
+def test_recovered_step_is_not_joined_by_an_approval(client):
+    """I1: a recovered step queued again resumes with RECOVERED_CONTINUE, so
+    an approval never joins it: it is deferred and spawned after it."""
+    from app.guard import grants as guard_grants
+    from app.models import ActionApproval
+
+    owner = f"u{_uid()}"
+    root = mk_task(status="completed", created_by=owner, prompt="root work")
+    rec = mk_task(root_id=root, parent_task_id=root, status="queued", created_by=owner, origin="guard",
+                  prompt="approved block", recovery={"pending": True})
+    now = _now()
+
+    async def setup():
+        async with SessionLocal() as s:
+            s.add(ActionApproval(task_id=root, status="approved", delivery="resume", rule_ids=["git-reset-hard"],
+                                 tool="Bash", summary="first", expires_at=now, decided_by="d", decided_at=now,
+                                 resume_until=now + timedelta(hours=1), followup_task_id=rec))
+            a = ActionApproval(task_id=root, status="approved", delivery="resume", rule_ids=["git-reset-hard"],
+                               tool="Bash", summary="git reset --hard HEAD~1", grant_key="c" * 64,
+                               expires_at=now, decided_by="d", decided_at=now, resume_until=now + timedelta(hours=1))
+            s.add(a)
+            await s.commit()
+            return a.id
+
+    aid = run(setup())
+
+    async def approve():
+        async with guard_grants.followup_lock():
+            async with SessionLocal() as s:
+                a = await s.get(ActionApproval, aid)
+                out = await guard_grants.create_resume_followup(s, a, "d")
+                await s.commit()
+                return out
+
+    assert run(approve()) is None
+    assert get_task(rec).prompt == "approved block"
+
+    async def approval():
+        async with SessionLocal() as s:
+            return await s.get(ActionApproval, aid)
+
+    assert run(approval()).followup_task_id is None
+    set_task(rec, status="completed")
+    fu = run(guard_grants.after_task_finished(rec))
+    assert fu and fu != rec
+    t = get_task(fu)
+    assert t.origin == "guard" and "git reset --hard HEAD~1" in t.prompt
+    assert run(approval()).followup_task_id == fu
+    _park(fu)
+
+
+def test_compose_failure_keeps_the_record(client, tmp_path, monkeypatch):
+    """I5: a failed compose still puts the record into a recovered, resumed
+    step (never a bare re-run) and leaves it pending."""
+    owner = _owner(client)
+    key = env_probe_key()
+    tid = _crashed_run(owner, tmp_path, key, session_id="s1")
+    session_file(owner.user_id, "s1")
+    out, held = _recover_live(tid)
+    assert out == "requeued"
+
+    async def boom(*a, **kw):
+        raise RuntimeError("compose broke")
+
+    monkeypatch.setattr(prompting, "compose", boom)
+    client.portal.call(app.state.worker.submit, *held[0])
+    finished = wait_task(owner, tid)
+    assert finished["status"] == "completed", finished.get("error")
+    prompt = probe_prompt(key)
+    assert RECORD_START in prompt and prompt.endswith(RECOVERED_CONTINUE)
+    assert "original work" not in prompt
+    assert get_task(tid).recovery["pending"] is True
+
+
+def test_recovery_event_failure_still_enqueues(client, monkeypatch):
+    """I6: a failed recovery event after the QUEUED commit never strands the row."""
+    w = WorkerManager()
+    tid = mk_task()
+    enq = []
+
+    async def enqueue(task_id, priority, created_at):
+        enq.append(task_id)
+
+    real = w._emit_offline
+
+    async def emit(task_id, etype, payload):
+        if etype == "recovery":
+            raise RuntimeError("db hiccup")
+        await real(task_id, etype, payload)
+
+    w._enqueue, w._emit_offline = enqueue, emit
+    assert run(w.recover(tid, "server restart")) == "requeued"
+    assert enq == [tid] and get_task(tid).status == "queued"
+    _park(tid)
+
+
+def test_recover_skips_a_row_that_changed(client, monkeypatch):
+    """M1: a row no longer RUNNING after the awaits gets no record and no requeue."""
+    w = WorkerManager()
+    tid = mk_task()
+    enq = []
+
+    async def enqueue(task_id, priority, created_at):
+        enq.append(task_id)
+
+    async def snap(task_id, reason, **kw):
+        async with SessionLocal() as s:
+            (await s.get(Task, task_id)).status = "cancelled"
+            await s.commit()
+
+    w._enqueue = enqueue
+    monkeypatch.setattr(handoff_mod, "snapshot", snap)
+    assert run(w.recover(tid, "server restart")) == "skipped"
+    t = get_task(tid)
+    assert t.status == "cancelled" and enq == [] and not t.recovery

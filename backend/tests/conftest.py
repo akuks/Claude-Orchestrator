@@ -2,6 +2,7 @@
 up, and a mock `claude` binary stands in for the real CLI (stream-json for tasks,
 structured JSON for --json-schema, plain text otherwise)."""
 
+import contextlib
 import os
 import pathlib
 import tempfile
@@ -190,3 +191,12 @@ def login_as(email: str, role: str = "member"):
     c.headers["X-Requested-With"] = "co"
     c.user_id = uid
     return c
+
+
+@contextlib.contextmanager
+def time_limit(limit: float):
+    """Passes when wall time OR this process's CPU time is under ``limit`` (a busy CI box stretches wall time)."""
+    w, c = time.monotonic(), time.process_time()
+    yield
+    wall, cpu = time.monotonic() - w, time.process_time() - c
+    assert wall < limit or cpu < limit, f"wall {wall:.2f}s and cpu {cpu:.2f}s both >= {limit}s"

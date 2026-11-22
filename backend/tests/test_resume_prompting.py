@@ -583,6 +583,27 @@ def test_continue_endpoint(client, submitted):
     assert _bearer(owner.user_id, tid).post(f"/tasks/{tid}/continue", json={}).status_code == 403
 
 
+def test_continue_409_before_snapshot_when_a_step_is_active(client, submitted):
+    """M2: a thread with a live step gets 409 before any snapshot is taken
+    (none describes the live step without its secrets or moves its base)."""
+    from app.resume import handoff
+
+    owner = login_as(f"rp-c409-{_uid()}@test.local")
+    tid = mk_task(prompt="the work", status="failed", created_by=owner.user_id, session_id=f"s-{_uid()}")
+    run(handoff.snapshot(tid, "run ended"))
+    mk_task(prompt="sibling", status="running", root_id=tid, parent_task_id=tid, created_by=owner.user_id)
+
+    async def row():
+        async with SessionLocal() as s:
+            h = (await s.execute(select(TaskHandoff).where(TaskHandoff.root_id == tid))).scalar_one()
+            return h.version, h.saved_at, h.reason
+
+    before = run(row())
+    r = owner.post(f"/tasks/{tid}/continue", json={})
+    assert r.status_code == 409 and r.json()["detail"] == "A step of this thread is still active"
+    assert run(row()) == before and submitted == []
+
+
 async def _handoff_reason(tid):
     async with SessionLocal() as s:
         row = (await s.execute(select(TaskHandoff).where(TaskHandoff.root_id == tid))).scalar_one_or_none()

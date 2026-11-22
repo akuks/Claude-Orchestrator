@@ -21,7 +21,7 @@ from app import redaction
 from app.database import SessionLocal
 from app.events import broker
 from app.models import TaskEvent
-from conftest import login_as, wait_task
+from conftest import login_as, time_limit, wait_task
 
 CO_TOKEN_RE = re.compile(r"co_[A-Za-z0-9_-]{43}")
 
@@ -441,7 +441,6 @@ def test_hook_and_server_use_the_same_patterns():
 
 def test_redaction_stays_linear_on_long_input():
     blob = "a" * 200_000 + " password" * 2000 + " mysql " + "x" * 50_000
-    t0 = time.monotonic()
-    redaction.redact(blob, [])
-    co_hook.redact(blob, None)
-    assert time.monotonic() - t0 < 3.0
+    with time_limit(3.0):
+        redaction.redact(blob, [])
+        co_hook.redact(blob, None)

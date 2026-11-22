@@ -193,3 +193,84 @@ def test_policy_helper_context(client, ground_restored):
     assert gr.GROUNDING not in p["helper_context"]
     assert inp.main_text == "\n\n".join([gr.SHORT_ANSWERS, gr.USAGE_CARE_MAIN, "Ask first."])
     assert inp.ground_included == ["short_answers", "usage_care", "extra"]
+
+
+# ---- F114: the precedence line (forge v0.7.0) ---------------------------------------------------
+
+
+def test_precedence_line_matches_forge():
+    src = (FIX / "precedence_line.js").read_text()
+    m = re.search(r"const PRECEDENCE_LINE = (.*?);\n", src, re.S)
+    assert m
+    forge = "".join(a or b for a, b in re.findall(r"'((?:[^'\\]|\\.)*)'|\"((?:[^\"\\]|\\.)*)\"", m.group(1)))
+    assert "JSPARK Forge" in forge
+    assert gr.PRECEDENCE_LINE == forge.replace("JSPARK Forge", "co-orchestrator")
+
+
+def test_has_superpowers(tmp_path):
+    P = types.SimpleNamespace
+    assert gr.has_superpowers([P(name="Superpowers", local_path=str(tmp_path / "none"))])
+    plug = tmp_path / "sp"
+    (plug / ".claude-plugin").mkdir(parents=True)
+    (plug / ".claude-plugin" / "plugin.json").write_text('{"name": "superpowers", "version": "5"}')
+    assert gr.has_superpowers([P(name="my-pack", local_path=str(plug))])
+    other = tmp_path / "other"
+    (other / ".claude-plugin").mkdir(parents=True)
+    (other / ".claude-plugin" / "plugin.json").write_text('{"name": "other"}')
+    bad = tmp_path / "bad"
+    (bad / ".claude-plugin").mkdir(parents=True)
+    (bad / ".claude-plugin" / "plugin.json").write_text("{not json")
+    big = tmp_path / "big"
+    (big / ".claude-plugin").mkdir(parents=True)
+    (big / ".claude-plugin" / "plugin.json").write_text('{"name": "superpowers", "pad": "' + "x" * 70000 + '"}')
+    assert not gr.has_superpowers([P(name="o", local_path=str(other)), P(name="b", local_path=str(bad)),
+                                   P(name="g", local_path=str(big)), P(name=None, local_path=None)])
+    assert not gr.has_superpowers([])
+
+
+def _with_pack(name, path):
+    from app.models import SkillPack
+
+    async def add():
+        async with SessionLocal() as s:
+            p = SkillPack(name=name, local_path=str(path), enabled=True, scope="global")
+            s.add(p)
+            await s.commit()
+            return p.id
+
+    return _run(add())
+
+
+def _drop_pack(pid):
+    from app.models import SkillPack
+
+    async def go():
+        async with SessionLocal() as s:
+            row = await s.get(SkillPack, pid)
+            if row is not None:
+                await s.delete(row)
+                await s.commit()
+
+    _run(go())
+
+
+def test_precedence_line_only_with_superpowers(client, ground_restored, tmp_path):
+    _set_ground({})
+    key = env_probe_key()
+    done = wait_task(client, client.post("/tasks", json={"prompt": f"hi [env-probe:{key}]"}).json()["id"])
+    assert done["status"] == "completed", done.get("error")
+    assert gr.PRECEDENCE_LINE not in _system_prompt(read_probe_args(key))
+    assert "precedence" not in _events(done["id"], "ground_rules")[0]["included"]
+    plug = tmp_path / "superpowers"
+    plug.mkdir()
+    pid = _with_pack("superpowers", plug)
+    try:
+        key = env_probe_key()
+        done = wait_task(client, client.post("/tasks", json={"prompt": f"hi [env-probe:{key}]"}).json()["id"])
+        assert done["status"] == "completed", done.get("error")
+        sp = _system_prompt(read_probe_args(key))
+        assert gr.PRECEDENCE_LINE in sp and sp.index(gr.GROUNDING) < sp.index(gr.PRECEDENCE_LINE)
+        assert _events(done["id"], "ground_rules") == [
+            {"included": ["grounding", "short_answers", "usage_care", "notes", "precedence"]}]
+    finally:
+        _drop_pack(pid)

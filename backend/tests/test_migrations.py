@@ -333,7 +333,7 @@ def test_migration_0007(scratch_url):
 
 def test_migration_0008(scratch_url):
     """0008_resume: task resume columns, task_handoffs, ground_rules; old rows get the
-    defaults and a guard follow-up is attributed to the guard."""
+    defaults, a guard follow-up is attributed to the guard and a dispatched child to its agent."""
     from alembic import command
 
     url = scratch_url
@@ -345,6 +345,11 @@ def test_migration_0008(scratch_url):
     def seed(sc, insp):
         sc.exec_driver_sql(task_sql.format(id="t8", title="plain"))
         sc.exec_driver_sql(task_sql.format(id="g8", title="co-guard follow-up: approved request x"))
+        # a pre-3a dispatched child (parent and agent set) and a pre-3a follow-up (parent only)
+        kid_sql = task_sql.replace("(id, title,", "(id, parent_task_id, agent_id, title,").replace(
+            "VALUES ('{id}', '{title}'", "VALUES ('{id}', {parent}, {agent}, '{title}'")
+        sc.exec_driver_sql(kid_sql.format(id="k8", parent="'t8'", agent="'a8'", title="dispatched"))
+        sc.exec_driver_sql(kid_sql.format(id="f8", parent="'t8'", agent="NULL", title="follow-up"))
         sc.exec_driver_sql("INSERT INTO guard_org_settings (id, updated_at) VALUES (1, CURRENT_TIMESTAMP)")
 
     _inspect(url, seed)
@@ -362,6 +367,7 @@ def test_migration_0008(scratch_url):
         q = sc.exec_driver_sql
         rows = {r[0]: (r[1], r[2]) for r in q("SELECT id, origin, recoveries FROM tasks")}
         assert rows["t8"] == ("user", 0) and rows["g8"] == ("guard", 0)
+        assert rows["k8"] == ("agent", 0) and rows["f8"] == ("user", 0)
         gr = q("SELECT ground_rules FROM guard_org_settings").scalar()
         assert (json.loads(gr) if isinstance(gr, str) else gr) == {}
         return q("SELECT version_num FROM alembic_version").scalar()
