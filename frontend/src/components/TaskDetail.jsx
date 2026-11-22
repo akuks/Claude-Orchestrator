@@ -562,7 +562,7 @@ export default function TaskDetail({ taskId, onClose, onChanged, onOpenTask, onO
           onOpenTask?.(child.id) // the answer continues the thread in a new step
         }}
       />
-      <HandoffCard taskId={taskId} onHandoff={setHandoff} canManage={task?.can_manage === true} />
+      <HandoffCard taskId={taskId} onHandoff={setHandoff} canManage={task?.can_manage === true} status={task?.status} />
 
       <Typography.Title level={5}>Live Output</Typography.Title>
       <div

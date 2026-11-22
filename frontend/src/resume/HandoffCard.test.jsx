@@ -88,6 +88,25 @@ describe('HandoffCard', () => {
     await click(q(c, 'handoff-refresh'))
     expect(api.refreshHandoff).toHaveBeenCalledWith('t1')
   })
+  it('asks again when the step ends, not on every render', async () => {
+    const c = await mount({ status: undefined })
+    await view.rerender(<HandoffCard taskId="t1" canManage status="running" />) // the task loads: no new fetch
+    expect(api.getHandoff).toHaveBeenCalledTimes(1)
+    api.getHandoff.mockResolvedValue({ ...H, reason: 'run ended', content: { ...H.content, task: 'finished task' } })
+    await view.rerender(<HandoffCard taskId="t1" canManage status="completed" />)
+    await flush()
+    expect(api.getHandoff).toHaveBeenCalledTimes(2)
+    expect(q(c, 'handoff-task').textContent).toContain('finished task')
+    expect(q(c, 'handoff-meta').textContent).toContain('· run ended') // the header says why it was saved
+    await view.rerender(<HandoffCard taskId="t1" canManage status="completed" />)
+    await flush()
+    expect(api.getHandoff).toHaveBeenCalledTimes(2)
+    await view.rerender(<HandoffCard taskId="t2" canManage status="running" />)
+    await view.rerender(<HandoffCard taskId="t3" canManage status="failed" />) // another task: one fetch
+    await flush()
+    expect(api.getHandoff).toHaveBeenCalledTimes(4)
+  })
+
   it('shows an empty state on null', async () => {
     api.getHandoff.mockResolvedValue(null)
     const c = await mount()

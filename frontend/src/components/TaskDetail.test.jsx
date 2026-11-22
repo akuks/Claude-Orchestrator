@@ -213,6 +213,24 @@ describe('TaskDetail: where it stands (phase 3a)', () => {
     expect(c.querySelector('[data-testid="notice-no_commits"]')).not.toBeNull()
     expect(c.querySelector('[data-testid="continue-button"]')).not.toBeNull()
   })
+
+  it('opens the new step after Continue', async () => {
+    globalThis.WebSocket = FakeSocket
+    api.getTask.mockImplementationOnce(async (id) => ({
+      id, title: 'T', status: 'failed', prompt: 'p', origin: 'user', created_by: 'u1', session_id: 's', can_manage: true, can_resume: true,
+    }))
+    api.continueTask.mockResolvedValue({ id: 'child' })
+    const onOpenTask = vi.fn()
+    view = await render(<TaskDetail inline taskId="a" currentUser={{ id: 'u1' }} onOpenTask={onOpenTask} />)
+    await flush()
+    await flush()
+    const click = (el) => act(async () => { el.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+    await click(view.container.querySelector('[data-testid="continue-button"]'))
+    await click([...document.body.querySelectorAll('.ant-dropdown-menu-item')].find((e) => e.textContent === 'Continue (resume)'))
+    await flush()
+    expect(api.continueTask).toHaveBeenCalledWith('a', 'resume')
+    expect(onOpenTask).toHaveBeenCalledWith('child')
+  })
 })
 
 describe('TaskDetail: token care (phase 3b)', () => {

@@ -80,11 +80,13 @@ export function GroundRulesCard({ canEdit, initial, onSaved }) {
   const [cfg, setCfg] = useState(saved)
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState(null)
+  // a parent reload with the same values keeps unsaved edits (only new content resets the card)
+  const initialKey = JSON.stringify(initial || {})
   useEffect(() => {
-    const v = { ...GROUND_DEFAULTS, ...(initial || {}) }
+    const v = { ...GROUND_DEFAULTS, ...JSON.parse(initialKey) }
     setSaved(v)
     setCfg(v)
-  }, [initial])
+  }, [initialKey])
   const dirty = GROUND_SWITCHES.some(([k]) => cfg[k] !== saved[k]) || cfg.extra !== saved.extra
   const save = async () => {
     setSaving(true)
@@ -301,7 +303,7 @@ export default function OrgGuardView({ isAdmin = false }) {
           </Typography.Text>
         </Space>
       </Card>
-      {ground && <GroundRulesCard canEdit={isAdmin} initial={ground} />}
+      {ground && <GroundRulesCard canEdit={isAdmin} initial={ground} onSaved={setGround} />}
       {error && <Alert type="error" showIcon message={error} data-testid="org-guard-error" style={{ marginTop: 12 }} />}
     </div>
   )
