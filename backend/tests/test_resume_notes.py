@@ -133,7 +133,7 @@ def test_notes_body_too_large_413(client, me):
     assert agent.put(f"/tasks/{tid}/notes", content=b"a " * 2048, headers={"Content-Type": "text/plain"}).status_code == 200
 
 
-def test_outsider_404_viewer_get(client, me):
+def test_outsider_404_owner_and_admin_get(client, me):  # project contributors: the test below
     tid = _task(me.user_id)
     out = login_as(f"notes-out-{uuid.uuid4().hex[:8]}@test.local")
     assert out.get(f"/tasks/{tid}/notes").status_code == 404

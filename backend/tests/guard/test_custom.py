@@ -449,9 +449,8 @@ def test_values_text_is_forge_mcp_text():
 def test_i3_sigalrm_blocked_in_the_mask_is_unblocked_then_restored():
     old_mask = signal.pthread_sigmask(signal.SIG_BLOCK, [signal.SIGALRM])
     try:
-        t0 = time.monotonic()
-        got = match_rules(SLOW_TEXT, [R("repo.slow", SLOW, "regex", kind="never")], 50)
-        assert time.monotonic() - t0 < 3.0  # load-tolerant bound (final wave)
+        with time_limit(3.0):  # load-tolerant bound: wall or CPU time
+            got = match_rules(SLOW_TEXT, [R("repo.slow", SLOW, "regex", kind="never")], 50)
         assert got[0][1] == "timeout"
         assert signal.SIGALRM in signal.pthread_sigmask(signal.SIG_BLOCK, [])  # still blocked afterwards
         assert signal.SIGALRM not in signal.sigpending()

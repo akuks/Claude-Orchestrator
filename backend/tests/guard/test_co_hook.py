@@ -9,6 +9,7 @@ import subprocess
 import sys
 import threading
 import time
+import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import pytest
@@ -1386,7 +1387,12 @@ def test_seen_line_has_tool_and_what(run):
     first = run.spool()[0]
     assert first["seen"] is True and first["tool"] == "Bash" and first["tool_use_id"] == "t1"
     assert tok not in first["what"] and "***" in first["what"] and first["what"].startswith("say hi :: echo ")
-    assert run.spool()[0] is not None and "seen" in run.spool()[0]  # still the first spool line
+    # an env secret with no token shape is masked by its value
+    plain = "plain" + uuid.uuid4().hex
+    run.env["MY_API_KEY"] = plain
+    run(_pre("Bash", {"command": f"echo {plain}", "description": "say"}, "t2"))
+    second = [r for r in run.spool() if r.get("tool_use_id") == "t2" and r.get("seen")][0]
+    assert plain not in second["what"] and second["what"] == "say :: echo ***"
     # the token starts at char 190 of the command: redacted before the cut, so no prefix survives
     long_cmd = "x" * 190 + tok
     run(_pre("Bash", {"command": long_cmd}, "t2"))
@@ -1699,6 +1705,16 @@ def test_compact_handoff_is_redacted_cleaned_then_cut(plugin, tmp_path, stub):
             assert secret[:6] not in ctx and secret[:4] not in ctx.replace(co_hook.CARRY_LINE, "")[-mx:]
             assert "ghp_" not in ctx and "sk-ant-" not in ctx and "aaaa" not in ctx and "bbbb" not in ctx
             assert len(ctx) <= len(co_hook.CARRY_LINE) + mx + 4
+    # a token straddling the bounded read (4 x the cut) after redaction shrank the text in front of it
+    run = Run(plugin, tmp_path / "read", stub.base, trust="own")
+    body = HANDOFF + "\n"
+    while len(body) + len(tok) + 1 < mx * 4 - 8:
+        body += tok + " "
+    body += "x" * (mx * 4 - 8 - len(body)) + " " + "ghp_" + "c" * 36 + " tail"
+    assert body.index("ghp_c") < mx * 4 < body.index("ghp_c") + 40
+    _handoff(run, body)
+    ctx = _ctx_of(_sess(run, source="compact"))
+    assert "***" in ctx and "ghp_" not in ctx and "cccc" not in ctx
 
 
 def test_hook_hidden_chars_equal_the_apps():
@@ -1730,10 +1746,26 @@ def test_session_context_error_single_answer(plugin, tmp_path, stub):
 
 
 def test_session_context_internal_error_is_one_answer(plugin, tmp_path, stub):
-    """An error anywhere in the compact branch (a policy whose helper fields are the wrong shape) still answers once."""
+    """A policy whose helper_context is the wrong shape (SubagentStart) still answers once, with the data line."""
     run = Run(plugin, tmp_path, stub.base, trust="external", notes=True, helper_context=["not", "a", "str"])
     out = _sess(run, "SubagentStart")
     assert _ctx_of(out) == co_hook.DATA_LINE
+
+
+def test_session_context_outer_catch_all(monkeypatch):
+    """An unexpected error inside the compact branch reaches the outer catch-all: a guard_error and one answer."""
+    answers, errors = [], []
+
+    def boom():
+        raise RuntimeError("unexpected")
+
+    monkeypatch.setattr(co_hook, "load_policy", lambda: {"trust": "external"})
+    monkeypatch.setattr(co_hook, "_compact_handoff", boom)
+    monkeypatch.setattr(co_hook, "guard_error", lambda event, exc: errors.append((event, type(exc).__name__)))
+    monkeypatch.setattr(co_hook, "_emit", lambda obj: answers.append(obj))
+    co_hook.session_context("SessionStart", "compact")
+    assert errors == [("SessionStart", "RuntimeError")]
+    assert answers == [{"hookSpecificOutput": {"hookEventName": "SessionStart", "additionalContext": co_hook.DATA_LINE}}]
 
 
 def test_startup_and_resume_unchanged(plugin, tmp_path, stub):

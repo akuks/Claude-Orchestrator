@@ -153,10 +153,10 @@ def test_guard_payload_background_missing_what_or_id():
 
 
 def test_clean_text():
-    assert redaction.clean_text("a‮b​c\nd\te") == "abc\nd\te"
+    assert redaction.clean_text("a\u202eb\u200bc\nd\te") == "abc\nd\te"
     assert redaction.clean_text(None) == ""
     # the cut is applied after stripping
-    assert redaction.clean_text("ab​​​cd", 4) == "abcd"
+    assert redaction.clean_text("ab\u200b\u200b\u200bcd", 4) == "abcd"
     assert redaction.clean_text("abcdef", 3) == "abc"
     from app.routers import guard
 
@@ -181,6 +181,7 @@ def test_hang_seam(client):
                     break
             time.sleep(0.2)
         assert t["status"] == "running"
+        assert spool, "no seen line before the deadline"
         seen = [x for x in spool if x.get("seen") is True]
         assert seen and seen[0]["tool"] == "Bash" and "sleep 600" in seen[0]["what"]
     finally:

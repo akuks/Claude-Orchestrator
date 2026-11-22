@@ -38,14 +38,26 @@ def _set_ground(value):
 
 @pytest.fixture
 def ground_restored(client):
+    """Puts the org row back as it was: no row, a null ground_rules and the disabled rules included."""
     async def get():
         async with SessionLocal() as s:
             row = await s.get(GuardOrgSettings, 1)
-            return None if row is None else row.ground_rules
+            return None if row is None else (row.ground_rules, row.disabled_rules)
 
     saved = _run(get())
     yield
-    _set_ground(saved or {})
+
+    async def restore():
+        async with SessionLocal() as s:
+            row = await s.get(GuardOrgSettings, 1)
+            if saved is None:
+                if row is not None:
+                    await s.delete(row)
+            elif row is not None:
+                row.ground_rules, row.disabled_rules = saved
+            await s.commit()
+
+    _run(restore())
 
 
 # ---- the texts ----------------------------------------------------------------------------------
@@ -112,14 +124,14 @@ def test_org_settings_ground_rules_roundtrip_and_admin_only(client, ground_resto
     member = login_as(f"gr-{uuid.uuid4().hex[:8]}@test.local")
     assert member.put("/guard/org-settings", json={"ground_rules": {"usage_care": False}}).status_code == 403
     assert member.get("/guard/org-settings").json()["ground_rules"] == gr.DEFAULTS  # anyone may read
-    for bad in ({"extra": "x" * 2001}, {"bogus": True}, {"grounding": "yes"}, {"extra": 5}):
+    for bad in ({"extra": "x" * 2001}, {"bogus": True}, {"grounding": "yes"}, {"extra": 5}, "x", ["a"]):
         assert client.put("/guard/org-settings", json={"ground_rules": bad}).status_code == 400, bad
     r = client.put("/guard/org-settings", json={"ground_rules": {"usage_care": False}})
     assert r.status_code == 200, r.text
     got = client.get("/guard/org-settings").json()["ground_rules"]
     assert got == gr.DEFAULTS | {"usage_care": False}
     # PUT replaces the whole object: a key left out takes its default
-    client.put("/guard/org-settings", json={"ground_rules": {"extra": "hello‮​ there"}})
+    client.put("/guard/org-settings", json={"ground_rules": {"extra": "hello\u202e\u200b there"}})
     got = client.get("/guard/org-settings").json()["ground_rules"]
     assert got == gr.DEFAULTS | {"extra": "hello there"}
     # a PUT without ground_rules leaves it alone

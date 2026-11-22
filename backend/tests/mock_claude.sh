@@ -110,7 +110,7 @@ if [[ "$args" != *"stream-json"* && "$prompt" =~ \[call-probe:([A-Za-z0-9_-]+)\]
   mv "$f.vars.tmp.$$" "$f.vars"
 fi
 if [[ "$args" == *"stream-json"* && "$prompt" == *"[guard-spool]"* ]]; then
-  
+
   if [[ -n "$CO_TASK_DIR" && -d "$CO_TASK_DIR" ]]; then
     printf '{"event":"PreToolUse","decision":"deny","rule_ids":["rm-rf-outside"],"tool":"Bash","summary":"rm -rf ~","reason":"deletes home"}\n' >>"$CO_TASK_DIR/spool.jsonl"
     printf '{"event":"PreToolUse","decision":"approved","rule_ids":["mcp-require-approval"],"tool":"mcp__db__query","summary":"token %s and %s","status":"approved","request_id":"r1"}\n' "$GH_TOKEN" "$CO_API_TOKEN" >>"$CO_TASK_DIR/spool.jsonl"
@@ -120,7 +120,7 @@ if [[ "$args" == *"stream-json"* && "$prompt" == *"[guard-spool]"* ]]; then
   fi
 fi
 if [[ "$args" == *"stream-json"* && "$prompt" == *"[env-echo"* ]]; then
-  
+
   jesc() { local s=$1; s=${s//\\/\\\\}; s=${s//\"/\\\"}; printf '%s' "$s"; }
   dump=""
   for n in CLAUDE_CODE_OAUTH_TOKEN ANTHROPIC_API_KEY GH_TOKEN GITHUB_TOKEN CO_API_TOKEN PATH PROBE_PROJECT_VAR PROBE_DB_PASSWORD PROBE_SHORT_TOKEN PROBE_SHAPED; do
@@ -141,7 +141,7 @@ if [[ "$args" == *"stream-json"* && "$prompt" == *"[env-echo"* ]]; then
   exit 0
 fi
 if [[ "$args" == *"stream-json"* && "$prompt" =~ \[guard-tool:([a-z]+)\] ]]; then
-  
+
   mode="${BASH_REMATCH[1]}"
   sp="$CO_TASK_DIR/spool.jsonl"
   seen() { printf '{"event":"PreToolUse","tool_use_id":"%s","seen":true}\n' "$1" >>"$sp"; }

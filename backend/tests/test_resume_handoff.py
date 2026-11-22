@@ -218,6 +218,9 @@ def test_step_from_superpowers_ledger(tmp_path):
     # writing only the ledger finds its plan too
     evs = [use("Edit", {"file_path": ".superpowers/sdd/2026-11-22-thing/progress.md"})]
     assert handoff.step_progress(evs, tmp_path, None, None)["source"] == "superpowers"
+    # a plan written in the project dir (not the workspace) is found there
+    evs = [use("Write", {"file_path": str(plans / "2026-11-22-thing.md")})]
+    assert handoff.step_progress(evs, tmp_path / "elsewhere", None, None)["source"] == "superpowers"
 
 
 def test_step_from_notes_header_and_last_prompt(tmp_path):
@@ -411,17 +414,17 @@ def test_handoff_redacted_and_cleaned():
     from app.resume import handoff
 
     tok, key = gh_token(), ant_key()
-    notes = f"keep {tok} and {key}‮ and ​ done"
+    notes = f"keep {tok} and {key}\u202e and \u200b done"
     # a token straddling the 200-char cut: redacted first, so no prefix survives
     straddle = "s" * 190 + " " + key
-    steps = [_step("user", f"use {tok}", notes=notes, notes_updated_at=T0, result_text=f"reply {key}‮")]
+    steps = [_step("user", f"use {tok}", notes=notes, notes_updated_at=T0, result_text=f"reply {key}\u202e")]
     content = handoff.build(_input(steps=steps, step_events=[ev("text_output", {"text": straddle})],
                                    secrets=["a-run-secret-value"]))
     text = handoff.render(content)
     for blob in (json.dumps(content, ensure_ascii=False), text):
         assert tok not in blob and key not in blob
         assert tok[:5] not in blob and key[:8] not in blob
-        assert "‮" not in blob and "​" not in blob
+        assert "\u202e" not in blob and "\u200b" not in blob
         assert "***" in blob
     steps[-1]["result_text"] = None
     content = handoff.build(_input(steps=steps, step_events=[ev("text_output", {"text": straddle})]))
@@ -617,8 +620,8 @@ def until(fn, timeout=15.0, step=0.1):
 
 
 def wait_handoff(step_id, reason="run ended"):
-    """_finish commits the status before its snapshot: wait (bounded) for the stored handoff
-    that belongs to this step and reason, not just for the step's terminal status."""
+    """The stored handoff of this step and reason (bounded wait). _finish stores it before the terminal
+    status (test_finish_snapshot_lands_before_the_terminal_status pins that); the wait stays as a guard."""
     got = until(lambda: (r := stored_row(step_id)) is not None and r.task_id == step_id
                 and r.reason == reason and r)
     assert got, f"no {reason!r} handoff stored for step {step_id}"
@@ -665,6 +668,57 @@ def test_finish_reason_cut_off_vs_run_ended(client):
     assert WorkerManager._finish_reason(Status.FAILED, "Task exceeded time limit") == "cut off"
     assert WorkerManager._finish_reason(Status.FAILED, "boom") == "run ended"
     assert WorkerManager._finish_reason(Status.COMPLETED, None) == "run ended"
+
+
+def _slow_finish_snapshot(monkeypatch):
+    """Slow the finish snapshot down, so a status committed before it would be seen without it."""
+    from app.resume import handoff
+
+    real = handoff.snapshot
+
+    async def slow(task_id, reason, **kw):
+        if reason in ("run ended", "cut off"):
+            await asyncio.sleep(0.6)
+        return await real(task_id, reason, **kw)
+
+    monkeypatch.setattr(handoff, "snapshot", slow)
+
+
+def _at_terminal(tid):
+    """The stored handoff read the moment the step's terminal status is visible."""
+    deadline = time.time() + 20.0
+    while time.time() < deadline:
+        if task_row(tid).status in ("completed", "failed", "cancelled"):
+            return stored_row(tid)
+        time.sleep(0.02)
+    raise AssertionError(f"step {tid} never ended")
+
+
+def test_finish_snapshot_lands_before_the_terminal_status(client, monkeypatch):
+    _slow_finish_snapshot(monkeypatch)
+    tid = start(client, "snapshot first")
+    row = _at_terminal(tid)
+    assert row is not None and row.task_id == tid and row.reason == "run ended"
+    # written before the commit, it still records the terminal status
+    assert row.content["step_status"] == "completed"
+    assert row.content["ended"] == "session ended (completed)"
+    # a follow-up issued right away composes with the finish handoff
+    key = conftest.env_probe_key()
+    fu = client.post(f"/tasks/{tid}/followup", json={"prompt": f"next [env-probe:{key}]"})
+    assert fu.status_code == 201, fu.text
+    wait_task(client, fu.json()["id"])
+    copied = conftest.read_probe_file(key, "handoff")
+    assert copied is not None and "Session: session ended (completed)." in copied
+
+
+def test_cut_off_snapshot_lands_before_the_cancelled_status(client, monkeypatch):
+    _slow_finish_snapshot(monkeypatch)
+    tid = start(client, "cut first [hang]")
+    assert until(lambda: task_row(tid).run_pgid)  # the process is registered, so cancel signals it
+    assert client.post(f"/tasks/{tid}/cancel").status_code == 200
+    row = _at_terminal(tid)
+    assert row is not None and row.task_id == tid and row.reason == "cut off"
+    assert row.content["step_status"] == "cancelled" and row.content["ended"] == "cut off"
 
 
 def test_handoff_md_written_at_spawn(client):
@@ -721,7 +775,7 @@ def test_handoff_routes_permissions(client):
     assert r.status_code == 201, r.text
     tid = r.json()["id"]
     wait_task(owner, tid)
-    # _finish commits the status before its snapshot: wait for the handoff row itself
+    # the handoff row itself (stored before the terminal status; the wait is a guard)
     assert until(lambda: (r := stored_row(tid)) is not None and r.reason == "run ended")
     got = viewer.get(f"/tasks/{tid}/handoff")
     assert got.status_code == 200, got.text
@@ -824,6 +878,15 @@ def test_fixture_commit_bg_and_outside_doc(client):
         assert "may vanish" in _handoff(client, o["id"])["text"]
     else:  # the workspace itself is under /tmp (Linux CI), so /tmp is no temp root for it
         assert content["outside_docs"] == [] and content["elsewhere"] == ["/tmp"]
+
+
+def test_snapshot_others_include_a_legacy_row(client, tmp_path):
+    from app.resume import handoff
+
+    owner = login_as(f"ho-legacy-{uuid.uuid4().hex[:8]}@test.local")
+    root = mk_task(workspace_dir=str(tmp_path), status="running", created_by=owner.user_id)
+    mk_task(workspace_dir=str(tmp_path), title="legacy run", status="running", created_by=owner.user_id, root_id=None)
+    assert run(handoff.snapshot(root, "working")).content["others"] == ["legacy run"]  # a NULL root_id is another run
 
 
 def test_snapshot_children_waiting_others(client, tmp_path):
