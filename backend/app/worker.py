@@ -722,6 +722,9 @@ class WorkerManager:
         tracker = self._usage[task_id] = usage_tracker.UsageTracker(secrets=run_secrets)  # fresh per attempt
         self._usage_spool[task_id] = self._new_usage_spool()
         await self._reset_usage_row(task_id)  # an earlier attempt's bands and figures are not this one's
+        from .questions import service as questions_service
+
+        await questions_service.dismiss_attempt_questions(task_id)  # nor its stale final-text questions
         ctx = {
             "task_id": task_id,
             "mcp_ids": {},
