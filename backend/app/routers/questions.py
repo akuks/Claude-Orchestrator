@@ -1,9 +1,10 @@
 """The Questions inbox for people (phase 3b): list, answer, dismiss. Never on the agent token's allowlist.
 
 Answer and dismiss need the same permission as Continue (``_manage_allowed(need_contributor=True)`` on the
-question's task); a question on a task the caller cannot see is 404. An answer queues a follow-up step of the
-question's task through the follow-up path (``_step_from`` under the global follow-up lock): it resumes the
-task's session when the answerer owns it, else starts fresh with the thread's handoff."""
+question's task); a question on a task the caller cannot see is 404. An answer continues the thread: a
+follow-up step of the thread's newest main-line step (not a dispatched child), built by the follow-up path
+(``_step_from`` under the global follow-up lock). It resumes that step's session when the answerer owns it,
+else starts fresh with the thread's handoff."""
 
 from datetime import datetime, timezone
 
@@ -97,12 +98,18 @@ async def answer_question(question_id: str, payload: QuestionAnswer, request: Re
                 or_(Task.root_id == root, Task.id == root), Task.status.in_(Status.ACTIVE)).limit(1))).first()
             if active is not None:
                 raise HTTPException(409, "A step of this thread is still active")
-            # the follow-up rule: only the session's owner resumes it; anyone else starts fresh
+            # the answer continues the THREAD: from its newest main-line step (not a dispatched child)
+            newest = (await s.execute(select(Task).where(
+                or_(Task.root_id == root, Task.id == root), Task.origin != "agent")
+                .order_by(Task.created_at.desc()).limit(1))).scalar_one_or_none()
+            step_parent = newest or parent
+            # the follow-up rule on that step: only its session's owner resumes it; anyone else starts fresh
             sender = p.user.id
-            resume = parent.session_id if parent.session_id and sender == parent.created_by else None
+            resume = (step_parent.session_id if step_parent.session_id and sender == step_parent.created_by
+                      else None)
             # the question is quoted as data on one line (a line break cannot pose as the answer line)
             prompt = ANSWER_PROMPT.format(question=" ".join(q.question.split()), answer=answer)
-            child = _step_from(parent, prompt=prompt, origin="user", resume=resume, created_by=sender)
+            child = _step_from(step_parent, prompt=prompt, origin="user", resume=resume, created_by=sender)
             s.add(child)
             await s.flush()
             q.status = "answered"

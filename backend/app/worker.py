@@ -33,7 +33,8 @@ from .guard import grants as guard_grants
 from .guard import policy_inputs
 from .guard import runtime as guard_runtime
 from .guard.plugin import ensure_plugin
-from .models import Agent, Artifact, McpCall, Project, SkillPack, Task, TaskEvent, TaskHandoff, TaskUsage, User
+from .models import (Agent, Artifact, McpCall, Project, SkillPack, Task, TaskEvent, TaskHandoff, TaskQuestion,
+                     TaskUsage, User)
 from .redaction import redact, redact_obj, secrets_from_env
 from .resume import gitfacts, ground_rules, handoff, prompting, recovery
 from .resume.texts import CRED_NOTE, RECOVERED_CONTINUE
@@ -1741,8 +1742,8 @@ class WorkerManager:
 
     async def _maybe_auto_continue(self, task_id: str) -> None:
         """The automatic fresh Continue: the step completed (not a dispatched child), co-guard fired its
-        ``fresh`` band, and either the handoff has an open todo or the step's notes were saved after the
-        band; no step of the thread is active and fewer than AUTO_CONTINUE_MAX of the thread's newest
+        ``fresh`` band, the step has no open question (the thread waits for the person's answer), and either
+        the handoff has an open todo or the step's notes were saved after the band; no step of the thread is active and fewer than AUTO_CONTINUE_MAX of the thread's newest
         main-line steps in a row were automatic. The step runs as the parent's owner, mode fresh, with an
         ``auto_continue`` run-log event. Never raises."""
         try:
@@ -1759,6 +1760,11 @@ class WorkerManager:
                 fresh = next((b for b in ((usage.bands or []) if usage is not None else [])
                               if isinstance(b, dict) and b.get("band") == "fresh"), None)
                 if fresh is None:
+                    return
+                # the agent asked a person in this step (filed or captured): the thread waits for the answer
+                asked = (await s.execute(select(TaskQuestion.id).where(
+                    TaskQuestion.task_id == task_id, TaskQuestion.status == "open").limit(1))).first()
+                if asked is not None:
                     return
                 root = task.root_id or task.id
                 row = (await s.execute(select(TaskHandoff).where(TaskHandoff.root_id == root))
