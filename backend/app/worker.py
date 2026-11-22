@@ -32,10 +32,11 @@ from .guard import grants as guard_grants
 from .guard import policy_inputs
 from .guard import runtime as guard_runtime
 from .guard.plugin import ensure_plugin
-from .models import Agent, Artifact, McpCall, Project, SkillPack, Task, TaskEvent, User
+from .models import Agent, Artifact, McpCall, Project, SkillPack, Task, TaskEvent, TaskUsage, User
 from .redaction import redact, redact_obj, secrets_from_env
 from .resume import gitfacts, ground_rules, handoff, prompting, recovery
 from .resume.texts import CRED_NOTE, RECOVERED_CONTINUE
+from .usage import tracker as usage_tracker
 
 log = logging.getLogger(__name__)
 
@@ -134,7 +135,8 @@ def _is_transient(stderr: str) -> bool:
     return any(m in text for m in _TRANSIENT_MARKERS)
 
 
-def _short(value, secrets: list[str] | None = None) -> str:
+def _flatten(value) -> str:
+    """A tool result's content as one text (its original length is what usage measures)."""
     if isinstance(value, list):
         parts = []
         for b in value:
@@ -143,7 +145,11 @@ def _short(value, secrets: list[str] | None = None) -> str:
             else:
                 parts.append(str(b))
         value = " ".join(str(p) for p in parts)
-    text = str(value)
+    return str(value)
+
+
+def _short(value, secrets: list[str] | None = None) -> str:
+    text = _flatten(value)
     if secrets is not None:  # before the cut, so no secret prefix survives it
         text = redact(text, secrets)
     return text[:_MAX_TOOL_RESULT_CHARS]
@@ -208,6 +214,8 @@ class WorkerManager:
         # task_id -> the run's outside-commit base, fixed at spawn (F9); the
         # finish snapshot uses it too.
         self._run_since: dict[str, str | None] = {}
+        # task_id -> the live run's UsageTracker (phase 3b); _finish stores its last figures.
+        self._usage: dict[str, usage_tracker.UsageTracker] = {}
         # task ids a live _run_guarded holds (the sweep never recovers them),
         # and ids a recover() is working on (never two side by side)
         self._active: set[str] = set()
@@ -393,6 +401,7 @@ class WorkerManager:
             project_env = {}
             # co-guard: the project's guard and policy settings.
             guard_project = None
+            proj = None
             if task.project_id:
                 proj = await s.get(Project, task.project_id)
                 if proj and proj.env:
@@ -408,6 +417,7 @@ class WorkerManager:
                 proj = await s.get(Project, eff) if eff else None
                 if proj is not None:
                     guard_project = _guard_project(proj, None)
+            fresh_session_tokens = proj.fresh_session_tokens if proj is not None else None
             # Coordinator: inject the live agent registry + how to delegate — but
             # NOT inside a workflow, where the workflow owns the orchestration and a
             # coordinator agent is used only as a planning step.
@@ -705,12 +715,19 @@ class WorkerManager:
 
         stderr_task = asyncio.create_task(read_stderr())
 
+        tracker = self._usage[task_id] = usage_tracker.UsageTracker()  # fresh per attempt
         ctx = {
             "task_id": task_id,
             "mcp_ids": {},
             "secrets": run_secrets,
             "since": since,
             "run": run_state,
+            # token care (phase 3b): the step's usage, written to usage.json (<= 1 / 2 s)
+            # and the TaskUsage row (<= 1 / 5 s) while running
+            "usage": tracker,
+            "usage_meta": {"max_budget_usd": max_budget_usd, "fresh_session_tokens": fresh_session_tokens},
+            "usage_saved": None,
+            "usage_written": None,
             # co-guard watchdog (Ruling R21): tool_use ids checked through the spool
             "guard": {"calls": {}, "lanes": {}, "done": set(), "seen": set(), "offset": 0, "violation": None,
                       "proc": proc, "emit": emit,
@@ -781,6 +798,7 @@ class WorkerManager:
                 # This attempt is over: don't leave its token live through backoff.
                 await auth.revoke_task_tokens(s, task_id)
                 await s.commit()
+            self._usage.pop(task_id, None)  # the next attempt counts afresh
             asyncio.create_task(
                 self._retry_after(task_id, backoff, task_priority, task_created_at)
             )
@@ -1003,6 +1021,12 @@ class WorkerManager:
                         await s.commit()
             except Exception as e:  # noqa: BLE001
                 log.warning("heartbeat: %s: %s", task_id, e)
+            # a fresh ts through a long quiet tool call (still <= 1 write / 2 s)
+            if ctx.get("usage") is not None and (
+                    ctx.get("usage_written") is None
+                    or time.monotonic() - ctx["usage_written"] >= self.USAGE_FILE_EVERY):
+                ctx["usage_written"] = time.monotonic()
+                self._write_usage_json(ctx)
             try:
                 n = ctx["run"]["events"]
                 if n != snapped and time.monotonic() - last >= handoff.HANDOFF_EVERY_SECONDS:
@@ -1363,6 +1387,9 @@ class WorkerManager:
             if sid:
                 await self._store_session_id(ctx["task_id"], sid)
         elif etype == "assistant":
+            usage = ctx.get("usage")
+            if usage is not None:
+                usage.on_assistant(obj)
             actual = obj.get("message", {}).get("model")
             if actual and not ctx.get("model_stored"):
                 ctx["model_stored"] = True
@@ -1374,6 +1401,8 @@ class WorkerManager:
                     await emit("text_output", {"text": block["text"]})
                 elif block.get("type") == "tool_use":
                     name = block.get("name")
+                    if usage is not None and not obj.get("parent_tool_use_id") and block.get("id"):
+                        usage.on_tool_use_main(str(block["id"]), str(name or ""), block.get("input") or {})
                     await emit("tool_use", {"name": name, "input": block.get("input"),
                                             "id": block.get("id"), "parent": obj.get("parent_tool_use_id") or None})
                     if name and name.startswith("mcp__"):
@@ -1383,9 +1412,12 @@ class WorkerManager:
             if isinstance(content, list):
                 for block in content:
                     if isinstance(block, dict) and block.get("type") == "tool_result":
+                        flat = _flatten(block.get("content"))
+                        if ctx.get("usage") is not None:  # the original length, before _short cuts it
+                            ctx["usage"].on_tool_result(str(block.get("tool_use_id") or ""), None, len(flat))
                         await emit(
                             "tool_result",
-                            {"content": _short(block.get("content"), ctx.get("secrets") or []),
+                            {"content": _short(flat, ctx.get("secrets") or []),
                              "tool_use_id": block.get("tool_use_id"),
                              "is_error": bool(block.get("is_error")),
                              "parent": obj.get("parent_tool_use_id") or None},
@@ -1408,6 +1440,57 @@ class WorkerManager:
                 + (usage.get("cache_creation_input_tokens") or 0)
             ) or None
             result["output_tokens"] = usage.get("output_tokens")
+        if etype in ("assistant", "user") and ctx.get("usage") is not None:
+            await self._usage_tick(ctx)
+
+    # ---- token care (phase 3b): usage.json and the TaskUsage row ---------------
+
+    USAGE_FILE_EVERY = 2.0  # seconds between usage.json writes
+    USAGE_SAVE_EVERY = 5.0  # seconds between TaskUsage writes while running
+
+    async def _usage_tick(self, ctx) -> None:
+        now = time.monotonic()
+        if ctx.get("usage_written") is None or now - ctx["usage_written"] >= self.USAGE_FILE_EVERY:
+            ctx["usage_written"] = now
+            self._write_usage_json(ctx)
+        if ctx.get("usage_saved") is None or now - ctx["usage_saved"] >= self.USAGE_SAVE_EVERY:
+            ctx["usage_saved"] = now
+            await self._persist_usage(ctx["task_id"], ctx["usage"])
+
+    @staticmethod
+    def _write_usage_json(ctx) -> None:
+        """co-guard's view of the step (it ignores a file older than 120 s). Never raises."""
+        t, meta = ctx["usage"], ctx.get("usage_meta") or {}
+        try:
+            usage_tracker.write_usage_file(ctx["task_id"], {
+                "context_tokens": t.context_tokens, "est_cost_usd": t.est_cost_usd,
+                "max_budget_usd": meta.get("max_budget_usd"),
+                "fresh_session_tokens": meta.get("fresh_session_tokens"), "ts": time.time()})
+        except Exception as e:  # noqa: BLE001 - usage bookkeeping never stops a run
+            log.warning("usage: usage.json write failed for %s: %s", ctx["task_id"], e)
+
+    async def _persist_usage(self, task_id: str, tracker, final: bool = False,
+                             total_cost_usd: float | None = None) -> None:
+        """Upsert the step's TaskUsage row; at finish the estimate becomes the
+        result's total_cost_usd when there is one. Bands are left as they are. Never raises."""
+        try:
+            async with SessionLocal() as s:
+                row = await s.get(TaskUsage, task_id)
+                if row is None:
+                    t = await s.get(Task, task_id)
+                    if t is None:
+                        return
+                    row = TaskUsage(task_id=task_id, root_id=t.root_id or t.id, bands=[])
+                    s.add(row)
+                row.context_tokens = tracker.context_tokens
+                row.peak_context = tracker.peak_context
+                row.est_cost_usd = (total_cost_usd if final and total_cost_usd is not None
+                                    else tracker.est_cost_usd)
+                row.breakdown = tracker.snapshot()
+                row.updated_at = _now()
+                await s.commit()
+        except Exception as e:  # noqa: BLE001
+            log.warning("usage: persist failed for %s: %s", task_id, e)
 
     async def _store_model_used(self, task_id: str, model_used: str) -> None:
         async with SessionLocal() as s:
@@ -1471,6 +1554,7 @@ class WorkerManager:
             result_text = redact(result_text, secrets or [])
         if error:
             error = redact(error, secrets or [])
+        tracker = self._usage.pop(task_id, None)  # the live run's usage (stored below)
         context_store.cleanup(task_id)  # drop this task's knowledge snapshot
         await self._spend_spool_grants(task_id)  # a spool not ingested (error paths): its once grants stay spent
         guard_runtime.remove_task_dir(task_id)  # co-guard policy + spool (normally gone already)
@@ -1511,6 +1595,9 @@ class WorkerManager:
                     )
                 )
             await s.commit()
+        # the step's last usage figures (the result's cost replaces the estimate)
+        if tracker is not None:
+            await self._persist_usage(task_id, tracker, final=True, total_cost_usd=total_cost_usd)
         # where the thread stands now (the run's outside-commit base when one is held)
         try:
             # the cut-off callers (cancel, timeout) pass no secrets: use the run's
