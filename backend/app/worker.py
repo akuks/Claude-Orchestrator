@@ -15,7 +15,7 @@ import signal
 import time
 from collections import Counter
 from types import SimpleNamespace
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from sqlalchemy import func, select
@@ -33,7 +33,7 @@ from .guard import runtime as guard_runtime
 from .guard.plugin import ensure_plugin
 from .models import Agent, Artifact, McpCall, Project, SkillPack, Task, TaskEvent, User
 from .redaction import redact, redact_obj, secrets_from_env
-from .resume import gitfacts, handoff, prompting
+from .resume import gitfacts, handoff, prompting, recovery
 from .resume.texts import CRED_NOTE
 
 log = logging.getLogger(__name__)
@@ -207,13 +207,19 @@ class WorkerManager:
         # task_id -> the run's outside-commit base, fixed at spawn (F9); the
         # finish snapshot uses it too.
         self._run_since: dict[str, str | None] = {}
+        # task ids a live _run_guarded holds (the sweep never recovers them),
+        # and ids a recover() is working on (never two side by side)
+        self._active: set[str] = set()
+        self._recovering: set[str] = set()
         self._dispatcher: asyncio.Task | None = None
+        self._sweeper: asyncio.Task | None = None
 
     # ---- lifecycle -------------------------------------------------------
 
     async def start(self) -> None:
         self._dispatcher = asyncio.create_task(self._dispatch_loop())
         await self._requeue_pending()
+        self._sweeper = asyncio.create_task(self._sweep_loop())
 
     @staticmethod
     def _signal_group(proc, sig: int) -> None:
@@ -230,22 +236,29 @@ class WorkerManager:
     async def stop(self) -> None:
         if self._dispatcher:
             self._dispatcher.cancel()
+        if self._sweeper:
+            self._sweeper.cancel()
         for proc in list(self._running.values()):
             self._signal_group(proc, signal.SIGTERM)
 
     async def _requeue_pending(self) -> None:
-        """On boot, re-queue anything left QUEUED, and reset orphaned RUNNING."""
+        """On boot, re-queue anything left QUEUED; a RUNNING row was cut off
+        by the restart and goes through ``recover``."""
         async with SessionLocal() as s:
             rows = (
                 await s.execute(
-                    select(Task).where(Task.status.in_([Status.QUEUED, Status.RUNNING]))
+                    select(Task.id, Task.status, Task.priority, Task.created_at)
+                    .where(Task.status.in_([Status.QUEUED, Status.RUNNING]))
                 )
-            ).scalars().all()
-            for t in rows:
-                if t.status == Status.RUNNING:
-                    t.status = Status.QUEUED
-                await self._enqueue(t.id, t.priority, t.created_at)
-            await s.commit()
+            ).all()
+        for tid, status, priority, created_at in rows:
+            if status == Status.QUEUED:
+                await self._enqueue(tid, priority, created_at)
+                continue
+            try:
+                await self.recover(tid, "server restart")
+            except Exception:  # noqa: BLE001 - one bad row never stops the boot (the sweep retries it)
+                log.exception("recovery: %s failed at boot", tid)
 
     # ---- public control --------------------------------------------------
 
@@ -278,6 +291,7 @@ class WorkerManager:
             asyncio.create_task(self._run_guarded(task_id))
 
     async def _run_guarded(self, task_id: str) -> None:
+        self._active.add(task_id)
         try:
             await self._run_job(task_id)
         except Exception as exc:  # noqa: BLE001 - never let the pool die
@@ -291,6 +305,7 @@ class WorkerManager:
             self._run_secrets.pop(task_id, None)
             self._guard_live.pop(task_id, None)
             self._run_since.pop(task_id, None)
+            self._active.discard(task_id)
             self._sem.release()
 
     # ---- execution -------------------------------------------------------
@@ -356,6 +371,7 @@ class WorkerManager:
                 return
             task.status = Status.RUNNING
             task.started_at = _now()
+            task.run_pgid = task.run_proc_start = None  # this run's are recorded at spawn
             prompt = task.prompt
             model = task.model
             max_turns = task.max_turns
@@ -465,6 +481,10 @@ class WorkerManager:
             except Exception:  # noqa: BLE001 - a failed composition never stops a run
                 log.exception("prompting: compose failed for %s; running with the step's own prompt", task_id)
                 ctx_log = {"blocks": [], "compose_failed": True}
+            if recovery_block is not None and prompting.recovering(t):
+                # the record goes into this prompt once
+                t.recovery = {**t.recovery, "pending": False}
+                await s.commit()
         if ctx_log.get("blocks") or ctx_log.get("compose_failed"):
             await emit("context", ctx_log)
         # A fresh guard follow-up keeps today's project preamble (Phase 2).
@@ -654,6 +674,7 @@ class WorkerManager:
             return
 
         self._running[task_id] = proc
+        await self._record_spawn(task_id, proc.pid)
 
         try:
             proc.stdin.write(prompt.encode())
@@ -792,9 +813,144 @@ class WorkerManager:
     # ---- resume: head at start, heartbeat, handoff ---------------------------
 
     def _recovery_block(self, task: Task) -> str | None:
-        """The rendered recovery record of a step whose recovery is pending
-        (Task 7 renders it with recovery.render_record); None otherwise."""
-        return None
+        """The rendered recovery record of a step whose recovery is pending;
+        None otherwise. (``external`` was stored with the record by recover.)"""
+        if not prompting.recovering(task):
+            return None
+        return recovery.render_record(task.recovery, external=bool(task.recovery.get("external")))
+
+    @staticmethod
+    async def _record_spawn(task_id: str, pid: int) -> None:
+        """The claude process group and its start time, so a recovery can stop
+        a surviving copy (and only that process: the start time must match)."""
+        try:
+            start = await asyncio.to_thread(recovery.proc_start, pid)
+            async with SessionLocal() as s:
+                t = await s.get(Task, task_id)
+                if t is not None:
+                    t.run_pgid, t.run_proc_start = pid, start
+                    await s.commit()
+        except Exception as e:  # noqa: BLE001 - bookkeeping never stops a run
+            log.warning("recovery: spawn bookkeeping failed for %s: %s", task_id, e)
+
+    # ---- crash recovery ----------------------------------------------------------
+
+    async def _emit_offline(self, task_id: str, etype: str, payload: dict) -> None:
+        """An event of a task with no live run: the next seq, redacted by
+        token shapes (no run secrets exist here), stored and published."""
+        payload = redact_obj(payload, [])
+        async with SessionLocal() as s:
+            seq = ((await s.execute(select(func.max(TaskEvent.seq)).where(TaskEvent.task_id == task_id))
+                    ).scalar() or 0) + 1
+            s.add(TaskEvent(task_id=task_id, seq=seq, type=etype, payload=payload))
+            await s.commit()
+        await broker.publish(task_id, {"seq": seq, "type": etype, "payload": payload})
+
+    def _emit_offline_for(self, task_id: str):
+        async def emit(etype: str, payload: dict) -> None:
+            await self._emit_offline(task_id, etype, payload)
+
+        return emit
+
+    async def recover(self, task_id: str, why: str) -> str:
+        """A RUNNING step whose run is gone (server restart, lost worker):
+        stop a surviving claude group (start time verified), record what was
+        in flight from the raw spool BEFORE the spool is ingested and wiped,
+        snapshot the handoff and queue the step again to resume its own
+        session with the record. After MAX_RECOVERIES the step fails.
+        ``"requeued"``, ``"failed"`` or ``"skipped"`` (not RUNNING, held by a
+        live run, or already being recovered)."""
+        if task_id in self._active or task_id in self._recovering:
+            return "skipped"
+        self._recovering.add(task_id)
+        try:
+            return await self._recover(task_id, why)
+        finally:
+            self._recovering.discard(task_id)
+
+    async def _recover(self, task_id: str, why: str) -> str:
+        async with SessionLocal() as s:
+            t = await s.get(Task, task_id)
+            if t is None or t.status != Status.RUNNING:
+                return "skipped"
+            pgid, start, recoveries = t.run_pgid, t.run_proc_start, t.recoveries or 0
+            session_id, priority, created_at = t.session_id, t.priority, t.created_at
+            workspace = t.workspace_dir or str(settings.workspaces_dir / task_id)
+            pid = await effective_project_id(s, t)
+            proj = await s.get(Project, pid) if pid else None
+            external = proj is not None and (proj.trust == "external" or bool(proj.quarantine))
+            project_dir = proj.directory if proj is not None else None
+            rows = (await s.execute(select(TaskEvent).where(TaskEvent.task_id == task_id)
+                                    .order_by(TaskEvent.seq.desc()).limit(handoff.EVENTS_SCAN_MAX))).scalars().all()
+            evs = [{"type": e.type, "payload": e.payload or {}, "created_at": e.created_at} for e in reversed(rows)]
+        # 1. a surviving claude group: SIGKILL, only when its start time still matches
+        orphan_killed = await asyncio.to_thread(recovery.kill_orphan, pgid, start)
+        # 2. the raw spool, before anything wipes it
+        spool_raw = guard_runtime.read_spool_raw(task_id)
+        # 3. the record
+        saved = await handoff.stored(task_id)
+        now = _now()
+        record = recovery.build_record(None, evs, spool_raw, workspace, saved.saved_at if saved else None, now,
+                                       why=why, project_dir=project_dir)
+        # 4. the spool's guard records as events, its once grants spent, the task dir removed
+        await self._ingest_guard_spool(task_id, self._emit_offline_for(task_id))
+        gave_up = recoveries >= recovery.MAX_RECOVERIES
+        if not gave_up:
+            # 5. where the thread stands
+            try:
+                await handoff.snapshot(task_id, "recovered", secrets=[])
+            except Exception as e:  # noqa: BLE001
+                log.warning("handoff: recovered snapshot failed for %s: %s", task_id, e)
+        # 6.-7. the record, the count, its own session; queued again
+        async with SessionLocal() as s:
+            t = await s.get(Task, task_id)
+            if t is None:
+                return "skipped"
+            t.recovery = {**record, "external": external, "pending": not gave_up}
+            t.run_pgid = t.run_proc_start = t.heartbeat_at = None
+            if not gave_up:
+                t.recoveries = recoveries + 1
+                if session_id:
+                    t.resume_session_id = session_id
+                t.status = Status.QUEUED
+            await s.commit()
+        # 8. the recovery event (before the enqueue: the next run's seq follows it)
+        await self._emit_offline(task_id, "recovery", {
+            "why": record["why"], "at": record["at"], "in_flight": len(record["in_flight"]),
+            "orphan_killed": orphan_killed, "recoveries": recoveries if gave_up else recoveries + 1,
+            "gave_up": gave_up})
+        if gave_up:
+            await self._finish(task_id, Status.FAILED, error=recovery.GAVE_UP_ERROR.format(n=recoveries + 1),
+                               secrets=[])
+            return "failed"
+        await self._enqueue(task_id, priority, created_at)
+        return "requeued"
+
+    async def _sweep_once(self) -> None:
+        """RUNNING rows no live run holds whose heartbeat (else start) is
+        older than STALE_SECONDS: the run lost its worker."""
+        cutoff = _now() - timedelta(seconds=recovery.STALE_SECONDS)
+        async with SessionLocal() as s:
+            rows = (await s.execute(select(Task.id, Task.heartbeat_at, Task.started_at)
+                                    .where(Task.status == Status.RUNNING))).all()
+        for tid, beat, started in rows:
+            if tid in self._active:
+                continue
+            last = recovery.aware(beat or started)
+            if last is not None and last > cutoff:
+                continue
+            try:
+                await self.recover(tid, "lost its worker")
+            except Exception:  # noqa: BLE001 - the next sweep tries again
+                log.exception("recovery: sweep of %s failed", tid)
+
+    async def _sweep_loop(self) -> None:
+        while True:
+            await asyncio.sleep(settings.recovery_sweep_seconds or recovery.SWEEP_SECONDS)
+            try:
+                await self._sweep_once()
+            except Exception:  # noqa: BLE001 - the loop never dies
+                log.exception("recovery: sweep failed")
 
     async def _spawn_handoff(self, task_id: str, workspace: Path, secrets: list[str]) -> str | None:
         """Record head_at_start, return the run's outside-commit base (the
@@ -1312,6 +1468,7 @@ class WorkerManager:
                 return
             task.status = status
             task.completed_at = _now()
+            task.run_pgid = task.run_proc_start = task.heartbeat_at = None
             if exit_code is not None:
                 task.exit_code = exit_code
             if result_text is not None:
