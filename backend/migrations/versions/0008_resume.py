@@ -1,6 +1,9 @@
 """resume: task origin, notes, heartbeat and recovery fields, thread handoffs,
 org ground rules
 
+Backfill: co-guard follow-ups (by title) get origin guard; dispatched children
+(parent and agent set) get origin agent; every other row keeps user.
+
 Revision ID: 0008
 Revises: 0007
 """
@@ -29,6 +32,7 @@ def upgrade() -> None:
         b.add_column(sa.Column("credential_ref", sa.String(32), nullable=True))
         b.add_column(sa.Column("head_at_start", sa.String(64), nullable=True))
     op.execute("UPDATE tasks SET origin='guard' WHERE title LIKE 'co-guard follow-up:%'")
+    op.execute("UPDATE tasks SET origin='agent' WHERE parent_task_id IS NOT NULL AND agent_id IS NOT NULL")
     op.create_table(
         "task_handoffs",
         sa.Column("id", sa.String(32), primary_key=True),
