@@ -10,6 +10,7 @@ prefixed ``[helper] ``."""
 
 from __future__ import annotations
 
+import math
 from datetime import datetime
 
 from ..redaction import clean_text, redact
@@ -73,6 +74,15 @@ def _guard(p: dict) -> tuple[str, str] | None:
     return None
 
 
+def _band(p: dict) -> tuple[str, str]:
+    band, value = str(p.get("band") or ""), p.get("value")
+    if not isinstance(value, (int, float)) or isinstance(value, bool) or not math.isfinite(value):
+        return "BAND", band
+    if band == "fresh":
+        return "BAND", f"{band} {int(value) // 1000}k"
+    return "BAND", f"{band} ${value:.2f}"
+
+
 def _kind(ev: dict) -> tuple[str, str] | None:
     etype = ev.get("type")
     p = ev.get("payload") if isinstance(ev.get("payload"), dict) else {}
@@ -102,6 +112,8 @@ def _kind(ev: dict) -> tuple[str, str] | None:
         return "CUTOFF", "gave up" if p.get("gave_up") else (p.get("why") or "")
     if etype == "fresh_session":
         return "FRESH", p.get("reason") or ""
+    if etype == "usage_band":
+        return _band(p)
     return None
 
 
