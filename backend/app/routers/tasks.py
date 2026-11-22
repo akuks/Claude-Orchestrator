@@ -389,6 +389,9 @@ async def duplicate_task(task_id: str, request: Request):
             tags=list(src.tags or []),
             model=src.model,
             max_turns=src.max_turns,
+            # the source's budget, else the default a new task gets (build_task)
+            max_budget_usd=(src.max_budget_usd if src.max_budget_usd is not None
+                            else settings.default_task_budget_usd),
             parent_task_id=src.id,
             origin="user",
             status=Status.QUEUED,

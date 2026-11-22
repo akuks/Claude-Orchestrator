@@ -5,6 +5,7 @@ from ..constants import Status
 
 TIP_NARROW = "A tool result over 20,000 characters came back; read narrower ranges or filter output."
 TIP_FRESH = "Context got large; split long work across fresh sessions (set a fresh-session threshold on the project)."
+TIP_FRESH_SET = "Context got large; this project's fresh-session threshold will hand long work to a fresh session."
 TIP_CACHE = "Under half of the input came from the cache; keep the start of prompts stable."
 
 BIG_RESULT_CHARS = 20_000
@@ -18,8 +19,10 @@ def _buckets(breakdown: dict) -> list[dict]:
 
 
 def breakdown_tokens(breakdown: dict) -> int:
-    """input + output over the main and helper buckets (what Task.input/output_tokens count)."""
-    return sum(int(b.get("input") or 0) + int(b.get("output") or 0) for b in _buckets(breakdown))
+    """input + cache write + cache read + output over the main and helper buckets: the basis of the stored
+    Task.input_tokens (cache included) + Task.output_tokens, so a step's figure does not jump when it ends."""
+    return sum(int(b.get(f) or 0) for b in _buckets(breakdown)
+               for f in ("input", "cache_write", "cache_read", "output"))
 
 
 def tips(usages: list, fresh_tokens: int | None) -> list[str]:
@@ -29,7 +32,7 @@ def tips(usages: list, fresh_tokens: int | None) -> list[str]:
            for u in usages for r in ((u.breakdown or {}).get("largest_results") or [])):
         out.append(TIP_NARROW)
     if any((u.peak_context or 0) > (fresh_tokens or DEFAULT_FRESH_TOKENS) for u in usages):
-        out.append(TIP_FRESH)
+        out.append(TIP_FRESH if fresh_tokens is None else TIP_FRESH_SET)
     for u in usages:
         bd = u.breakdown or {}
         if (bd.get("messages") or 0) < CACHE_MIN_MESSAGES:

@@ -145,17 +145,22 @@ async def _touched(s, task: Task) -> bool:
     return False
 
 
-async def capture_final(task_id: str) -> None:
-    """After a run ends (any terminal status with a final text): when the step touched files or made a commit
+async def capture_final(task_id: str, ending: dict | None = None) -> None:
+    """When a run ends (any terminal status with a final text): when the step touched files or made a commit
     and its last paragraph ends with ``?`` (at most ``QUESTION_MAX`` characters; a longer one is skipped, not
     cut), file that paragraph as a ``final_text`` question - unless a question was already filed on this step
-    (by the agent, or an earlier capture) or the thread is full. Never raises."""
+    (by the agent, or an earlier capture) or the thread is full. Never raises.
+
+    ``ending`` (the worker's ``_finish``, like the handoff snapshot's): the run is ending and its terminal
+    status is not committed yet, so the question is in place when the status flips; its ``result_text``
+    (redacted already) is the final text, else the stored one. Without it the stored status must be terminal."""
     try:
         async with SessionLocal() as s:
             task = await s.get(Task, task_id)
-            if task is None or task.status not in Status.TERMINAL:
+            if task is None or (ending is None and task.status not in Status.TERMINAL):
                 return
-            para = last_paragraph(task.result_text)
+            text = ending["result_text"] if ending is not None and "result_text" in ending else task.result_text
+            para = last_paragraph(text)
             # the stored result_text is already redacted with the run's secrets (_finish); this masks
             # token shapes again and strips hidden characters
             para = one_line(para) if para else None

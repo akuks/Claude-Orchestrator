@@ -12,6 +12,7 @@ Context size = input + cache write + cache read of the latest main message.
 import json
 import os
 
+from ..redaction import clean_text, redact
 from . import prices
 
 USAGE_FILE = "usage.json"
@@ -29,7 +30,8 @@ def _bucket() -> dict:
 
 
 class UsageTracker:
-    def __init__(self) -> None:
+    def __init__(self, secrets: list[str] | None = None) -> None:
+        self._secrets = list(secrets or [])  # the run's secrets: helper kinds and tool names are masked
         # message key -> {"helper": kind | None, "model": str | None, "u": (input, cw, cr, output)}
         self._msgs: dict[str, dict] = {}
         self._anon = 0  # messages without an id (each its own)
@@ -40,6 +42,11 @@ class UsageTracker:
         self.injected_chars = 0
         self._context: int | None = None
         self._peak: int | None = None
+
+    def _clean(self, text) -> str:
+        """Model text kept in the breakdown (served to every viewer): hidden characters stripped, the run's
+        secrets and token shapes masked."""
+        return redact(clean_text(text), self._secrets)
 
     # ---- feeding -----------------------------------------------------------
 
@@ -53,7 +60,7 @@ class UsageTracker:
         content = msg.get("content")
         for block in content if isinstance(content, list) else []:
             if isinstance(block, dict) and block.get("type") == "tool_use" and block.get("id"):
-                self._tool_names[str(block["id"])] = str(block.get("name") or "")
+                self._tool_names[str(block["id"])] = self._clean(block.get("name") or "")
         usage = msg.get("usage")
         if not isinstance(usage, dict):
             return
@@ -74,15 +81,16 @@ class UsageTracker:
 
     def on_tool_use_main(self, tool_use_id: str, name: str, input: dict) -> None:
         if tool_use_id:
-            self._tool_names[str(tool_use_id)] = str(name or "")
+            self._tool_names[str(tool_use_id)] = self._clean(name or "")
         if name in _HELPER_TOOLS and tool_use_id:
             inp = input if isinstance(input, dict) else {}
             kind = inp.get("subagent_type") or inp.get("description") or "helper"
-            self._helper_kinds[str(tool_use_id)] = str(kind)[:80]
+            self._helper_kinds[str(tool_use_id)] = self._clean(kind)[:80] or "helper"  # redact, then cut
 
     def on_tool_result(self, tool_use_id: str, tool_name: str | None, raw_len: int) -> None:
         tid = str(tool_use_id or "")
-        rec = {"tool": tool_name or self._tool_names.get(tid) or "", "chars": _n(raw_len), "id": tid}
+        tool = self._clean(tool_name) if tool_name else self._tool_names.get(tid)
+        rec = {"tool": tool or "", "chars": _n(raw_len), "id": tid}
         if len(self._largest) >= LARGEST_KEEP and rec["chars"] <= self._largest[-1]["chars"]:
             return
         self._largest.append(rec)
@@ -113,12 +121,15 @@ class UsageTracker:
 
     @property
     def est_cost_usd(self) -> float | None:
-        """The running estimate; None when nothing counted yet or any model is unknown."""
+        """The running estimate; None when nothing counted yet or tokens came from an unknown model (a
+        zero-token message, e.g. Claude Code's ``<synthetic>`` error text, costs nothing and is skipped)."""
         models = self._per_model()
         if not models:
             return None
         total = 0.0
         for model, b in models.items():
+            if not any(b[f] for f in _FIELDS):
+                continue
             est = prices.estimate(None if model == "unknown" else model,
                                   b["input"], b["output"], b["cache_write"], b["cache_read"])
             if est is None:

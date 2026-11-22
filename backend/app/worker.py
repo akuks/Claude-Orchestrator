@@ -719,7 +719,7 @@ class WorkerManager:
 
         stderr_task = asyncio.create_task(read_stderr())
 
-        tracker = self._usage[task_id] = usage_tracker.UsageTracker()  # fresh per attempt
+        tracker = self._usage[task_id] = usage_tracker.UsageTracker(secrets=run_secrets)  # fresh per attempt
         self._usage_spool[task_id] = self._new_usage_spool()
         await self._reset_usage_row(task_id)  # an earlier attempt's bands and figures are not this one's
         ctx = {
@@ -1686,6 +1686,14 @@ class WorkerManager:
                                    since=self._run_since.get(task_id), ending=ending)
         except Exception as e:  # noqa: BLE001 - never breaks a finish
             log.warning("handoff: finish snapshot failed for %s: %s", task_id, e)
+        # Questions inbox: the final text's trailing question, filed before the terminal status too, so the
+        # task page's refetch on the status change sees it (never raises; the guard is belt and braces)
+        try:
+            from .questions import service as questions
+
+            await questions.capture_final(task_id, ending=ending)
+        except Exception as e:  # noqa: BLE001 - never breaks a finish
+            log.warning("questions: capture failed for %s: %s", task_id, e)
         async with SessionLocal() as s:
             task = await s.get(Task, task_id)
             if task is None:
@@ -1725,13 +1733,6 @@ class WorkerManager:
             await guard_grants.after_task_finished(task_id, submit=self.submit)
         except Exception:  # noqa: BLE001 - never breaks a finish
             pass
-        # Questions inbox: the final text's trailing question (never raises; the guard is belt and braces)
-        try:
-            from .questions import service as questions
-
-            await questions.capture_final(task_id)
-        except Exception as e:  # noqa: BLE001 - never breaks a finish
-            log.warning("questions: capture failed for %s: %s", task_id, e)
         # token care: a step that crossed the fresh-session threshold continues in a fresh session
         await self._maybe_auto_continue(task_id)
 
