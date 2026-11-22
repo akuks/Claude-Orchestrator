@@ -1194,7 +1194,7 @@ async def list_builtins(request: Request):
 class OrgSettingsIn(BaseModel):
     disabled_rules: Optional[list[str]] = None
     dev_db_patterns: Optional[list[str]] = None
-    ground_rules: Optional[dict] = None  # replaces the whole object (a key left out takes its default)
+    ground_rules: Optional[Any] = None  # replaces the whole object; not an object: 400 (validate) (a key left out takes its default)
 
 
 async def _org_settings_out(s) -> dict:
@@ -1220,7 +1220,10 @@ async def put_org_settings(body: OrgSettingsIn, request: Request):
         raise HTTPException(403, "Admin only")
     disabled = patterns = ground = None
     if body.ground_rules is not None:
-        ground = ground_rules.validate(body.ground_rules)
+        try:
+            ground = ground_rules.validate(body.ground_rules)
+        except ValueError as e:
+            raise HTTPException(400, str(e)) from None
     if body.disabled_rules is not None:
         disabled = list(dict.fromkeys(body.disabled_rules))
         locked = [r for r in disabled if r not in guard_rules.DISABLEABLE]

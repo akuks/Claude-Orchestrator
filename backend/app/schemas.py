@@ -1,6 +1,6 @@
 from datetime import datetime
 import re
-from typing import Literal, Optional
+from typing import Annotated, Literal, Optional
 
 from pydantic import BaseModel, Field, field_validator, model_validator
 
@@ -84,6 +84,45 @@ class FollowupCreate(BaseModel):
 class ContinueCreate(BaseModel):
     # auto | resume | fresh (checked by the route: a bad mode is 400)
     mode: str | None = "auto"
+
+
+class QuestionCreate(BaseModel):
+    # raw size caps (422) before any work; the stored limits are checked after redaction and cleaning
+    # (questions.service.clean_fields): 422
+    question: str = Field(max_length=10000)
+    options: list[Annotated[str, Field(max_length=2000)]] = Field(default_factory=list, max_length=20)
+    recommendation: Optional[str] = Field(default=None, max_length=2000)
+    blocks: Optional[str] = Field(default=None, max_length=3000)
+    reversible: Optional[bool] = None
+
+
+class QuestionAnswer(BaseModel):
+    # exactly one of: a free answer, or accept=true (checked by the route: 422)
+    answer: Optional[str] = Field(default=None, max_length=10000)
+    accept: Optional[bool] = None
+
+
+class QuestionOut(BaseModel):
+    id: str
+    task_id: str
+    root_id: str
+    project_id: Optional[str]
+    question: str
+    options: list[str]
+    recommendation: Optional[str]
+    blocks: Optional[str]
+    reversible: Optional[bool]
+    source: str
+    status: str
+    answer: Optional[str]
+    answered_by: Optional[str]
+    answered_at: Optional[datetime]
+    followup_task_id: Optional[str]
+    created_at: datetime
+    task_title: Optional[str] = None
+    can_answer: bool = False
+
+    model_config = {"from_attributes": True}
 
 
 class ArtifactOut(BaseModel):
@@ -273,6 +312,8 @@ class ProjectUpdate(BaseModel):
     on_no_answer: Optional[str] = None
     readonly_paths: Optional[list["ReadonlyPathIn"]] = None
     reference_project_ids: Optional[list[str]] = None
+    # token care (phase 3b, maintainer-editable): null turns the fresh-session hand-over off.
+    fresh_session_tokens: Optional[int] = Field(None, ge=50000, le=900000)
 
 
 class ReadonlyPathIn(BaseModel):
@@ -307,6 +348,7 @@ class ProjectOut(BaseModel):
     on_no_answer: str = "deny"
     readonly_paths: list = []
     reference_project_ids: list = []
+    fresh_session_tokens: Optional[int] = None
     # create/import only: why suggest_trust chose `trust`
     trust_reason: Optional[str] = None
     task_count: int = 0

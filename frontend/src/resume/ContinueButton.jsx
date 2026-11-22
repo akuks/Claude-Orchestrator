@@ -7,11 +7,12 @@ import './resume.css'
 
 // Continue a stopped main-line step (never a completed one, never an agent's
 // child). The server has the last word: a 409 is shown as its message.
-export default function ContinueButton({ task, user, thread, onContinued }) {
+// `allowCompleted`: also on a completed step (Home "Open handoffs" lists one whose handoff has an open todo).
+export default function ContinueButton({ task, user, thread, onContinued, allowCompleted = false }) {
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState(null)
   const can = canContinue(task, user, thread)
-  if (!task || task.status === 'completed' || (!can.resume && !can.fresh)) return null
+  if (!task || (task.status === 'completed' && !allowCompleted) || (!can.resume && !can.fresh)) return null
 
   const go = async (mode) => {
     setBusy(true)

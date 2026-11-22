@@ -27,8 +27,10 @@ from .routers import (
     credentials,
     guard,
     findings,
+    handoffs,
     mcp,
     projects,
+    questions,
     schedules,
     skills,
     stream,
@@ -158,6 +160,8 @@ app.include_router(guard.router)
 _authed = [Depends(current_principal)]
 for _r in (
     tasks.router,
+    questions.router,
+    handoffs.router,
     mcp.router,
     projects.router,
     templates.router,

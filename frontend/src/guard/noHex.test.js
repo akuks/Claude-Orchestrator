@@ -3,8 +3,8 @@ import { readdirSync, readFileSync } from 'node:fs'
 import { resolve } from 'node:path'
 
 // Colours come from tokens (CSS variables / antd tokens), never literals.
-describe('guard and resume UI use tokens', () => {
-  for (const d of ['src/guard', 'src/resume']) {
+describe('guard, resume, usage and questions UI use tokens', () => {
+  for (const d of ['src/guard', 'src/resume', 'src/usage', 'src/questions']) {
     const dir = resolve(process.cwd(), d)
     const files = readdirSync(dir).filter((n) => /\.(jsx|css)$/.test(n) && !n.includes('.test.'))
     it(`${d} has .jsx and .css files to check`, () => {

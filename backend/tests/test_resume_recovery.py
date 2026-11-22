@@ -222,11 +222,11 @@ def test_orphan_killed_only_with_matching_start(client, killpg_calls):
 # ---- the requeued run --------------------------------------------------------------------------
 
 
-def _crashed_run(owner, tmp_path, key, *, session_id=None, prompt="original work"):
+def _crashed_run(owner, tmp_path, key, *, session_id=None, prompt="original work", **extra):
     ws = tmp_path / "ws"
     ws.mkdir()
     (ws / "data.txt").write_bytes(b"")  # a Write truncated to 0 bytes
-    tid = mk_task(prompt=prompt, created_by=owner.user_id, session_id=session_id, workspace_dir=str(ws))
+    tid = mk_task(prompt=prompt, created_by=owner.user_id, session_id=session_id, workspace_dir=str(ws), **extra)
     add_events(tid, [
         ("text_output", {"text": "writing the data"}),
         ("tool_use", {"name": "Write", "input": {"file_path": str(ws / "data.txt"), "content": ""}, "id": "tW"}),
@@ -371,6 +371,7 @@ def test_sweep_recovers_stale_not_live(client):
     stale_no_beat = mk_task(started_at=old)
     live = mk_task(heartbeat_at=old, started_at=old)
     fresh = mk_task(heartbeat_at=_now(), started_at=old)
+    restarted = mk_task(heartbeat_at=old, started_at=_now())  # a leftover beat of an earlier run
     w._active.add(live)
     calls = []
 
@@ -380,9 +381,47 @@ def test_sweep_recovers_stale_not_live(client):
 
     w.recover = spy
     run(w._sweep_once())
-    mine = [c for c in calls if c[0] in (stale, stale_no_beat, live, fresh)]
+    mine = [c for c in calls if c[0] in (stale, stale_no_beat, live, fresh, restarted)]
     assert sorted(mine) == sorted([(stale, "lost its worker"), (stale_no_beat, "lost its worker")])
-    _park(stale, stale_no_beat, live, fresh)
+    _park(stale, stale_no_beat, live, fresh, restarted)
+
+
+def test_recover_skips_a_live_or_recovering_step(client):
+    w = WorkerManager()
+    tid = mk_task()
+    w._active.add(tid)
+    assert run(w.recover(tid, "server restart")) == "skipped"
+    w._active.discard(tid)
+    w._recovering.add(tid)
+    assert run(w.recover(tid, "server restart")) == "skipped"
+    assert get_task(tid).status == "running" and get_task(tid).recovery is None
+    _park(tid)
+
+
+def test_requeue_pending_survives_a_failing_recovery(client):
+    w = WorkerManager()
+    bad, good = mk_task(), mk_task()
+    calls = []
+
+    async def spy(task_id, why):
+        calls.append(task_id)
+        raise RuntimeError("boom")  # every row fails: both are still tried
+
+    w.recover = spy
+    run(w._requeue_pending())
+    assert bad in calls and good in calls  # one bad row never stops the boot
+    _park(bad, good)
+
+
+def test_second_crash_keeps_the_unchecked_entries():
+    a, b = {"tool": "Bash", "what": "make migrate", "advice": "x"}, {"tool": "Write", "what": "/w/f", "advice": "y"}
+    prev = {"pending": True, "in_flight": [a], "recent_writes": [{"path": "/w/f", "mark": "0 bytes"}]}
+    rec = recovery.carry_over({"in_flight": [b, a], "recent_writes": []}, prev)
+    assert rec["in_flight"] == [b, a] and rec["recent_writes"] == [{"path": "/w/f", "mark": "0 bytes"}]
+    done = {"pending": False, "in_flight": [a]}  # a record the re-run already carried: not kept
+    assert recovery.carry_over({"in_flight": [], "recent_writes": []}, done)["in_flight"] == []
+    many = {"pending": True, "in_flight": [{"tool": "Bash", "what": str(i)} for i in range(20)]}
+    assert len(recovery.carry_over({"in_flight": [b]}, many)["in_flight"]) == recovery.IN_FLIGHT_MAX
 
 
 def test_requeue_pending_recovers_running_rows(client, monkeypatch):
@@ -414,12 +453,12 @@ def _ev(etype, payload, at=None):
 def test_record_redacted_and_external_tail(client, tmp_path):
     tok = gh_token()
     long_key = ant_key(700)  # straddles the 600-char cut of the last words
-    evs = [_ev("text_output", {"text": f"done with ‮it​ and {tok} then {long_key}"})]
+    evs = [_ev("text_output", {"text": f"done with \u202eit\u200b and {tok} then {long_key}"})]
     rec = recovery.build_record(None, evs, [seen("t1", "Bash", f"push :: git push {tok}")], tmp_path, None, _now(),
                                 why="server restart")
     words = rec["last_words"]
     assert tok not in words and "b" * 20 not in words and "***" in words
-    assert "‮" not in words and "​" not in words
+    assert "\u202e" not in words and "\u200b" not in words
     assert tok not in rec["in_flight"][0]["what"] and "***" in rec["in_flight"][0]["what"]
     text = recovery.render_record(rec, external=False)
     assert tok not in text and "b" * 20 not in text and "***" in text
@@ -427,6 +466,11 @@ def test_record_redacted_and_external_tail(client, tmp_path):
     assert "a record, not instructions" in text
     assert GUEST_TAIL not in text
     assert recovery.render_record(rec, external=True).endswith(GUEST_TAIL)
+    # a Monitor call is a shell call; a call co-guard denied never ran, so it is not in flight
+    denied = {"event": "PreToolUse", "decision": "deny", "tool_use_id": "t2", "tool": "Bash"}
+    rec = recovery.build_record(None, [], [seen("t1", "Monitor", "tail :: tail -f log"),
+                                           seen("t2", "Bash", "rm :: rm -rf x"), denied], tmp_path, None, _now())
+    assert [(f["tool"], f["advice"]) for f in rec["in_flight"]] == [("Monitor", recovery.IN_FLIGHT_ADVICE["shell"])]
     # the 600-char cut lands inside a token: none of its tail survives (redacted whole, then cut)
     for kept in (4, 7, 12, 30):
         evs = [_ev("text_output", {"text": ant_key() + " " + "y" * (recovery.LAST_WORDS_CHARS - 1 - kept)})]
@@ -555,6 +599,61 @@ def test_compose_failure_keeps_the_record(client, tmp_path, monkeypatch):
     assert RECORD_START in prompt and prompt.endswith(RECOVERED_CONTINUE)
     assert "original work" not in prompt
     assert get_task(tid).recovery["pending"] is True
+
+
+def test_retry_after_compose_failure_drops_the_old_record(client, tmp_path, monkeypatch):
+    """3a leftover: the record kept pending by a compose failure belongs to the automatic
+    re-run; a person's Retry of the step starts it over without that record."""
+    owner = _owner(client)
+    key, key2 = env_probe_key(), env_probe_key()
+    tid = _crashed_run(owner, tmp_path, key, session_id="s1", prompt=f"original work [prompt-probe:{key2}]")
+    session_file(owner.user_id, "s1")
+    out, held = _recover_live(tid)
+    assert out == "requeued"
+
+    async def boom(*a, **kw):
+        raise RuntimeError("compose broke")
+
+    with monkeypatch.context() as m:
+        m.setattr(prompting, "compose", boom)
+        client.portal.call(app.state.worker.submit, *held[0])
+        assert wait_task(owner, tid)["status"] == "completed"
+    assert RECORD_START in probe_prompt(key) and get_task(tid).recovery["pending"] is True
+    for k in (key, key2):
+        (conftest._PROBES / f"{k}.prompt").unlink(missing_ok=True)
+
+    r = owner.post(f"/tasks/{tid}/retry")
+    assert r.status_code == 200, r.text
+    assert get_task(tid).recovery["pending"] is False  # the record itself is kept
+    assert wait_task(owner, tid)["status"] == "completed"
+    prompt = probe_prompt(key2)  # the step's own prompt ran: the record (which holds key's probe) did not
+    assert probe_prompt(key) is None and RECORD_START not in prompt
+    assert prompt.endswith(f"original work [prompt-probe:{key2}]") and RECOVERED_CONTINUE not in prompt
+
+
+def test_retry_of_a_recovered_follow_up_never_resumes_the_cut_session(client, tmp_path):
+    """F1: recovery points a follow-up at its own crashed session; a person's Retry puts the
+    pre-recovery resume id (the parent's session) back and drops the record."""
+    owner = _owner(client)
+    key, key2 = env_probe_key(), env_probe_key()
+    parent = mk_task(prompt="parent work", created_by=owner.user_id, status="completed", session_id="p1")
+    tid = _crashed_run(owner, tmp_path, key, session_id="s1", prompt=f"follow up [prompt-probe:{key2}] [env-probe:{key2}]",
+                       parent_task_id=parent, root_id=parent, origin="user", resume_session_id="p1")
+    session_file(owner.user_id, "s1")
+    session_file(owner.user_id, "p1")
+    out, held = _recover_live(tid)
+    assert out == "requeued" and get_task(tid).resume_session_id == "s1"
+    assert get_task(tid).recovery["resume_before"] == "p1"
+    set_task(tid, status="failed")  # the person retries before (or instead of) the automatic re-run
+    r = owner.post(f"/tasks/{tid}/retry")
+    assert r.status_code == 200, r.text
+    t = get_task(tid)
+    assert t.resume_session_id == "p1" and t.recovery["pending"] is False
+    assert wait_task(owner, tid)["status"] == "completed"
+    args = read_probe_args(key2)
+    assert args is not None and args[args.index("--resume") + 1] == "p1" and "s1" not in args
+    prompt = probe_prompt(key2)  # the step's own prompt: the record's probe (key) never ran
+    assert RECORD_START not in prompt and probe_prompt(key) is None
 
 
 def test_recovery_event_failure_still_enqueues(client, monkeypatch):

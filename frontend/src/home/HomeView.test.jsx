@@ -13,6 +13,11 @@ vi.mock('../api', () => ({
     liveRuns: vi.fn(),
     usageSummary: vi.fn(),
     approveTask: vi.fn(),
+    listQuestions: vi.fn(),
+    openHandoffs: vi.fn(),
+    continueTask: vi.fn(),
+    answerQuestion: vi.fn(),
+    dismissQuestion: vi.fn(),
   },
 }))
 
@@ -30,6 +35,8 @@ function okAll() {
   api.myCredentials.mockImplementation(async () => ({ claude: 'own' }))
   api.liveRuns.mockImplementation(async () => [])
   api.usageSummary.mockImplementation(async () => ({ today: { cost_usd: 0 } }))
+  api.listQuestions.mockImplementation(async () => [])
+  api.openHandoffs.mockImplementation(async () => [])
 }
 
 const panel = (c, id) => c.querySelector(`[data-testid="${id}"]`)
@@ -135,5 +142,45 @@ describe('HomeView: action approvals', () => {
     await flush()
     const row = view.container.querySelector('[data-testid="needs-approval"]')
     expect([...row.querySelectorAll('button')].map((b) => b.textContent.trim())).toEqual(['Approve', 'Open'])
+  })
+})
+
+describe('HomeView: Questions and Open handoffs', () => {
+  const question = { id: 'q1', task_id: 't1', task_title: 'Port', status: 'open', can_answer: true,
+    question: 'Also the old table?', options: ['yes', 'no'], recommendation: 'yes', source: 'agent',
+    created_at: '2026-11-22T10:00:00Z' }
+  const step = { id: 's2', status: 'completed', origin: 'continue', can_manage: true, can_resume: false,
+    session_id: null, title: 'continue', created_by: 'u1' }
+  const handoffRow = { root_id: 'r1', title: 'Port the importer', task: step, step: { n: 2, m: 4, text: 'tests' },
+    open_todo: true, ended_at: '2026-11-21T10:00:00Z' }
+
+  it('both sections stay away while empty', async () => {
+    const c = await mount()
+    expect(panel(c, 'home-questions')).toBeNull()
+    expect(panel(c, 'home-handoffs')).toBeNull()
+  })
+
+  it('lists open questions with their answer buttons', async () => {
+    api.listQuestions.mockImplementation(async () => [question])
+    const c = await mount()
+    expect(api.listQuestions).toHaveBeenCalledWith('open')
+    expect(text(c, 'home-questions')).toContain('Also the old table?')
+    expect(panel(c, 'home-questions').querySelectorAll('[data-testid="question-option"]').length).toBe(2)
+  })
+
+  it('an open handoff row: title, step n of m, age and Continue (even on a completed step)', async () => {
+    api.openHandoffs.mockImplementation(async () => [handoffRow])
+    const c = await mount()
+    const row = panel(c, 'home-handoffs').querySelector('[data-testid="handoff-row"]')
+    expect(row.textContent).toContain('Port the importer')
+    expect(row.textContent).toContain('Step 2 of 4: tests')
+    expect(row.textContent).toMatch(/ago/)
+    expect(row.querySelector('[data-testid="continue-button"]')).not.toBeNull()
+  })
+
+  it('a row the viewer may not continue has no Continue button', async () => {
+    api.openHandoffs.mockImplementation(async () => [{ ...handoffRow, task: { ...step, can_manage: false } }])
+    const c = await mount()
+    expect(panel(c, 'home-handoffs').querySelector('[data-testid="continue-button"]')).toBeNull()
   })
 })

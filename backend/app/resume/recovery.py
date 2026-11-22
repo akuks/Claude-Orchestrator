@@ -38,7 +38,7 @@ PS_TIMEOUT = 2.0
 
 GAVE_UP_ERROR = "interrupted {n} times by server restarts; use Continue to resume it"
 
-_SHELL = {"Bash", "PowerShell"}
+_SHELL = {"Bash", "Monitor", "PowerShell"}  # the hook's SHELL_TOOLS, plus PowerShell
 _FILE = {"Write", "Edit", "MultiEdit", "NotebookEdit"}
 _AGENT = {"Agent", "Task"}
 
@@ -142,8 +142,9 @@ def _what_of_use(p: dict) -> str:
 
 
 def _in_flight(events, spool_raw) -> list[dict]:
-    """``seen`` calls with no ``done`` line and no ``tool_result`` event."""
-    done = {str(r.get("tool_use_id")) for r in spool_raw if r.get("done") is True and r.get("tool_use_id")}
+    """``seen`` calls with no ``done`` line, no PreToolUse deny line (it never ran) and no ``tool_result`` event."""
+    done = {str(r.get("tool_use_id")) for r in spool_raw if r.get("tool_use_id") and (
+        r.get("done") is True or (r.get("event") == "PreToolUse" and r.get("decision") == "deny"))}
     results = {str(_payload(e).get("tool_use_id")) for e in events if e.get("type") == "tool_result"}
     uses = {str(_payload(e).get("id")): _payload(e) for e in events if e.get("type") == "tool_use"}
     out, listed = [], set()
@@ -280,6 +281,20 @@ def _last_words(events) -> str:
             words = clean_text(whole).split()[-LAST_WORDS:]
             return " ".join(words)[-LAST_WORDS_CHARS:]
     return ""
+
+
+def carry_over(record: dict, prev) -> dict:
+    """A second crash before the re-run used the earlier record (still pending): the earlier in-flight calls
+    and recent writes, which nobody has checked yet, stay after the new ones (once each, within the caps)."""
+    if not isinstance(prev, dict) or not prev.get("pending"):
+        return record
+    for key, cap in (("in_flight", IN_FLIGHT_MAX), ("recent_writes", WRITES_MAX)):
+        out = []
+        for x in [*(record.get(key) or []), *(prev.get(key) or [])]:
+            if isinstance(x, dict) and x not in out:
+                out.append(x)
+        record[key] = out[:cap]
+    return record
 
 
 def build_record(task, events, spool_raw, workspace, last_save_at, now, *, why: str = "",

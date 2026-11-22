@@ -12,7 +12,7 @@ from sqlalchemy.orm import Session
 from app import models
 from app.database import _alembic_cfg, _baseline_metadata, run_migrations
 
-HEAD = "0008"  # the latest revision
+HEAD = "0009"  # the latest revision
 
 
 def _tables(db) -> set[str]:
@@ -353,7 +353,7 @@ def test_migration_0008(scratch_url):
         sc.exec_driver_sql("INSERT INTO guard_org_settings (id, updated_at) VALUES (1, CURRENT_TIMESTAMP)")
 
     _inspect(url, seed)
-    command.upgrade(_alembic_cfg(url), "head")
+    command.upgrade(_alembic_cfg(url), "0008")
 
     def check_head(sc, insp):
         cols = {c["name"] for c in insp.get_columns("tasks")}

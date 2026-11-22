@@ -10,6 +10,7 @@ from pathlib import Path
 from fastapi import APIRouter, HTTPException, Query, Request
 from fastapi.responses import FileResponse, Response
 from sqlalchemy import and_, delete, func, or_, select
+from sqlalchemy.exc import InvalidRequestError
 
 from ..access import (
     can_see_task,
@@ -25,15 +26,18 @@ from ..constants import VALID_MODELS, Priority, Status
 from ..database import SessionLocal
 from ..guard import runtime as guard_runtime
 from .. import reports
-from ..models import ActionGrant, Artifact, Project, Task, TaskEvent, TaskHandoff
+from ..models import ActionGrant, Artifact, Project, Task, TaskEvent, TaskHandoff, TaskQuestion, TaskUsage
 from ..resume import handoff as resume_handoff
 from ..resume.texts import CONTINUE_PROMPT
 from ..task_service import build_task
+from ..usage import report as usage_report
 from ..schemas import (
     ArtifactOut,
     ContinueCreate,
     EventOut,
     FollowupCreate,
+    QuestionCreate,
+    QuestionOut,
     StatsOut,
     TaskCreate,
     TaskOut,
@@ -277,6 +281,28 @@ async def get_thread(task_id: str, request: Request):
         return [await _viewer_flags(s, p, TaskOut.model_validate(t), t) for t in rows]
 
 
+@router.get("/{task_id}/usage")
+async def get_usage(task_id: str, request: Request):
+    """Token care: this step's figures, the thread's totals so far and up to three tips."""
+    async with SessionLocal() as s:
+        p = request.state.principal
+        task = await require_task(s, p, task_id)
+        root = task.root_id or task.id
+        steps = (
+            await s.execute(
+                select(Task)
+                .where(Task.root_id == root, await task_visibility_clause(s, p))
+                .order_by(Task.created_at.asc())
+            )
+        ).scalars().all()
+        ids = [t.id for t in steps]
+        usages = list((await s.execute(select(TaskUsage).where(TaskUsage.task_id.in_(ids)))).scalars().all())
+        pid = await effective_project_id(s, task)
+        proj = await s.get(Project, pid) if pid else None
+        usage = next((u for u in usages if u.task_id == task.id), None)
+        return usage_report.build(task, usage, steps, usages, proj.fresh_session_tokens if proj else None)
+
+
 @router.get("/{task_id}/events", response_model=list[EventOut])
 async def get_events(task_id: str, request: Request, after_seq: int = 0):
     async with SessionLocal() as s:
@@ -328,6 +354,14 @@ async def retry_task(task_id: str, request: Request):
         task.duration_ms = None
         task.started_at = None
         task.completed_at = None
+        if isinstance(task.recovery, dict):
+            # the record belongs to the automatic re-run of the crashed attempt (a compose failure keeps
+            # it pending). A person's Retry starts the step over without it, and never resumes the
+            # conversation cut mid-tool: the resume id goes back to what the step had before recovery.
+            if "resume_before" in task.recovery:
+                task.resume_session_id = task.recovery["resume_before"]
+            if task.recovery.get("pending"):
+                task.recovery = {**task.recovery, "pending": False}
         await s.commit()
         await s.refresh(task)
         out = TaskOut.model_validate(task)
@@ -355,6 +389,9 @@ async def duplicate_task(task_id: str, request: Request):
             tags=list(src.tags or []),
             model=src.model,
             max_turns=src.max_turns,
+            # the source's budget, else the default a new task gets (build_task)
+            max_budget_usd=(src.max_budget_usd if src.max_budget_usd is not None
+                            else settings.default_task_budget_usd),
             parent_task_id=src.id,
             origin="user",
             status=Status.QUEUED,
@@ -383,7 +420,7 @@ async def duplicate_task(task_id: str, request: Request):
 
 def _step_from(parent: Task, *, prompt: str, origin: str, resume: str | None, created_by: str | None) -> Task:
     """The one builder of a thread step (a follow-up or a Continue): the
-    parent's thread, workspace and run settings, queued."""
+    parent's thread, workspace and run settings (model, max turns, max budget), queued."""
     return Task(
         title=_default_title(prompt),
         prompt=prompt,
@@ -393,6 +430,7 @@ def _step_from(parent: Task, *, prompt: str, origin: str, resume: str | None, cr
         tags=list(parent.tags or []),
         model=parent.model,
         max_turns=parent.max_turns,
+        max_budget_usd=parent.max_budget_usd,  # the hard cut and the 80/95 % bands carry on
         parent_task_id=parent.id,
         origin=origin,
         root_id=parent.root_id or parent.id,  # join the parent's thread
@@ -431,6 +469,38 @@ async def followup_task(task_id: str, payload: FollowupCreate, request: Request)
 CONTINUE_MODES = ("auto", "resume", "fresh")
 
 
+async def queue_continue(s, parent: Task, *, mode: str, sender: str | None, auto: bool) -> Task:
+    """Add a queued ``continue`` step to ``parent``'s thread (committed; the caller submits it to the
+    worker). Under the global follow-up lock (serialised with deny-and-resume's join / defer / spawn
+    choice) it re-checks for an active step of the thread (409). ``resume`` needs ``sender`` to own the
+    parent's session (409); ``fresh`` never resumes; ``auto`` resumes when it can. ``auto=True``: the
+    automatic fresh Continue (marked ``auto_continued``)."""
+    from ..guard import grants as guard_grants
+
+    async with guard_grants.followup_lock():
+        try:
+            await s.refresh(parent)
+        except InvalidRequestError:  # deleted while waiting for the lock
+            raise HTTPException(404, "Task not found") from None
+        root = parent.root_id or parent.id
+        active = (await s.execute(select(Task.id).where(
+            or_(Task.root_id == root, Task.id == root), Task.status.in_(Status.ACTIVE)).limit(1))).first()
+        if active is not None:
+            raise HTTPException(409, "A step of this thread is still active")
+        can_resume = bool(parent.session_id) and sender == parent.created_by
+        if mode == "resume" and not can_resume:
+            raise HTTPException(
+                409, "Only the session's owner can resume it, and the step needs a session")
+        resume = parent.session_id if can_resume and mode != "fresh" else None
+        child = _step_from(parent, prompt=CONTINUE_PROMPT, origin="continue", resume=resume,
+                           created_by=sender)
+        child.auto_continued = bool(auto)
+        s.add(child)
+        await s.commit()
+        await s.refresh(child)
+        return child
+
+
 @router.post("/{task_id}/continue", response_model=TaskOut, status_code=201)
 async def continue_task(task_id: str, request: Request, payload: ContinueCreate | None = None):
     """Continue a stopped main-line step: a queued ``continue`` step of its
@@ -438,8 +508,6 @@ async def continue_task(task_id: str, request: Request, payload: ContinueCreate 
     the step's session (409 otherwise); ``auto`` resumes when it can, else
     starts fresh with the handoff; ``fresh`` never resumes. Same permission
     as a follow-up."""
-    from ..guard import grants as guard_grants
-
     mode = (payload.mode if payload is not None else None) or "auto"
     if mode not in CONTINUE_MODES:
         raise HTTPException(400, "mode must be auto, resume or fresh")
@@ -466,29 +534,10 @@ async def continue_task(task_id: str, request: Request, payload: ContinueCreate 
         await resume_handoff.snapshot(task_id, "continue")
     except Exception:  # noqa: BLE001 - the Continue still runs (its prompt uses the stored handoff)
         logging.getLogger(__name__).exception("handoff snapshot before continue failed for %s", task_id)
-    # serialised with deny-and-resume's join / defer / spawn choice
-    async with guard_grants.followup_lock():
-        async with SessionLocal() as s:
-            parent = await require_task(s, p, task_id)
-            root = parent.root_id or parent.id
-            active = (await s.execute(select(Task.id).where(
-                or_(Task.root_id == root, Task.id == root), Task.status.in_(Status.ACTIVE)).limit(1))).first()
-            if active is not None:
-                raise HTTPException(409, "A step of this thread is still active")
-            sender = p.user.id
-            can_resume = bool(parent.session_id) and sender == parent.created_by
-            if mode == "resume" and not can_resume:
-                raise HTTPException(
-                    409, "Only the session's owner can resume it, and the step needs a session")
-            resume = parent.session_id if can_resume and mode != "fresh" else None
-        async with SessionLocal() as s:
-            parent = await require_task(s, p, task_id)
-            child = _step_from(parent, prompt=CONTINUE_PROMPT, origin="continue", resume=resume,
-                               created_by=sender)
-            s.add(child)
-            await s.commit()
-            await s.refresh(child)
-            out = TaskOut.model_validate(child)
+    async with SessionLocal() as s:
+        parent = await require_task(s, p, task_id)
+        child = await queue_continue(s, parent, mode=mode, sender=p.user.id, auto=False)
+        out = TaskOut.model_validate(child)
     await worker.submit(out.id, out.priority, out.created_at)
     return out
 
@@ -546,6 +595,9 @@ async def delete_task(task_id: str, request: Request):
             await s.delete(m)
         # the deleted threads' handoffs (no FK either)
         await s.execute(delete(TaskHandoff).where(TaskHandoff.root_id.in_(deleted)))
+        # their usage rows and questions (FK cascade on Postgres; SQLite does not enforce it)
+        await s.execute(delete(TaskUsage).where(TaskUsage.task_id.in_(deleted)))
+        await s.execute(delete(TaskQuestion).where(TaskQuestion.task_id.in_(deleted)))
         # co-guard grants of the deleted thread / steps (no FK: they would be orphans)
         await s.execute(delete(ActionGrant).where(
             or_(ActionGrant.root_id.in_(deleted),
@@ -641,6 +693,66 @@ async def put_notes(task_id: str, request: Request):
     except Exception:  # noqa: BLE001
         logging.getLogger(__name__).exception("handoff snapshot after notes failed for %s", task_id)
     return out
+
+
+# ---- questions (phase 3b): the agent's own token may file and read its own task's questions
+# (auth._AGENT_QUESTIONS); a manager may file one; people read the thread's. Answer and dismiss live in
+# routers/questions.py (people only).
+
+
+async def _question_task(s, p, task_id: str) -> Task:
+    """The task a question call is about: the agent token's own task only (403 otherwise), or a task the
+    person can see (404 otherwise)."""
+    if p.is_agent:
+        if p.token.task_id != task_id:
+            raise HTTPException(403, "Token not allowed for this task")
+        task = await s.get(Task, task_id)
+        if task is None:
+            raise HTTPException(404, "Task not found")
+        return task
+    return await require_task(s, p, task_id)
+
+
+@router.post("/{task_id}/questions", response_model=QuestionOut, status_code=201)
+async def file_question(task_id: str, payload: QuestionCreate, request: Request):
+    from ..questions import service as questions
+
+    p = request.state.principal
+    async with SessionLocal() as s:
+        task = await _question_task(s, p, task_id)
+        if not p.is_agent:
+            await _require_manage(s, p, task)
+        fields = questions.clean_fields(payload, request.app.state.worker._run_secrets.get(task_id))
+        q = await questions.file(s, task, fields, source="agent" if p.is_agent else "person")
+        out = questions.out(q, task_title=task.title,
+                            can_answer=not p.is_agent and (await _manage_allowed(s, p, task, need_contributor=True))[0])
+    await questions.notify(out.id)
+    return out
+
+
+@router.get("/{task_id}/questions", response_model=list[QuestionOut])
+async def list_task_questions(task_id: str, request: Request):
+    """The agent token: its own task's questions. A person: the questions of the task's thread, on the steps
+    they can see, oldest first."""
+    from ..questions import service as questions
+
+    p = request.state.principal
+    async with SessionLocal() as s:
+        task = await _question_task(s, p, task_id)
+        if p.is_agent:
+            rows = (await s.execute(select(TaskQuestion, Task.title).join(Task, Task.id == TaskQuestion.task_id)
+                                    .where(TaskQuestion.task_id == task_id)
+                                    .order_by(TaskQuestion.created_at.asc()))).all()
+            return [questions.out(q, task_title=title) for q, title in rows]
+        rows = (await s.execute(
+            select(TaskQuestion, Task).join(Task, Task.id == TaskQuestion.task_id)
+            .where(TaskQuestion.root_id == (task.root_id or task.id), await task_visibility_clause(s, p))
+            .order_by(TaskQuestion.created_at.asc()))).all()
+        res = []
+        for q, t in rows:
+            can = q.status == "open" and (await _manage_allowed(s, p, t, need_contributor=True))[0]
+            res.append(questions.out(q, task_title=t.title, can_answer=can))
+        return res
 
 
 @router.get("/{task_id}/handoff")

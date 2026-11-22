@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { Button, Space, Typography } from 'antd'
 import { CheckOutlined, DownOutlined, ReloadOutlined, RightOutlined } from '@ant-design/icons'
 import { api } from '../api'
@@ -23,8 +23,12 @@ function Row({ label, children, testid }) {
   )
 }
 
-// "Where it stands": the thread's handoff, above the run log.
-export default function HandoffCard({ taskId, onHandoff, canManage = false }) {
+const ENDED = ['completed', 'failed', 'cancelled']
+
+// "Where it stands": the thread's handoff, above the run log. `status`: the
+// step's; when it ends the card asks again (the server stores the finish
+// handoff before the status flips).
+export default function HandoffCard({ taskId, onHandoff, canManage = false, status }) {
   const [handoff, setHandoff] = useState(undefined) // undefined: loading, null: none yet
   const [open, setOpen] = useState(true)
   const [busy, setBusy] = useState(false)
@@ -52,6 +56,23 @@ export default function HandoffCard({ taskId, onHandoff, canManage = false }) {
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [taskId])
+  const ended = ENDED.includes(status)
+  const last = useRef({ taskId, status })
+  useEffect(() => {
+    const prev = last.current
+    last.current = { taskId, status }
+    // only when this step is seen to end (not a task change or the first status that loads: the fetch above)
+    if (!taskId || !ended || !prev.status || ENDED.includes(prev.status) || prev.taskId !== taskId) return undefined
+    let live = true
+    api
+      .getHandoff(taskId)
+      .then((h) => live && apply(h))
+      .catch(() => {}) // the card keeps what it shows
+    return () => {
+      live = false
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [taskId, status])
 
   const run = async (fn) => {
     setBusy(true)
@@ -93,6 +114,7 @@ export default function HandoffCard({ taskId, onHandoff, canManage = false }) {
           <span className="co-resume-meta" data-testid="handoff-meta">
             {isDone ? 'marked done · ' : ''}
             {handoff.saved_at ? `saved ${formatTime(handoff.saved_at)}` : ''}
+            {handoff.reason ? ` · ${clean(handoff.reason)}` : ''}
           </span>
         )}
       </div>

@@ -11,6 +11,8 @@ vi.mock('../api', () => ({
     myCredentials: vi.fn(async () => ({ claude: 'own' })),
     liveRuns: vi.fn(async () => []),
     usageSummary: vi.fn(async () => ({ today: { cost_usd: 0 } })),
+    listQuestions: vi.fn(async () => []),
+    openHandoffs: vi.fn(async () => []),
   },
 }))
 

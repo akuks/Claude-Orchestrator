@@ -186,6 +186,9 @@ _SAFE_METHODS = {"GET", "HEAD", "OPTIONS"}
 _AGENT_DISPATCH = ("POST", "/agents/dispatch")
 # The agent's own notes (phase 3a): the handler requires token.task_id == task_id.
 _AGENT_NOTES = ("PUT", "/tasks/{task_id}/notes")
+# The agent's own questions (phase 3b): file and read; the handlers require token.task_id == task_id.
+# Never answer or dismiss (those routes stay outside the allowlist).
+_AGENT_QUESTIONS = {("POST", "/tasks/{task_id}/questions"), ("GET", "/tasks/{task_id}/questions")}
 _AGENT_TASK_READS = {("GET", "/tasks/{task_id}"), ("GET", "/tasks/{task_id}/events")}
 # co-guard's hook (Global Constraints): file/poll its own task's approval
 # requests and report decisions. The handlers confine each call to the
@@ -266,10 +269,10 @@ async def current_principal(request: Request) -> Principal:
                 key = (request.method, route_template(request))
                 if key == _AGENT_DISPATCH:
                     pass  # parent_task_id checked by the dispatch handler
-                elif key == _AGENT_NOTES:
+                elif key == _AGENT_NOTES or key in _AGENT_QUESTIONS:
                     if not principal.token.task_id:
                         raise HTTPException(403, "Token not allowed for this route")
-                    # own task checked by the notes handler
+                    # own task checked by the notes / questions handlers
                 elif key in _AGENT_GUARD:
                     if not principal.token.task_id:
                         raise HTTPException(403, "Token not allowed for this route")

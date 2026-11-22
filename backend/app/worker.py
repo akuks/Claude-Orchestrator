@@ -9,6 +9,7 @@ results + output artifacts. No external broker/queue needed for Phase 1.
 import asyncio
 import json
 import logging
+import math
 import mimetypes
 import os
 import signal
@@ -32,10 +33,12 @@ from .guard import grants as guard_grants
 from .guard import policy_inputs
 from .guard import runtime as guard_runtime
 from .guard.plugin import ensure_plugin
-from .models import Agent, Artifact, McpCall, Project, SkillPack, Task, TaskEvent, User
+from .models import (Agent, Artifact, McpCall, Project, SkillPack, Task, TaskEvent, TaskHandoff, TaskQuestion,
+                     TaskUsage, User)
 from .redaction import redact, redact_obj, secrets_from_env
 from .resume import gitfacts, ground_rules, handoff, prompting, recovery
 from .resume.texts import CRED_NOTE, RECOVERED_CONTINUE
+from .usage import tracker as usage_tracker
 
 log = logging.getLogger(__name__)
 
@@ -134,7 +137,8 @@ def _is_transient(stderr: str) -> bool:
     return any(m in text for m in _TRANSIENT_MARKERS)
 
 
-def _short(value, secrets: list[str] | None = None) -> str:
+def _flatten(value) -> str:
+    """A tool result's content as one text (its original length is what usage measures)."""
     if isinstance(value, list):
         parts = []
         for b in value:
@@ -143,7 +147,11 @@ def _short(value, secrets: list[str] | None = None) -> str:
             else:
                 parts.append(str(b))
         value = " ".join(str(p) for p in parts)
-    text = str(value)
+    return str(value)
+
+
+def _short(value, secrets: list[str] | None = None) -> str:
+    text = _flatten(value)
     if secrets is not None:  # before the cut, so no secret prefix survives it
         text = redact(text, secrets)
     return text[:_MAX_TOOL_RESULT_CHARS]
@@ -208,6 +216,10 @@ class WorkerManager:
         # task_id -> the run's outside-commit base, fixed at spawn (F9); the
         # finish snapshot uses it too.
         self._run_since: dict[str, str | None] = {}
+        # task_id -> the live run's UsageTracker (phase 3b); _finish stores its last figures.
+        self._usage: dict[str, usage_tracker.UsageTracker] = {}
+        # task_id -> the live run's read state of co-guard's token-care spool lines (_new_usage_spool)
+        self._usage_spool: dict[str, dict] = {}
         # task ids a live _run_guarded holds (the sweep never recovers them),
         # and ids a recover() is working on (never two side by side)
         self._active: set[str] = set()
@@ -393,6 +405,7 @@ class WorkerManager:
             project_env = {}
             # co-guard: the project's guard and policy settings.
             guard_project = None
+            proj = None
             if task.project_id:
                 proj = await s.get(Project, task.project_id)
                 if proj and proj.env:
@@ -408,6 +421,7 @@ class WorkerManager:
                 proj = await s.get(Project, eff) if eff else None
                 if proj is not None:
                     guard_project = _guard_project(proj, None)
+            fresh_session_tokens = proj.fresh_session_tokens if proj is not None else None
             # Coordinator: inject the live agent registry + how to delegate — but
             # NOT inside a workflow, where the workflow owns the orchestration and a
             # coordinator agent is used only as a planning step.
@@ -705,12 +719,21 @@ class WorkerManager:
 
         stderr_task = asyncio.create_task(read_stderr())
 
+        tracker = self._usage[task_id] = usage_tracker.UsageTracker(secrets=run_secrets)  # fresh per attempt
+        self._usage_spool[task_id] = self._new_usage_spool()
+        await self._reset_usage_row(task_id)  # an earlier attempt's bands and figures are not this one's
         ctx = {
             "task_id": task_id,
             "mcp_ids": {},
             "secrets": run_secrets,
             "since": since,
             "run": run_state,
+            # token care (phase 3b): the step's usage, written to usage.json (<= 1 / 2 s)
+            # and the TaskUsage row (<= 1 / 5 s) while running
+            "usage": tracker,
+            "usage_meta": {"max_budget_usd": max_budget_usd, "fresh_session_tokens": fresh_session_tokens},
+            "usage_saved": None,
+            "usage_written": None,
             # co-guard watchdog (Ruling R21): tool_use ids checked through the spool
             "guard": {"calls": {}, "lanes": {}, "done": set(), "seen": set(), "offset": 0, "violation": None,
                       "proc": proc, "emit": emit,
@@ -781,6 +804,8 @@ class WorkerManager:
                 # This attempt is over: don't leave its token live through backoff.
                 await auth.revoke_task_tokens(s, task_id)
                 await s.commit()
+            self._usage.pop(task_id, None)  # the next attempt counts afresh
+            self._usage_spool.pop(task_id, None)  # (its spool was wiped by the ingest)
             asyncio.create_task(
                 self._retry_after(task_id, backoff, task_priority, task_created_at)
             )
@@ -886,6 +911,12 @@ class WorkerManager:
             if t is None or t.status != Status.RUNNING:
                 return "skipped"
             pgid, start, recoveries = t.run_pgid, t.run_proc_start, t.recoveries or 0
+            prev_record = t.recovery
+            # the resume id the step had before its first recovery (a person's Retry puts it back); only
+            # recovery changes a step's resume id, so an earlier record's value stays the original
+            resume_before = (prev_record["resume_before"]
+                             if isinstance(prev_record, dict) and "resume_before" in prev_record
+                             else t.resume_session_id)
             session_id, priority, created_at = t.session_id, t.priority, t.created_at
             workspace = t.workspace_dir or str(settings.workspaces_dir / task_id)
             pid = await effective_project_id(s, t)
@@ -904,6 +935,7 @@ class WorkerManager:
         now = _now()
         record = recovery.build_record(None, evs, spool_raw, workspace, saved.saved_at if saved else None, now,
                                        why=why, project_dir=project_dir)
+        record = recovery.carry_over(record, prev_record)
         # 4. the spool's guard records as events, its once grants spent, the task dir removed
         await self._ingest_guard_spool(task_id, self._emit_offline_for(task_id))
         gave_up = recoveries >= recovery.MAX_RECOVERIES
@@ -918,7 +950,7 @@ class WorkerManager:
             t = await s.get(Task, task_id)
             if t is None or t.status != Status.RUNNING:
                 return "skipped"
-            t.recovery = {**record, "external": external, "pending": not gave_up}
+            t.recovery = {**record, "external": external, "pending": not gave_up, "resume_before": resume_before}
             t.run_pgid = t.run_proc_start = t.heartbeat_at = None
             if not gave_up:
                 t.recoveries = recoveries + 1
@@ -951,7 +983,8 @@ class WorkerManager:
         for tid, beat, started in rows:
             if tid in self._active:
                 continue
-            last = recovery.aware(beat or started)
+            # the newer of the two: a leftover heartbeat of an earlier run never outranks a fresh start
+            last = max((x for x in (recovery.aware(beat), recovery.aware(started)) if x is not None), default=None)
             if last is not None and last > cutoff:
                 continue
             try:
@@ -1003,6 +1036,14 @@ class WorkerManager:
                         await s.commit()
             except Exception as e:  # noqa: BLE001
                 log.warning("heartbeat: %s: %s", task_id, e)
+            # a fresh ts through a long quiet tool call (still <= 1 write / 2 s)
+            if ctx.get("usage") is not None and (
+                    ctx.get("usage_written") is None
+                    or time.monotonic() - ctx["usage_written"] >= self.USAGE_FILE_EVERY):
+                ctx["usage_written"] = time.monotonic()
+                self._write_usage_json(ctx)
+            if ctx.get("guard"):
+                await self._ingest_usage_spool(task_id, ctx["guard"]["emit"])  # bands and injected, live
             try:
                 n = ctx["run"]["events"]
                 if n != snapped and time.monotonic() - last >= handoff.HANDOFF_EVERY_SECONDS:
@@ -1128,24 +1169,34 @@ class WorkerManager:
         self._signal_group(g["proc"], signal.SIGKILL)  # claude and every tool it started
 
     @staticmethod
-    def _guard_read_spool(g) -> None:
-        """Read the spool's new complete lines; collect the ids co-guard saw."""
+    def _spool_new_lines(path, state: dict) -> list[dict]:
+        """The spool's complete lines after ``state["offset"]`` (advanced past them; a half-written last
+        line waits for its newline), as dicts."""
         try:
-            with open(g["spool"], "rb") as f:
-                f.seek(g["offset"])
+            with open(path, "rb") as f:
+                f.seek(state["offset"])
                 data = f.read()
         except OSError:
-            return
+            return []
         end = data.rfind(b"\n")
         if end < 0:
-            return
-        g["offset"] += end + 1
+            return []
+        state["offset"] += end + 1
+        out = []
         for line in data[: end + 1].splitlines():
             try:
                 rec = json.loads(line)
             except ValueError:
                 continue
-            if isinstance(rec, dict) and rec.get("seen") is True and rec.get("tool_use_id"):
+            if isinstance(rec, dict):
+                out.append(rec)
+        return out
+
+    @classmethod
+    def _guard_read_spool(cls, g) -> None:
+        """Read the spool's new complete lines; collect the ids co-guard saw."""
+        for rec in cls._spool_new_lines(g["spool"], g):
+            if rec.get("seen") is True and rec.get("tool_use_id"):
                 g["seen"].add(str(rec["tool_use_id"]))
 
     def _guard_checked(self, g, tid: str) -> bool:
@@ -1278,6 +1329,7 @@ class WorkerManager:
         live = self._guard_live.get(task_id)
         reported = live["reported"] if live else Counter()
         try:
+            await self._ingest_usage_spool(task_id, emit)  # bands + injected, before the spool goes
             await self._spend_spool_grants(task_id)  # every granted line, durably (retries wipe the spool)
             for rec in guard_runtime.read_spool(task_id):
                 if rec.get("seen") is True:
@@ -1363,6 +1415,9 @@ class WorkerManager:
             if sid:
                 await self._store_session_id(ctx["task_id"], sid)
         elif etype == "assistant":
+            usage = ctx.get("usage")
+            if usage is not None:
+                usage.on_assistant(obj)
             actual = obj.get("message", {}).get("model")
             if actual and not ctx.get("model_stored"):
                 ctx["model_stored"] = True
@@ -1374,6 +1429,8 @@ class WorkerManager:
                     await emit("text_output", {"text": block["text"]})
                 elif block.get("type") == "tool_use":
                     name = block.get("name")
+                    if usage is not None and not obj.get("parent_tool_use_id") and block.get("id"):
+                        usage.on_tool_use_main(str(block["id"]), str(name or ""), block.get("input") or {})
                     await emit("tool_use", {"name": name, "input": block.get("input"),
                                             "id": block.get("id"), "parent": obj.get("parent_tool_use_id") or None})
                     if name and name.startswith("mcp__"):
@@ -1383,9 +1440,12 @@ class WorkerManager:
             if isinstance(content, list):
                 for block in content:
                     if isinstance(block, dict) and block.get("type") == "tool_result":
+                        flat = _flatten(block.get("content"))
+                        if ctx.get("usage") is not None:  # the original length, before _short cuts it
+                            ctx["usage"].on_tool_result(str(block.get("tool_use_id") or ""), None, len(flat))
                         await emit(
                             "tool_result",
-                            {"content": _short(block.get("content"), ctx.get("secrets") or []),
+                            {"content": _short(flat, ctx.get("secrets") or []),
                              "tool_use_id": block.get("tool_use_id"),
                              "is_error": bool(block.get("is_error")),
                              "parent": obj.get("parent_tool_use_id") or None},
@@ -1408,6 +1468,134 @@ class WorkerManager:
                 + (usage.get("cache_creation_input_tokens") or 0)
             ) or None
             result["output_tokens"] = usage.get("output_tokens")
+        if etype in ("assistant", "user") and ctx.get("usage") is not None:
+            await self._usage_tick(ctx)
+
+    # ---- token care (phase 3b): usage.json and the TaskUsage row ---------------
+
+    USAGE_FILE_EVERY = 2.0  # seconds between usage.json writes
+    USAGE_SAVE_EVERY = 5.0  # seconds between TaskUsage writes while running
+
+    async def _usage_tick(self, ctx) -> None:
+        now = time.monotonic()
+        if ctx.get("usage_written") is None or now - ctx["usage_written"] >= self.USAGE_FILE_EVERY:
+            ctx["usage_written"] = now
+            self._write_usage_json(ctx)
+        if ctx.get("usage_saved") is None or now - ctx["usage_saved"] >= self.USAGE_SAVE_EVERY:
+            ctx["usage_saved"] = now
+            await self._persist_usage(ctx["task_id"], ctx["usage"])
+
+    @staticmethod
+    def _write_usage_json(ctx) -> None:
+        """co-guard's view of the step (it ignores a file older than 120 s). Never raises."""
+        t, meta = ctx["usage"], ctx.get("usage_meta") or {}
+        try:
+            usage_tracker.write_usage_file(ctx["task_id"], {
+                "context_tokens": t.context_tokens, "est_cost_usd": t.est_cost_usd,
+                "max_budget_usd": meta.get("max_budget_usd"),
+                "fresh_session_tokens": meta.get("fresh_session_tokens"), "ts": time.time()})
+        except Exception as e:  # noqa: BLE001 - usage bookkeeping never stops a run
+            log.warning("usage: usage.json write failed for %s: %s", ctx["task_id"], e)
+
+    async def _persist_usage(self, task_id: str, tracker, final: bool = False,
+                             total_cost_usd: float | None = None) -> None:
+        """Upsert the step's TaskUsage row; at finish the estimate becomes the
+        result's total_cost_usd when there is one. Bands are left as they are. Never raises."""
+        try:
+            async with SessionLocal() as s:
+                row = await s.get(TaskUsage, task_id)
+                if row is None:
+                    t = await s.get(Task, task_id)
+                    if t is None:
+                        return
+                    row = TaskUsage(task_id=task_id, root_id=t.root_id or t.id, bands=[])
+                    s.add(row)
+                row.context_tokens = tracker.context_tokens
+                row.peak_context = tracker.peak_context
+                row.est_cost_usd = (total_cost_usd if final and total_cost_usd is not None
+                                    else tracker.est_cost_usd)
+                row.breakdown = tracker.snapshot()
+                row.updated_at = _now()
+                await s.commit()
+        except Exception as e:  # noqa: BLE001
+            log.warning("usage: persist failed for %s: %s", task_id, e)
+
+    USAGE_BANDS = ("budget80", "budget95", "fresh")
+
+    @staticmethod
+    async def _reset_usage_row(task_id: str) -> None:
+        """At a run's start: the step's TaskUsage row (from an earlier attempt: transient retry, Retry,
+        recovery re-run) loses its bands and running figures. Never raises."""
+        try:
+            async with SessionLocal() as s:
+                row = await s.get(TaskUsage, task_id)
+                if row is not None:
+                    row.bands = []
+                    row.context_tokens = row.peak_context = row.est_cost_usd = None
+                    row.breakdown = {}
+                    row.updated_at = _now()
+                    await s.commit()
+        except Exception as e:  # noqa: BLE001 - usage bookkeeping never stops a run
+            log.warning("usage: reset failed for %s: %s", task_id, e)
+
+    @staticmethod
+    def _new_usage_spool() -> dict:
+        return {"offset": 0, "pending": [], "lock": asyncio.Lock()}
+
+    async def _ingest_usage_spool(self, task_id: str, emit) -> None:
+        """co-guard's token-care spool lines since the last read (by byte offset, so each complete line once,
+        whether read live by the heartbeat or at the final ingest): ``injected`` chars -> the live tracker,
+        each ``band`` -> a ``usage_band`` event {band, value} and a TaskUsage.bands entry {band, ts}, at most
+        once per band name (the row decides). With no live state (a crashed run's recovery) the whole spool
+        is read and only bands are recorded. Never raises."""
+        state = self._usage_spool.get(task_id) or self._new_usage_spool()
+        async with state["lock"]:
+            try:
+                self._read_usage_lines(task_id, state, self._usage.get(task_id))
+                while state["pending"]:
+                    band, value, ts = state["pending"][0]
+                    if await self._record_band(task_id, band, ts):
+                        await emit("usage_band", {"band": band, "value": value})
+                    state["pending"].pop(0)
+            except Exception as e:  # noqa: BLE001 - usage bookkeeping never stops a run
+                log.warning("usage: band ingest failed for %s: %s", task_id, e)
+
+    @staticmethod
+    def _finite(v) -> bool:
+        return isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v)
+
+    @classmethod
+    def _read_usage_lines(cls, task_id: str, state: dict, tracker) -> None:
+        for rec in cls._spool_new_lines(guard_runtime.task_dir(task_id) / guard_runtime.SPOOL_NAME, state):
+            band = rec.get("band")
+            if band is not None and band not in cls.USAGE_BANDS:
+                continue  # not a record co-guard writes
+            if tracker is not None and "injected" in rec:
+                tracker.add_injected(rec["injected"])
+            if band is not None:
+                value, ts = rec.get("value"), rec.get("ts")
+                state["pending"].append((band, value if cls._finite(value) else None,
+                                         float(ts) if cls._finite(ts) else None))
+
+    @staticmethod
+    async def _record_band(task_id: str, band: str, ts) -> bool:
+        """Append {band, ts} to the step's TaskUsage.bands; False when that band is already there (or the
+        task is gone)."""
+        async with SessionLocal() as s:
+            row = await s.get(TaskUsage, task_id)
+            if row is None:
+                t = await s.get(Task, task_id)
+                if t is None:
+                    return False
+                row = TaskUsage(task_id=task_id, root_id=t.root_id or t.id, bands=[])
+                s.add(row)
+            bands = list(row.bands or [])
+            if any(isinstance(b, dict) and b.get("band") == band for b in bands):
+                return False
+            row.bands = bands + [{"band": band, "ts": ts}]
+            row.updated_at = _now()
+            await s.commit()
+            return True
 
     async def _store_model_used(self, task_id: str, model_used: str) -> None:
         async with SessionLocal() as s:
@@ -1471,18 +1659,47 @@ class WorkerManager:
             result_text = redact(result_text, secrets or [])
         if error:
             error = redact(error, secrets or [])
+        # token care: the spool's lines not ingested yet (a crash skips _ingest_guard_spool; elsewhere the
+        # spool is gone already and this reads nothing) - same lock and offset, so each line once
+        live = self._guard_live.get(task_id)
+        await self._ingest_usage_spool(task_id, live["emit"] if live else self._emit_offline_for(task_id))
+        tracker = self._usage.pop(task_id, None)  # the live run's usage (stored below)
+        self._usage_spool.pop(task_id, None)
         context_store.cleanup(task_id)  # drop this task's knowledge snapshot
         await self._spend_spool_grants(task_id)  # a spool not ingested (error paths): its once grants stay spent
         guard_runtime.remove_task_dir(task_id)  # co-guard policy + spool (normally gone already)
         async with SessionLocal() as s:
             await auth.revoke_task_tokens(s, task_id)
             await s.commit()
+        # the step's last usage figures (the result's cost replaces the estimate)
+        if tracker is not None:
+            await self._persist_usage(task_id, tracker, final=True, total_cost_usd=total_cost_usd)
+        # where the thread stands now (the run's outside-commit base when one is held), stored before
+        # the terminal status: a follow-up created the moment the status flips composes with it
+        completed_at = _now()
+        ending = {"status": status, "completed_at": completed_at,
+                  **({"result_text": result_text} if result_text is not None else {})}
+        try:
+            # the cut-off callers (cancel, timeout) pass no secrets: use the run's
+            await handoff.snapshot(task_id, self._finish_reason(status, error),
+                                   secrets=secrets if secrets is not None else self._run_secrets.get(task_id),
+                                   since=self._run_since.get(task_id), ending=ending)
+        except Exception as e:  # noqa: BLE001 - never breaks a finish
+            log.warning("handoff: finish snapshot failed for %s: %s", task_id, e)
+        # Questions inbox: the final text's trailing question, filed before the terminal status too, so the
+        # task page's refetch on the status change sees it (never raises; the guard is belt and braces)
+        try:
+            from .questions import service as questions
+
+            await questions.capture_final(task_id, ending=ending)
+        except Exception as e:  # noqa: BLE001 - never breaks a finish
+            log.warning("questions: capture failed for %s: %s", task_id, e)
         async with SessionLocal() as s:
             task = await s.get(Task, task_id)
             if task is None:
                 return
             task.status = status
-            task.completed_at = _now()
+            task.completed_at = completed_at
             task.run_pgid = task.run_proc_start = task.heartbeat_at = None
             if exit_code is not None:
                 task.exit_code = exit_code
@@ -1511,16 +1728,87 @@ class WorkerManager:
                     )
                 )
             await s.commit()
-        # where the thread stands now (the run's outside-commit base when one is held)
-        try:
-            # the cut-off callers (cancel, timeout) pass no secrets: use the run's
-            await handoff.snapshot(task_id, self._finish_reason(status, error),
-                                   secrets=secrets if secrets is not None else self._run_secrets.get(task_id),
-                                   since=self._run_since.get(task_id))
-        except Exception as e:  # noqa: BLE001 - never breaks a finish
-            log.warning("handoff: finish snapshot failed for %s: %s", task_id, e)
         # co-guard deny-and-resume: follow-ups deferred while this step was active
         try:
             await guard_grants.after_task_finished(task_id, submit=self.submit)
         except Exception:  # noqa: BLE001 - never breaks a finish
             pass
+        # token care: a step that crossed the fresh-session threshold continues in a fresh session
+        await self._maybe_auto_continue(task_id)
+
+    AUTO_CONTINUE_MAX = 3  # automatic continues in a row per thread
+
+    # the handoff has an open todo for this step (shared with Home "Open handoffs")
+    _open_todo = staticmethod(handoff.open_todo)
+
+    async def _maybe_auto_continue(self, task_id: str) -> None:
+        """The automatic fresh Continue: the step completed (not a dispatched child), co-guard fired its
+        ``fresh`` band, the step has no open question (the thread waits for the person's answer), and either
+        the handoff has an open todo or the step's notes were saved after the band; no step of the thread is
+        active and fewer than AUTO_CONTINUE_MAX of the thread's newest main-line steps in a row were
+        automatic. The step runs as the parent's owner, mode fresh, with an
+        ``auto_continue`` run-log event. Never raises."""
+        try:
+            from fastapi import HTTPException
+
+            from .resume.texts import AUTO_CONTINUE_LINE
+            from .routers import tasks as tasks_router
+
+            async with SessionLocal() as s:
+                task = await s.get(Task, task_id)
+                if task is None or task.status != Status.COMPLETED or task.origin == "agent":
+                    return
+                usage = await s.get(TaskUsage, task_id)
+                fresh = next((b for b in ((usage.bands or []) if usage is not None else [])
+                              if isinstance(b, dict) and b.get("band") == "fresh"), None)
+                if fresh is None:
+                    return
+                # the agent asked a person in this step (filed or captured): the thread waits for the answer
+                asked = (await s.execute(select(TaskQuestion.id).where(
+                    TaskQuestion.task_id == task_id, TaskQuestion.status == "open").limit(1))).first()
+                if asked is not None:
+                    return
+                root = task.root_id or task.id
+                row = (await s.execute(select(TaskHandoff).where(TaskHandoff.root_id == root))
+                       ).scalar_one_or_none()
+                band_ts = fresh.get("ts")
+                noted = task.notes_updated_at
+                if noted is not None and noted.tzinfo is None:
+                    noted = noted.replace(tzinfo=timezone.utc)
+                notes_after = (noted is not None and self._finite(band_ts) and noted.timestamp() > band_ts)
+                if not (notes_after or (row is not None and self._open_todo(row.content, task_id))):
+                    return
+                steps = (await s.execute(
+                    select(Task.auto_continued).where(
+                        (Task.root_id == root) | (Task.id == root), Task.origin != "agent")
+                    .order_by(Task.created_at.desc()))).scalars().all()
+                streak = 0
+                for auto in steps:
+                    if not auto:
+                        break
+                    streak += 1
+                if streak >= self.AUTO_CONTINUE_MAX:
+                    log.info("auto-continue: %s reached %d in a row; not continuing", root, streak)
+                    return
+                try:
+                    child = await tasks_router.queue_continue(s, task, mode="fresh", sender=task.created_by,
+                                                              auto=True)
+                except HTTPException:
+                    return  # a step of the thread is active
+                child_id, priority, created_at = child.id, child.priority, child.created_at
+                # the size co-guard reported with the band (its usage_band event), else the step's peak
+                tokens = next((e.get("value") for e in (await s.execute(
+                    select(TaskEvent.payload).where(TaskEvent.task_id == task_id, TaskEvent.type == "usage_band")
+                )).scalars() if isinstance(e, dict) and e.get("band") == "fresh"), None)
+                if not self._finite(tokens):
+                    tokens = usage.peak_context or usage.context_tokens
+            tokens = tokens if self._finite(tokens) else None
+            n = int(tokens) // 1000 if tokens is not None else "?"
+            try:  # the step is committed: a failed event never leaves it queued without a submit
+                await self._emit_offline(child_id, "auto_continue", {
+                    "text": AUTO_CONTINUE_LINE.format(n=n), "context_tokens": tokens, "continued_from": task_id})
+            except Exception as e:  # noqa: BLE001
+                log.warning("auto-continue: event failed for %s: %s", child_id, e)
+            await self.submit(child_id, priority, created_at)
+        except Exception as e:  # noqa: BLE001 - never breaks a finish
+            log.warning("auto-continue: failed for %s: %s", task_id, e)

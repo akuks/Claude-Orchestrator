@@ -123,8 +123,8 @@ def events(task_id, etype=None):
 
 
 def wait_handoff(step_id, reason="run ended"):
-    """_finish commits the status before its snapshot: wait (bounded, 15 s) for the stored
-    handoff that belongs to this step and reason before a follow-up reads it."""
+    """The stored handoff of this step and reason, before a follow-up reads it (bounded wait, 15 s).
+    _finish stores it before the terminal status, so this returns at once; it stays as a guard."""
     def row():
         async def go():
             async with SessionLocal() as s:
@@ -441,14 +441,15 @@ def test_recovered_step_credentials_changed_goes_fresh(client, monkeypatch):
     key = env_probe_key()
     sid = f"s-{_uid()}"
     tid = mk_task(prompt=f"original work [prompt-probe:{key}] [env-probe:{key}]", created_by=owner.user_id,
-                  status="failed", session_id=sid, resume_session_id=sid, recovery={"pending": True},
+                  status="queued", session_id=sid, resume_session_id=sid, recovery={"pending": True},
                   credential_ref=crypto.fingerprint("CLAUDE_CODE_OAUTH_TOKEN", tok_a))
     session_file(owner.user_id, sid)
     add_events(tid, [("tool_use", {"name": "Bash", "input": {"command": "make migrate"}, "id": "t1"})])
     put_handoff(tid, f"{HANDOFF_HEAD}\nTask: original work")
     monkeypatch.setattr(WorkerManager, "_recovery_block",
                         lambda self, t: RECORD if prompting.recovering(t) else None)
-    assert owner.post(f"/tasks/{tid}/retry").status_code == 200  # queues it, keeping the recovery state
+    # the automatic re-run of a recovered step (a person's Retry drops the record: test_resume_recovery)
+    client.portal.call(app.state.worker.submit, tid, "normal", datetime.now(timezone.utc))
     done = wait_task(owner, tid)
     assert done["status"] == "completed", done.get("error")
     args = read_probe_args(key)

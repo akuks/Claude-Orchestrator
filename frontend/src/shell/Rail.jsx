@@ -33,8 +33,16 @@ const ICONS = {
 const RAIL_PARENT = { runs: 'automation' }
 
 // Slim left icon rail. Items are real links (#/page) so middle-click and
-// "copy link" work; the hash router picks the change up.
-export default function Rail({ page, isAdmin, approvalCount = 0 }) {
+// "copy link" work; the hash router picks the change up. Badges: pending
+// approvals on Approvals, open questions the viewer may answer on Home (where
+// the Questions section lives).
+const BADGES = {
+  approvals: { prop: 'approvalCount', testId: 'rail-approvals-badge', label: (n) => `${n} pending` },
+  home: { prop: 'questionCount', testId: 'rail-questions-badge', label: (n) => `${n} open question${n === 1 ? '' : 's'}` },
+}
+
+export default function Rail({ page, isAdmin, approvalCount = 0, questionCount = 0 }) {
+  const counts = { approvalCount, questionCount }
   const active = RAIL_PARENT[page] || page
   return (
     <nav className="co-rail" aria-label="Main">
@@ -43,15 +51,16 @@ export default function Rail({ page, isAdmin, approvalCount = 0 }) {
       </a>
       {visiblePages(isAdmin).map((p) => {
         const on = p.page === active
-        const icon =
-          p.page === 'approvals' ? (
-            <Badge count={approvalCount} size="small" offset={[4, -2]} data-testid="rail-approvals-badge">
-              <span className="co-rail-icon">{ICONS[p.page]}</span>
-            </Badge>
-          ) : (
+        const badge = BADGES[p.page]
+        const n = badge ? counts[badge.prop] : 0
+        const icon = badge ? (
+          <Badge count={n} size="small" offset={[4, -2]} data-testid={badge.testId}>
             <span className="co-rail-icon">{ICONS[p.page]}</span>
-          )
-        const label = p.page === 'approvals' && approvalCount ? `${p.label} (${approvalCount} pending)` : p.label
+          </Badge>
+        ) : (
+          <span className="co-rail-icon">{ICONS[p.page]}</span>
+        )
+        const label = badge && n ? `${p.label} (${badge.label(n)})` : p.label
         return (
           <Tooltip key={p.page} title={label} placement="right" mouseEnterDelay={0.15}>
             <a

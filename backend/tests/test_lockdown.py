@@ -365,3 +365,43 @@ def test_agent_token_guard_routes_are_own_task_only(thread, client):
     pat = _bearer(_mint(me, "personal"))
     assert pat.post("/guard/approvals", json=body).status_code == 403
     assert client.post(f"/guard/approvals/{rid}/approve").status_code == 200  # admin, a person
+
+
+def test_agent_token_allowlist_is_exact(thread):
+    """Walk every HTTP route with an agent-task token: the routes that get past the allowlist (any answer
+    but "Token not allowed for this route") are exactly these. A new agent route must be added here."""
+    expected = {
+        ("POST", "/agents/dispatch"),
+        ("GET", "/tasks/{task_id}"),
+        ("GET", "/tasks/{task_id}/events"),
+        ("PUT", "/tasks/{task_id}/notes"),
+        ("POST", "/tasks/{task_id}/questions"),
+        ("GET", "/tasks/{task_id}/questions"),
+        ("POST", "/guard/report"),
+        ("POST", "/guard/approvals"),
+        ("GET", "/guard/approvals/{approval_id}"),
+    }
+    import uuid
+
+    from app.database import SessionLocal
+    from app.models import Task
+
+    own = uuid.uuid4().hex  # a row no worker runs: its finish would revoke the token mid-walk
+
+    async def mk():
+        async with SessionLocal() as s:
+            s.add(Task(id=own, title="allow-walk", prompt="x", root_id=own, status="running",
+                       created_by=thread["user_id"]))
+            await s.commit()
+
+    _run(mk())
+    t = _bearer(_mint(thread["user_id"], "agent-task", own))
+    passed = set()
+    for method, path in _all_http_routes(app):
+        if (method, path) in OPEN_ROUTES:
+            continue
+        r = t.request(method, _fill(path))
+        blocked = r.status_code == 403 and r.json().get("detail") == "Token not allowed for this route"
+        if not blocked:
+            passed.add((method, path))
+    assert passed == expected

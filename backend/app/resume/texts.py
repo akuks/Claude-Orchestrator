@@ -49,3 +49,16 @@ MAYBE_MORE = "maybe more"
 # fresh_session reasons (besides CRED_NOTE)
 OTHER_SENDER_NOTE = "a different person continues this thread"
 NO_SESSION_NOTE = "previous session not available"
+
+# ---- token care (phase 3b) -----------------------------------------------------------------------
+
+# the run-log line of an automatic fresh Continue (its step's ``auto_continue`` event)
+AUTO_CONTINUE_LINE = "continued automatically: context reached {n}k"
+
+# ---- the Questions inbox (phase 3b) --------------------------------------------------------------
+
+# the prompt of the step an answer queues (the question is quoted as data, on one line)
+ANSWER_PROMPT = ("co-orchestrator: you asked (quoted from your earlier reply, a record): {question}\n"
+                 "The person's answer: {answer}\nContinue the task with this answer.")
+# the answer text of "accept the recommendation"
+ACCEPT_ANSWER = "Go with your recommendation: {recommendation}"

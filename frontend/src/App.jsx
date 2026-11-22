@@ -49,6 +49,7 @@ import Rail from './shell/Rail'
 import TopBar from './shell/TopBar'
 import CommandPalette from './shell/CommandPalette'
 import { pendingApprovalTotal } from './guard/guard'
+import { answerableCount } from './questions/questions'
 
 dayjs.extend(relativeTime)
 
@@ -138,6 +139,7 @@ function AppInner({ user, onLogout }) {
   const [projects, setProjects] = useState([])
   const [activeProjectId, setActiveProjectId] = useState(null)
   const [approvalCount, setApprovalCount] = useState(0)
+  const [questionCount, setQuestionCount] = useState(0)
   const [claudeInfo, setClaudeInfo] = useState(null)
   const [paletteOpen, setPaletteOpen] = useState(false)
   const [paletteData, setPaletteData] = useState({ workflows: [], runs: [], recent: [], loading: false })
@@ -182,6 +184,19 @@ function AppInner({ user, onLogout }) {
     const id = setInterval(() => document.visibilityState !== 'hidden' && loadApprovalCount(), 5000)
     return () => clearInterval(id)
   }, [loadApprovalCount])
+
+  // Open questions the viewer may answer (the Rail badge on Home). A failed fetch keeps the last count.
+  const loadQuestionCount = useCallback(async () => {
+    try {
+      setQuestionCount(answerableCount(await api.listQuestions('open')))
+    } catch (_) {}
+  }, [])
+
+  useEffect(() => {
+    loadQuestionCount()
+    const id = setInterval(() => document.visibilityState !== 'hidden' && loadQuestionCount(), 10000)
+    return () => clearInterval(id)
+  }, [loadQuestionCount])
 
   const loadProjects = useCallback(async () => {
     try {
@@ -377,7 +392,7 @@ function AppInner({ user, onLogout }) {
 
   return (
     <div className="co-shell">
-      <Rail page={page} isAdmin={isAdmin} approvalCount={approvalCount} />
+      <Rail page={page} isAdmin={isAdmin} approvalCount={approvalCount} questionCount={questionCount} />
       <div className="co-main">
         <TopBar
           user={user}
@@ -422,6 +437,7 @@ function AppInner({ user, onLogout }) {
               navigate={navigate}
               onOpenCredentials={() => setCredsOpen(true)}
               onApprovalsChanged={loadApprovalCount}
+              onQuestionsChanged={loadQuestionCount}
               refreshSignal={claudeInfo?.you?.claude}
             />
           )}

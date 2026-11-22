@@ -39,6 +39,7 @@ import ProjectMembers from './ProjectMembers'
 import ProjectCards from '../projects/ProjectCards'
 import GuardSettings from '../guard/GuardSettings'
 import { canEditGuard } from '../guard/guard'
+import { FRESH_SUGGEST, freshSessionError } from '../usage/usage'
 
 dayjs.extend(relativeTime)
 
@@ -82,11 +83,13 @@ async function loadOwnerOptions(project, currentUser) {
   ]
 }
 
-function ProjectModal({ open, project, isAdmin, currentUser, onClose, onSaved }) {
+export function ProjectModal({ open, project, isAdmin, currentUser, onClose, onSaved }) {
   const [form] = Form.useForm()
   const [saving, setSaving] = useState(false)
   const [ownerOpts, setOwnerOpts] = useState([])
   const isEdit = !!project
+  // token care (phase 3b): maintainers set it on an existing project; empty is off
+  const editFresh = isEdit && (project.my_role === 'maintainer' || isAdmin)
 
   useEffect(() => {
     if (!open || !project) return
@@ -109,6 +112,7 @@ function ProjectModal({ open, project, isAdmin, currentUser, onClose, onSaved })
         github_repo: project.github_repo,
         auto_review_prs: project.auto_review_prs,
         automation_owner_id: project.automation_owner_id || CREATOR,
+        ...(editFresh ? { fresh_session_tokens: project.fresh_session_tokens ?? null } : {}),
       })
     } else {
       form.resetFields()
@@ -135,6 +139,8 @@ function ProjectModal({ open, project, isAdmin, currentUser, onClose, onSaved })
       if (owner === (project.automation_owner_id || null)) delete v.automation_owner_id
       else v.automation_owner_id = owner
     } else delete v.automation_owner_id
+    if (editFresh) v.fresh_session_tokens = v.fresh_session_tokens ?? null
+    else delete v.fresh_session_tokens
     setSaving(true)
     try {
       if (isEdit) await api.updateProject(project.id, v)
@@ -210,6 +216,30 @@ function ProjectModal({ open, project, isAdmin, currentUser, onClose, onSaved })
             extra="Webhook-triggered PR reviews run as this person, on their Claude credential. Must be a maintainer."
           >
             <Select data-testid="automation-owner" showSearch optionFilterProp="label" options={ownerOpts} />
+          </Form.Item>
+        )}
+        {editFresh && (
+          <Form.Item
+            name="fresh_session_tokens"
+            label="Fresh session at (tokens)"
+            data-testid="fresh-session"
+            extra={`Empty is off. When a step's conversation reaches this size, the agent saves its notes and the thread continues in a fresh session (at most 3 times in a row). ${FRESH_SUGGEST.toLocaleString('en-US')} is a good start.`}
+            rules={[
+              {
+                validator: (_, value) => {
+                  const err = freshSessionError(value)
+                  return err ? Promise.reject(new Error(err)) : Promise.resolve()
+                },
+              },
+            ]}
+          >
+            <InputNumber
+              data-testid="fresh-session-input"
+              step={10000}
+              precision={0}
+              placeholder={String(FRESH_SUGGEST)}
+              style={{ width: '100%' }}
+            />
           </Form.Item>
         )}
         <Space size="large">

@@ -78,11 +78,12 @@ def test_outside_commits_attribution(tmp_path):
     d = repo(tmp_path)
     commit(d, "base.txt")
     start = head(d)
-    g(d, "commit", "-q", "--allow-empty", "-m", "own")
+    out = g(d, "commit", "--allow-empty", "-m", "own")  # the run's own `git commit` output, as the agent saw it
     c1 = head(d)
     commit(d, "other.txt", "other process")
     c2 = head(d)
-    own = {c1[:7]}
+    own = gitfacts.own_shas([out])
+    assert any(c1.startswith(s) for s in own)
     r = gitfacts.outside_commits(d, since=start[:12], head=c2[:12], own=own, budget=gitfacts.Budget())
     assert [c.sha for c in r["commits"]] == [c2] and r["rewritten"] is False
     assert r["commits"][0].subject == "other process"

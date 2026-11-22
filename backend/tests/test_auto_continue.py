@@ -1,0 +1,309 @@
+"""Phase 3b task 3: the automatic fresh Continue after a completed step that crossed the project's
+fresh-session threshold (a ``fresh`` band), when the handoff has an open todo or the notes changed after
+the band; at most 3 in a row per thread (Review Focus 3)."""
+
+import asyncio
+import time
+import uuid
+from datetime import datetime, timedelta, timezone
+
+import pytest
+from sqlalchemy import select
+
+from app.database import SessionLocal
+from app.main import app
+from app.models import Task, TaskEvent, TaskHandoff, TaskQuestion, TaskUsage
+from app.resume import logfmt
+from app.resume.texts import AUTO_CONTINUE_LINE, CONTINUE_PROMPT
+from conftest import login_as, wait_task
+
+BAND_TS = 1790000003.0
+OPEN = {"step": {"n": 2, "m": 3, "text": "Write the parser", "source": "todo"}, "next": "Test it"}
+DONE = {"step": {"n": 3, "m": 3, "text": "all steps done", "source": "todo"}, "next": None}
+
+
+def run(coro):
+    return asyncio.run(coro)
+
+
+@pytest.fixture
+def submitted(monkeypatch):
+    got = []
+
+    async def submit(task_id, priority, created_at):
+        got.append(task_id)
+
+    monkeypatch.setattr(app.state.worker, "submit", submit)
+    return got
+
+
+@pytest.fixture(scope="module")
+def owner(client):
+    return login_as(f"ac-owner-{uuid.uuid4().hex[:8]}@test.local")
+
+
+_clock = [datetime.now(timezone.utc) - timedelta(hours=1)]
+
+
+def _step(owner, *, root=None, parent=None, origin="user", status="completed", auto=False,
+          bands=(("fresh", BAND_TS),), content=OPEN, notes_at=None, peak=152345, budget=None):
+    """A thread step row (created_at strictly increasing), its usage row and the thread's handoff."""
+    tid = uuid.uuid4().hex
+    _clock[0] += timedelta(seconds=1)
+
+    async def go():
+        async with SessionLocal() as s:
+            s.add(Task(id=tid, title="t", prompt="the work", root_id=root or tid, parent_task_id=parent,
+                       origin=origin, status=status, auto_continued=auto, created_by=owner.user_id,
+                       session_id=f"s-{tid[:6]}", created_at=_clock[0], max_budget_usd=budget,
+                       notes="Step: 2 of 3" if notes_at else None, notes_updated_at=notes_at))
+            if bands is not None:
+                s.add(TaskUsage(task_id=tid, root_id=root or tid, peak_context=peak, context_tokens=peak,
+                                bands=[{"band": b, "ts": ts} for b, ts in bands]))
+            if content is not None:
+                r = root or tid
+                row = (await s.execute(select(TaskHandoff).where(TaskHandoff.root_id == r))).scalar_one_or_none()
+                if row is None:
+                    row = TaskHandoff(root_id=r, version=1)
+                    s.add(row)
+                row.task_id, row.content = tid, dict(content, step_task_id=tid)
+            await s.commit()
+
+    run(go())
+    return tid
+
+
+def _auto(tid):
+    run(app.state.worker._maybe_auto_continue(tid))
+
+
+def _children(tid):
+    async def go():
+        async with SessionLocal() as s:
+            return (await s.execute(select(Task).where(Task.parent_task_id == tid))).scalars().all()
+
+    return run(go())
+
+
+def _events(tid, etype):
+    async def go():
+        async with SessionLocal() as s:
+            return (await s.execute(select(TaskEvent).where(TaskEvent.task_id == tid, TaskEvent.type == etype)
+                                    .order_by(TaskEvent.seq))).scalars().all()
+
+    return run(go())
+
+
+def test_fresh_band_and_open_todo_queue_one_fresh_continue(client, owner, submitted):
+    tid = _step(owner)
+    _auto(tid)
+    kids = _children(tid)
+    assert len(kids) == 1
+    k = kids[0]
+    assert (k.origin, k.prompt, k.status) == ("continue", CONTINUE_PROMPT, "queued")
+    assert k.resume_session_id is None  # fresh, even though the owner could resume
+    assert k.auto_continued is True and k.created_by == owner.user_id and k.root_id == tid
+    assert submitted == [k.id]
+    evs = _events(k.id, "auto_continue")
+    assert len(evs) == 1 and evs[0].payload["text"] == AUTO_CONTINUE_LINE.format(n=152)
+    ln = logfmt.line({"type": "auto_continue", "payload": evs[0].payload, "created_at": None})
+    assert ln == "--:--:-- AUTO continued automatically: context reached 152k"
+    # the thread now has an active step: a second call queues nothing
+    _auto(tid)
+    assert len(_children(tid)) == 1 and submitted == [k.id]
+
+
+def test_automatic_continue_keeps_the_steps_budget(client, owner, submitted):
+    """Found by the phase 3b e2e: the continued step had no max_budget_usd, so an unattended automatic
+    continue ran without the --max-budget-usd cut and without the 80/95 % bands. A thread step (automatic or
+    manual Continue, follow-up, answer) keeps the parent's budget, like its model and max turns."""
+    tid = _step(owner, budget=1.5)
+    _auto(tid)
+    kids = _children(tid)
+    assert len(kids) == 1 and kids[0].max_budget_usd == 1.5
+    other = _step(owner, budget=2.0, bands=None)
+    r = client.post(f"/tasks/{other}/followup", json={"prompt": "and the tests"})
+    assert r.status_code == 201, r.text
+    assert r.json()["max_budget_usd"] == 2.0
+
+
+def test_duplicate_keeps_the_budget_or_takes_the_default(client, owner, submitted):
+    """Final review I1: Duplicate copies the source's max_budget_usd; a source without one gets
+    default_task_budget_usd, the way task creation does."""
+    from app.config import settings
+
+    src = _step(owner, budget=1.75, bands=None)
+    r = client.post(f"/tasks/{src}/duplicate")
+    assert r.status_code == 201, r.text
+    assert r.json()["max_budget_usd"] == 1.75
+    bare = _step(owner, budget=None, bands=None)
+    r = client.post(f"/tasks/{bare}/duplicate")
+    assert r.status_code == 201, r.text
+    assert settings.default_task_budget_usd is not None
+    assert r.json()["max_budget_usd"] == settings.default_task_budget_usd
+
+
+def test_open_question_on_the_step_waits_for_the_answer(client, owner, submitted):
+    """Fresh band + open todo, but the agent asked a person (filed or captured): no automatic continue."""
+    for source in ("agent", "final_text"):
+        tid = _step(owner)
+
+        async def ask():
+            async with SessionLocal() as s:
+                s.add(TaskQuestion(task_id=tid, root_id=tid, question="Which one?", source=source))
+                await s.commit()
+
+        run(ask())
+        _auto(tid)
+        assert _children(tid) == [], source
+    assert submitted == []
+
+
+def test_no_fresh_band_none(client, owner, submitted):
+    for bands in (None, (), (("budget80", BAND_TS), ("budget95", BAND_TS))):
+        tid = _step(owner, bands=bands)
+        _auto(tid)
+        assert _children(tid) == []
+    assert submitted == []
+
+
+def test_failed_cancelled_agent_none(client, owner, submitted):
+    for status in ("failed", "cancelled"):
+        tid = _step(owner, status=status)
+        _auto(tid)
+        assert _children(tid) == []
+    root = _step(owner)
+    kid = _step(owner, root=root, parent=root, origin="agent")
+    _auto(kid)
+    assert _children(kid) == []
+    assert submitted == []
+
+
+def test_band_without_open_todo_or_newer_notes_none(client, owner, submitted):
+    before = datetime.fromtimestamp(BAND_TS - 60, timezone.utc)
+    for kw in ({"content": DONE}, {"content": None}, {"content": DONE, "notes_at": before},
+               {"content": {"step": {"n": None, "m": None, "text": "the work", "source": "prompt"}}}):
+        tid = _step(owner, **kw)
+        _auto(tid)
+        assert _children(tid) == [], kw
+    assert submitted == []
+
+
+def test_notes_changed_after_the_band_continue(client, owner, submitted):
+    after = datetime.fromtimestamp(BAND_TS + 60, timezone.utc)
+    tid = _step(owner, content=DONE, notes_at=after)
+    _auto(tid)
+    assert len(_children(tid)) == 1 and len(submitted) == 1
+
+
+def test_handoff_of_another_step_does_not_count(client, owner, submitted):
+    """A stale handoff (the finish snapshot failed) describes an earlier step: its todo does not count."""
+    root = _step(owner, bands=None)
+    tid = _step(owner, root=root, parent=root, content=None)
+    _auto(tid)
+    assert _children(tid) == []
+    assert submitted == []
+
+
+def test_cap_three_in_a_row_and_a_user_followup_resets(client, owner, submitted):
+    # U -> A1 -> A2 -> A3: the 4th completion (A3's) does not continue
+    root = _step(owner)
+    prev = root
+    for _ in range(3):
+        prev = _step(owner, root=root, parent=prev, origin="continue", auto=True)
+    _auto(prev)
+    assert _children(prev) == []
+    # a user follow-up after A3 resets the count; then A1' continues again
+    fu = _step(owner, root=root, parent=prev, origin="user")
+    _auto(fu)
+    assert len(_children(fu)) == 1
+    # two in a row still continue (count 2 < 3)
+    root = _step(owner)
+    a1 = _step(owner, root=root, parent=root, origin="continue", auto=True)
+    a2 = _step(owner, root=root, parent=a1, origin="continue", auto=True)
+    _auto(a2)
+    assert len(_children(a2)) == 1
+    # a manual Continue in between is not automatic: it resets too
+    root = _step(owner)
+    a1 = _step(owner, root=root, parent=root, origin="continue", auto=True)
+    a2 = _step(owner, root=root, parent=a1, origin="continue", auto=True)
+    m = _step(owner, root=root, parent=a2, origin="continue")
+    a3 = _step(owner, root=root, parent=m, origin="continue", auto=True)
+    _auto(a3)
+    assert len(_children(a3)) == 1
+    # agent children are not main-line steps: they neither count nor reset
+    root = _step(owner)
+    prev = root
+    for _ in range(3):
+        prev = _step(owner, root=root, parent=prev, origin="continue", auto=True)
+        _step(owner, root=root, parent=prev, origin="agent", bands=None, content=None)
+    _auto(prev)
+    assert _children(prev) and all(c.origin == "agent" for c in _children(prev))
+
+
+def test_never_raises_into_finish(client, owner, monkeypatch, submitted):
+    from app.routers import tasks as tasks_router
+
+    async def boom(*a, **kw):
+        raise RuntimeError("db gone")
+
+    monkeypatch.setattr(tasks_router, "queue_continue", boom)
+    tid = _step(owner)
+    _auto(tid)  # logged, not raised
+    _auto(uuid.uuid4().hex)  # a missing task
+    assert submitted == []
+
+
+def _settled(client, tid, timeout=30.0):
+    """The step is terminal and its _finish (auto-continue included) has returned."""
+    deadline = time.time() + timeout
+    t = wait_task(client, tid, timeout)
+    while time.time() < deadline and tid in app.state.worker._active:
+        time.sleep(0.1)
+    assert tid not in app.state.worker._active, f"{tid} still finishing"
+    return t
+
+
+def test_end_to_end_chain_stops_at_the_cap(client):
+    """Through the mock CLI: the fresh continue's prompt carries the original request (with the fixture
+    marker), so every automatic step crosses the band again; the chain stops after exactly 3 automatic
+    steps and nothing is left running when the test ends (Review Focus 3, end to end)."""
+    r = client.post("/tasks", json={"prompt": "go [stream-fixture:fresh_todo]"})
+    assert r.status_code == 201, r.text
+    done = _settled(client, r.json()["id"])
+    assert done["status"] == "completed", done.get("error")
+    chain, prev = [], done["id"]
+    while True:
+        kids = _children(prev)
+        if not kids:
+            break
+        assert len(kids) == 1 and len(chain) < 3, "more than one automatic continue per step / past the cap"
+        k = kids[0]
+        assert k.auto_continued and k.origin == "continue" and k.resume_session_id is None
+        assert k.created_by == done["created_by"]
+        assert _events(k.id, "auto_continue")[0].payload["text"] == AUTO_CONTINUE_LINE.format(n=152)
+        finished = _settled(client, k.id)
+        assert finished["status"] == "completed", finished.get("error")
+        chain.append(k.id)
+        prev = k.id
+    assert len(chain) == 3
+
+
+def test_queue_continue_parent_deleted_in_the_window_404(client, owner):
+    from fastapi import HTTPException
+
+    from app.routers.tasks import queue_continue
+
+    tid = _step(owner, bands=None, content=None)
+
+    async def go():
+        async with SessionLocal() as s:
+            parent = await s.get(Task, tid)
+            async with SessionLocal() as s2:  # deleted by someone else before the lock is taken
+                await s2.delete(await s2.get(Task, tid))
+                await s2.commit()
+            with pytest.raises(HTTPException) as e:
+                await queue_continue(s, parent, mode="fresh", sender=owner.user_id, auto=False)
+            return e.value.status_code
+
+    assert run(go()) == 404

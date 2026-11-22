@@ -1,0 +1,10 @@
+{"type":"system","subtype":"init","session_id":"test-session"}
+{"type":"assistant","message":{"id":"b1","model":"claude-test","content":[{"type":"text","text":"working"}]}}
+{"__spool__": {"event":"PostToolUse","nudge":"notes","injected":500,"ts":1790000000.0}}
+{"__spool__": {"event":"PostToolUse","band":"budget80","value":4.0,"injected":0,"ts":1790000001.0}}
+{"__spool__": {"event":"PostToolUse","band":"budget95","value":4.8,"injected":160,"ts":1790000001.5}}
+{"__spool__": {"event":"PostToolUse","band":"budget80","value":4.9,"injected":80,"ts":1790000002.0}}
+{"__spool__": {"event":"PostToolUse","band":"fresh","value":152345,"injected":200,"ts":1790000003.0}}
+{"__spool__": {"event":"PostToolUse","band":"bogus","value":1,"injected":7,"ts":1790000004.0}}
+{"__spool__": {"event":"PostToolUse","outside_doc":"/tmp/a.html","injected":100,"ts":1790000005.0}}
+{"type":"result","subtype":"success","result":"done","num_turns":1,"total_cost_usd":0.01,"duration_ms":100,"is_error":false,"usage":{"input_tokens":1,"output_tokens":1}}

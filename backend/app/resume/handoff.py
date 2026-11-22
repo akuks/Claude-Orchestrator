@@ -214,14 +214,19 @@ def _from_plan_file(events, workspace):
     return None
 
 
-def _from_superpowers(events, workspace):
+def _from_superpowers(events, workspace, roots=()):
+    allowed = [_realabs(d) for d in (workspace, *roots) if d]
     for shown, _real in _written_paths(events, workspace):
         m = _SP_PLAN.search(shown) or _SP_LEDGER.search(shown)
         if not m:
             continue
         name = m.group(1)
-        plan = Path(workspace) / "docs" / "superpowers" / "plans" / f"{name}.md"
-        ledger = Path(workspace) / ".superpowers" / "sdd" / name / "progress.md"
+        # the tree the step wrote it in, when that is the workspace, the project dir or a source dir (or
+        # inside one); anywhere else: the workspace, as before
+        tree = _realabs(shown[: m.start()] or workspace)
+        root = Path(tree if any(_within(tree, a) for a in allowed) else workspace)
+        plan = root / "docs" / "superpowers" / "plans" / f"{name}.md"
+        ledger = root / ".superpowers" / "sdd" / name / "progress.md"
         tasks = _SP_TASK.findall(_read_small(plan) or "")
         if not tasks:
             continue
@@ -241,17 +246,18 @@ def _from_notes(notes_text):
             "done": [], "source": "notes"}
 
 
-def step_progress(events, workspace, notes_text, notes_at):
+def step_progress(events, workspace, notes_text, notes_at, roots=()):
     """Step n of m, in priority order: TodoWrite, TaskCreate/TaskUpdate, a
     checkbox plan file the step wrote, a superpowers plan with its ledger, the
     notes' ``Step:`` header (it wins over a plan file when newer). None: no
-    source (the caller falls back to the last user prompt)."""
+    source (the caller falls back to the last user prompt). ``roots``: the
+    project dir and source dirs a superpowers plan may also live in."""
     for derive in (_from_todos, _from_tasks):
         got = derive(events)
         if got:
             return got
     noted = _from_notes(notes_text)
-    for derive in (_from_plan_file, _from_superpowers):
+    for derive in (_from_plan_file, lambda ev, ws: _from_superpowers(ev, ws, roots)):
         got = derive(events, workspace)
         if got:
             plan, at = got
@@ -355,7 +361,8 @@ def build(inp: HandoffInput) -> dict:
     notes = noted[-1] if noted else None
     notes_text = clean_text(redact(notes["notes"], secrets)) if notes else None
 
-    sp = step_progress(events, inp.workspace, notes_text, notes["notes_updated_at"] if notes else None)
+    roots = [inp.project_dir, *(s.get("path") for s in inp.sources or [] if isinstance(s, dict))]
+    sp = step_progress(events, inp.workspace, notes_text, notes["notes_updated_at"] if notes else None, roots)
     if sp is None:
         sp = {"n": None, "m": None, "text": last_request, "next": None, "done": [], "source": "prompt"}
     done = list(sp["done"])
@@ -602,7 +609,7 @@ def write_file(task_id: str, text: str, secrets=None) -> bool:
     return True
 
 
-async def _gather(s, task, since):
+async def _gather(s, task, since, ending=None):
     from ..access import can_see_task, effective_project_id
     from ..auth import Principal
     from ..config import settings
@@ -620,7 +627,13 @@ async def _gather(s, task, since):
     else:
         described = ([t for t in main if t.started_at] or main or [task])[-1]
     steps = main[: main.index(described) + 1] if described in main else [*main, described]
-    children = Counter(t.status for t in thread if t.origin == "agent")
+    ending = ending or {}
+
+    def step(t):  # a finishing step's terminal fields, not committed yet
+        return {**_step_dict(t), **ending} if t.id == task.id else _step_dict(t)
+
+    children = Counter(ending.get("status", t.status) if t.id == task.id else t.status
+                       for t in thread if t.origin == "agent")
     evs = (await s.execute(select(TaskEvent).where(TaskEvent.task_id == described.id)
                            .order_by(TaskEvent.seq.desc()).limit(EVENTS_SCAN_MAX))).scalars().all()
     events = [{"type": e.type, "payload": e.payload or {}, "created_at": e.created_at, "seq": e.seq}
@@ -646,7 +659,9 @@ async def _gather(s, task, since):
     others = []
     if described.workspace_dir:
         rows = (await s.execute(select(Task).where(
-            Task.status == Status.RUNNING, Task.workspace_dir == described.workspace_dir, Task.root_id != root)
+            Task.status == Status.RUNNING, Task.workspace_dir == described.workspace_dir,
+            or_(Task.root_id.is_(None), Task.root_id != root),  # a legacy row has no root_id
+            Task.id.notin_([t.id for t in thread]))  # never the thread's own steps
             .order_by(Task.started_at.desc()).limit(OTHERS_MAX + 1))).scalars().all()
         owner = await s.get(User, described.created_by) if described.created_by else None
         for t in rows[:OTHERS_MAX]:
@@ -659,17 +674,19 @@ async def _gather(s, task, since):
     policy = {"project_dir": project_dir, "home": guard_runtime.real_home(), "tmpdir": os.environ.get("TMPDIR")}
     own_texts = [str(e["payload"].get("content") or "") for e in events if e["type"] == "tool_result"]
     return {
-        "root": root, "described": described, "steps": [_step_dict(t) for t in steps], "events": events,
+        "root": root, "described": described, "steps": [step(t) for t in steps], "events": events,
         "children": dict(children), "workspace": workspace, "project_dir": project_dir, "sources": source_dirs,
         "waiting": waiting, "others": others, "trust": trust, "base": base, "policy": policy, "own": own_texts,
         "prev": prev,
     }
 
 
-async def snapshot(task_id: str, reason: str, *, secrets=None, since=None):
+async def snapshot(task_id: str, reason: str, *, secrets=None, since=None, ending=None):
     """Build and store the thread's handoff; the stored TaskHandoff, or None
     when the task is gone. ``since``: the run's outside-commit base (else the
-    stored handoff's base_head, else its head, else head_at_start)."""
+    stored handoff's base_head, else its head, else head_at_start). ``ending``:
+    the finishing step's terminal fields (status, completed_at, result_text),
+    which the finish snapshot records before they are committed."""
     from sqlalchemy.exc import IntegrityError
 
     from ..database import SessionLocal
@@ -679,7 +696,7 @@ async def snapshot(task_id: str, reason: str, *, secrets=None, since=None):
         task = await s.get(Task, task_id)
         if task is None:
             return None
-        g = await _gather(s, task, since)
+        g = await _gather(s, task, since, ending)
 
     budget = gitfacts.Budget()
     facts = await asyncio.to_thread(gitfacts.facts, g["workspace"], budget)
@@ -724,3 +741,18 @@ async def snapshot(task_id: str, reason: str, *, secrets=None, since=None):
             if attempt == 2:
                 raise
     return None
+
+
+def open_todo(content: dict, task_id: str) -> bool:
+    """(Phase 3b: the automatic Continue and Home "Open handoffs".) The stored handoff describes this step and its progress has an item not completed: a ``next``
+    one, a current one that is not "all steps done", or (from the notes' header) n below m."""
+    if not isinstance(content, dict) or content.get("step_task_id") != task_id:
+        return False
+    st = content.get("step") if isinstance(content.get("step"), dict) else {}
+    if st.get("source") in (None, "prompt") or not st.get("m"):
+        return False
+    if content.get("next"):
+        return True
+    if st.get("source") == "notes":
+        return isinstance(st.get("n"), int) and st["n"] < st["m"]
+    return st.get("text") != "all steps done"

@@ -38,14 +38,26 @@ def _set_ground(value):
 
 @pytest.fixture
 def ground_restored(client):
+    """Puts the org row back as it was: no row, a null ground_rules and the disabled rules included."""
     async def get():
         async with SessionLocal() as s:
             row = await s.get(GuardOrgSettings, 1)
-            return None if row is None else row.ground_rules
+            return None if row is None else (row.ground_rules, row.disabled_rules)
 
     saved = _run(get())
     yield
-    _set_ground(saved or {})
+
+    async def restore():
+        async with SessionLocal() as s:
+            row = await s.get(GuardOrgSettings, 1)
+            if saved is None:
+                if row is not None:
+                    await s.delete(row)
+            elif row is not None:
+                row.ground_rules, row.disabled_rules = saved
+            await s.commit()
+
+    _run(restore())
 
 
 # ---- the texts ----------------------------------------------------------------------------------
@@ -82,17 +94,17 @@ def test_main_text_uses_hook_notes_line():
     text = gr.main_text(gr.DEFAULTS)
     assert co_hook.NOTES_LINE.replace("update your notes now", "keep short notes") in text
     assert "update your notes now" not in text
-    for part in (gr.GROUNDING, gr.SHORT_ANSWERS, gr.USAGE_CARE_MAIN):
+    for part in (gr.GROUNDING, gr.SHORT_ANSWERS, gr.USAGE_CARE_MAIN, gr.QUESTIONS_RULE):
         assert part in text
     # the text of the rule is not written a second time in the module
     src = pathlib.Path(gr.__file__).read_text()
     assert "Start with the lines" not in src and "--data-binary" not in src
     off = gr.main_text(gr.DEFAULTS | {"grounding": False, "short_answers": False, "usage_care": False,
-                                      "notes": False, "extra": "  be kind  "})
+                                      "notes": False, "questions": False, "extra": "  be kind  "})
     assert off == "be kind"
-    assert gr.included(gr.DEFAULTS) == ["grounding", "short_answers", "usage_care", "notes"]
+    assert gr.included(gr.DEFAULTS) == ["grounding", "short_answers", "usage_care", "notes", "questions"]
     assert gr.included(gr.DEFAULTS | {"usage_care": False, "extra": "x"}) == [
-        "grounding", "short_answers", "notes", "extra"]
+        "grounding", "short_answers", "notes", "questions", "extra"]
 
 
 def test_helper_text():
@@ -112,14 +124,14 @@ def test_org_settings_ground_rules_roundtrip_and_admin_only(client, ground_resto
     member = login_as(f"gr-{uuid.uuid4().hex[:8]}@test.local")
     assert member.put("/guard/org-settings", json={"ground_rules": {"usage_care": False}}).status_code == 403
     assert member.get("/guard/org-settings").json()["ground_rules"] == gr.DEFAULTS  # anyone may read
-    for bad in ({"extra": "x" * 2001}, {"bogus": True}, {"grounding": "yes"}, {"extra": 5}):
+    for bad in ({"extra": "x" * 2001}, {"bogus": True}, {"grounding": "yes"}, {"extra": 5}, "x", ["a"]):
         assert client.put("/guard/org-settings", json={"ground_rules": bad}).status_code == 400, bad
     r = client.put("/guard/org-settings", json={"ground_rules": {"usage_care": False}})
     assert r.status_code == 200, r.text
     got = client.get("/guard/org-settings").json()["ground_rules"]
     assert got == gr.DEFAULTS | {"usage_care": False}
     # PUT replaces the whole object: a key left out takes its default
-    client.put("/guard/org-settings", json={"ground_rules": {"extra": "hello‮​ there"}})
+    client.put("/guard/org-settings", json={"ground_rules": {"extra": "hello\u202e\u200b there"}})
     got = client.get("/guard/org-settings").json()["ground_rules"]
     assert got == gr.DEFAULTS | {"extra": "hello there"}
     # a PUT without ground_rules leaves it alone
@@ -165,11 +177,13 @@ def test_system_prompt_gets_enabled_rules(client, ground_restored):
     assert gr.GROUNDING in sp and gr.SHORT_ANSWERS in sp and "Prefer small diffs." in sp
     assert gr.USAGE_CARE_MAIN not in sp
     assert "keep short notes" in sp
-    assert _events(done["id"], "ground_rules") == [{"included": ["grounding", "short_answers", "notes", "extra"]}]
+    assert gr.QUESTIONS_RULE in sp
+    assert _events(done["id"], "ground_rules") == [
+        {"included": ["grounding", "short_answers", "notes", "questions", "extra"]}]
 
 
 def test_all_rules_off_adds_nothing(client, ground_restored):
-    _set_ground({"grounding": False, "short_answers": False, "usage_care": False, "notes": False})
+    _set_ground({"grounding": False, "short_answers": False, "usage_care": False, "notes": False, "questions": False})
     key = env_probe_key()
     done = wait_task(client, client.post("/tasks", json={"prompt": f"hi [env-probe:{key}]"}).json()["id"])
     assert done["status"] == "completed", done.get("error")
@@ -191,8 +205,9 @@ def test_policy_helper_context(client, ground_restored):
     assert p["compact"] is True and p["notes"] is False
     assert p["helper_context"] == gr.USAGE_CARE_HELPER + "\n\nAsk first."  # own project: no data line
     assert gr.GROUNDING not in p["helper_context"]
-    assert inp.main_text == "\n\n".join([gr.SHORT_ANSWERS, gr.USAGE_CARE_MAIN, "Ask first."])
-    assert inp.ground_included == ["short_answers", "usage_care", "extra"]
+    assert gr.QUESTIONS_RULE not in p["helper_context"]  # main session only
+    assert inp.main_text == "\n\n".join([gr.SHORT_ANSWERS, gr.USAGE_CARE_MAIN, gr.QUESTIONS_RULE, "Ask first."])
+    assert inp.ground_included == ["short_answers", "usage_care", "questions", "extra"]
 
 
 # ---- F114: the precedence line (forge v0.7.0) ---------------------------------------------------
@@ -271,6 +286,6 @@ def test_precedence_line_only_with_superpowers(client, ground_restored, tmp_path
         sp = _system_prompt(read_probe_args(key))
         assert gr.PRECEDENCE_LINE in sp and sp.index(gr.GROUNDING) < sp.index(gr.PRECEDENCE_LINE)
         assert _events(done["id"], "ground_rules") == [
-            {"included": ["grounding", "short_answers", "usage_care", "notes", "precedence"]}]
+            {"included": ["grounding", "short_answers", "usage_care", "notes", "questions", "precedence"]}]
     finally:
         _drop_pack(pid)

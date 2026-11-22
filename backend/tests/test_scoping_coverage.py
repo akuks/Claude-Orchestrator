@@ -18,7 +18,7 @@ from starlette.websockets import WebSocketDisconnect
 
 from app.database import SessionLocal
 from app.main import app
-from app.models import ActionApproval, ActionGrant, Finding, McpCall, Task
+from app.models import ActionApproval, ActionGrant, Finding, McpCall, Task, TaskHandoff, TaskQuestion
 from conftest import login_as
 from test_lockdown import OPEN_ROUTES, _all_http_routes, _all_ws_routes
 
@@ -163,6 +163,13 @@ def world(client, tmp_path_factory):
         output_tokens=50, model_used=f"cov-model-{tag}", completed_at=datetime.now(timezone.utc),
     ))
     _add(McpCall(task_id=done_id, server=f"cov-mcp-{tag}", tool="t"))
+    # an open question on that P task: GET /questions must not list it, answer/dismiss must refuse
+    (question_id,) = _add(TaskQuestion(
+        task_id=done_id, root_id=done_id, project_id=pid, question=f"cov-question-{tag}?", source="agent",
+    ))
+    # an open handoff with an open todo on that P thread: GET /handoffs/open must not list it
+    _add(TaskHandoff(root_id=done_id, task_id=done_id, status="open", content={
+        "step_task_id": done_id, "step": {"source": "notes", "n": 1, "m": 2, "text": f"cov-step-{tag}"}}))
     # A running P task with a pending co-guard action request (owned by the
     # admin, so it is decidable by P's maintainers and listed for them).
     running_id = uuid.uuid4().hex
@@ -204,6 +211,7 @@ def world(client, tmp_path_factory):
         "rule_id": rule["id"],
         "grant_id": grant_id,
         "root_id": running_id,
+        "question_id": question_id,
     }
     # Strings that must never appear in a list the outsider gets back. Agents,
     # templates and workflows are global by spec, so their ids aren't secret.
@@ -213,9 +221,11 @@ def world(client, tmp_path_factory):
         server["id"], f"cov-mcp-{tag}", run["id"], f"cov-run-{tag}",
         done_id, f"cov-done-{tag}", f"cov-model-{tag}",
         running_id, f"cov-running-{tag}", approval_id, f"cov-action-{tag}",
-        rule["id"], f"cov-pattern-{tag}", f"cov-reason-{tag}", grant_id,
+        rule["id"], f"cov-pattern-{tag}", f"cov-reason-{tag}", grant_id, question_id, f"cov-question-{tag}?",
+        f"cov-step-{tag}",
     }
     return {
+        "done_id": done_id,
         "ids": ids, "secrets": secrets, "outsider": outsider, "project": p,
         "free_agent": free_agent, "task": task,
     }
@@ -232,6 +242,8 @@ def _bodies(world) -> dict:
     item = [{"agent": world["ids"]["agent_id"], "prompt": "go"}]
     return {
         ("POST", "/tasks"): {"prompt": "x", "project_id": i["project_id"], "requires_approval": True},
+        ("POST", "/tasks/{task_id}/questions"): {"question": "x?"},
+        ("POST", "/questions/{question_id}/answer"): {"answer": "x"},
         ("POST", "/tasks/{task_id}/followup"): {"prompt": "x"},
         ("POST", "/projects"): {"name": f"cov-new-{_uid()}"},
         ("POST", "/projects/import"): {"directories": ["/tmp"]},
@@ -404,6 +416,23 @@ def _ws_close_code(c, url, timeout=10.0):
     t.join(timeout)
     assert not t.is_alive(), f"{url}: accepted and silent"
     return got.get("code")
+
+
+def test_open_handoffs_list_p_thread_for_its_maintainer_only(client, world):
+    """The P handoff is a real candidate (a P maintainer sees it), so the walk's outsider check means something.
+    A fresh maintainer, not the admin: the admin's list is the whole suite's newest 10."""
+    pid = world["ids"]["project_id"]
+    boss = login_as(f"cov-boss-{_uid()}@test.local")
+    keep = [{"subject_type": m["subject_type"], "subject_id": m["subject_id"], "role": m["role"]}
+            for m in client.get(f"/projects/{pid}/members").json()]
+    try:
+        r = client.put(f"/projects/{pid}/members", json=keep + [
+            {"subject_type": "user", "subject_id": boss.user_id, "role": "maintainer"}])
+        assert r.status_code == 200, r.text
+        assert world["done_id"] in [r["root_id"] for r in boss.get("/handoffs/open").json()]
+        assert world["done_id"] not in world["outsider"].get("/handoffs/open").text
+    finally:
+        client.put(f"/projects/{pid}/members", json=keep)
 
 
 def test_outsider_ws_on_project_task_is_4404(world):
