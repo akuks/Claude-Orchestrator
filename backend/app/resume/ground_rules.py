@@ -14,6 +14,9 @@ The rule texts are forge's, adapted: "JSPARK Forge" is "co-orchestrator", and th
 
 from __future__ import annotations
 
+import json
+import os
+
 from fastapi import HTTPException
 
 from ..guard.co_hook import DATA_LINE, NOTES_LINE
@@ -52,6 +55,38 @@ USAGE_CARE_HELPER = (
 )
 # the notes rule for the main session: the hook's nudge, asking for short notes instead of an update now
 NOTES_RULE = NOTES_LINE.replace("update your notes now", "keep short notes")
+# forge v0.7.0's PRECEDENCE_LINE (forge.js l.253-256), "JSPARK Forge" -> "co-orchestrator", nothing else changed.
+# The main session gets it when the superpowers plugin is loaded (helpers do not, as in forge).
+PRECEDENCE_LINE = (
+    "co-orchestrator and superpowers, who decides what: superpowers sets the method (brainstorm, plan, test first, "
+    "review, verify). co-orchestrator sets the guard rails (resume, block list, decisions, grounding). At a session "
+    "start, do what co-orchestrator's lines say first (show where the work stands, check a cut-off session), then use "
+    "superpowers' skills for the work. If the two still disagree: the user's own instruction, then co-orchestrator's "
+    "block list and grounding rule, then superpowers."
+)
+PLUGIN_JSON_MAX = 65536
+
+
+def _plugin_name(local_path) -> str | None:
+    try:
+        with open(os.path.join(str(local_path), ".claude-plugin", "plugin.json"), "rb") as fh:
+            raw = fh.read(PLUGIN_JSON_MAX + 1)
+        if len(raw) > PLUGIN_JSON_MAX:
+            return None
+        name = json.loads(raw).get("name")
+        return name if isinstance(name, str) else None
+    except Exception:  # noqa: BLE001 - an unreadable manifest is not superpowers
+        return None
+
+
+def has_superpowers(packs) -> bool:
+    """A loaded skill pack is the superpowers plugin: by its name, or its ``.claude-plugin/plugin.json`` name."""
+    for p in packs or []:
+        if str(getattr(p, "name", None) or "").lower() == "superpowers":
+            return True
+        if getattr(p, "local_path", None) and _plugin_name(p.local_path) == "superpowers":
+            return True
+    return False
 
 
 def normalized(stored) -> dict:

@@ -451,6 +451,13 @@ async def continue_task(task_id: str, request: Request, payload: ContinueCreate 
             raise HTTPException(409, "A dispatched child cannot be continued; continue its thread")
         if parent.status not in Status.TERMINAL:
             raise HTTPException(409, f"Task is still {parent.status}")
+        # a live step: 409 before the snapshot (it would describe that step without its secrets);
+        # the check under the lock below is the real serialisation
+        root = parent.root_id or parent.id
+        active = (await s.execute(select(Task.id).where(
+            or_(Task.root_id == root, Task.id == root), Task.status.in_(Status.ACTIVE)).limit(1))).first()
+        if active is not None:
+            raise HTTPException(409, "A step of this thread is still active")
     worker = request.app.state.worker
     # Where the thread stands, saved before the step is queued and outside the
     # global follow-up lock (it runs git). The step is terminal, so it has no

@@ -358,13 +358,15 @@ async def _queued_followup(s, root_id: str, owner=None) -> Task | None:
     """The thread's queued follow-up an approval may join: one an approval
     created, or a queued Continue step of the thread owner (it runs on the
     owner's credentials, as a follow-up must; another person's Continue is
-    an active step, so the approval is deferred)."""
+    an active step, so the approval is deferred). A step that already ran (a
+    recovered step queued again) is never joined: its resumed prompt is
+    RECOVERED_CONTINUE, so the approval is deferred and spawned after it."""
     made = select(ActionApproval.followup_task_id).where(ActionApproval.followup_task_id.is_not(None))
     joinable = Task.id.in_(made)
     if owner is not None:
         joinable = or_(joinable, and_(Task.origin == "continue", Task.created_by == owner))
     return (await s.execute(
-        select(Task).where(Task.root_id == root_id, Task.status == Status.QUEUED, joinable)
+        select(Task).where(Task.root_id == root_id, Task.status == Status.QUEUED, Task.started_at.is_(None), joinable)
         .order_by(Task.created_at.desc()).limit(1)
     )).scalar_one_or_none()
 

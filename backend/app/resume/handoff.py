@@ -38,6 +38,7 @@ HANDOFF_MAX_WORDS = 600
 FIELD_MAX = 200
 FILES_MAX = 50
 FILES_TRIMMED = 5
+FILES_SHOWN = 8  # files the injected text lists (forge v0.7.0); the card shows all FILES_MAX
 RECENT_ACTIONS = 8
 OTHERS_MAX = 2
 BEFORE_MAX = 4
@@ -56,6 +57,8 @@ ELSEWHERE_MAX = 10
 RUNNING_MAX = 10
 SOURCES_MAX = 5
 HANDOFF_FILE = "handoff.md"
+# snapshots of a run: only they move the outside-commit base (a Refresh or notes save by a person never does)
+RUN_REASONS = ("run ended", "cut off", "working", "recovered")
 
 _WRITE_TOOLS = {"Write", "Edit", "MultiEdit", "NotebookEdit"}
 _HELPER_TOOLS = {"Agent", "Task"}
@@ -408,7 +411,7 @@ def build(inp: HandoffInput) -> dict:
         "last_reply": reply or None,
         "elsewhere": fl(touched["elsewhere"]),
         "outside_docs": fl(touched["outside_docs"]),
-        "notes": {"text": f(notes_text), "at": _iso(notes["notes_updated_at"])} if notes else None,
+        "notes": {"text": f(notes_text, NOTES_MAX_CHARS), "at": _iso(notes["notes_updated_at"])} if notes else None,
         "recent": fl(logfmt.all_lines(events)[-RECENT_ACTIONS:]),
         "files": fl(touched["files"]),
         "others": fl((inp.others or [])[:OTHERS_MAX]),
@@ -491,7 +494,7 @@ def _render(c: dict, level: int) -> str:
     if level < 1:
         items("Recent actions:", c.get("recent"))
     files = c.get("files") or []
-    shown = files[:FILES_TRIMMED] if level >= 2 else files
+    shown = files[:FILES_TRIMMED] if level >= 2 else files[:FILES_SHOWN]
     items("Files touched (newest first):", shown + ([f"(and {len(files) - len(shown)} more)"]
                                                     if len(files) > len(shown) else []))
     items("Files outside the workspace that may vanish:", c.get("outside_docs"))
@@ -521,7 +524,8 @@ def _cut_words(text: str, n: int) -> str:
 
 
 def render(content: dict, level: int = 0) -> str:
-    """The injected text at trim ``level`` (cumulative: 1 drops recent
+    """The injected text at trim ``level``. Files: the newest FILES_SHOWN (8),
+    FILES_TRIMMED (5) from level 2. Levels are cumulative: 1 drops recent
     actions, 2 files down to FILES_TRIMMED, 3 notes to 60 and the last reply
     to 35 words, 4 drops also active). Over HANDOFF_MAX_WORDS, the next level
     is tried, and the last one is cut to the limit."""
@@ -550,7 +554,8 @@ def _step_dict(t) -> dict:
 
 async def boundary(task_id: str) -> str | None:
     """The outside-commit base of a run, fixed at its spawn (F9): the stored
-    handoff's head, else the step's head_at_start."""
+    handoff's base_head (the head a run's own snapshot saw), else its head,
+    else the step's head_at_start."""
     from ..database import SessionLocal
     from ..models import Task, TaskHandoff
 
@@ -560,8 +565,8 @@ async def boundary(task_id: str) -> str | None:
             return None
         row = (await s.execute(select(TaskHandoff).where(TaskHandoff.root_id == (task.root_id or task.id)))
                ).scalar_one_or_none()
-        head = (row.content or {}).get("head") if row is not None else None
-        return head or task.head_at_start
+        c = (row.content or {}) if row is not None else {}
+        return c.get("base_head") or c.get("head") or task.head_at_start
 
 
 async def stored(task_id: str):
@@ -649,20 +654,22 @@ async def _gather(s, task, since):
             others.append(t.title if seen else "a run you cannot see")
     row = (await s.execute(select(TaskHandoff).where(TaskHandoff.root_id == root))).scalar_one_or_none()
     trust = (proj.trust if proj is not None else None) or "own"
-    base = since or ((row.content or {}).get("head") if row is not None else None) or described.head_at_start
+    prev = (row.content or {}) if row is not None else {}
+    base = since or prev.get("base_head") or prev.get("head") or described.head_at_start
     policy = {"project_dir": project_dir, "home": guard_runtime.real_home(), "tmpdir": os.environ.get("TMPDIR")}
     own_texts = [str(e["payload"].get("content") or "") for e in events if e["type"] == "tool_result"]
     return {
         "root": root, "described": described, "steps": [_step_dict(t) for t in steps], "events": events,
         "children": dict(children), "workspace": workspace, "project_dir": project_dir, "sources": source_dirs,
         "waiting": waiting, "others": others, "trust": trust, "base": base, "policy": policy, "own": own_texts,
+        "prev": prev,
     }
 
 
 async def snapshot(task_id: str, reason: str, *, secrets=None, since=None):
     """Build and store the thread's handoff; the stored TaskHandoff, or None
     when the task is gone. ``since``: the run's outside-commit base (else the
-    stored handoff's head, else head_at_start)."""
+    stored handoff's base_head, else its head, else head_at_start)."""
     from sqlalchemy.exc import IntegrityError
 
     from ..database import SessionLocal
@@ -691,6 +698,10 @@ async def snapshot(task_id: str, reason: str, *, secrets=None, since=None):
         waiting=g["waiting"], children=g["children"], others=g["others"], trust=g["trust"],
         workspace=g["workspace"], project_dir=g["project_dir"], policy=g["policy"], now=now, reason=reason,
         secrets=list(secrets or [])))
+    prev = g["prev"]
+    # the outside-commit base: a run's own snapshot moves it to the head it saw; any other keeps the stored one
+    content["base_head"] = (facts.head if reason in RUN_REASONS or not prev
+                            else prev.get("base_head") or prev.get("head"))
     text = render(content)
 
     for attempt in (1, 2):  # a concurrent first insert of the thread's row: update it instead

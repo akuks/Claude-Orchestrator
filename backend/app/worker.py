@@ -27,14 +27,15 @@ from .config import settings
 from .constants import Priority, Status
 from .database import SessionLocal
 from .events import broker
+from .guard import co_hook as guard_co_hook
 from .guard import grants as guard_grants
 from .guard import policy_inputs
 from .guard import runtime as guard_runtime
 from .guard.plugin import ensure_plugin
 from .models import Agent, Artifact, McpCall, Project, SkillPack, Task, TaskEvent, User
 from .redaction import redact, redact_obj, secrets_from_env
-from .resume import gitfacts, handoff, prompting, recovery
-from .resume.texts import CRED_NOTE
+from .resume import gitfacts, ground_rules, handoff, prompting, recovery
+from .resume.texts import CRED_NOTE, RECOVERED_CONTINUE
 
 log = logging.getLogger(__name__)
 
@@ -417,7 +418,7 @@ class WorkerManager:
                     coordinator_block = await _coordinator_context(s, task_id, me.id)
             # Enabled skill packs (Claude Code plugins) for this task: global ones
             # plus any scoped to this task's project.
-            plugin_dirs = []
+            plugin_dirs, loaded_packs = [], []
             packs = (
                 await s.execute(select(SkillPack).where(SkillPack.enabled.is_(True)))
             ).scalars().all()
@@ -425,6 +426,9 @@ class WorkerManager:
                 if p.scope == "global" or (p.scope == "project" and p.project_id == task.project_id):
                     if Path(p.local_path).exists():
                         plugin_dirs.append(p.local_path)
+                        loaded_packs.append(p)
+            # forge v0.7.0: with superpowers loaded, the main session gets the precedence line
+            superpowers = ground_rules.has_superpowers(loaded_packs)
             await s.commit()
         # Re-read the prompt now that the task is marked running: a co-guard
         # resume approval may have joined this queued follow-up (its update
@@ -481,7 +485,11 @@ class WorkerManager:
             except Exception:  # noqa: BLE001 - a failed composition never stops a run
                 log.exception("prompting: compose failed for %s; running with the step's own prompt", task_id)
                 ctx_log = {"blocks": [], "compose_failed": True}
-            if recovery_block is not None and prompting.recovering(t):
+                if recovery_block is not None:
+                    # a recovered step is never a bare re-run: the record still goes in
+                    prompt = (f"{redact(recovery_block, run_secrets)}{prompting.SEP}"
+                              f"{RECOVERED_CONTINUE if resume_session_id else prompt}")
+            if recovery_block is not None and prompting.recovering(t) and not ctx_log.get("compose_failed"):
                 # the record goes into this prompt once
                 t.recovery = {**t.recovery, "pending": False}
                 await s.commit()
@@ -523,8 +531,12 @@ class WorkerManager:
         if guard_plugin is None:
             return
         # external projects: forge's data line (also re-added by the SessionStart hook)
-        system_prompt = "\n\n".join(filter(None, [system_prompt, guard_inputs.data_line, guard_inputs.main_text]))
-        await emit("ground_rules", {"included": list(guard_inputs.ground_included)})
+        main_text, included = guard_inputs.main_text, list(guard_inputs.ground_included)
+        if superpowers:
+            main_text = "\n\n".join(filter(None, [main_text, ground_rules.PRECEDENCE_LINE]))
+            included.append("precedence")
+        system_prompt = "\n\n".join(filter(None, [system_prompt, guard_inputs.data_line, main_text]))
+        await emit("ground_rules", {"included": included})
 
         # Repo-backed project tasks: skip artifact diffing (git tracks changes and
         # scanning a whole repo is slow/noisy). Sandbox tasks still collect outputs.
@@ -904,7 +916,7 @@ class WorkerManager:
         # 6.-7. the record, the count, its own session; queued again
         async with SessionLocal() as s:
             t = await s.get(Task, task_id)
-            if t is None:
+            if t is None or t.status != Status.RUNNING:
                 return "skipped"
             t.recovery = {**record, "external": external, "pending": not gave_up}
             t.run_pgid = t.run_proc_start = t.heartbeat_at = None
@@ -915,10 +927,13 @@ class WorkerManager:
                 t.status = Status.QUEUED
             await s.commit()
         # 8. the recovery event (before the enqueue: the next run's seq follows it)
-        await self._emit_offline(task_id, "recovery", {
-            "why": record["why"], "at": record["at"], "in_flight": len(record["in_flight"]),
-            "orphan_killed": orphan_killed, "recoveries": recoveries if gave_up else recoveries + 1,
-            "gave_up": gave_up})
+        try:
+            await self._emit_offline(task_id, "recovery", {
+                "why": record["why"], "at": record["at"], "in_flight": len(record["in_flight"]),
+                "orphan_killed": orphan_killed, "recoveries": recoveries if gave_up else recoveries + 1,
+                "gave_up": gave_up})
+        except Exception:  # noqa: BLE001 - the finish / requeue below must always run
+            log.exception("recovery: event for %s failed", task_id)
         if gave_up:
             await self._finish(task_id, Status.FAILED, error=recovery.GAVE_UP_ERROR.format(n=recoveries + 1),
                                secrets=[])
@@ -1014,7 +1029,6 @@ class WorkerManager:
         "hook_event", "error",  # guard_error records (a hook other than PreToolUse failed)
         "background", "what",  # Stop: background tasks still running; seen: what the call was
     )
-    BACKGROUND_MAX = 10
 
     async def _prepare_guard(self, task_id, guard_project, workspace, sub_env, mcp, emit, owner_id=None):
         """Write the task's policy (0600) into a fresh CO_TASK_DIR, add the
@@ -1223,8 +1237,9 @@ class WorkerManager:
             if k in ("rule_ids", "grant_ids"):
                 payload[k] = [str(x)[:64] for x in v][:guard_grants.MAX_GRANT_IDS] if isinstance(v, list) else []
             elif k == "background":
-                payload[k] = [{"id": str(b.get("id"))[:200], "what": str(b.get("what"))[:200]}
-                              for b in v if isinstance(b, dict)][:cls.BACKGROUND_MAX] if isinstance(v, list) else []
+                payload[k] = [{"id": str(b["id"])[:200], "what": str(b.get("what") or "")[:200]}
+                              for b in v if isinstance(b, dict) and b.get("id") is not None
+                              ][:guard_co_hook.BACKGROUND_MAX] if isinstance(v, list) else []
             elif isinstance(v, str):
                 payload[k] = v[:2000]
             elif not isinstance(v, (int, float, bool)) and v is not None:
