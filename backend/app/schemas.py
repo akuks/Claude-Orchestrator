@@ -878,3 +878,22 @@ class OrgFallbackOut(BaseModel):
     set: bool
     updated_at: Optional[datetime] = None
     updated_by: Optional[str] = None
+
+
+class AskIn(BaseModel):
+    question: str = ""  # validated in the route, after the 404
+
+
+class AskOut(BaseModel):
+    id: str
+    task_id: str
+    question: str
+    answer: Optional[str] = None
+    status: str
+    error: Optional[str] = None
+    cost_usd: Optional[float] = None
+    model: Optional[str] = None
+    created_at: datetime
+    answered_at: Optional[datetime] = None
+
+    model_config = {"from_attributes": True}

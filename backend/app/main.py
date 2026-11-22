@@ -32,6 +32,7 @@ from .routers import (
     mcp,
     projects,
     questions,
+    asks,
     schedules,
     skills,
     stream,
@@ -163,6 +164,7 @@ _authed = [Depends(current_principal)]
 for _r in (
     tasks.router,
     questions.router,
+    asks.router,
     handoffs.router,
     mcp.router,
     projects.router,
