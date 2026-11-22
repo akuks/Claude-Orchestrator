@@ -53,6 +53,7 @@ import SoFarLine from '../usage/SoFarLine'
 import TokensPanel from '../usage/TokensPanel'
 import { ThreadQuestions } from '../questions/QuestionsSection'
 import { usageLine, useUsage } from '../usage/usage'
+import AskCard from '../asks/AskCard'
 
 // co-guard lines in the run log: one icon per kind (guard.js guardLine).
 const GUARD_ICON = {
@@ -282,6 +283,9 @@ function DelegationTree({ thread, currentId, onOpenTask }) {
 // The task drawer (Tasks page), or with `inline` the same content as a panel
 // (embedded on the run page). One component, so live output, follow-ups and
 // actions behave the same in both places.
+const END_REFRESH_MS = [0, 500, 1000, 2000, 4000]
+const TERMINAL_STATUSES = ['completed', 'failed', 'cancelled']
+
 export default function TaskDetail({ taskId, onClose, onChanged, onOpenTask, onOpenCredentials, currentUser, inline = false }) {
   const [task, setTask] = useState(null)
   const [events, setEvents] = useState([])
@@ -292,9 +296,36 @@ export default function TaskDetail({ taskId, onClose, onChanged, onOpenTask, onO
   const [handoff, setHandoff] = useState(null)
   const [requests, setRequests] = useState([]) // this task's co-guard approval requests
   const [names, setNames] = useState(() => new Map())
+  const [endTick, setEndTick] = useState(0) // bumped once a finished run's status is terminal: questions and usage reload
   const wsRef = useRef(null)
   const termRef = useRef(null)
   const lastSeqRef = useRef(0)
+  const endTimers = useRef([])
+
+  const endRefresh = (id, isClosed, setT, finish) => {
+    endTimers.current.forEach(clearTimeout)
+    endTimers.current = []
+    let stopped = false
+    END_REFRESH_MS.forEach((ms, i) => {
+      endTimers.current.push(
+        setTimeout(async () => {
+          if (stopped || isClosed()) return
+          let t = null
+          try {
+            t = await api.getTask(id)
+          } catch (_) {}
+          if (stopped || isClosed()) return
+          if (t) setT(t)
+          const last = i === END_REFRESH_MS.length - 1
+          if ((t && TERMINAL_STATUSES.includes(t.status)) || last) {
+            stopped = true
+            endTimers.current.forEach(clearTimeout)
+            finish()
+          }
+        }, ms),
+      )
+    })
+  }
 
   // Load task + open the live stream whenever the selected task changes.
   useEffect(() => {
@@ -320,9 +351,13 @@ export default function TaskDetail({ taskId, onClose, onChanged, onOpenTask, onO
       if (ev.seq) lastSeqRef.current = Math.max(lastSeqRef.current, ev.seq)
       setEvents((prev) => [...prev, ev])
       if (ev.type === 'completed' || ev.type === 'error') {
-        api.getTask(taskId).then((t) => !closed && setTask(t))
-        api.getArtifacts(taskId).then((a) => !closed && setArtifacts(a))
-        onChanged?.()
+        // The worker emits `completed` before it commits the terminal status: refetch until it is terminal.
+        endRefresh(taskId, () => closed, setTask, () => {
+          api.getThread(taskId).then((t) => !closed && setThread(t))
+          api.getArtifacts(taskId).then((a) => !closed && setArtifacts(a))
+          setEndTick((n) => n + 1)
+          onChanged?.()
+        })
       }
     }
     ws.onclose = (e) => {
@@ -338,6 +373,8 @@ export default function TaskDetail({ taskId, onClose, onChanged, onOpenTask, onO
     return () => {
       closed = true
       ws.close()
+      endTimers.current.forEach(clearTimeout)
+      endTimers.current = []
     }
   }, [taskId])
 
@@ -375,7 +412,7 @@ export default function TaskDetail({ taskId, onClose, onChanged, onOpenTask, onO
   }, [needNames, names.size])
   const guardCtx = useMemo(() => ({ approvals: new Map(requests.map((a) => [a.id, a])), names }), [requests, names])
   const waiting = requests.filter((a) => a.status === 'pending')
-  const usage = useUsage(taskId, running)
+  const usage = useUsage(taskId, running, endTick)
   const chips = <UsageChips report={usage} />
 
   // Auto-scroll the terminal as events arrive.
@@ -555,13 +592,14 @@ export default function TaskDetail({ taskId, onClose, onChanged, onOpenTask, onO
       <RunNotices task={task} events={events} handoff={handoff} />
       <ThreadQuestions
         taskId={taskId}
-        refreshKey={task?.status}
+        refreshKey={`${task?.status}:${endTick}`}
         onChanged={onChanged}
         onAnswered={(child) => {
           onChanged?.()
           onOpenTask?.(child.id) // the answer continues the thread in a new step
         }}
       />
+      <AskCard taskId={taskId} />
       <HandoffCard taskId={taskId} onHandoff={setHandoff} canManage={task?.can_manage === true} status={task?.status} />
 
       <Typography.Title level={5}>Live Output</Typography.Title>

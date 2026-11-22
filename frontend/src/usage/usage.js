@@ -100,7 +100,7 @@ export function freshSessionError(v) {
 
 // GET /tasks/{id}/usage: every 5 s while the step runs (and the tab is
 // visible), once otherwise. null until the first answer or when it fails.
-export function useUsage(taskId, running) {
+export function useUsage(taskId, running, refreshKey = 0) {
   const [report, setReport] = useState(null)
   useEffect(() => setReport(null), [taskId])
   useEffect(() => {
@@ -117,6 +117,6 @@ export function useUsage(taskId, running) {
       live = false
       if (id) clearInterval(id)
     }
-  }, [taskId, running])
+  }, [taskId, running, refreshKey])
   return report
 }
