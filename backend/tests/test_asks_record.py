@@ -74,3 +74,38 @@ def test_record_without_handoff_or_usage(client):
     out = _go(client)
     assert "## Where it stands" not in out and "## Usage" not in out
     assert "## Step" in out and "> why?" in out
+
+
+def test_record_events_no_duplicates_when_emitting_during_paging(client, monkeypatch):
+    from app.asks import record as rec
+
+    monkeypatch.setattr(rec, "_PAGE", 5)
+    tid = uuid.uuid4().hex
+    calls = {"n": 0}
+    real = rec._event_line
+
+    async def add():
+        async with SessionLocal() as s2:
+            s2.add(TaskEvent(task_id=tid, seq=999, type="text_output", payload={"text": "late"}))
+            await s2.commit()
+
+    async def run():
+        async with SessionLocal() as s:
+            t = Task(id=tid, title="t", prompt="p", root_id=tid, status="running")
+            s.add(t)
+            for i in range(12):
+                s.add(TaskEvent(task_id=tid, seq=i, type="text_output", payload={"text": f"ev{i:02d}"}))
+            await s.commit()
+
+            def spy(ev, secrets):
+                calls["n"] += 1
+                if calls["n"] == 5:  # end of the first page: the task emits meanwhile
+                    asyncio.get_running_loop().create_task(add())
+                return real(ev, secrets)
+
+            monkeypatch.setattr(rec, "_event_line", spy)
+            return await rec.build_record(s, t, "q", [])
+
+    out = asyncio.run(run())
+    for i in range(12):
+        assert out.count(f"ev{i:02d}") == 1

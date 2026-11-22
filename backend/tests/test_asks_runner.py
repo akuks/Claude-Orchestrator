@@ -67,3 +67,41 @@ def test_run_ask_cwd_removed(monkeypatch):
     monkeypatch.setattr(tempfile, "mkdtemp", spy)
     asyncio.run(run_ask("[ask-raw]", {"PATH": os.environ["PATH"]}))
     assert seen and not os.path.exists(seen[0])
+
+
+def test_run_ask_is_error_json_is_failure():
+    r = asyncio.run(run_ask("[ask-iserror]", {"PATH": os.environ["PATH"]}))
+    assert (r.answer, r.error) == (None, "no answer")
+
+
+def test_run_ask_cancel_kills_and_cleans(monkeypatch):
+    seen, procs = [], []
+    real_mk = tempfile.mkdtemp
+    real_exec = asyncio.create_subprocess_exec
+
+    def spy(*a, **kw):
+        d = real_mk(*a, **kw)
+        seen.append(d)
+        return d
+
+    async def spy_exec(*a, **kw):
+        p = await real_exec(*a, **kw)
+        procs.append(p)
+        return p
+
+    monkeypatch.setattr(tempfile, "mkdtemp", spy)
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", spy_exec)
+
+    async def go():
+        t = asyncio.create_task(run_ask("[ask-sleep]", {"PATH": os.environ["PATH"]}))
+        await asyncio.sleep(1)
+        t.cancel()
+        try:
+            await t
+        except asyncio.CancelledError:
+            return True
+        return False
+
+    assert asyncio.run(go())
+    assert seen and not os.path.exists(seen[0])
+    assert procs and procs[0].returncode is not None
