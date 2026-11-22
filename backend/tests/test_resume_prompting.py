@@ -31,6 +31,7 @@ from app.resume.texts import (
     LOG_HEAD,
     NO_COMMITS_LINE,
     RECOVERED_CONTINUE,
+    REQUEST_LINE,
 )
 from app.worker import WorkerManager
 from conftest import env_probe_key, login_as, read_probe_args, wait_task
@@ -286,23 +287,43 @@ def test_compose_modes(thread, row, tmp_path):
 
 
 def test_injected_blocks_redacted(thread):
-    """Handoff (with notes), log tail and the request carry a GitHub token, an
-    Anthropic key, a run secret and hidden characters: none survive, and a
-    token straddling the request's cut leaves no prefix."""
+    """Handoff (with notes) and log tail carry a GitHub token, an Anthropic
+    key, a run secret and hidden characters: none survive."""
     gh, ak, run_secret = gh_token(), ant_key(), "hunter-" + "q" * 12
-    root = mk_task(prompt=("p" * (prompting.REQUEST_MAX - 40)) + " " + ak, created_by=thread.owner.user_id,
-                   workspace_dir=thread.ws)
-    put_handoff(root, f"{HANDOFF_HEAD}\nNotes: token {gh} and {run_secret}‮ here​\nTask: x")
-    add_events(root, [("text_output", {"text": f"key {ak} and {run_secret}"})])
+    root = mk_task(prompt="the request", created_by=thread.owner.user_id, workspace_dir=thread.ws)
+    put_handoff(root, f"{HANDOFF_HEAD}\nNotes: token {gh} and {run_secret}\u202e here\u200b\nTask: x")
+    add_events(root, [("text_output", {"text": f"key {ak} and {run_secret}\u202e"})])
     tid = mk_task(prompt=CONTINUE_PROMPT, origin="continue", parent_task_id=root, root_id=root,
                   created_by=thread.owner.user_id, workspace_dir=thread.ws, status="queued")
     prompt, log = compose(tid, resumed=False, secrets=[run_secret])
     assert {"handoff", "log_tail", "request"} <= set(log["blocks"])
     for value in (gh, ak, run_secret):
         assert value not in prompt
-    assert ak[:12] not in prompt  # the straddling key: redacted before the cut
     assert "***" in prompt
-    assert "‮" not in prompt and "​" not in prompt
+    assert "\u202e" not in prompt and "\u200b" not in prompt
+
+
+@pytest.mark.parametrize("kept", [4, 7, 12, 30])
+def test_token_straddling_the_request_cut(thread, kept):
+    """An Anthropic key straddles the request block's REQUEST_MAX cut with
+    ``kept`` of its characters inside it: redacted before the cut, no prefix
+    of 4+ characters survives (a cut-first order would leave ak[:kept])."""
+    ak = ant_key()
+    head = REQUEST_LINE.format(request="")
+    request = "p" * (prompting.REQUEST_MAX - len(head) - kept) + ak
+    start = len(head) + request.index(ak)
+    assert start < prompting.REQUEST_MAX < start + len(ak)  # the key really straddles the cut
+    assert start + kept == prompting.REQUEST_MAX
+    root = mk_task(prompt=request, created_by=thread.owner.user_id, workspace_dir=thread.ws)
+    put_handoff(root, f"{HANDOFF_HEAD}\nTask: x")
+    tid = mk_task(prompt=CONTINUE_PROMPT, origin="continue", parent_task_id=root, root_id=root,
+                  created_by=thread.owner.user_id, workspace_dir=thread.ws, status="queued")
+    prompt, log = compose(tid, resumed=False)
+    assert "request" in log["blocks"]
+    assert "sk-a" not in CONTINUE_PROMPT + HANDOFF_HEAD  # no other source of the prefix
+    for n in range(4, len(ak) + 1):
+        assert ak[:n] not in prompt, n
+    assert prompt.endswith(head + "p" * (prompting.REQUEST_MAX - len(head) - kept) + "***"[:kept])
 
 
 # ---- others, no commits, outside commits ---------------------------------------------------------
