@@ -10,6 +10,7 @@ from pathlib import Path
 from fastapi import APIRouter, HTTPException, Query, Request
 from fastapi.responses import FileResponse, Response
 from sqlalchemy import and_, delete, func, or_, select
+from sqlalchemy.exc import InvalidRequestError
 
 from ..access import (
     can_see_task,
@@ -440,7 +441,10 @@ async def queue_continue(s, parent: Task, *, mode: str, sender: str | None, auto
     from ..guard import grants as guard_grants
 
     async with guard_grants.followup_lock():
-        await s.refresh(parent)
+        try:
+            await s.refresh(parent)
+        except InvalidRequestError:  # deleted while waiting for the lock
+            raise HTTPException(404, "Task not found") from None
         root = parent.root_id or parent.id
         active = (await s.execute(select(Task.id).where(
             or_(Task.root_id == root, Task.id == root), Task.status.in_(Status.ACTIVE)).limit(1))).first()
