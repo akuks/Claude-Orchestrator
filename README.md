@@ -518,9 +518,10 @@ completed one, never an agent's dispatched child) has a **Continue** button:
 - The API's `auto` mode (`POST /tasks/{id}/continue`, body `{"mode":
   "auto"|"resume"|"fresh"}`) resumes when it can and starts fresh otherwise.
 
-Who may use it is the same as for a follow-up: an admin, the project's
-maintainers and contributors, and the task's owner. The buttons follow the
-server's `can_manage` / `can_resume` on the task. Only one step of a thread
+Who may use it is the same as for a follow-up: the step's creator, a
+maintainer on it, or an admin, who also hold at least contributor on its
+project. The buttons follow the server's `can_manage` / `can_resume` on the
+task, which are the same checks `POST /continue` makes. Only one step of a thread
 runs at a time (409 while one is active).
 
 A plain follow-up with an intact session gets no handoff, only a one-line
@@ -552,12 +553,12 @@ Limits:
 
 **Notes.** The agent keeps short notes (what it is doing, what was agreed,
 what is next, cautions with what was measured). It saves them with its own
-agent token: `PUT /tasks/{id}/notes` (plain text or `{"text": …}`, 16 KB at
+agent token: `PUT /tasks/{id}/notes` (plain text or `{"text": …}`, 4 KB at
 most; own task only; cleaned and redacted). co-guard's `PostToolUse` hook
 reminds it after every 12 tool calls, and re-injects the handoff after a
 context compaction (`SessionStart compact`). The notes show on the card with
 their time and are treated as a record to re-check, not as instructions. A
-person can also write them (`PUT` with a session, maintainers and above).
+person who can manage the task can also write them (`PUT` with a session).
 
 **Ground rules (admin).** **Agent guard → Ground rules** sets the standing
 instructions every run gets in its system prompt: *Grounding* (cite
