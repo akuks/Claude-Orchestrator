@@ -74,6 +74,14 @@ def test_run_ask_is_error_json_is_failure():
     assert (r.answer, r.error) == (None, "no answer")
 
 
+def test_run_ask_failure_keeps_cost():
+    env = {"PATH": os.environ["PATH"]}
+    assert asyncio.run(run_ask("[ask-budgetstop]", env)).cost_usd == 0.07  # non-zero exit, JSON on stdout
+    from app.asks.runner import _parse
+    r = _parse('{"is_error": true, "result": "x", "total_cost_usd": 0.02}')
+    assert (r.answer, r.error, r.cost_usd) == (None, "no answer", 0.02)
+
+
 def test_run_ask_cancel_kills_and_cleans(monkeypatch):
     seen, procs = [], []
     real_mk = tempfile.mkdtemp

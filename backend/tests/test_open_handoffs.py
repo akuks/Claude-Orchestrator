@@ -178,3 +178,18 @@ def test_open_handoffs_pages_past_scan_max(client, monkeypatch):
     for i in range(4):  # newer, visible to me but not mine to manage: they fill the first page
         _thread(admin_id, ended_days=0.01 * (i + 1), project_id=pid)
     assert mine in _roots(me)
+
+
+def test_open_handoffs_no_thread_listed_twice_when_pages_overlap(client, monkeypatch):
+    from app.routers import handoffs as h
+
+    class Overlap(int):  # every page re-reads the first rows, as when data shifts between page queries
+        def __rmul__(self, other):
+            return 0
+
+    monkeypatch.setattr(h, "SCAN_MAX", Overlap(2))
+    me = login_as(f"oh-dup-{uuid.uuid4().hex[:6]}@test.local")
+    for i in range(3):
+        _thread(me.user_id, ended_days=0.1 * (i + 1))
+    roots = _roots(me)
+    assert roots and len(roots) == len(set(roots))

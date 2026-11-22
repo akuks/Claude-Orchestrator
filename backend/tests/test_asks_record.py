@@ -109,3 +109,23 @@ def test_record_events_no_duplicates_when_emitting_during_paging(client, monkeyp
     out = asyncio.run(run())
     for i in range(12):
         assert out.count(f"ev{i:02d}") == 1
+
+
+def test_record_hard_cap_with_huge_handoff_and_prior_answers(client):
+    big = "w " * 50000
+    tid = uuid.uuid4().hex
+
+    async def run():
+        async with SessionLocal() as s:
+            t = Task(id=tid, title="T", prompt="p" * 9000, root_id=tid, status="completed",
+                     started_at=datetime.now(timezone.utc))
+            s.add(t)
+            s.add(TaskHandoff(root_id=tid, content={"goal": big, "status": "open"}, text="x"))
+            s.add(TaskEvent(task_id=tid, seq=0, type="text_output", payload={"text": "hello"}))
+            await s.commit()
+            prior = [("q" * 5000, "a" * 30000) for _ in range(3)]
+            return await build_record(s, t, "z" * 9000, prior, None)
+
+    out = asyncio.run(run())
+    assert len(out) <= RECORD_MAX_CHARS
+    assert "Question from the person:" in out and "assistant: hello" in out

@@ -7,7 +7,7 @@
 # (CO_CLAUDE_BIN="$DIR/claude"). Seams, all keyed on the task prompt:
 #   [env-probe:KEY] [call-probe:KEY] [prompt-probe:KEY] [guard-spool] [guard-tool:MODE]
 #   [env-echo] [env-echo-fail] [stream-fixture:NAME] [hang] [usage-probe:KEY]
-#   (ask calls, `--output-format json`:) [ask-probe:KEY] [ask-raw] [ask-fail] [ask-sleep] [ask-iserror]
+#   (ask calls, `--output-format json`:) [ask-probe:KEY] [ask-raw] [ask-fail] [ask-sleep] [ask-iserror] [ask-budgetstop]
 args="$*"
 prompt="$(cat)"
 # Ask calls (--output-format json, not stream-json): [ask-probe:KEY] records argv to
@@ -16,6 +16,7 @@ if [[ "$args" == *"--output-format json"* && "$args" != *"stream-json"* ]]; then
   if [[ "$prompt" == *"[ask-sleep]"* ]]; then sleep 5; exit 0; fi
   if [[ "$prompt" == *"[ask-fail]"* ]]; then exit 1; fi
   if [[ "$prompt" == *"[ask-iserror]"* ]]; then printf '{"type":"result","is_error":true,"result":"Credit balance too low","total_cost_usd":0}\n'; exit 0; fi
+  if [[ "$prompt" == *"[ask-budgetstop]"* ]]; then printf '{"type":"result","is_error":true,"subtype":"error_max_budget_usd","total_cost_usd":0.07}\n'; exit 1; fi
   if [[ "$prompt" == *"[ask-raw]"* ]]; then printf 'plain answer\n'; exit 0; fi
   if [[ "$prompt" =~ \[ask-probe:([A-Za-z0-9_-]+)\] ]]; then
     k="${BASH_REMATCH[1]}"

@@ -124,6 +124,31 @@ def test_ask_no_credential_422_message(client):
         assert client.put("/admin/org-fallback", json={"api_key": "sk-test-fallback"}).status_code == 200
 
 
+def test_ask_with_org_fallback_and_no_own_credential_runs(client):
+    assert client.put("/admin/org-fallback", json={"api_key": "sk-test-fallback"}).status_code == 200
+    c = login_as(f"fb-{uuid.uuid4().hex[:8]}@test.local")
+    c.portal = client.portal
+    tid = _task(c.user_id)
+    assert c.post(f"/tasks/{tid}/asks", json={"question": "q [ask-probe:fbk1]"}).status_code == 202
+    assert _wait(c, tid)["answer"] == "answer for fbk1"
+
+
+def test_ask_question_stored_redacted(client):
+    u = _user(client)
+    tid = _task(u.user_id)
+    tok = "sk-ant-api03-" + "A" * 40
+    r = u.post(f"/tasks/{tid}/asks", json={"question": f"is {tok} ok?"})
+    assert r.status_code == 202 and tok not in r.json()["question"]
+    row = _wait(u, tid)
+    assert tok not in row["question"] and "ok?" in row["question"]
+
+    async def stored():
+        async with SessionLocal() as s:
+            return (await s.execute(select(RunAsk.question).where(RunAsk.task_id == tid))).scalars().all()
+
+    assert all(tok not in q for q in _run(stored()))
+
+
 def test_ask_pending_conflict_409(client):
     u = _user(client)
     tid = _task(u.user_id)
