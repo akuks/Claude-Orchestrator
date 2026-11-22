@@ -61,34 +61,34 @@ def _when(dt) -> str:
 
 
 async def _events(s, task_id: str, budget: int, secrets) -> tuple[list[str], int]:
-    """Newest lines within `budget` chars (oldest first) and the count of older events left out."""
-    total = (await s.execute(select(func.count()).select_from(TaskEvent).where(TaskEvent.task_id == task_id))).scalar() or 0
+    """Newest lines within `budget` chars (oldest first) and the count of older events left out.
+    Keyset paging by id, newest first: events emitted meanwhile have higher ids and never repeat."""
     lines: list[str] = []
     used = 0
-    seen = 0
-    offset = 0
-    full = False
-    while not full and offset < total:
-        rows = (await s.execute(
-            select(TaskEvent).where(TaskEvent.task_id == task_id)
-            .order_by(TaskEvent.seq.desc(), TaskEvent.id.desc()).offset(offset).limit(_PAGE)
-        )).scalars().all()
+    before: int | None = None  # only events with id < before
+    dropped = 0
+    while True:
+        q = select(TaskEvent).where(TaskEvent.task_id == task_id)
+        if before is not None:
+            q = q.where(TaskEvent.id < before)
+        rows = (await s.execute(q.order_by(TaskEvent.id.desc()).limit(_PAGE))).scalars().all()
         if not rows:
             break
-        offset += len(rows)
+        before = rows[-1].id
         for ev in rows:
             line = _event_line(ev, secrets)
             if line is None:
-                seen += 1
                 continue
             if used + len(line) + 1 > budget:
-                full = True
-                break
+                dropped = (await s.execute(
+                    select(func.count()).select_from(TaskEvent)
+                    .where(TaskEvent.task_id == task_id, TaskEvent.id <= ev.id))).scalar() or 0
+                lines.reverse()
+                return lines, dropped
             lines.append(line)
             used += len(line) + 1
-            seen += 1
     lines.reverse()
-    return lines, max(total - seen, 0)
+    return lines, 0
 
 
 async def build_record(s, task: Task, question: str, prior: list[tuple[str, str]],
