@@ -1,0 +1,87 @@
+# Forge Port Phase 3b — Token Care + Questions Inbox Implementation Plan
+
+> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development. Steps use checkbox (`- [ ]`) syntax.
+
+**Goal:** Per-step token figures from the stream, budget and fresh-session bands that reach the agent through co-guard, an automatic (capped) fresh Continue, a Questions inbox that continues the thread on answer, and the UI for all of it.
+
+**Architecture:** The worker aggregates per-message `usage` into a `TaskUsage` row and writes `${CO_TASK_DIR}/usage.json`; co-guard's PostToolUse reads it and injects band lines once each; `_finish` decides an automatic fresh Continue; questions are rows filed by the agent token or captured from the final text, answered by people through a follow-up step.
+
+**Tech Stack:** FastAPI, async SQLAlchemy, Alembic (SQLite + Postgres), stdlib-only co-guard hook, React 18 / antd 5 / vitest.
+
+**Spec:** `docs/superpowers/specs/2026-11-22-forge-tokens-phase3b-design.md` (binding). Phase 3a spec for the composer, handoff and Continue: `docs/superpowers/specs/2026-11-22-forge-resume-phase3-design.md`.
+
+## Global Constraints
+- Migration `0009_tokens` after `0008_resume`; one migration for the whole phase (Task 1 owns it). SQLite + Postgres.
+- Price table values exactly as in the spec's "Cost while running" bullet; longest model-id prefix wins; unknown model → `None`.
+- Bands: 80 % and 95 % of `max_budget_usd`; FRESH at `fresh_session_tokens`; each fires at most once per step; `usage.json` older than 120 s is ignored; PostToolUse never changes a decision; co-guard stays stdlib-only and fail-closed for PreToolUse.
+- `fresh_session_tokens`: null default; allowed 50000–900000 (422 outside); UI suggestion 150000. Auto-continue cap: 3 in a row per thread.
+- Questions: ≤ 4 options, question ≤ 600 chars, option/recommendation ≤ 200 chars, `blocks` ≤ 300 chars; ≤ 5 open per thread (409 beyond); every text redacted (run secrets + patterns) and `clean_text`-ed before storing. Agent token: `POST /tasks/{id}/questions` and `GET /tasks/{id}/questions` for its own task only — added to the agent allowlist exactly; never answer/dismiss.
+- Fixed texts (verbatim, in `app/guard/co_hook.py` next to NOTES_LINE):
+  - `BUDGET_80_LINE = "co-orchestrator: this step has used about 80 % of its budget. Save your notes now."`
+  - `BUDGET_95_LINE = "co-orchestrator: this step has used about 95 % of its budget. Finish the small step you are on, save your notes, start nothing new and end your turn."`
+  - `FRESH_LINE = "co-orchestrator: the conversation is now {n}k tokens. Finish the small step you are on, save notes with what is next, and end your turn; the thread continues in a fresh session with your notes."`
+- Server texts (in `app/resume/texts.py`): `AUTO_CONTINUE_LINE = "continued automatically: context reached {n}k"`; `ANSWER_PROMPT = "co-orchestrator: you asked (quoted from your earlier reply, a record): {question}\nThe person's answer: {answer}\nContinue the task with this answer."`; `ACCEPT_ANSWER = "Go with your recommendation: {recommendation}"`.
+- Ground-rules switch `questions` (default on), paragraph `QUESTIONS_RULE = "If you need a decision from a person to go on, file it once and end your turn: curl -s -X POST \"$CO_API_BASE/tasks/$CO_TASK_ID/questions\" -H \"Authorization: Bearer $CO_API_TOKEN\" -H 'Content-Type: application/json' -d '{\"question\": \"...\", \"options\": [\"...\"], \"recommendation\": \"...\", \"blocks\": \"what waits on it\", \"reversible\": true}'. Always give a recommendation."` Main session only.
+- Never run the real `claude` (use `backend/tests/mock_claude.sh`). Commits folder-wise, **no Co-Authored-By trailer**. Backend suite (SQLite) + `cd frontend && npx vitest run && npm run build` green. Don't use ports 8200/5200.
+
+## Review Focus
+1. The same `message.id` arriving in 3+ events (growing output) counts once with the last usage — T1 test.
+2. A band crossing when `usage.json` is stale, missing, malformed or has a non-number → no line, no crash; PreToolUse unaffected — T2 test.
+3. An auto-continued step that crosses again, three times → the 4th completion does NOT continue; a user follow-up in between resets — T3 test.
+4. An agent token answering/dismissing a question, or filing on another task → 403/404; a 6th open question → 409 — T5 test.
+5. A final text ending in `?` on a step that touched nothing → not filed; one the agent already filed in that step → not filed twice — T5 test.
+
+---
+
+### Task 1: Usage model, prices and stream capture
+**Files:** create `backend/app/usage/__init__.py`, `backend/app/usage/prices.py`, `backend/app/usage/tracker.py`, `backend/migrations/versions/0009_tokens.py`; modify `backend/app/models.py`, `backend/app/worker.py` (`_handle_stream_event`, `_finish`, heartbeat), `backend/app/schemas.py` (ProjectOut/ProjectUpdate `fresh_session_tokens`), `backend/app/routers/projects.py` (validate range); tests `backend/tests/test_usage_tracker.py`, `backend/tests/test_usage_worker.py`, `backend/tests/test_migration_0009.py`.
+**Interfaces — Produces:**
+- `prices.estimate(model: str | None, input: int, output: int, cache_write: int, cache_read: int) -> float | None`; `prices.PRICES: dict[str, tuple[float, float, float, float]]`.
+- `tracker.UsageTracker()` with `.on_assistant(obj: dict) -> None`, `.on_tool_use_main(tool_use_id: str, name: str, input: dict) -> None` (records helper kind for Agent/Task), `.on_tool_result(tool_use_id: str, tool_name: str | None, raw_len: int) -> None`, `.add_injected(chars: int)`, properties `context_tokens: int | None`, `peak_context: int | None`, `est_cost_usd: float | None`, `.snapshot() -> dict` (JSON-safe: `{"main": {...}, "helpers": {kind: {...}}, "models": {model: {...}}, "largest_results": [{"tool","chars","id"}] (≤5), "injected_chars", "messages"}` where each bucket is `{"messages","input","cache_write","cache_read","output"}`).
+- Model `TaskUsage(task_id PK FK tasks.id ondelete cascade, root_id indexed, context_tokens int|null, peak_context int|null, est_cost_usd float|null, breakdown JSON, bands JSON list default [], updated_at)`; `Task.auto_continued bool default false server_default false`; `Project.fresh_session_tokens int|null`; model `TaskQuestion` (fields in Task 5's Interfaces — created here so the migration is single).
+- Worker: `ctx["usage"]` tracker; persists `TaskUsage` at most every 5 s while running (`_persist_usage(task_id, tracker, final=False)`) and at finish (est replaced by `total_cost_usd` when present); writes `usage.json` (atomic replace, 0600, ≤ 1 write / 2 s) with keys `context_tokens, est_cost_usd, max_budget_usd, fresh_session_tokens, ts`.
+- `_short` callers pass the original length to `on_tool_result` before cutting.
+- [ ] Tests (RED first): dedup by id keeping last usage (Review Focus 1); helper attribution via `parent_tool_use_id` → `subagent_type`; missing usage/id tolerated; context = input+cache_write+cache_read of latest main message; peak; largest 5 results; `estimate` longest-prefix match (`claude-opus-5-5-20990101` → opus-5-5 row; `claude-opus-5` row distinct), unknown → None; worker run with mock claude emitting 3 assistant events (2 share an id) + result → TaskUsage row matches and est == result cost; usage.json written with 0600 and all keys; project setting 49999/900001 → 422, null ok; migration upgrade/downgrade on SQLite. Extend `mock_claude.sh` only via a new env switch (existing behaviour unchanged).
+- [ ] Implement → GREEN → commit (backend/app/usage, models+migration, worker, routers/schemas, tests).
+
+### Task 2: co-guard bands
+**Files:** modify `backend/app/guard/co_hook.py` (texts, `_band_nudge(policy, lines)`, `post_tool_use`), `backend/app/worker.py` (spool ingest: `band` records → run-log event `usage_band` with `{band, value}`; `injected` chars of nudge records → `tracker.add_injected`), `backend/app/resume/logfmt.py` (render `usage_band`); tests `backend/tests/guard/test_co_hook_bands.py`, `backend/tests/test_usage_bands_ingest.py`.
+**Interfaces — Consumes:** usage.json from T1. **Produces:** spool record `{"event":"PostToolUse","band":"budget80"|"budget95"|"fresh","value":<number>,"injected":<len of line>}`; existing nudges (notes, temp doc) also spool `injected` when they fire.
+- Rules: budget bands need numeric `est_cost_usd` and `max_budget_usd > 0`; ratio ≥ 0.80 → budget80, ≥ 0.95 → budget95 (when both newly cross in one call, only BUDGET_95_LINE is shown and both are spooled); fresh needs int `fresh_session_tokens` and `context_tokens ≥` it, `{n}` = context // 1000. Already-spooled band never repeats. Stale (`time.time() - ts > 120`) or unreadable → nothing.
+- [ ] Tests via subprocess as existing co_hook tests do: each band once; 95 skips 80 text; stale/missing/malformed/bool values (Review Focus 2); joins with NOTES_LINE by a blank line; PreToolUse decisions unchanged with a band-crossing usage.json present; ingest creates `usage_band` events and log lines. Commit.
+
+### Task 3: Automatic fresh Continue
+**Files:** modify `backend/app/worker.py` (`_finish` → `_maybe_auto_continue(task_id)` after the terminal commit and snapshot), `backend/app/routers/tasks.py` (extract the step-creation part of `continue_task` into `async def queue_continue(s, parent, *, mode, sender, auto: bool) -> Task` reused by the route), `backend/app/resume/texts.py` (AUTO_CONTINUE_LINE); test `backend/tests/test_auto_continue.py`.
+**Rule (exact):** parent status `completed`; parent origin not `agent`; parent's TaskUsage `bands` contains `fresh`; (handoff content has a todo whose status is not completed) OR (`notes.stamp` mtime > the fresh band's spool ts); no active step in the thread; consecutive auto count < 3 where the count walks the thread's main-line steps newest first while `auto_continued` is true. Creates the step with `mode="fresh"`, `created_by=parent.created_by`, `auto_continued=True`, and a run-log event `auto_continue` rendered with AUTO_CONTINUE_LINE.
+- [ ] Tests: completes with fresh band + open todo → one queued fresh continue (no resume id); no band → none; failed/cancelled → none; band but no open todo and notes unchanged → none; cap (Review Focus 3) incl. reset by a user follow-up; route behaviour of `/continue` unchanged (existing tests pass). Commit.
+
+### Task 4: Usage API, thread totals, tips
+**Files:** create `backend/app/usage/report.py`; modify `backend/app/routers/tasks.py` (`GET /tasks/{id}/usage`), `backend/app/schemas.py`; test `backend/tests/test_usage_api.py`.
+**Interfaces — Produces:** `GET /tasks/{id}/usage` (same visibility as the task) → `{"step": {"context_tokens","peak_context","est_cost_usd","cost_is_estimate": bool,"max_budget_usd","budget_pct": float|null,"fresh_session_tokens","breakdown"}, "thread": {"steps": int,"duration_ms": int,"cost_usd": float,"tokens": int,"last": {"title","duration_ms","cost_usd"}|null}, "tips": [str]}`. Thread sums use stored `Task.total_cost_usd/duration_ms/input_tokens+output_tokens`, plus the running step's TaskUsage estimate. Tips exactly per spec Goal 5, fixed texts `TIP_NARROW = "A tool result over 20,000 characters came back; read narrower ranges or filter output."`, `TIP_FRESH = "Context got large; split long work across fresh sessions (set a fresh-session threshold on the project)."`, `TIP_CACHE = "Under half of the input came from the cache; keep the start of prompts stable."` in `app/usage/report.py`.
+- [ ] Tests: values for a 3-step thread incl. a running step; budget_pct; tips each trigger and not; outsider 404; step without TaskUsage → nulls, not 500. Commit.
+
+### Task 5: Questions backend
+**Files:** create `backend/app/questions/__init__.py`, `backend/app/questions/service.py`, `backend/app/routers/questions.py`; modify `backend/app/main.py` (router), `backend/app/auth.py` (agent allowlist: exactly `POST|GET /tasks/{id}/questions`), `backend/app/routers/tasks.py` (the two task-scoped routes), `backend/app/worker.py` (`_finish` → `questions.service.capture_final(task_id)` before auto-continue), `backend/app/notifications.py` (`notify_question(question_id)`), `backend/app/resume/ground_rules.py` (switch `questions` + QUESTIONS_RULE in `main_text`); tests `backend/tests/test_questions.py`, `backend/tests/test_questions_capture.py`, route-coverage test update.
+**Interfaces — Produces:** model `TaskQuestion(id uuid, task_id FK cascade, root_id idx, project_id null, question, options JSON list, recommendation null, blocks null, reversible bool null, source "agent"|"final_text", status "open"|"answered"|"dismissed", answer null, answered_by null, answered_at null, followup_task_id null, created_at)`; routes: `POST /tasks/{id}/questions` (agent own task or a manager human; 201 → QuestionOut), `GET /tasks/{id}/questions`, `GET /questions?status=open` (humans; only questions on tasks the caller can see; each with `can_answer`), `POST /questions/{id}/answer {"answer": str} | {"accept": true}` → queues a follow-up via the existing follow-up step path with ANSWER_PROMPT (resume when the answerer owns the session, else fresh) and returns `{question, task}`; 409 when not open, when the thread has an active step, or `accept` without a recommendation; `POST /questions/{id}/dismiss`. `capture_final(task_id)`: spec rule (touched files = any Write/Edit/NotebookEdit tool_use event or a commit in the handoff's commits for that step), last paragraph = text after the last blank line, stripped, ending with `?`, ≤ 600 chars (longer → skip).
+- [ ] Tests: Review Focus 4 and 5; limits and 422s; redaction of a run secret and a `ghp_` token in question/options; hidden chars stripped; answer queues a step whose prompt contains ANSWER_PROMPT with the quoted question; accept uses ACCEPT_ANSWER; webhook called (monkeypatched); ground rules include QUESTIONS_RULE only when on, never in helper text. Commit.
+
+### Task 6: Frontend — tokens
+**Files:** create `frontend/src/usage/{usage.js, UsageChips.jsx, TokensPanel.jsx, SoFarLine.jsx, usage.css}` + tests; modify `frontend/src/components/TaskDetail.jsx` (chips + so-far in header, panel as a collapsible section, `usage_band`/`auto_continue` log lines), `frontend/src/components/ProjectsView.jsx` (fresh-session field: off / number with 150000 placeholder, maintainer only), `frontend/src/api.js`.
+- Context chip text `context {n}k`, amber at ≥ 80 % of the project threshold, red at ≥ threshold (no colour when no threshold); budget chip `budget {pct} % est.` (no "est." after finish), hidden without max budget or estimate; polling the usage route every 5 s while the step runs, once otherwise. Theme tokens only.
+- [ ] vitest: chip states, panel renders buckets/largest results/tips, so-far formatting (`$2.10`, `1.2M tokens`, `41 min`), settings validation; build. Commit.
+
+### Task 7: Frontend — Questions inbox and Open handoffs
+**Files:** create `frontend/src/questions/{questions.js, QuestionCard.jsx, QuestionsSection.jsx, questions.css}` + tests; modify `frontend/src/home/HomeView.jsx` + `useHomeData.js` (Questions section, Open handoffs section), `frontend/src/shell/Rail.jsx` (badge = open answerable questions), `frontend/src/components/TaskDetail.jsx` (the thread's questions), `frontend/src/api.js`; backend `GET /handoffs/open` in `backend/app/routers/tasks.py` (or a small router) per the spec's Home "Open handoffs" rule + test `backend/tests/test_open_handoffs.py`.
+- QuestionCard: question (hidden characters revealed, as the approval card does), options as buttons, recommendation marked "(recommended)", blocks, reversible chip, free-text answer, Accept recommendation, Dismiss; buttons only when `can_answer`. Open handoffs rows: task title, "step n of m", age, Continue button (3a ContinueButton).
+- [ ] vitest for card permissions/states, Home sections, badge count; backend test for open-handoffs visibility/limit/14 days; build. Commit.
+
+### Task 8: 3a leftovers
+**Files:** `backend/app/worker.py`, `backend/app/resume/recovery.py`, `backend/tests/guard/test_custom.py`, tests as needed.
+- (a) `_finish`: take the finish handoff snapshot before committing the terminal status (a follow-up created right after the status flips composes with the new handoff); test with a follow-up issued immediately on status change.
+- (b) compose failure then Retry: the retried step must not inject the old recovery record — clear `recovery.pending` only after the composed prompt is stored, and Retry rebuilds or drops it; test.
+- (c) `tests/guard/test_custom.py:452-454` wall-only `< 3.0` → `time_limit` helper from conftest.
+- (d) Triage the deferred minors in the 3a reviews copied to this plan's workspace (`3a-reviews/`): fix each that is ≤ ~20 lines and still applies; list the rest with a one-line reason in the report.
+- [ ] Commit.
+
+### Task 9: End-to-end + README
+- [ ] Scratch backend on port 8335 (temp SQLite) with mock claude emitting usage: a run crosses 80/95 % budget and the fresh threshold → co-guard lines appear in the agent's next PostToolUse (verified via spool), TaskUsage figures, auto-continue queued once; a question filed by the agent token → appears in `GET /questions`, answered → follow-up step with ANSWER_PROMPT. Playwright on Vite 5335: chips, panel, so-far line, Home Questions + Open handoffs, Rail badge, project setting. Screenshots to the workspace. README "Phase 3b" section (what users see; figures unverified against real `claude` until the first live run). Fix anything found. Commit.
