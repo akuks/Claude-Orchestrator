@@ -1,0 +1,108 @@
+/* The Questions inbox: the question card, the Home section and the thread's questions. Theme variables only. */
+.co-q-list {
+  display: grid;
+  gap: 8px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.co-q-card {
+  border: 1px solid var(--co-border);
+  border-radius: var(--co-radius);
+  background: var(--co-surface);
+  padding: 8px 12px;
+  display: grid;
+  gap: 6px;
+  min-width: 0;
+}
+.co-q-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  min-width: 0;
+  font-size: 12px;
+}
+.co-q-source {
+  color: var(--co-text-secondary);
+}
+.co-q-task {
+  min-width: 0;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-weight: 600;
+}
+.co-q-meta {
+  color: var(--co-text-muted);
+  font-size: 12px;
+}
+.co-q-chip {
+  display: inline-block;
+  padding: 0 8px;
+  border: 1px solid var(--co-border);
+  border-radius: var(--co-radius);
+  color: var(--co-text-secondary);
+  line-height: 20px;
+  white-space: nowrap;
+}
+.co-q-chip-warn {
+  border-color: var(--co-warning);
+  color: var(--co-warning-text);
+}
+.co-q-text {
+  margin: 0;
+  color: var(--co-text);
+  font-size: 14px;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.co-q-line {
+  color: var(--co-text);
+  font-size: 13px;
+  overflow-wrap: anywhere;
+}
+.co-q-label {
+  color: var(--co-text-secondary);
+}
+.co-q-options-list {
+  margin: 0;
+  padding-left: 18px;
+  color: var(--co-text);
+  font-size: 13px;
+  overflow-wrap: anywhere;
+}
+.co-q-actions {
+  display: grid;
+  gap: 6px;
+}
+.co-q-options,
+.co-q-buttons {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+.co-q-options .ant-btn {
+  max-width: 100%;
+  white-space: normal;
+  height: auto;
+  text-align: left;
+}
+.co-q-free {
+  display: flex;
+  gap: 6px;
+  align-items: flex-start;
+}
+.co-q-error {
+  color: var(--co-danger-text);
+  font-size: 12px;
+}
+.co-q-thread {
+  margin-bottom: 12px;
+}
+.co-q-thread-title {
+  font-weight: 600;
+  color: var(--co-text);
+  margin-bottom: 6px;
+}
