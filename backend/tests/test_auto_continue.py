@@ -156,6 +156,7 @@ def test_handoff_of_another_step_does_not_count(client, owner, submitted):
     tid = _step(owner, root=root, parent=root, content=None)
     _auto(tid)
     assert _children(tid) == []
+    assert submitted == []
 
 
 def test_cap_three_in_a_row_and_a_user_followup_resets(client, owner, submitted):
@@ -207,19 +208,56 @@ def test_never_raises_into_finish(client, owner, monkeypatch, submitted):
     assert submitted == []
 
 
-def test_end_to_end_run_crosses_fresh_band_and_continues(client):
+def _settled(client, tid, timeout=30.0):
+    """The step is terminal and its _finish (auto-continue included) has returned."""
+    deadline = time.time() + timeout
+    t = wait_task(client, tid, timeout)
+    while time.time() < deadline and tid in app.state.worker._active:
+        time.sleep(0.1)
+    assert tid not in app.state.worker._active, f"{tid} still finishing"
+    return t
+
+
+def test_end_to_end_chain_stops_at_the_cap(client):
+    """Through the mock CLI: the fresh continue's prompt carries the original request (with the fixture
+    marker), so every automatic step crosses the band again; the chain stops after exactly 3 automatic
+    steps and nothing is left running when the test ends (Review Focus 3, end to end)."""
     r = client.post("/tasks", json={"prompt": "go [stream-fixture:fresh_todo]"})
     assert r.status_code == 201, r.text
-    done = wait_task(client, r.json()["id"])
+    done = _settled(client, r.json()["id"])
     assert done["status"] == "completed", done.get("error")
-    deadline, kids = time.time() + 20, []
-    while time.time() < deadline and not kids:
-        kids = _children(done["id"])
-        time.sleep(0.2)
-    assert len(kids) == 1, "no automatic continue"
-    k = kids[0]
-    assert k.auto_continued and k.origin == "continue" and k.resume_session_id is None
-    assert k.created_by == done["created_by"]
-    finished = wait_task(client, k.id)
-    assert finished["status"] in ("completed", "failed", "cancelled")
-    assert _events(k.id, "auto_continue")[0].payload["text"] == AUTO_CONTINUE_LINE.format(n=152)
+    chain, prev = [], done["id"]
+    while True:
+        kids = _children(prev)
+        if not kids:
+            break
+        assert len(kids) == 1 and len(chain) < 3, "more than one automatic continue per step / past the cap"
+        k = kids[0]
+        assert k.auto_continued and k.origin == "continue" and k.resume_session_id is None
+        assert k.created_by == done["created_by"]
+        assert _events(k.id, "auto_continue")[0].payload["text"] == AUTO_CONTINUE_LINE.format(n=152)
+        finished = _settled(client, k.id)
+        assert finished["status"] == "completed", finished.get("error")
+        chain.append(k.id)
+        prev = k.id
+    assert len(chain) == 3
+
+
+def test_queue_continue_parent_deleted_in_the_window_404(client, owner):
+    from fastapi import HTTPException
+
+    from app.routers.tasks import queue_continue
+
+    tid = _step(owner, bands=None, content=None)
+
+    async def go():
+        async with SessionLocal() as s:
+            parent = await s.get(Task, tid)
+            async with SessionLocal() as s2:  # deleted by someone else before the lock is taken
+                await s2.delete(await s2.get(Task, tid))
+                await s2.commit()
+            with pytest.raises(HTTPException) as e:
+                await queue_continue(s, parent, mode="fresh", sender=owner.user_id, auto=False)
+            return e.value.status_code
+
+    assert run(go()) == 404
