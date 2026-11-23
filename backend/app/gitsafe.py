@@ -35,7 +35,10 @@ remote's lazy fetch of a missing object), so every such call goes through
   a hex sha or ``<hex>..<hex>`` (hex is 7-40 lowercase digits);
 * the decision health check's two reads: ``ls-files`` with exactly ``-co
   --exclude-standard -z`` (any order, nothing else), and ``log`` with
-  ``--name-only`` and ``--since=<date>`` (both in ``ALLOWED_LOG_OPTIONS``).
+  ``--name-only`` and ``--since=<date>`` (both in ``ALLOWED_LOG_OPTIONS``);
+* the gate code-state hash's two reads: ``diff`` with exactly
+  ``--no-ext-diff --no-textconv --binary HEAD`` and ``ls-files`` with exactly
+  ``--others --exclude-standard -z`` (each any order, nothing else).
 
 It only reads metadata. Commands that need the network or write (clone,
 fetch, push, checkout ...) are refused; they are out of scope here.
@@ -98,6 +101,8 @@ ALLOWED_LOG_OPTIONS = ("--all", "-i", "--fixed-strings", "--no-merges", "--count
                        "--author=", "--name-only", "--since=")
 
 LS_FILES_OPTIONS = ("-co", "--exclude-standard", "-z")
+LS_FILES_OTHERS_OPTIONS = ("--others", "--exclude-standard", "-z")
+DIFF_OPTIONS = ("--no-ext-diff", "--no-textconv", "--binary", "HEAD")
 STATUS_OPTIONS = ("--porcelain=v1", "-z", "--untracked-files=all", "--no-renames")
 _HEX = r"[0-9a-f]{7,40}"
 _REV_RE = re.compile(rf"^(HEAD|{_HEX}(\.\.{_HEX})?)$")
@@ -120,6 +125,10 @@ def check_args(args) -> None:
     if cmd == "status" and sorted(rest) == sorted(STATUS_OPTIONS):
         return
     if cmd == "ls-files" and sorted(rest) == sorted(LS_FILES_OPTIONS):
+        return
+    if cmd == "ls-files" and sorted(rest) == sorted(LS_FILES_OTHERS_OPTIONS):
+        return
+    if cmd == "diff" and sorted(rest) == sorted(DIFF_OPTIONS):
         return
     if cmd == "merge-base" and len(rest) == 3 and rest[0] == "--is-ancestor" and all(_SHA_RE.match(a) for a in rest[1:]):
         return
