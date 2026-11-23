@@ -8,6 +8,10 @@ vi.mock('../api', () => ({
     userDirectory: vi.fn(),
     cancelWorkflowRun: vi.fn(),
     retryWorkflowRun: vi.fn(),
+    allowWorkflowGate: vi.fn(),
+    approveWorkflowStage: vi.fn(),
+    rejectWorkflowStage: vi.fn(),
+    workflowGateLog: vi.fn(),
   },
   STATUS_COLORS: {},
 }))
@@ -258,5 +262,39 @@ describe('RunView', () => {
     const c = await mount()
     const head = c.querySelector('[data-testid="run-stage-tasks"] header')
     expect(head.querySelector('[data-testid="run-stage-parallel"]')?.textContent).toBe('parallel')
+  })
+
+  it('a gate stage renders GateCard (timeline still renders) and the totals line shows', async () => {
+    api.getWorkflowRun.mockImplementation(async () => ({
+      run: run({ current_stage: 1, stages: [{ name: 'Plan', items: [] }, { name: 'Tests', kind: 'gate', run: ['pytest -q'], project: 'p1' }] }),
+      tasks: [t('a', 0, 'completed')],
+      stage_state: { 1: { status: 'running', attempt: 0, passed_cmds: [], status_text: 'not yet passed (0 of 1 commands passed, none running)' } },
+      gate_runs: [],
+      live: null,
+      totals: { line: 'So far: $1.23 over 2 tasks' },
+      log: [{ at: '2026-11-20T10:00:00Z', text: 'first line' }, { at: '2026-11-20T10:01:00Z', text: 'second line' }],
+    }))
+    const c = await mount()
+    expect(c.querySelector('[data-testid="gate-card"]')).not.toBeNull()
+    expect(c.querySelector('[data-testid="gate-words"]').textContent).toContain('not yet passed (0 of 1 commands passed')
+    expect(c.querySelector('[data-testid="run-totals-line"]').textContent).toBe('So far: $1.23 over 2 tasks')
+    expect(seen.stages.at(-1).map((s) => s.task_count)).toEqual([1, 0])
+    const lines = [...c.querySelectorAll('[data-testid="run-log"] li')].map((l) => l.textContent)
+    expect(lines[0]).toContain('second line')
+  })
+
+  it('earlier attempts are collapsed under "Earlier attempts (1)"', async () => {
+    api.getWorkflowRun.mockImplementation(async () => ({
+      run: run(),
+      tasks: [t('old', 1, 'failed', { stage_attempt: 0 }), t('new', 1, 'running', { stage_attempt: 1 })],
+      stage_state: { 1: { status: 'running', attempt: 1 } },
+    }))
+    const c = await mount()
+    const d = c.querySelector('[data-testid="run-earlier"]')
+    expect(d.querySelector('summary').textContent).toBe('Earlier attempts (1)')
+    expect(d.open).toBe(false)
+    const outer = [...c.querySelectorAll('.co-run-tasks')].filter((u) => !d.contains(u))
+    expect(outer[0].querySelectorAll('[data-testid="run-task"]').length).toBe(1)
+    expect(seen.stages.at(-1)[1]).toMatchObject({ state: 'current', task_count: 1 })
   })
 })

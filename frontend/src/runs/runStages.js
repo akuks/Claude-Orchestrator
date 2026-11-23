@@ -23,24 +23,49 @@ export function stageState(statuses, index, current) {
 // [{name, state, task_count}] for the run's stages, from the board's tasks.
 // The live endpoint only covers active runs; a completed run's stages are all
 // done even when some of their tasks aren't visible to the viewer.
-export function runStages(run, tasks) {
+const GATE_STATE = {
+  passed: 'done',
+  approved: 'done',
+  failed: 'failed',
+  rejected: 'failed',
+  waiting_approval: 'waiting_approval',
+  needs_approval: 'waiting_approval',
+}
+
+// The current attempt of a stage (0 when the run predates attempts).
+export const stageAttempt = (sstate, index) => Number(sstate?.[String(index)]?.attempt) || 0
+
+// sstate: the run's stage_state (optional). Only the current attempt's
+// tasks count, and gate/approval stages (no tasks) take their state from it.
+export function runStages(run, tasks, sstate) {
   if (!run || !Array.isArray(run.stages)) return []
   const byStage = new Map()
   for (const t of Array.isArray(tasks) ? tasks : []) {
     if (t?.stage_index == null) continue
+    if ((t.stage_attempt || 0) !== stageAttempt(sstate, t.stage_index)) continue
     if (!byStage.has(t.stage_index)) byStage.set(t.stage_index, [])
     byStage.get(t.stage_index).push(t.status)
   }
   return run.stages.map((st, i) => {
     const statuses = byStage.get(i) || []
-    const state =
-      run.status === 'completed' && !statuses.length ? 'done' : stageState(statuses, i, run.current_stage)
+    const kind = st && st.kind
+    const gs = kind === 'gate' || kind === 'approval' ? sstate?.[String(i)]?.status : null
+    let state
+    if (gs && GATE_STATE[gs]) state = GATE_STATE[gs]
+    else if (run.status === 'completed' && !statuses.length) state = 'done'
+    else state = stageState(statuses, i, run.current_stage)
     return { name: (st && st.name) || `Stage ${i + 1}`, state, task_count: statuses.length }
   })
 }
 
-export function tasksOfStage(tasks, index) {
-  return (Array.isArray(tasks) ? tasks : []).filter((t) => t.stage_index === index)
+export function tasksOfStage(tasks, index, attempt) {
+  const all = (Array.isArray(tasks) ? tasks : []).filter((t) => t.stage_index === index)
+  return attempt == null ? all : all.filter((t) => (t.stage_attempt || 0) === attempt)
+}
+
+// Tasks of earlier attempts of a stage (collapsed in the run view).
+export function earlierAttemptTasks(tasks, index, attempt) {
+  return (Array.isArray(tasks) ? tasks : []).filter((t) => t.stage_index === index && (t.stage_attempt || 0) !== attempt)
 }
 
 // The task to show when a stage is selected: one needing attention (approval,

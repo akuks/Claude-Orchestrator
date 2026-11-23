@@ -15,9 +15,15 @@ import {
   defaultTaskFor,
   isRunActive,
   runStages,
+  earlierAttemptTasks,
   splitStageTitle,
+  stageAttempt,
   tasksOfStage,
 } from './runStages'
+import ApprovalCard from '../gates/ApprovalCard'
+import GateCard from '../gates/GateCard'
+import RunLog from '../gates/RunLog'
+import { stageKind } from '../gates/gates'
 import './run.css'
 
 dayjs.extend(relativeTime)
@@ -114,14 +120,18 @@ export default function RunView({ id, user, projects = [], navigate, onOpenCrede
   const tasks = data?.tasks || []
   // Polls return fresh objects; keep the same stages array while nothing
   // changed so the 3D timeline isn't rebuilt (and its labels re-placed) every poll.
-  const freshStages = useMemo(() => runStages(run, tasks), [run, tasks])
+  const sstate = data?.stage_state || run?.stage_state
+  const freshStages = useMemo(() => runStages(run, tasks, sstate), [run, tasks, sstate])
   const stagesKey = JSON.stringify(freshStages)
   // eslint-disable-next-line react-hooks/exhaustive-deps
   const stages = useMemo(() => freshStages, [stagesKey])
   const head = useMemo(() => timelineComet(stages).headIndex, [stages])
   const selStage = stageIdx != null && stageIdx < stages.length ? stageIdx : head >= 0 ? head : null
-  const stageTasks = selStage == null ? [] : tasksOfStage(tasks, selStage)
-  const selTask = taskId && stageTasks.some((t) => t.id === taskId) ? taskId : defaultTaskFor(stageTasks)
+  const curAttempt = selStage == null ? 0 : stageAttempt(sstate, selStage)
+  const stageTasks = selStage == null ? [] : tasksOfStage(tasks, selStage, curAttempt)
+  const earlier = selStage == null ? [] : earlierAttemptTasks(tasks, selStage, curAttempt)
+  const selTask =
+    taskId && [...stageTasks, ...earlier].some((t) => t.id === taskId) ? taskId : defaultTaskFor(stageTasks)
 
   const pickStage = useCallback(
     (i) => {
@@ -212,6 +222,39 @@ export default function RunView({ id, user, projects = [], navigate, onOpenCrede
   const manage = canManageRun(run, user, projects)
   const stage = selStage == null ? null : stages[selStage]
   const stageDef = selStage == null ? null : run.stages[selStage]
+  const kind = stageKind(stageDef)
+  const isAdmin = user?.role === 'admin' || user?.is_admin
+  const canAllow =
+    manage &&
+    (isAdmin ||
+      !stageDef?.project ||
+      projects.length === 0 ||
+      projects.some((p) => p.id === stageDef.project && p.my_role === 'maintainer'))
+  const taskButton = (t) => {
+    const { agent, text } = splitStageTitle(t.title)
+    const on = t.id === selTask
+    return (
+      <li key={t.id}>
+        <button
+          type="button"
+          className={`co-run-task${on ? ' co-run-task-on' : ''}`}
+          aria-pressed={on}
+          onClick={() => setTaskId(t.id)}
+          data-testid="run-task"
+        >
+          <span className="co-run-task-dot" style={{ background: statusVar(t.status) }} aria-hidden="true" />
+          <span className="co-run-task-main">
+            {agent && <span className="co-run-task-agent">{agent}</span>}
+            <span className="co-run-task-text">{text}</span>
+          </span>
+          <span className="co-run-task-meta co-num">
+            {t.status.replace('_', ' ')}
+            {t.total_cost_usd != null ? ` · ${money(t.total_cost_usd)}` : ''}
+          </span>
+        </button>
+      </li>
+    )
+  }
 
   return (
     <div className="co-run" data-testid="run-view">
@@ -230,9 +273,13 @@ export default function RunView({ id, user, projects = [], navigate, onOpenCrede
         </div>
         <div className="co-run-head-side">
           <div className="co-run-stats co-num" aria-label="Run totals">
-            <span>
-              <b>{money(cost)}</b> so far
-            </span>
+            {data?.totals?.line ? (
+              <span data-testid="run-totals-line">{data.totals.line}</span>
+            ) : (
+              <span>
+                <b>{money(cost)}</b> so far
+              </span>
+            )}
             {tokens > 0 && (
               <span>
                 <b>{compact(tokens)}</b> tokens
@@ -310,34 +357,21 @@ export default function RunView({ id, user, projects = [], navigate, onOpenCrede
               )}
               <Tag color={STAGE_TAG[stage.state]}>{stateLabel(stage.state)}</Tag>
             </header>
-            {stageTasks.length ? (
-              <ul className="co-run-tasks">
-                {stageTasks.map((t) => {
-                  const { agent, text } = splitStageTitle(t.title)
-                  const on = t.id === selTask
-                  return (
-                    <li key={t.id}>
-                      <button
-                        type="button"
-                        className={`co-run-task${on ? ' co-run-task-on' : ''}`}
-                        aria-pressed={on}
-                        onClick={() => setTaskId(t.id)}
-                        data-testid="run-task"
-                      >
-                        <span className="co-run-task-dot" style={{ background: statusVar(t.status) }} aria-hidden="true" />
-                        <span className="co-run-task-main">
-                          {agent && <span className="co-run-task-agent">{agent}</span>}
-                          <span className="co-run-task-text">{text}</span>
-                        </span>
-                        <span className="co-run-task-meta co-num">
-                          {t.status.replace('_', ' ')}
-                          {t.total_cost_usd != null ? ` · ${money(t.total_cost_usd)}` : ''}
-                        </span>
-                      </button>
-                    </li>
-                  )
-                })}
-              </ul>
+            {kind === 'gate' ? (
+              <GateCard
+                runId={id}
+                index={selStage}
+                stage={stageDef}
+                state={sstate?.[String(selStage)]}
+                live={data?.live}
+                gateRuns={data?.gate_runs || []}
+                canAllow={canAllow}
+                onChanged={load}
+              />
+            ) : kind === 'approval' ? (
+              <ApprovalCard runId={id} index={selStage} stage={stageDef} state={sstate?.[String(selStage)]} canDecide={manage} onChanged={load} />
+            ) : stageTasks.length ? (
+              <ul className="co-run-tasks">{stageTasks.map(taskButton)}</ul>
             ) : (
               <div className="co-run-empty">
                 Not started yet
@@ -348,6 +382,12 @@ export default function RunView({ id, user, projects = [], navigate, onOpenCrede
                   </div>
                 ) : null}
               </div>
+            )}
+            {kind === 'agent' && earlier.length > 0 && (
+              <details className="co-run-earlier" data-testid="run-earlier">
+                <summary>Earlier attempts ({earlier.length})</summary>
+                <ul className="co-run-tasks">{earlier.map(taskButton)}</ul>
+              </details>
             )}
           </section>
 
@@ -362,12 +402,13 @@ export default function RunView({ id, user, projects = [], navigate, onOpenCrede
                 onOpenTask={openTask}
                 onOpenCredentials={onOpenCredentials}
               />
-            ) : (
+            ) : kind !== 'agent' ? null : (
               <div className="co-surface co-run-panel co-run-empty">Select a task to see its live output.</div>
             )}
           </div>
         </div>
       )}
+      <RunLog log={data?.log || run.log} />
     </div>
   )
 }
