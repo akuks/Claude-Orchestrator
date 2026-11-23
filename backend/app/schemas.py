@@ -1,6 +1,6 @@
 from datetime import datetime
 import re
-from typing import Annotated, Literal, Optional
+from typing import Annotated, Any, Literal, Optional
 
 from pydantic import BaseModel, Field, field_validator, model_validator
 
@@ -23,6 +23,7 @@ class TaskCreate(BaseModel):
     claude_md: Optional[str] = None
     input_files: list[InputFile] = Field(default_factory=list)
     requires_approval: bool = False
+    brief: Optional[Any] = None  # checked by clean_brief (a plain-text 422), not by Pydantic
 
 
 class TaskOut(BaseModel):
@@ -67,6 +68,8 @@ class TaskOut(BaseModel):
     notes_updated_at: Optional[datetime] = None
     recoveries: int = 0
     recovery: Optional[dict] = None
+    brief: Optional[dict] = None
+    brief_bounds: list = []
     # per viewer, set on the task and thread reads only: may the viewer follow up / Continue, and own the session
     can_manage: bool = False
     can_resume: bool = False
@@ -75,6 +78,11 @@ class TaskOut(BaseModel):
     completed_at: Optional[datetime]
 
     model_config = {"from_attributes": True}
+
+    @field_validator("brief_bounds", mode="before")
+    @classmethod
+    def _bounds_none(cls, v):
+        return [] if v is None else v
 
 
 class FollowupCreate(BaseModel):
@@ -426,6 +434,7 @@ class AgentCreate(BaseModel):
     default_prompt: Optional[str] = None  # default task input
     project_id: Optional[str] = None  # optional default project (overridable)
     model: Optional[str] = None
+    tier: Optional[str] = None  # strongest | standard | light (the org's model map); model overrides it
     max_turns: int = Field(default=25, ge=1, le=200)
     max_budget_usd: Optional[float] = Field(default=None, ge=0)
     priority: str = "normal"
@@ -444,6 +453,7 @@ class AgentUpdate(BaseModel):
     default_prompt: Optional[str] = None
     project_id: Optional[str] = None
     model: Optional[str] = None
+    tier: Optional[str] = None
     max_turns: Optional[int] = None
     max_budget_usd: Optional[float] = None
     priority: Optional[str] = None
@@ -463,6 +473,7 @@ class AgentOut(BaseModel):
     default_prompt: Optional[str]
     project_id: Optional[str]
     model: str
+    tier: Optional[str] = None
     max_turns: int
     max_budget_usd: Optional[float]
     priority: str
@@ -472,6 +483,7 @@ class AgentOut(BaseModel):
     read_only: bool = False
     folder: str = ""
     coordinator: bool = False
+    lint: list[str] = []  # non-blocking warnings (model / description), set by the agents router
     created_at: datetime
 
     model_config = {"from_attributes": True}
@@ -482,6 +494,7 @@ class AgentRun(BaseModel):
     project_id: Optional[str] = None  # overrides the agent's default project
     input_files: list[InputFile] = Field(default_factory=list)  # attached task files
     parent_task_id: Optional[str] = None  # a coordinator dispatching a child
+    brief: Optional[Any] = None
 
 
 class AgentBulkRun(BaseModel):
@@ -493,6 +506,7 @@ class AgentBulkRun(BaseModel):
 class DispatchItem(BaseModel):
     agent: str  # agent id OR exact name
     prompt: str = Field(min_length=1)
+    brief: Optional[Any] = None
 
 
 class DispatchRequest(BaseModel):

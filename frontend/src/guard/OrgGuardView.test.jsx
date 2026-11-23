@@ -13,7 +13,7 @@ vi.mock('../api', () => ({
 }))
 
 import { api } from '../api'
-import OrgGuardView, { GroundRulesCard } from './OrgGuardView'
+import OrgGuardView, { GroundRulesCard, ModelTiersCard } from './OrgGuardView'
 
 const BUILTINS = [
   { id: 'rm-rf-outside', reason: 'this deletes a folder outside the project', hard_reason: 'this would delete your home folder', disableable: true },
@@ -175,5 +175,61 @@ describe('OrgGuardView (Settings → Agent guard)', () => {
     c = await mount({ isAdmin: true })
     expect(q(c, 'guard-health')).toBeNull()
     expect(q(c, 'builtin-list')).not.toBeNull()
+  })
+
+  describe('Model tiers card', () => {
+    const TIERS = { strongest: 'opus', standard: 'sonnet', light: 'claude-haiku-4-5' }
+    const withTiers = () =>
+      api.guardOrgSettings.mockImplementation(async () => ({ disabled_rules: [], dev_db_patterns: [], model_tiers: TIERS }))
+
+    it('shows three rows from model_tiers', async () => {
+      withTiers()
+      const c = await mount({ isAdmin: true })
+      const card = q(c, 'model-tiers')
+      expect(card.textContent).toContain('Model tiers')
+      for (const k of ['strongest', 'standard', 'light']) expect(q(c, `tier-${k}`)).not.toBeNull()
+      expect(q(c, 'tier-light').querySelector('input').value).toBe('claude-haiku-4-5')
+    })
+
+    it('admin Save sends the whole map', async () => {
+      withTiers()
+      api.saveGuardOrgSettings.mockImplementation(async (b) => b)
+      view = await render(<ModelTiersCard canEdit initial={TIERS} />)
+      const c = view.container
+      const input = q(c, 'tier-strongest').querySelector('input')
+      await act(async () => {
+        Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set.call(input, 'claude-opus-4-1')
+        input.dispatchEvent(new Event('input', { bubbles: true }))
+      })
+      await click(q(c, 'model-tiers-save'))
+      await flush()
+      expect(api.saveGuardOrgSettings).toHaveBeenCalledWith({
+        model_tiers: { strongest: 'claude-opus-4-1', standard: 'sonnet', light: 'claude-haiku-4-5' },
+      })
+    })
+
+    it('non-admin sees read-only values', async () => {
+      withTiers()
+      const c = await mount({ isAdmin: false })
+      expect(q(c, 'model-tiers-save')).toBeNull()
+      expect(q(c, 'tier-strongest').querySelector('input')).toBeNull()
+      expect(q(c, 'tier-strongest').textContent).toContain('opus')
+    })
+
+    it('shows a 400 message', async () => {
+      api.saveGuardOrgSettings.mockImplementation(async () => {
+        throw Object.assign(new Error('model_tiers.light must be opus, sonnet, haiku or a claude-… model id'), { status: 400 })
+      })
+      view = await render(<ModelTiersCard canEdit initial={TIERS} />)
+      const c = view.container
+      const input = q(c, 'tier-light').querySelector('input')
+      await act(async () => {
+        Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set.call(input, 'claude-xyz')
+        input.dispatchEvent(new Event('input', { bubbles: true }))
+      })
+      await click(q(c, 'model-tiers-save'))
+      await flush()
+      expect(q(c, 'model-tiers-error').textContent).toContain('model_tiers.light must be')
+    })
   })
 })

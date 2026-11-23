@@ -45,6 +45,7 @@ import { api, notifyUnauthorized, PRIORITY_COLORS, STATUS_COLORS, shortModel } f
 import { statusVar } from '../theme/tokens'
 import { guardLine, revealHidden, waitingLine } from '../guard/guard'
 import '../guard/guard.css'
+import BriefPanel from '../briefs/BriefPanel'
 import HandoffCard from '../resume/HandoffCard'
 import ContinueButton from '../resume/ContinueButton'
 import RunNotices from '../resume/RunNotices'
@@ -583,6 +584,11 @@ export default function TaskDetail({ taskId, onClose, onChanged, onOpenTask, onO
           <Descriptions.Item label="Prompt" span={2}>
             <Typography.Text style={{ whiteSpace: 'pre-wrap' }}>{task.prompt}</Typography.Text>
           </Descriptions.Item>
+          {(task.brief || task.brief_bounds?.length > 0) && (
+            <Descriptions.Item label="Brief" span={2}>
+              <BriefPanel brief={task.brief} bounds={task.brief_bounds} />
+            </Descriptions.Item>
+          )}
           {task.error && (
             <Descriptions.Item label="Error" span={2}>
               <Typography.Text type="danger" style={{ whiteSpace: 'pre-wrap' }}>

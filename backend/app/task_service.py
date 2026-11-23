@@ -5,12 +5,25 @@ root assignment so the create endpoint and scheduled runs stay in sync.
 """
 
 import base64
+import contextlib
 import os
 from pathlib import Path
 
 from .config import settings
+from fastapi import HTTPException
+
+from .briefs.validate import child_scope, clean_brief
 from .constants import Status
 from .models import Project, Task
+
+
+@contextlib.contextmanager
+def brief_422():
+    """Brief errors (ValueError, a plain reason) from build_task become a 422 with that reason."""
+    try:
+        yield
+    except ValueError as e:
+        raise HTTPException(422, str(e)) from None
 
 
 def default_title(prompt: str) -> str:
@@ -82,6 +95,7 @@ async def build_task(
     workflow_run_id: str | None = None,
     stage_index: int | None = None,
     created_by: str | None = None,
+    brief: dict | None = None,
 ) -> Task:
     """Create a Task row (flushed, not committed) in the given session.
 
@@ -90,10 +104,16 @@ async def build_task(
 
     When parent_task_id is set (a coordinator dispatching a child), the new task
     links to the parent and inherits its root_id, so it shows under the parent in
-    the existing thread view.
+    the existing thread view. A ``brief`` is validated (ValueError with a plain reason); under a parent with
+    a brief the child inherits it, or narrows it and keeps the parent's scope as a bound.
     """
     project_obj = await s.get(Project, project_id) if project_id else None
     parent = await s.get(Task, parent_task_id) if parent_task_id else None
+    own = clean_brief(brief)
+    if parent is not None:
+        own, bounds = child_scope(parent.brief, parent.brief_bounds, parent.id, own)
+    else:
+        bounds = []
     resolved_model = model or (project_obj.default_model if project_obj else "")
 
     risk = classify_risk(prompt, project_id, tags)
@@ -125,6 +145,8 @@ async def build_task(
         workflow_run_id=workflow_run_id,
         stage_index=stage_index,
         created_by=created_by,
+        brief=own,
+        brief_bounds=bounds if own else None,
     )
     s.add(task)
     await s.flush()  # assign id

@@ -107,7 +107,7 @@ allowlist in auth.py and again here):
   project) -> 409.
 * ``GET /guard/builtins`` - ``[{id, reason, hard_reason, disableable}]``.
 * ``GET /guard/org-settings`` (any person) / ``PUT`` (admins):
-  ``{disabled_rules, dev_db_patterns, ground_rules}`` (a field left out stays; ``ground_rules`` is replaced
+  ``{disabled_rules, dev_db_patterns, ground_rules, model_tiers}`` (a field left out stays; ``ground_rules`` is replaced
   whole after ``ground_rules.validate``, so a key left out takes its default, 400 on a bad one); only
   ``rules.DISABLEABLE`` ids may be switched off and every dev pattern must pass
   ``dbrules.check_dev_pattern`` (400).
@@ -133,7 +133,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy import and_, func, or_, select, update
 from sqlalchemy.exc import IntegrityError
 
-from .. import notifications
+from .. import notifications, tiers
 from ..access import (
     ALL,
     can_see_task,
@@ -1195,6 +1195,7 @@ class OrgSettingsIn(BaseModel):
     disabled_rules: Optional[list[str]] = None
     dev_db_patterns: Optional[list[str]] = None
     ground_rules: Optional[Any] = None  # replaces the whole object; not an object: 400 (validate) (a key left out takes its default)
+    model_tiers: Optional[Any] = None  # replaces the whole map; a key left out takes its default (400 on a bad one)
 
 
 async def _org_settings_out(s) -> dict:
@@ -1218,7 +1219,12 @@ async def put_org_settings(body: OrgSettingsIn, request: Request):
     _person(p)
     if not p.is_admin or not p.user.active:
         raise HTTPException(403, "Admin only")
-    disabled = patterns = ground = None
+    disabled = patterns = ground = tier_map = None
+    if body.model_tiers is not None:
+        try:
+            tier_map = tiers.validate(body.model_tiers)
+        except ValueError as e:
+            raise HTTPException(400, str(e)) from None
     if body.ground_rules is not None:
         try:
             ground = ground_rules.validate(body.ground_rules)
@@ -1250,6 +1256,8 @@ async def put_org_settings(body: OrgSettingsIn, request: Request):
                 row.dev_db_patterns = patterns
             if ground is not None:
                 row.ground_rules = ground
+            if tier_map is not None:
+                row.model_tiers = tier_map
             row.updated_by = p.user.id
             row.updated_at = _now()
             try:

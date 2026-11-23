@@ -333,3 +333,10 @@ describe('hook error health line (final wave)', () => {
     )
   })
 })
+
+describe('brief-scope rule name', () => {
+  it('has a friendly name', async () => {
+    const { ruleName } = await import('./guard')
+    expect(ruleName('brief-scope')).toBe('Outside the task brief')
+  })
+})

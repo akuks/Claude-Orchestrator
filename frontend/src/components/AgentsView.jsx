@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import {
+  Alert,
   Button,
   Collapse,
   Form,
@@ -13,6 +14,7 @@ import {
   Switch,
   Table,
   Tag,
+  Tooltip,
   Typography,
   Upload,
   message,
@@ -25,24 +27,27 @@ import {
   ReloadOutlined,
   ThunderboltOutlined,
   UploadOutlined,
+  WarningOutlined,
 } from '@ant-design/icons'
 import { api } from '../api'
+import BriefFields from '../briefs/BriefFields'
+import { BRIEF_LABELS, briefMissing, briefPayload } from '../briefs/brief'
+import { TIER_OPTIONS, modelOptions } from '../agents/tiers'
 
-const MODEL_OPTS = [
-  { value: 'sonnet', label: 'Sonnet' },
-  { value: 'opus', label: 'Opus' },
-  { value: 'haiku', label: 'Haiku' },
-]
-
-function AgentModal({ open, agent, seed, projects, onClose, onSaved }) {
+function AgentModal({ open, agent, seed, projects, modelTiers, onClose, onSaved }) {
   const [form] = Form.useForm()
   const [saving, setSaving] = useState(false)
-  const isEdit = !!agent
+  const [savedAgent, setSavedAgent] = useState(null) // saved with warnings: the modal stays open on this agent
+  const [lint, setLint] = useState([])
+  const target = agent || savedAgent
+  const isEdit = !!target
 
   useEffect(() => {
     if (!open) return
+    setSavedAgent(null)
+    setLint([])
     if (agent) {
-      form.setFieldsValue({ ...agent, model: agent.model || undefined })
+      form.setFieldsValue({ ...agent, model: agent.model || undefined, tier: agent.tier || undefined })
     } else {
       form.resetFields()
       // Seed from a template (role + governance) when creating from a preset.
@@ -59,11 +64,16 @@ function AgentModal({ open, agent, seed, projects, onClose, onSaved }) {
     }
     setSaving(true)
     try {
-      const payload = { ...v, model: v.model || undefined }
-      if (isEdit) await api.updateAgent(agent.id, payload)
-      else await api.createAgent(payload)
-      message.success(isEdit ? 'Agent saved' : 'Agent created')
+      // cleared selects send null so an edit can drop a model or tier
+      const payload = { ...v, model: v.model || (isEdit ? null : undefined), tier: v.tier || (isEdit ? null : undefined) }
+      const out = isEdit ? await api.updateAgent(target.id, payload) : await api.createAgent(payload)
       onSaved?.()
+      if (out?.lint?.length) {
+        setSavedAgent(out)
+        setLint(out.lint)
+        return
+      }
+      message.success(isEdit ? 'Agent saved' : 'Agent created')
       onClose()
     } catch (e) {
       message.error(e.message)
@@ -74,13 +84,29 @@ function AgentModal({ open, agent, seed, projects, onClose, onSaved }) {
 
   return (
     <Modal
-      title={isEdit ? `Edit ${agent.name}` : seed ? `New agent from “${seed.name}” template` : 'New Agent'}
+      title={isEdit ? `Edit ${target.name}` : seed ? `New agent from “${seed.name}” template` : 'New Agent'}
       open={open}
       onCancel={onClose}
       onOk={submit}
       confirmLoading={saving}
       width={640}
     >
+      {lint.length > 0 && (
+        <Alert
+          type="warning"
+          showIcon
+          style={{ marginBottom: 12 }}
+          data-testid="agent-lint"
+          message="Saved with warnings"
+          description={
+            <ul style={{ margin: 0, paddingLeft: 18 }}>
+              {lint.map((l) => (
+                <li key={l}>{l}</li>
+              ))}
+            </ul>
+          }
+        />
+      )}
       <Form form={form} layout="vertical">
         <Form.Item name="name" label="Name" rules={[{ required: true }]}>
           <Input placeholder="e.g. Security Auditor" />
@@ -116,8 +142,16 @@ function AgentModal({ open, agent, seed, projects, onClose, onSaved }) {
               options={projects.filter((p) => !p.archived).map((p) => ({ value: p.id, label: p.name }))}
             />
           </Form.Item>
-          <Form.Item name="model" label="Model" style={{ width: 130 }}>
-            <Select allowClear placeholder="Default" options={MODEL_OPTS} />
+          <Form.Item
+            name="tier"
+            label="Tier"
+            style={{ width: 150 }}
+            extra="A model set here overrides the tier."
+          >
+            <Select allowClear placeholder="None" options={TIER_OPTIONS} data-testid="agent-tier" />
+          </Form.Item>
+          <Form.Item name="model" label="Model" style={{ width: 150 }}>
+            <Select allowClear placeholder="Default" options={modelOptions(modelTiers)} />
           </Form.Item>
         </div>
         <div style={{ display: 'flex', gap: 12 }}>
@@ -212,9 +246,11 @@ function RunModal({ agent, projects, onClose, onRan }) {
   const [files, setFiles] = useState([]) // single-run attachments
   const [bulkText, setBulkText] = useState('')
   const [projectId, setProjectId] = useState(undefined)
+  const [briefError, setBriefError] = useState('')
 
   useEffect(() => {
     if (agent) {
+      setBriefError('')
       form.setFieldsValue({ prompt: agent.default_prompt })
       setProjectId(agent.project_id || undefined)
       setMode('single')
@@ -231,6 +267,13 @@ function RunModal({ agent, projects, onClose, onRan }) {
   const runSingle = async () => {
     const v = await form.validateFields().catch(() => null)
     if (!v) return
+    const brief = briefPayload(v.brief)
+    const missing = briefMissing(v.brief)
+    if (missing.length) {
+      setBriefError(`The brief needs: ${missing.map((k) => BRIEF_LABELS[k]).join(', ')} (${missing.join(', ')})`)
+      return
+    }
+    setBriefError('')
     setRunning(true)
     try {
       const input_files = await Promise.all(
@@ -243,6 +286,7 @@ function RunModal({ agent, projects, onClose, onRan }) {
         prompt: v.prompt || undefined,
         project_id: projectId || undefined,
         input_files,
+        ...(brief ? { brief } : {}),
       })
       message.success(
         task.status === 'awaiting_approval' ? 'Queued for approval' : 'Agent run started'
@@ -250,6 +294,7 @@ function RunModal({ agent, projects, onClose, onRan }) {
       onRan?.()
       onClose()
     } catch (e) {
+      if (brief) setBriefError(e.message)
       message.error(e.message)
     } finally {
       setRunning(false)
@@ -360,6 +405,7 @@ function RunModal({ agent, projects, onClose, onRan }) {
             options={projectOptions}
           />
         </Form.Item>
+        {mode === 'single' && <BriefFields error={briefError} />}
       </Form>
     </Modal>
   )
@@ -445,6 +491,7 @@ export default function AgentsView({ projects = [], isAdmin = false }) {
   const [editing, setEditing] = useState(null)
   const [seed, setSeed] = useState(null)
   const [runAgent, setRunAgent] = useState(null)
+  const [modelTiers, setModelTiers] = useState(null)
 
   const projName = (id) => projects.find((p) => p.id === id)?.name
   const tree = useMemo(() => buildTree(agents), [agents])
@@ -455,6 +502,10 @@ export default function AgentsView({ projects = [], isAdmin = false }) {
       const [a, p] = await Promise.all([api.listAgents(), api.agentPresets()])
       setAgents(a)
       setPresets(p)
+      // the org's tier map labels the model choices; without it the three base models show
+      Promise.resolve(api.guardOrgSettings?.())
+        .then((o) => setModelTiers(o?.model_tiers || null))
+        .catch(() => {})
     } catch (e) {
       message.error(e.message)
     } finally {
@@ -475,6 +526,7 @@ export default function AgentsView({ projects = [], isAdmin = false }) {
       description: p.description,
       system_prompt: p.system_prompt,
       default_prompt: p.default_prompt,
+      tier: p.tier || undefined,
       model: p.model || undefined,
       max_turns: p.max_turns ?? 25,
       max_budget_usd: p.max_budget_usd ?? undefined,
@@ -506,6 +558,20 @@ export default function AgentsView({ projects = [], isAdmin = false }) {
       render: (n, row) => (
         <div>
           <b>{n}</b>
+          {row.lint?.length > 0 && (
+            <Tooltip title={row.lint.join('\n')}>
+              <WarningOutlined
+                style={{ marginLeft: 6, color: '#faad14' }}
+                data-testid={`agent-lint-${row.id}`}
+                aria-label={row.lint.join('; ')}
+              />
+            </Tooltip>
+          )}
+          {row.tier && (
+            <Tag style={{ marginLeft: 6 }} data-testid={`agent-tier-${row.id}`}>
+              {row.tier}
+            </Tag>
+          )}
           {row.requires_approval && (
             <Tag color="warning" style={{ marginLeft: 6 }}>
               approval-gated
@@ -657,6 +723,7 @@ export default function AgentsView({ projects = [], isAdmin = false }) {
         agent={editing}
         seed={seed}
         projects={projects}
+        modelTiers={modelTiers}
         onClose={() => {
           setModalOpen(false)
           setSeed(null)

@@ -60,10 +60,13 @@ def test_org_settings_defaults_and_stored(client):
     empty, stored, odd = _run(_with_session(go))
     from app.resume import ground_rules
 
+    from app import tiers
+
     g = ground_rules.DEFAULTS  # nothing stored: the ground rules are their defaults
-    assert empty == {"disabled_rules": [], "dev_db_patterns": [], "ground_rules": g}
-    assert stored == {"disabled_rules": ["db-write"], "dev_db_patterns": ["host:*.dev"], "ground_rules": g}
-    assert odd == {"disabled_rules": [], "dev_db_patterns": ["ok"], "ground_rules": g}
+    t = tiers.DEFAULT_TIERS
+    assert empty == {"disabled_rules": [], "dev_db_patterns": [], "ground_rules": g, "model_tiers": t}
+    assert stored == {"disabled_rules": ["db-write"], "dev_db_patterns": ["host:*.dev"], "ground_rules": g, "model_tiers": t}
+    assert odd == {"disabled_rules": [], "dev_db_patterns": ["ok"], "ground_rules": g, "model_tiers": t}
 
 
 def test_rules_for_shape_and_filter(client):

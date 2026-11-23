@@ -70,7 +70,7 @@ Policy (a dict, as written by the worker into ``policy.json``)::
                                            #   the guard off); missing/null/false is off,
                                            #   any other value is on (fail safe)
       "readonly_paths": [{"path": "/abs" | "rel/to/project", "reason": str,
-                          "source": "project"|"reference"}],
+                          "source": "project"|"reference"|"brief"}],
                                            #   readonly-source roots (reason and source
                                            #   optional); not a list of such entries, a
                                            #   NUL, or a "~" prefix (the worker writes
@@ -836,7 +836,7 @@ def _readonly_entry_ok(e):
     return (isinstance(e, dict) and isinstance(e.get("path"), str) and bool(e["path"].strip())
             and "\x00" not in e["path"] and not e["path"].startswith("~")
             and (e.get("reason") is None or (isinstance(e.get("reason"), str) and "\x00" not in e["reason"]))
-            and e.get("source") in (None, "project", "reference"))
+            and e.get("source") in (None, "project", "reference", "brief"))
 
 
 def _braces(word, limit=64):

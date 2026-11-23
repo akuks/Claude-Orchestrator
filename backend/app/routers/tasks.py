@@ -31,7 +31,7 @@ from .. import reports
 from ..models import ActionGrant, Artifact, DecisionProposal, Project, RunAsk, Task, TaskEvent, TaskHandoff, TaskQuestion, TaskUsage
 from ..resume import handoff as resume_handoff
 from ..resume.texts import CONTINUE_PROMPT
-from ..task_service import build_task
+from ..task_service import brief_422, build_task
 from ..usage import report as usage_report
 from ..schemas import (
     ArtifactOut,
@@ -86,21 +86,23 @@ async def create_task(payload: TaskCreate, request: Request):
             await require_project_role(s, request.state.principal, payload.project_id)
             if (await s.get(Project, payload.project_id)) is None:
                 raise HTTPException(404, "Project not found")
-        task = await build_task(
-            s,
-            prompt=payload.prompt,
-            title=payload.title,
-            project_id=payload.project_id,
-            model=payload.model,
-            max_turns=payload.max_turns,
-            max_budget_usd=payload.max_budget_usd,
-            priority=payload.priority,
-            tags=payload.tags,
-            claude_md=payload.claude_md,
-            input_files=[f.model_dump() for f in payload.input_files],
-            requires_approval=payload.requires_approval,
-            created_by=request.state.principal.user.id,
-        )
+        with brief_422():
+            task = await build_task(
+                s,
+                prompt=payload.prompt,
+                title=payload.title,
+                project_id=payload.project_id,
+                model=payload.model,
+                max_turns=payload.max_turns,
+                max_budget_usd=payload.max_budget_usd,
+                priority=payload.priority,
+                tags=payload.tags,
+                claude_md=payload.claude_md,
+                input_files=[f.model_dump() for f in payload.input_files],
+                requires_approval=payload.requires_approval,
+                created_by=request.state.principal.user.id,
+                brief=payload.brief,
+            )
         await s.commit()
         await s.refresh(task)
         out = TaskOut.model_validate(task)
@@ -389,6 +391,7 @@ async def duplicate_task(task_id: str, request: Request):
         new = Task(
             title=f"{src.title} (copy)",
             prompt=src.prompt,
+            system_prompt=src.system_prompt,
             project=src.project,
             project_id=src.project_id,
             priority=src.priority,
@@ -398,6 +401,9 @@ async def duplicate_task(task_id: str, request: Request):
             # the source's budget, else the default a new task gets (build_task)
             max_budget_usd=(src.max_budget_usd if src.max_budget_usd is not None
                             else settings.default_task_budget_usd),
+            read_only=src.read_only,
+            brief=src.brief,
+            brief_bounds=src.brief_bounds,
             parent_task_id=src.id,
             origin="user",
             status=Status.QUEUED,
@@ -426,7 +432,8 @@ async def duplicate_task(task_id: str, request: Request):
 
 def _step_from(parent: Task, *, prompt: str, origin: str, resume: str | None, created_by: str | None) -> Task:
     """The one builder of a thread step (a follow-up or a Continue): the
-    parent's thread, workspace and run settings (model, max turns, max budget), queued."""
+    parent's thread, workspace and run settings (model, max turns, max budget, read-only, system prompt,
+    brief), queued."""
     return Task(
         title=_default_title(prompt),
         prompt=prompt,
@@ -437,6 +444,10 @@ def _step_from(parent: Task, *, prompt: str, origin: str, resume: str | None, cr
         model=parent.model,
         max_turns=parent.max_turns,
         max_budget_usd=parent.max_budget_usd,  # the hard cut and the 80/95 % bands carry on
+        read_only=parent.read_only,  # a follow-up of a read-only step stays read-only
+        system_prompt=parent.system_prompt,
+        brief=parent.brief,  # the thread keeps its brief and the bounds above it
+        brief_bounds=parent.brief_bounds,
         parent_task_id=parent.id,
         origin=origin,
         root_id=parent.root_id or parent.id,  # join the parent's thread

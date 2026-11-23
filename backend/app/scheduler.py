@@ -19,6 +19,7 @@ from .constants import Status
 from .credentials import credential_status
 from .database import SessionLocal
 from .models import Agent, Schedule, Task, User
+from . import tiers
 from .task_service import build_task
 
 log = logging.getLogger(__name__)
@@ -34,7 +35,7 @@ async def build_from_schedule(s, sch: Schedule, title_suffix: str):
             prompt=agent.default_prompt or sch.prompt,
             title=f"{agent.name} ({title_suffix})",
             project_id=agent.project_id or sch.project_id,
-            model=agent.model or None,
+            model=await tiers.agent_model(s, agent),
             max_turns=agent.max_turns,
             max_budget_usd=agent.max_budget_usd,
             priority=agent.priority,

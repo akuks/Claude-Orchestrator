@@ -3,9 +3,11 @@ from sqlalchemy import select
 
 from ..access import project_role, require_project_role, require_task
 from ..auth import ensure_admin
+from .. import tiers
 from ..constants import VALID_MODELS
 from ..database import SessionLocal
 from ..models import Agent, Project
+from ..resume import ground_rules
 from ..schemas import (
     AgentBulkRun,
     AgentCreate,
@@ -16,7 +18,7 @@ from ..schemas import (
     TaskOut,
 )
 from ..models import Task
-from ..task_service import build_task
+from ..task_service import brief_422, build_task
 
 router = APIRouter(prefix="/agents", tags=["agents"])
 
@@ -46,12 +48,13 @@ async def _creator(s, request: Request, parent_task_id: str | None) -> str:
 # `category` groups them in the UI. Connector-based ones assume the relevant MCP
 # servers (Gmail, Google Calendar, GitHub…) are configured.
 _DEV_TEAM = "Dev team"
+_HELPERS = "Helpers"
 
 PRESETS = [
     {
         "name": "Morning Brief",
         "category": "Personal",
-        "description": "A daily briefing: calendar, unread mail, open PRs, and what needs you.",
+        "description": "A daily briefing of calendar, unread mail, open PRs and what needs you. Use for a start-of-day summary, because one scannable page saves checking each source.",
         "system_prompt": (
             "You are a concise personal chief-of-staff. Produce a scannable morning "
             "brief in markdown with clear sections and short bullets. Lead with what "
@@ -63,13 +66,13 @@ PRESETS = [
             "open pull requests awaiting my review, and anything urgent. End with a short "
             "'Top 3 for today' list."
         ),
-        "model": "haiku",
+        "tier": "light",
         "tags": ["personal", "brief"],
     },
     {
         "name": "Weekly Review",
         "category": "Personal",
-        "description": "A Sunday roll-up of the week with what shipped, decisions, and open loops.",
+        "description": "A Sunday roll-up of what shipped, decisions and open loops. Use for a weekly review, because writing the week down keeps unfinished threads from being lost.",
         "system_prompt": (
             "You are a reflective weekly-review assistant. Summarize the week factually "
             "and quote the user's own notes/commits back to them where relevant. Keep it "
@@ -79,13 +82,13 @@ PRESETS = [
             "Produce my weekly review: what got done this week, key decisions, blockers, "
             "and open loops to carry into next week. Group by theme and keep it tight."
         ),
-        "model": "haiku",
+        "tier": "light",
         "tags": ["personal", "review"],
     },
     {
         "name": "Security Auditor",
         "category": "Security",
-        "description": "A read-only VAPT/STQC reviewer role you can point at any project.",
+        "description": "A read-only VAPT/STQC security reviewer for any project. Use for a security audit of a branch, because it cannot change code while it reports findings.",
         "system_prompt": (
             "You are a meticulous application-security auditor (OWASP Top 10 / CWE Top 25). "
             "Read-only: never modify, commit, push, or merge. Report findings by severity "
@@ -99,7 +102,7 @@ PRESETS = [
     {
         "name": "Tech Lead",
         "category": _DEV_TEAM,
-        "description": "Analyses work and delegates to specialist agents (coordinator). Does not code itself.",
+        "description": "Analyses work and delegates it to specialist agents; does not code itself. Use for splitting a PR, spec or bug into role-based sub-tasks, because independent parts then run in parallel.",
         "system_prompt": (
             "You are a pragmatic engineering tech lead / coordinator. You analyse "
             "incoming work (a PR, spec, or bug report), break it into sub-tasks by "
@@ -114,13 +117,13 @@ PRESETS = [
         "max_budget_usd": 2.0,
         "coordinator": True,
         "requires_approval": True,  # review the delegation plan before it fans out
-        "model": "sonnet",
+        "tier": "standard",
         "tags": ["dev", "coordinator", "lead"],
     },
     {
         "name": "Frontend Developer",
         "category": _DEV_TEAM,
-        "description": "Builds UI: components, state, styling, accessibility — in the project's conventions.",
+        "description": "Builds UI: components, state, styling and accessibility in the project's conventions. Use for frontend changes, because it reuses existing components and keeps diffs small.",
         "system_prompt": (
             "You are a senior frontend engineer. Work within THIS project's existing "
             "conventions, framework, and component patterns. Focus on UI, state, styling, "
@@ -132,13 +135,13 @@ PRESETS = [
         "default_prompt": "Implement the requested frontend change on this branch.",
         "max_turns": 30,
         "max_budget_usd": 2.0,
-        "model": "sonnet",
+        "tier": "standard",
         "tags": ["dev", "frontend"],
     },
     {
         "name": "Backend Developer",
         "category": _DEV_TEAM,
-        "description": "APIs, business logic, data models, and migrations — matching the project's architecture.",
+        "description": "APIs, business logic, data models and migrations, matching the project's architecture. Use for backend changes, because it tests what it changes and treats migrations as high-risk.",
         "system_prompt": (
             "You are a senior backend engineer. Focus on APIs, business logic, data models, "
             "and database migrations, matching THIS project's architecture and conventions. "
@@ -149,13 +152,13 @@ PRESETS = [
         "default_prompt": "Implement the requested backend change on this branch.",
         "max_turns": 30,
         "max_budget_usd": 2.0,
-        "model": "sonnet",
+        "tier": "standard",
         "tags": ["dev", "backend"],
     },
     {
         "name": "Fullstack Developer",
         "category": _DEV_TEAM,
-        "description": "End-to-end feature work across frontend and backend. The generalist.",
+        "description": "End-to-end feature work across frontend and backend. Use for a feature that touches both sides, because one agent keeps the two halves consistent.",
         "system_prompt": (
             "You are a senior fullstack engineer. Implement features end-to-end across "
             "frontend and backend, matching THIS project's conventions on both sides. Keep "
@@ -166,13 +169,13 @@ PRESETS = [
         "default_prompt": "Implement the requested feature end-to-end on this branch.",
         "max_turns": 40,
         "max_budget_usd": 3.0,
-        "model": "sonnet",
+        "tier": "standard",
         "tags": ["dev", "fullstack"],
     },
     {
         "name": "Code Reviewer",
         "category": _DEV_TEAM,
-        "description": "Read-only PR/code review for correctness, edge cases, and conventions.",
+        "description": "Read-only PR and code review for correctness, edge cases and conventions. Use for a review before merge, because it cannot change the code it judges.",
         "system_prompt": (
             "You are a meticulous code reviewer. READ-ONLY: never edit, commit, push, or "
             "merge — if you think a change is needed, describe it, don't make it. Review the "
@@ -184,14 +187,14 @@ PRESETS = [
         "default_prompt": "Review the changed files on the current branch and report findings.",
         "max_turns": 25,
         "max_budget_usd": 1.0,
-        "model": "haiku",
+        "tier": "light",
         "read_only": True,
         "tags": ["dev", "review"],
     },
     {
         "name": "QA / Tester",
         "category": _DEV_TEAM,
-        "description": "Writes and runs tests; reproduces bugs with a failing test first.",
+        "description": "Writes and runs tests and reproduces bugs with a failing test first. Use for adding coverage or confirming a fix, because results come from tests it actually ran.",
         "system_prompt": (
             "You are a QA engineer. Write and run tests (unit / integration / e2e as "
             "appropriate to THIS project). Reproduce any bug with a failing test first, then "
@@ -202,13 +205,13 @@ PRESETS = [
         "default_prompt": "Add tests for the recent changes and run the suite; report results.",
         "max_turns": 30,
         "max_budget_usd": 2.0,
-        "model": "haiku",
+        "tier": "light",
         "tags": ["dev", "qa", "testing"],
     },
     {
         "name": "DevOps Engineer",
         "category": _DEV_TEAM,
-        "description": "Infra-as-code, CI/CD, containers, and deploys. SSH-capable and approval-gated.",
+        "description": "Infra-as-code, CI/CD, containers and deploys; SSH-capable and approval-gated. Use for infrastructure and deploy work, because every run is reviewed before it touches a server.",
         "system_prompt": (
             "You are a DevOps engineer. Handle infrastructure-as-code, CI/CD pipelines, "
             "containerisation (Docker/K8s), deploy scripts, and environment/config in the "
@@ -228,8 +231,80 @@ PRESETS = [
         "max_budget_usd": 3.0,
         "requires_approval": True,  # deploys/infra changes are irreversible — always gated
         "allow_remote": True,  # may SSH in to deploy
-        "model": "sonnet",
+        "tier": "standard",
         "tags": ["devops", "ops", "ssh"],
+    },
+    # ---- Helpers: forge's four helpers, bound to the org model tiers ----
+    {
+        "name": "Planner",
+        "category": _HELPERS,
+        "description": "Designs a change and writes the plan and briefs. Use for turning a goal into a step-by-step plan with briefs, because a plan checked against recorded decisions saves rework.",
+        "system_prompt": (
+            "You are the planner. You design a change and write the plan; you do not implement it. Work from "
+            "your brief (Goal, CAN change, CANNOT change, Done, Stop). Read the code you plan against and cite "
+            "path:line. Never plan against a recorded project decision: when the goal conflicts with one, stop "
+            "and file a question with your recommendation instead of planning around it. Split the work into "
+            "small steps, each with its own brief: Goal, CAN change, CANNOT change, Done, Stop, and the tests "
+            "that prove it. End with Outputs (the plan and the briefs, by path) and the evidence you relied on."
+        ),
+        "default_prompt": "Plan the change described in the brief.",
+        "tier": "strongest",
+        "max_turns": 30,
+        "max_budget_usd": 2.0,
+        "tags": ["helper", "planner"],
+    },
+    {
+        "name": "Reviewer",
+        "category": _HELPERS,
+        "description": "Reviews a finished change and ranks findings. Use for a review before merge, because ranked findings with file:line and evidence are quick to act on.",
+        "system_prompt": (
+            "You are the reviewer. Read-only: never edit, commit, push or merge; describe a fix, do not make "
+            "it. Work from your brief. Review the change for correctness, edge cases, error handling, tests and "
+            "the project's recorded decisions. Rank every finding H (must fix), M (should fix) or L (nice to "
+            "have), and give for each the file:line, what is wrong, and the evidence (the code you read or the "
+            "command you ran and its output). Say \"no findings\" when there are none; never invent one. End "
+            "with Outputs (the findings by rank) and the evidence."
+        ),
+        "default_prompt": "Review the change on this branch against the brief.",
+        "tier": "strongest",
+        "read_only": True,
+        "max_turns": 25,
+        "max_budget_usd": 2.0,
+        "tags": ["helper", "review"],
+    },
+    {
+        "name": "Builder",
+        "category": _HELPERS,
+        "description": "Implements one brief, test first. Use for a scoped change with clear CAN change files, because a tight brief keeps the diff small and the review short.",
+        "system_prompt": (
+            "You are the builder. Work from your brief and change only files it lets you change (CAN change); "
+            "never touch CANNOT change (co-guard blocks it). Test first: write the failing test, see it fail, "
+            "make it pass. Keep the diff small and in the project's style. Stop when Done is met, or when Stop "
+            "says so, and report; do not widen the scope. End with Outputs (what changed, by path) and the "
+            "evidence (the tests you ran and their results).\n\n" + ground_rules.USAGE_CARE_HELPER
+        ),
+        "default_prompt": "Implement the brief.",
+        "tier": "standard",
+        "max_turns": 30,
+        "max_budget_usd": 2.0,
+        "tags": ["helper", "builder"],
+    },
+    {
+        "name": "Checker",
+        "category": _HELPERS,
+        "description": "Runs checks and reports facts only. Use for running test suites, builds and lints, because a cheap model can read long output and report the totals.",
+        "system_prompt": (
+            "You are the checker. Read-only: run the checks your brief names (tests, builds, lints) and report "
+            "facts only: commands run, totals, failing tests with their first error lines. No opinions, no "
+            "fixes, no guesses; say \"not run\" for anything you could not run. End with Outputs (each check: "
+            "pass or fail, with totals) and the evidence.\n\n" + ground_rules.USAGE_CARE_HELPER
+        ),
+        "default_prompt": "Run the checks in the brief and report.",
+        "tier": "light",
+        "read_only": True,
+        "max_turns": 20,
+        "max_budget_usd": 1.0,
+        "tags": ["helper", "checker"],
     },
 ]
 
@@ -239,12 +314,18 @@ async def list_presets():
     return PRESETS
 
 
+async def _check_model_tier(s, model, tier) -> None:
+    if tier and tier not in tiers.TIERS:
+        raise HTTPException(400, f"Invalid tier. Use one of {', '.join(tiers.TIERS)}")
+    if model and not tiers.valid_agent_model(model, await tiers.org_tiers(s)):
+        raise HTTPException(400, f"Invalid model. Use one of {sorted(VALID_MODELS)} or a tier model")
+
+
 @router.post("", response_model=AgentOut, status_code=201)
 async def create_agent(payload: AgentCreate, request: Request):
     ensure_admin(request.state.principal)
-    if payload.model and payload.model not in VALID_MODELS:
-        raise HTTPException(400, f"Invalid model. Use one of {sorted(VALID_MODELS)}")
     async with SessionLocal() as s:
+        await _check_model_tier(s, payload.model, payload.tier)
         if payload.project_id and (await s.get(Project, payload.project_id)) is None:
             raise HTTPException(404, "Project not found")
         agent = Agent(
@@ -254,6 +335,7 @@ async def create_agent(payload: AgentCreate, request: Request):
             default_prompt=payload.default_prompt,
             project_id=payload.project_id,
             model=payload.model or "",
+            tier=payload.tier or None,
             max_turns=payload.max_turns,
             max_budget_usd=payload.max_budget_usd,
             priority=payload.priority,
@@ -268,7 +350,13 @@ async def create_agent(payload: AgentCreate, request: Request):
         s.add(agent)
         await s.commit()
         await s.refresh(agent)
-        return AgentOut.model_validate(agent)
+        return await _out(s, agent)
+
+
+async def _out(s, agent: Agent, org: dict | None = None) -> AgentOut:
+    out = AgentOut.model_validate(agent)
+    out.lint = tiers.lint_agent(agent.model, agent.description, org or await tiers.org_tiers(s))
+    return out
 
 
 @router.get("", response_model=list[AgentOut])
@@ -277,7 +365,8 @@ async def list_agents():
         rows = (
             await s.execute(select(Agent).order_by(Agent.created_at.desc()))
         ).scalars().all()
-    return [AgentOut.model_validate(a) for a in rows]
+        org = await tiers.org_tiers(s)
+        return [await _out(s, a, org) for a in rows]
 
 
 async def _get_or_404(s, agent_id: str) -> Agent:
@@ -291,15 +380,18 @@ async def _get_or_404(s, agent_id: str) -> Agent:
 async def update_agent(agent_id: str, payload: AgentUpdate, request: Request):
     ensure_admin(request.state.principal)
     data = payload.model_dump(exclude_unset=True)
-    if data.get("model") and data["model"] not in VALID_MODELS:
-        raise HTTPException(400, "Invalid model")
     async with SessionLocal() as s:
+        await _check_model_tier(s, data.get("model"), data.get("tier"))
         agent = await _get_or_404(s, agent_id)
+        if "tier" in data:
+            data["tier"] = data["tier"] or None
+        if "model" in data:
+            data["model"] = data["model"] or ""  # the column is NOT NULL; "" means no fixed model
         for k, v in data.items():
             setattr(agent, k, v)
         await s.commit()
         await s.refresh(agent)
-        return AgentOut.model_validate(agent)
+        return await _out(s, agent)
 
 
 @router.delete("/{agent_id}", status_code=204)
@@ -323,25 +415,27 @@ async def run_agent(agent_id: str, payload: AgentRun, request: Request):
         project_id = payload.project_id or agent.project_id
         await require_project_role(s, request.state.principal, project_id)
         await _require_parent(s, request, payload.parent_task_id)
-        task = await build_task(
-            s,
-            prompt=prompt,
-            title=f"{agent.name}: {prompt.splitlines()[0][:60]}",
-            project_id=project_id,
-            model=agent.model or None,
-            max_turns=agent.max_turns,
-            max_budget_usd=agent.max_budget_usd,
-            priority=agent.priority,
-            tags=(agent.tags or []) + ["agent"],
-            agent_id=agent.id,
-            system_prompt=agent.system_prompt or None,
-            requires_approval=agent.requires_approval,
-            allow_remote=agent.allow_remote,
-            read_only=agent.read_only,
-            input_files=[f.model_dump() for f in payload.input_files],
-            parent_task_id=payload.parent_task_id,
-            created_by=await _creator(s, request, payload.parent_task_id),
-        )
+        with brief_422():
+            task = await build_task(
+                s,
+                prompt=prompt,
+                title=f"{agent.name}: {prompt.splitlines()[0][:60]}",
+                project_id=project_id,
+                model=await tiers.agent_model(s, agent),
+                max_turns=agent.max_turns,
+                max_budget_usd=agent.max_budget_usd,
+                priority=agent.priority,
+                tags=(agent.tags or []) + ["agent"],
+                agent_id=agent.id,
+                system_prompt=agent.system_prompt or None,
+                requires_approval=agent.requires_approval,
+                allow_remote=agent.allow_remote,
+                read_only=agent.read_only,
+                input_files=[f.model_dump() for f in payload.input_files],
+                parent_task_id=payload.parent_task_id,
+                created_by=await _creator(s, request, payload.parent_task_id),
+                brief=payload.brief,
+            )
         await s.commit()
         await s.refresh(task)
         out = TaskOut.model_validate(task)
@@ -395,24 +489,26 @@ async def dispatch(payload: DispatchRequest, request: Request):
             await _require_dispatch_target(s, p, pid)
         outs = []
         for item, agent, project_id in targets:
-            task = await build_task(
-                s,
-                prompt=item.prompt,
-                title=f"{agent.name}: {item.prompt.splitlines()[0][:60]}",
-                project_id=project_id,
-                model=agent.model or None,
-                max_turns=agent.max_turns,
-                max_budget_usd=agent.max_budget_usd,
-                priority=agent.priority,
-                tags=(agent.tags or []) + ["agent", "delegated"],
-                agent_id=agent.id,
-                system_prompt=agent.system_prompt or None,
-                requires_approval=agent.requires_approval,
-                allow_remote=agent.allow_remote,
-                read_only=agent.read_only,
-                parent_task_id=payload.parent_task_id,
-                created_by=creator,
-            )
+            with brief_422():
+                task = await build_task(
+                    s,
+                    prompt=item.prompt,
+                    title=f"{agent.name}: {item.prompt.splitlines()[0][:60]}",
+                    project_id=project_id,
+                    model=await tiers.agent_model(s, agent),
+                    max_turns=agent.max_turns,
+                    max_budget_usd=agent.max_budget_usd,
+                    priority=agent.priority,
+                    tags=(agent.tags or []) + ["agent", "delegated"],
+                    agent_id=agent.id,
+                    system_prompt=agent.system_prompt or None,
+                    requires_approval=agent.requires_approval,
+                    allow_remote=agent.allow_remote,
+                    read_only=agent.read_only,
+                    parent_task_id=payload.parent_task_id,
+                    created_by=creator,
+                    brief=item.brief,
+                )
             outs.append(task)
         await s.commit()
         for t in outs:
@@ -445,7 +541,7 @@ async def bulk_run_agent(agent_id: str, payload: AgentBulkRun, request: Request)
                     prompt=p,
                     title=f"{agent.name}: {p.splitlines()[0][:60]}",
                     project_id=project_id,
-                    model=agent.model or None,
+                    model=await tiers.agent_model(s, agent),
                     max_turns=agent.max_turns,
                     max_budget_usd=agent.max_budget_usd,
                     priority=agent.priority,

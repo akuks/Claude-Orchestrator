@@ -1044,3 +1044,56 @@ def test_granted_report_and_its_spool_line_key_alike(agent_id):
     forwarded = {k: hook_report[k] for k in guard_router.GRANTED_REPORT_KEYS if k in hook_report}
     key = WorkerManager._guard_key
     assert key(WorkerManager.guard_payload(spool)) == key(WorkerManager.guard_payload(forwarded))
+
+
+# ---- phase 4c: the brief in the prompt and the policy ---------------------------------------------------
+
+
+def test_brief_in_prompt_policy_and_events(client):
+    from app.briefs.render import BRIEF_FIRST_LINE
+
+    proj = _project(client)
+    brief = {"goal": "Add the export", "can_change": ["src/**"], "cannot_change": ["migrations", "**/*.lock"],
+             "done": "tests pass", "stop": "when blocked"}
+    key = env_probe_key()
+    done = _run(client, f"work [env-probe:{key}]", project_id=proj["id"], brief=brief)
+    assert done["status"] == "completed", done.get("error")
+    pol = json.loads(read_probe_file(key, "policy"))
+    assert pol["brief"] == {"layers": [{"task": done["id"], "can": ["src/**"],
+                                        "cannot": ["migrations", "**/*.lock"]}]}
+    root = str((Path(proj["directory"]) / "migrations").resolve())
+    assert {"path": root, "reason": "the task's brief says CANNOT change migrations", "source": "brief"} \
+        in pol["readonly_paths"]
+    args = read_probe_args(key)  # the mock writes argv one per line: a multi-paragraph value spans lines
+    sys_prompt = "\n".join(args[args.index("--append-system-prompt") + 1:])
+    assert BRIEF_FIRST_LINE in sys_prompt
+    evs = _events(done["id"])
+    assert "brief" in [e.payload for e in evs if e.type == "ground_rules"][0]["included"]
+    scope_ev = [e.payload for e in evs if e.type == "guard" and e.payload.get("event") == "brief_scope"]
+    assert scope_ev == [{"event": "brief_scope", "shell_roots": 1, "file_tools_only": ["**/*.lock"]}]
+
+
+def test_no_brief_no_policy_key_or_event(client):
+    key = env_probe_key()
+    done = _run(client, f"work [env-probe:{key}]")
+    assert done["status"] == "completed", done.get("error")
+    pol = json.loads(read_probe_file(key, "policy"))
+    assert "brief" not in pol and not any(e["source"] == "brief" for e in pol["readonly_paths"])
+    evs = _events(done["id"])
+    assert not any(e.type == "guard" and e.payload.get("event") == "brief_scope" for e in evs)
+    assert "brief" not in [e.payload for e in evs if e.type == "ground_rules"][0]["included"]
+
+
+def test_brief_scope_failure_fails_the_task_before_spawn(client, monkeypatch):
+    from app.briefs import scope
+
+    def boom(policy, layers):
+        raise RuntimeError("scope broke")
+
+    monkeypatch.setattr(scope, "apply", boom)
+    brief = {"goal": "g", "can_change": [], "cannot_change": ["migrations"], "done": "d", "stop": "s"}
+    key = env_probe_key()
+    done = _run(client, f"x [env-probe:{key}]", brief=brief)
+    assert done["status"] == "failed" and "co-guard could not be set up; task not started" in done["error"]
+    assert "scope broke" in done["error"]
+    assert read_probe_args(key) is None

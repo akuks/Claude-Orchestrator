@@ -108,6 +108,8 @@ class Task(Base):
     origin: Mapped[str] = mapped_column(String(16), default="user", server_default="user")
     notes: Mapped[str | None] = mapped_column(Text, nullable=True)
     notes_updated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    brief: Mapped[dict | None] = mapped_column(JSON(none_as_null=True), nullable=True)  # CAN/CANNOT change brief (phase 4c)
+    brief_bounds: Mapped[list | None] = mapped_column(JSON(none_as_null=True), nullable=True)  # enclosing briefs' scopes
     heartbeat_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     run_pgid: Mapped[int | None] = mapped_column(Integer, nullable=True)
     run_proc_start: Mapped[str | None] = mapped_column(String(64), nullable=True)
@@ -301,6 +303,7 @@ class GuardOrgSettings(Base):
     disabled_rules: Mapped[list] = mapped_column(JSON, default=list, server_default="[]")
     dev_db_patterns: Mapped[list] = mapped_column(JSON, default=list, server_default="[]")
     ground_rules: Mapped[dict] = mapped_column(JSON, default=dict, server_default="{}")
+    model_tiers: Mapped[dict] = mapped_column(JSON, default=dict, server_default="{}")
     updated_by: Mapped[str | None] = mapped_column(String(32), nullable=True)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now, onupdate=_now)
 
@@ -506,6 +509,7 @@ class Agent(Base):
 
     project_id: Mapped[str | None] = mapped_column(String(32), nullable=True)
     model: Mapped[str] = mapped_column(String(32), default="")
+    tier: Mapped[str | None] = mapped_column(String(16), nullable=True)  # strongest | standard | light
     max_turns: Mapped[int] = mapped_column(Integer, default=25)
     max_budget_usd: Mapped[float | None] = mapped_column(Float, nullable=True)
     priority: Mapped[str] = mapped_column(String(16), default=Priority.NORMAL)

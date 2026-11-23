@@ -911,6 +911,106 @@ and that agents really follow the index line and file suggestions, are checked
 on the first live use. Run a task that commits to an own project and look at the
 queue before you rely on it.
 
+## Helper tiers and briefs
+
+Phase 4c of the forge port. Two things: agents can be bound to a **model tier**
+instead of a fixed model, and a task can carry a **brief** that says what it may
+change, which co-guard then enforces for file tools.
+
+### Model tiers
+
+Three tiers, **strongest**, **standard** and **light**, each stand for a model.
+The defaults are `opus`, `sonnet` and `haiku`. Admins edit them under **Agent
+guard → Model tiers** (`PUT /guard/org-settings`, `model_tiers`, always the whole
+map; a key left out takes its default). A value is `opus`, `sonnet`, `haiku` or a
+`claude-…` model id of at most 32 characters; anything else is a 400.
+
+**Which model an agent runs.** Its own `model` if set; otherwise the model of its
+`tier` from the org map; otherwise the project's default. Changing the map moves
+every agent on a tier at once. An agent's model must be a base model or one of the
+three tier models.
+
+**Helper presets.** `GET /agents/presets` has a *Helpers* group (all on the tier
+shown, none with a fixed model):
+
+| Preset | Tier | Read-only | Promises |
+|---|---|---|---|
+| Planner | strongest | no | designs a change and writes the plan and a brief per step; stops and asks when the goal conflicts with a recorded decision |
+| Reviewer | strongest | yes | ranks findings H/M/L with file:line and evidence; "no findings" when there are none |
+| Builder | standard | no | implements one brief test first, inside CAN change |
+| Checker | light | yes | runs the named checks and reports facts only, "not run" for anything it could not run |
+
+All four end their report with *Outputs* and the evidence. These are prompts, not
+guarantees; what co-guard enforces is below. A read-only agent stays
+read-only when run as a workflow step or a dispatched child, and follow-ups,
+Continue and Duplicate of a read-only task stay read-only. A writable child agent
+dispatched by a read-only coordinator is writable (its own setting).
+
+**Lint (warnings only).** Agent responses carry `lint`, shown under the form. A
+save is never refused for it. It warns when: the agent's own model is not one of
+the org's tier models; the description lacks "Use for …" (when to use it); the
+description lacks "because …" (why).
+
+### Briefs
+
+A brief is an object with these fields. Required: `goal`, `can_change`,
+`cannot_change`, `done`, `stop`. Optional: `setup`, `log`, `retries`, `tie_break`,
+`outputs`. A missing or invalid field is a 422 with a plain reason.
+
+| Field | Limit |
+|---|---|
+| `goal` | text, 2000 characters |
+| `done`, `stop`, `setup` | text, 1000 characters; `stop` may not be "never" |
+| `log`, `tie_break` | text, 500 characters |
+| `can_change`, `cannot_change` | lists of paths or globs inside the project, at most 20 entries and 30 wildcards; `can_change` empty means anything not under CANNOT |
+| `retries` | whole number 0 to 10 |
+| `outputs` | at most 10 names of 60 characters |
+
+Texts are redacted like decisions. The brief is added to the run's system prompt
+and shown on the task page as **Brief**.
+
+**Where to give one.** The collapsible **Brief** section of the New task form and
+of the agent *Run* form (single run), or `brief` in `POST /tasks`,
+`POST /agents/{id}/run` and the items of `POST /agents/dispatch` (not
+`/agents/{id}/bulk`).
+
+**Inheritance.** Steps of a thread (follow-up, Continue, answer follow-up, a
+guard deny-and-resume, Duplicate) keep the thread's brief. A dispatched child
+started under a parent with a brief inherits it when given none. Workflow steps
+do not inherit a brief. When given its own, the parent's CAN/CANNOT stay as a **bound**
+the child cannot widen: a path must be inside every non-empty CAN and outside every
+CANNOT of the brief and its bounds. Briefs nest at most **5 levels**.
+
+### What is enforced
+
+- **File tools, inside the project.** co-guard denies `Edit`, `Write`,
+  `MultiEdit` and `NotebookEdit` (`notebook_path`) on a path outside CAN or inside
+  CANNOT (rule `brief-scope`, shown as "Outside the task brief"). Always on, and
+  never approvable. Paths are compared as given and after resolving symlinks, with
+  Unicode NFC normalisation on case-insensitive systems, so a symlink or `..`
+  cannot hide a path. It **fails closed**: a brief the hook cannot read, or a
+  policy without a project folder, blocks every file change; a malformed brief
+  stops the run before it starts.
+- **Shell writes into CANNOT folders.** A CANNOT entry that is a path or
+  `folder/**` becomes a read-only folder for shell commands (the same rule as a
+  project's read-only paths). The task page notes how many folders this covers.
+
+**Not enforced.**
+
+- Shell commands against **CAN** (a command that writes outside CAN but not into
+  CANNOT is not stopped).
+- CANNOT entries containing `*` or `?` are **file tools only** for shell; so is a
+  CANNOT path that is a symlink leaving the project. The task page lists these.
+- Anything outside the project. That includes temp files and the orchestrator's own
+  files, which are never blocked by a brief.
+
+For tasks in a sandbox workspace, put the output paths under CAN.
+
+**Not yet checked against the real CLI.** The tests use a mock. That the
+PreToolUse deny reason reaches the model as worded (so it stops and reports rather
+than retrying), and that agents follow the brief text, are unverified until a real
+`claude` run. Run a brief with a CANNOT folder and read the log before relying on it.
+
 ---
 
 ## REST API
@@ -921,7 +1021,7 @@ Full interactive docs at `/docs`. Highlights:
 
 | Method | Path | Description |
 |---|---|---|
-| `POST` / `GET` | `/tasks` | Create + queue / list (`?status=`, `?project_id=`, `?roots_only=`) |
+| `POST` / `GET` | `/tasks` | Create + queue (optional `brief`) / list (`?status=`, `?project_id=`, `?roots_only=`) |
 | `GET` | `/tasks/{id}` · `/events` | Detail / full event log (`?after_seq=`) |
 | `POST` | `/tasks/{id}/cancel` · `/retry` · `/duplicate` · `/followup` | Lifecycle actions |
 | `POST` | `/tasks/{id}/continue` | Continue a stopped step (`mode`: `auto`, `resume`, `fresh`) |
@@ -955,7 +1055,7 @@ Full interactive docs at `/docs`. Highlights:
 **Scheduling / templates / approvals** — `/schedules` CRUD + `/run` + `/runs` +
 `/preview` · `/templates` + `/presets` + `/run` · `/approvals` + `/{id}/approve|reject`
 
-**Agents** — `/agents` CRUD · `/agents/{id}/run` (with optional project/prompt override)
+**Agents** — `/agents` CRUD (`tier`; responses carry `lint`) · `/agents/presets` · `/agents/{id}/run` and `/agents/dispatch` (with optional project/prompt override and `brief`)
 
 **Security & usage** — `/findings` + `/summary` + `PATCH /{id}` · `/usage/summary`
 · `/usage/timeseries` · `/usage/by-project` · `/usage/by-model`
