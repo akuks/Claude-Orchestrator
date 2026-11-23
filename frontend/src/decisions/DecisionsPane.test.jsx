@@ -85,6 +85,8 @@ describe('DecisionsPane', () => {
     })
     await flush()
     await click([...document.querySelectorAll('.ant-select-item-option')].find((o) => o.textContent.includes('D-015')))
+    await flush()
+    await click([...document.querySelectorAll('.ant-modal-confirm button')].find((b) => b.classList.contains('ant-btn-primary')))
     expect(api.supersedeDecision).toHaveBeenCalledWith('p1', 12, 15)
   })
 
@@ -142,6 +144,56 @@ describe('DecisionsPane', () => {
     await view.unmount()
     api.decisionsHealth.mockResolvedValue({ available: true, git_error: 'not a git repo', ok: false, items: [] })
     expect(q(await mount(), 'health-git-error').textContent).toBe('not a git repo')
+  })
+})
+
+describe('races and fixes', () => {
+  it('a late answer for the old project does not overwrite the new one', async () => {
+    let resList, resHealth
+    api.listDecisions.mockImplementation((pid) => (pid === 'p1' ? new Promise((r) => { resList = r }) : Promise.resolve([dec(30)])))
+    api.decisionsHealth.mockImplementation((pid) => (pid === 'p1' ? new Promise((r) => { resHealth = r }) : Promise.resolve({ available: true, git_error: null, items: [] })))
+    view = await render(<DecisionsPane project={{ id: 'p1' }} canEdit />)
+    await flush()
+    await view.rerender(<DecisionsPane project={{ id: 'p2' }} canEdit />)
+    await flush()
+    const c = view.container
+    expect(q(c, 'decision-30')).not.toBeNull()
+    await act(async () => { resList([dec(99)]); resHealth?.({ available: true, git_error: 'old', items: [] }) })
+    await flush()
+    expect(q(c, 'decision-99')).toBeNull()
+    expect(q(c, 'decision-30')).not.toBeNull()
+    expect(q(c, 'health-git-error')).toBeNull()
+  })
+
+  it('says when the health check failed', async () => {
+    api.decisionsHealth.mockRejectedValue(new Error('x'))
+    expect(q(await mount(), 'health-unavailable')).not.toBeNull()
+  })
+
+  it('supersede asks first', async () => {
+    const c = await mount()
+    await act(async () => {
+      q(c, 'supersede-12').querySelector('.ant-select-selector').dispatchEvent(new MouseEvent('mousedown', { bubbles: true }))
+    })
+    await flush()
+    await click([...document.querySelectorAll('.ant-select-item-option')].find((o) => o.textContent.includes('D-015')))
+    await flush()
+    expect(api.supersedeDecision).not.toHaveBeenCalled()
+    await click([...document.querySelectorAll('.ant-modal-confirm button')].find((b) => /Supersede/.test(b.textContent) && b.classList.contains('ant-btn-primary')))
+    expect(api.supersedeDecision).toHaveBeenCalledWith('p1', 12, 15)
+  })
+
+  it('after an edit 409 the open form holds the fresh version', async () => {
+    const c = await mount()
+    await click([...q(c, 'decision-12').querySelectorAll('button')].find((b) => b.textContent === 'Edit'))
+    api.listDecisions.mockResolvedValue([dec(12, { version: 4, title: 'fresh title' }), dec(15)])
+    api.updateDecision.mockRejectedValueOnce(Object.assign(new Error('changed by someone else — reload'), { status: 409 }))
+    await click(document.querySelector('[data-testid="decision-save"]'))
+    await flush()
+    expect(document.querySelector('[data-testid="decision-title"]').value).toBe('fresh title')
+    expect(document.querySelector('[data-testid="decision-error"]').textContent).toContain('changed by someone else')
+    await click(document.querySelector('[data-testid="decision-save"]'))
+    expect(api.updateDecision.mock.calls[1][2].version).toBe(4)
   })
 })
 

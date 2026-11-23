@@ -12,10 +12,15 @@ export default function DecisionForm({ open, projectId, decision, onClose, onSav
   const isEdit = Boolean(decision)
   useEffect(() => {
     if (open) setError(null)
-  }, [open, decision])
+  }, [open])
   const initial = decision
     ? { kind: decision.kind, title: decision.title, why: decision.why, see: decision.see || '', touches: decision.touches, source: decision.source }
     : { kind: 'decision', title: '', why: '', see: '', touches: [], source: '' }
+
+  // a reload after a 409 brings a new version: show its fields
+  useEffect(() => {
+    if (open && decision) form.setFieldsValue(initial)
+  }, [decision?.version]) // eslint-disable-line react-hooks/exhaustive-deps
 
   const submit = async () => {
     const v = form.getFieldsValue(true)

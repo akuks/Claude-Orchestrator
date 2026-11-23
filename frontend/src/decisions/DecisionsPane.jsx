@@ -1,5 +1,5 @@
-import { useCallback, useEffect, useState } from 'react'
-import { Alert, Button, Empty, Popconfirm, Radio, Select, Space, Tag, Typography, message } from 'antd'
+import { useCallback, useEffect, useRef, useState } from 'react'
+import { Alert, Button, Empty, Modal, Popconfirm, Radio, Select, Space, Tag, Typography, message } from 'antd'
 import { PlusOutlined } from '@ant-design/icons'
 import { api } from '../api'
 import DecisionForm from './DecisionForm'
@@ -89,8 +89,15 @@ function Row({ pid, d, canEdit, busy, act, onEdit, onRule, active }) {
             data-testid={`supersede-${d.number}`}
             options={others.map((x) => ({ value: x.number, label: `${x.display_id} ${x.title}` }))}
             onChange={(v) => {
+              const target = others.find((x) => x.number === v)
               setBy(v)
-              act(() => api.supersedeDecision(pid, d.number, v))
+              Modal.confirm({
+                title: `Supersede ${d.display_id}?`,
+                content: `${d.display_id} will be marked superseded by ${target?.display_id || v}.`,
+                okText: 'Supersede',
+                onOk: () => act(() => api.supersedeDecision(pid, d.number, v)),
+                afterClose: () => setBy(null),
+              })
             }}
           />
           <Button size="small" onClick={() => onRule(d)} data-testid={`rule-${d.number}`}>Make this a rule</Button>
@@ -109,23 +116,50 @@ export default function DecisionsPane({ project, canEdit, onMakeRule }) {
   const [health, setHealth] = useState(null)
   const [error, setError] = useState(null)
   const [notice, setNotice] = useState(null)
+  const [healthError, setHealthError] = useState(false)
   const [busy, setBusy] = useState(false)
   const [modal, setModal] = useState(null) // {decision}
 
+  const seq = useRef(0)
+  // Every async result is checked against the latest request; a late answer for
+  // an older project or filter is dropped. Returns the rows, or null if stale/failed.
   const load = useCallback(async () => {
+    const mine = ++seq.current
+    let list = null
     try {
-      const list = await api.listDecisions(pid, { status, kind })
-      setRows(Array.isArray(list) ? list : [])
+      const r = await api.listDecisions(pid, { status, kind })
+      if (mine !== seq.current) return null
+      list = Array.isArray(r) ? r : []
+      setRows(list)
       setError(null)
     } catch (e) {
+      if (mine !== seq.current) return null
       setError(e.message)
     }
     try {
-      setHealth(await api.decisionsHealth(pid))
+      const h = await api.decisionsHealth(pid)
+      if (mine !== seq.current) return list
+      setHealth(h)
+      setHealthError(false)
     } catch (_) {
+      if (mine !== seq.current) return list
       setHealth(null)
+      setHealthError(true)
     }
+    return list
   }, [pid, status, kind])
+  useEffect(() => {
+    // new project: drop the old project's rows, health, notice and open form
+    seq.current++
+    setRows([])
+    setHealth(null)
+    setHealthError(false)
+    setNotice(null)
+    setError(null)
+    setModal(null)
+    setStatus('active')
+    setKind('')
+  }, [pid])
   useEffect(() => {
     load()
   }, [load])
@@ -153,6 +187,7 @@ export default function DecisionsPane({ project, canEdit, onMakeRule }) {
       <Typography.Paragraph type="secondary">
         Recorded decisions name the files they touch; agents are shown them before they edit those files.
       </Typography.Paragraph>
+      {healthError && <Typography.Text type="secondary" data-testid="health-unavailable">health check unavailable</Typography.Text>}
       <HealthPanel health={health} canEdit={canEdit} onVerify={(n) => act(() => api.verifyDecision(pid, n))} />
       <Space wrap style={{ marginBottom: 8 }}>
         <Radio.Group
@@ -197,9 +232,15 @@ export default function DecisionsPane({ project, canEdit, onMakeRule }) {
         decision={modal?.decision || null}
         onClose={() => setModal(null)}
         onSaved={load}
-        onConflict={(m) => {
+        onConflict={async (m) => {
           setNotice(m)
-          load()
+          const list = await load()
+          // show the fresh entry (new version and fields) in the open form
+          setModal((cur) => {
+            if (!cur?.decision) return cur
+            const fresh = (list || []).find((r) => r.number === cur.decision.number)
+            return fresh ? { decision: fresh } : cur
+          })
         }}
       />
     </div>
