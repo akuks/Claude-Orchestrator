@@ -20,7 +20,9 @@ vi.mock('../api', () => ({
 
 import { api } from '../api'
 import WorkflowsView from '../components/WorkflowsView'
+import { GATE_HINT, templateHint } from './TemplatePicker'
 
+// The server's wording; the editor shows GATE_HINT in its place.
 const HINT = "Set the project's own test command in the gate."
 const tpl = (key, extra = {}) => ({
   key, name: `T-${key}`, description: 'd', hint: null,
@@ -50,6 +52,11 @@ describe('workflow templates, export, import', () => {
     await flush()
   }
   const btn = (t) => [...document.body.querySelectorAll('button')].find((b) => b.textContent.replace(/\s/g, '') === t.replace(/\s/g, ''))
+  const menuItem = (t) => [...document.body.querySelectorAll('.ant-dropdown-menu-item')].find((li) => li.textContent.trim() === t)
+  const openMenu = async (t) => {
+    await click(document.body.querySelector('[data-testid="new-workflow"]'))
+    await click(menuItem(t))
+  }
   const mount = async () => {
     api.workflowTemplates.mockResolvedValue(TEMPLATES)
     view = await render(<WorkflowsView isAdmin />)
@@ -58,12 +65,13 @@ describe('workflow templates, export, import', () => {
 
   it('lists 5 templates and a choice pre-fills the editor with the exact hint and missing agents', async () => {
     await mount()
-    await click(btn('New from template'))
+    await openMenu('Start from a template')
     await flush()
     expect(document.body.querySelectorAll('[data-testid="template-item"]').length).toBe(5)
     await click(document.body.querySelector('[data-testid="template-item"] button'))
     await flush()
-    expect(document.body.querySelector('[data-testid="template-hint"]').textContent).toBe(HINT)
+    expect(document.body.querySelector('[data-testid="template-hint"]').textContent).toBe(GATE_HINT)
+    expect(GATE_HINT).toBe("Set your project's own test command in the check step.")
     expect(document.body.querySelector('[data-testid="missing-agents"]').textContent)
       .toContain('Add these helpers from Agents → presets first: Builder')
     const names = [...document.body.querySelectorAll('input')].map((i) => i.value)
@@ -74,7 +82,7 @@ describe('workflow templates, export, import', () => {
   it('shows the server reason when importing pasted text fails with 422', async () => {
     await mount()
     api.importWorkflow.mockRejectedValueOnce(new Error('Workflow file has no json block'))
-    await click(btn('Import'))
+    await openMenu('Import from a file')
     const ta = document.body.querySelector('textarea[placeholder^="Paste"]')
     await act(async () => {
       const set = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value').set
@@ -96,11 +104,36 @@ describe('workflow templates, export, import', () => {
     const orig = HTMLAnchorElement.prototype.click
     HTMLAnchorElement.prototype.click = function () { clicked.push(this.download) }
     await mount()
-    await click(btn('Export'))
+    await click(document.body.querySelector('[data-testid="workflow-more"]'))
+    await click(menuItem('Export'))
     await flush()
     HTMLAnchorElement.prototype.click = orig
     expect(api.exportWorkflow).toHaveBeenCalledWith('w1')
     expect(clicked).toEqual(['Ship it.md'])
     expect(URL.revokeObjectURL).toHaveBeenCalledWith('blob:x')
+  })
+
+  it('shows the team\'s templates as a second group and uses them like the built-in ones', async () => {
+    api.workflowPresets.mockResolvedValueOnce([{ name: 'Team flow', description: 'ours', stages: [{ name: 'Dev', items: [{ agent: 'Planner', prompt: 'x' }] }] }])
+    await mount()
+    await openMenu('Start from a template')
+    await flush()
+    const team = document.body.querySelector('[data-testid="team-templates"]')
+    expect(team.previousElementSibling.textContent).toBe("Your team's")
+    expect(team.textContent).toContain('Team flow')
+    await click(team.querySelector('button'))
+    await flush()
+    const names = [...document.body.querySelectorAll('input')].map((i) => i.value)
+    expect(names).toContain('Team flow')
+    expect(api.createWorkflow).not.toHaveBeenCalled()
+  })
+})
+
+describe('templateHint', () => {
+  it('shows the plain hint for the server wording and when a check step has none', () => {
+    expect(templateHint({ hint: HINT, stages: [] })).toBe(GATE_HINT)
+    expect(templateHint({ hint: null, stages: [{ kind: 'gate' }] })).toBe(GATE_HINT)
+    expect(templateHint({ hint: null, stages: [{ name: 'a' }] })).toBeNull()
+    expect(templateHint({ hint: 'Other', stages: [] })).toBe('Other')
   })
 })

@@ -1,8 +1,21 @@
 import { useEffect, useState } from 'react'
-import { Alert, Button, Empty, List, Modal, Typography } from 'antd'
+import { Alert, Button, Empty, Modal } from 'antd'
 import { api } from '../api'
+import StepFlow from './StepFlow'
+import './workflows.css'
 
-export const GATE_HINT = "Set the project's own test command in the gate."
+export const GATE_HINT = "Set your project's own test command in the check step."
+// The server's wording of the same hint, shown in the plain wording instead.
+const SERVER_GATE_HINT = "Set the project's own test command in the gate."
+
+// The hint to show for a template: the server's own, in plain words, or
+// GATE_HINT when the server sends none and the template has a check step.
+export function templateHint(t) {
+  const hasGate = (t?.stages || []).some((s) => s.kind === 'gate')
+  const h = t?.hint
+  if (!h) return hasGate ? GATE_HINT : null
+  return h === SERVER_GATE_HINT ? GATE_HINT : h
+}
 
 // Agent names a template uses that the install does not have yet.
 export function missingAgents(stages, agents) {
@@ -16,7 +29,24 @@ export function missingAgents(stages, agents) {
   return out
 }
 
-export default function TemplatePicker({ open, onClose, onPick }) {
+function TemplateCard({ t, onPick }) {
+  return (
+    <div className="co-wf-tpl" data-testid="template-item">
+      <div className="co-wf-tpl-head">
+        <div className="co-wf-tpl-name">{t.name}</div>
+        <Button size="small" type="primary" onClick={() => onPick(t)} aria-label={`Use this: ${t.name}`}>
+          Use this
+        </Button>
+      </div>
+      {t.description && <div className="co-wf-tpl-desc">{t.description}</div>}
+      <StepFlow stages={t.stages || []} />
+    </div>
+  )
+}
+
+// Templates in two groups: the built-in ones from the server, and the
+// team's own (`presets`). Choosing one opens the editor pre-filled.
+export default function TemplatePicker({ open, onClose, onPick, presets = [] }) {
   const [templates, setTemplates] = useState([])
   const [error, setError] = useState('')
 
@@ -27,23 +57,29 @@ export default function TemplatePicker({ open, onClose, onPick }) {
   }, [open])
 
   return (
-    <Modal title="New from template" open={open} onCancel={onClose} footer={null}>
+    <Modal title="Start from a template" open={open} onCancel={onClose} footer={null} width="min(900px, 92vw)">
+      <p className="co-wf-muted">Pick one to start with. You can change everything before you save it.</p>
       {error && <Alert type="error" showIcon message={error} style={{ marginBottom: 10 }} />}
-      {templates.length === 0 && !error && <Empty description="No templates" />}
-      <List
-        dataSource={templates}
-        renderItem={(t) => (
-          <List.Item
-            data-testid="template-item"
-            actions={[<Button key="use" size="small" type="primary" onClick={() => onPick(t)}>Use</Button>]}
-          >
-            <List.Item.Meta
-              title={t.name}
-              description={<Typography.Text type="secondary">{t.description}</Typography.Text>}
-            />
-          </List.Item>
-        )}
-      />
+      <h3 className="co-wf-group">Built-in</h3>
+      {templates.length === 0 && !error ? (
+        <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="No built-in templates" />
+      ) : (
+        <div className="co-wf-tpl-grid">
+          {templates.map((t) => (
+            <TemplateCard key={t.key || t.name} t={t} onPick={onPick} />
+          ))}
+        </div>
+      )}
+      {presets.length > 0 && (
+        <>
+          <h3 className="co-wf-group">Your team's</h3>
+          <div className="co-wf-tpl-grid" data-testid="team-templates">
+            {presets.map((t) => (
+              <TemplateCard key={t.name} t={t} onPick={onPick} />
+            ))}
+          </div>
+        </>
+      )}
     </Modal>
   )
 }
