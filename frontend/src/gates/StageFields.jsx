@@ -1,6 +1,8 @@
-import { Button, Form, Input, InputNumber, Select, Space } from 'antd'
-import { DeleteOutlined, PlusOutlined } from '@ant-design/icons'
-import { KIND_OPTIONS, checkCommand } from './gates'
+import { useState } from 'react'
+import { Button, Collapse, Form, Input, InputNumber, Segmented, Select } from 'antd'
+import { CheckCircleOutlined, DeleteOutlined, PlusOutlined, RobotOutlined, UserOutlined } from '@ant-design/icons'
+import { KIND_HELP, KIND_OPTIONS, checkCommand } from './gates'
+import './workflows.css'
 
 const cmdRule = {
   validator: (_, v) => {
@@ -9,62 +11,147 @@ const cmdRule = {
   },
 }
 
-export function KindSelect({ name }) {
+const KIND_ICON = { agent: <RobotOutlined />, gate: <CheckCircleOutlined />, approval: <UserOutlined /> }
+
+export const BEFORE_EXAMPLES = ['free memory 4 GB', 'port 5432 open', 'container db running']
+const DEFAULT_TIMEOUT = 60
+const MAX_BEFORE = 5
+
+export function KindSelect({ name, kind }) {
   const form = Form.useFormInstance()
-  const onChange = (kind) => {
-    // Seed what a freshly chosen kind needs.
+  const onChange = (next) => {
+    // Seed what a freshly chosen type needs.
     const cur = form.getFieldValue(['stages', name]) || {}
-    const next = { ...cur, kind }
-    if (kind === 'gate') {
-      if (!cur.run?.length) next.run = ['']
-      if (cur.timeout_min == null) next.timeout_min = 60
+    const out = { ...cur, kind: next }
+    if (next === 'gate') {
+      if (!cur.run?.length) out.run = ['']
+      if (cur.timeout_min == null) out.timeout_min = DEFAULT_TIMEOUT
     }
-    if (kind === 'agent' && !cur.items?.length) next.items = [{}]
-    form.setFieldValue(['stages', name], next)
+    if (next === 'agent' && !cur.items?.length) out.items = [{}]
+    form.setFieldValue(['stages', name], out)
   }
   return (
-    <Form.Item name={[name, 'kind']} label="Kind" style={{ marginBottom: 8 }}>
-      <Select style={{ width: 200 }} options={KIND_OPTIONS} onChange={onChange} />
+    <Form.Item name={[name, 'kind']} label="What happens in this step" extra={KIND_HELP[kind]} style={{ marginBottom: 14 }}>
+      <Segmented
+        className="co-wf-kind"
+        block
+        onChange={onChange}
+        options={KIND_OPTIONS.map((o) => ({
+          value: o.value,
+          label: (
+            <span className="co-wf-kind-opt">
+              {KIND_ICON[o.value]} {o.label}
+            </span>
+          ),
+        }))}
+      />
     </Form.Item>
   )
 }
 
+const blank = (v) => !String(v ?? '').trim()
+
 function BeforeList({ name }) {
+  const form = Form.useFormInstance()
   return (
-    <Form.Item label="Before (pre-flight checks, at most 5)" style={{ marginBottom: 8 }}>
+    <Form.Item
+      label="Wait until ready (optional)"
+      extra={`The step starts only when all of these are true. At most ${MAX_BEFORE}.`}
+      style={{ marginBottom: 14 }}
+    >
       <Form.List name={[name, 'before']}>
-        {(rows, { add, remove }) => (
-          <>
-            {rows.map((r) => (
-              <Space key={r.key} align="start" style={{ display: 'flex', marginBottom: 4 }}>
-                <Form.Item name={r.name} noStyle>
-                  <Input style={{ width: 360 }} placeholder="free memory 4 GB" aria-label="Pre-flight line" />
-                </Form.Item>
-                <Button type="text" danger icon={<DeleteOutlined />} onClick={() => remove(r.name)} aria-label="Remove pre-flight line" />
-              </Space>
-            ))}
-            {rows.length < 5 && (
-              <Button size="small" type="dashed" icon={<PlusOutlined />} onClick={() => add('')}>
-                Add pre-flight check
-              </Button>
-            )}
-          </>
-        )}
+        {(rows, { add, remove }) => {
+          const cur = form.getFieldValue(['stages', name, 'before']) || []
+          const emptyAt = cur.findIndex(blank)
+          const full = rows.length >= MAX_BEFORE && emptyAt < 0
+          const insert = (text) => {
+            if (emptyAt >= 0) form.setFieldValue(['stages', name, 'before', emptyAt], text)
+            else if (rows.length < MAX_BEFORE) add(text)
+          }
+          return (
+            <>
+              {rows.map((r) => (
+                <div key={r.key} className="co-wf-row">
+                  <Form.Item name={r.name} noStyle>
+                    <Input placeholder="e.g. free memory 4 GB" aria-label="Wait until ready" />
+                  </Form.Item>
+                  <Button type="text" danger icon={<DeleteOutlined />} onClick={() => remove(r.name)} aria-label="Remove this line" />
+                </div>
+              ))}
+              <div className="co-wf-chips" data-testid="before-examples">
+                <span className="co-wf-chips-label">Add an example:</span>
+                {BEFORE_EXAMPLES.map((ex) => (
+                  <Button key={ex} size="small" shape="round" disabled={full} onClick={() => insert(ex)}>
+                    {ex}
+                  </Button>
+                ))}
+                {rows.length < MAX_BEFORE && (
+                  <Button size="small" type="dashed" icon={<PlusOutlined />} onClick={() => add('')}>
+                    Write your own
+                  </Button>
+                )}
+              </div>
+            </>
+          )
+        }}
       </Form.List>
     </Form.Item>
   )
 }
 
-function ProjectSelect({ name, projects, required }) {
+function ProjectSelect({ name, projects, required, label }) {
   const options = projects.filter((p) => (p.directory || '').trim()).map((p) => ({ value: p.id, label: p.name }))
   return (
     <Form.Item
       name={[name, 'project']}
-      label={required ? 'Project' : 'Project (optional)'}
+      label={label}
       rules={required ? [{ required: true, message: 'Pick a project' }] : []}
-      style={{ marginBottom: 8 }}
+      style={{ marginBottom: 14 }}
     >
-      <Select showSearch optionFilterProp="label" allowClear={!required} style={{ width: 300 }} placeholder="Project with a directory" options={options} />
+      <Select showSearch optionFilterProp="label" allowClear={!required} placeholder="Pick a project" options={options} />
+    </Form.Item>
+  )
+}
+
+const filled = (v) => (Array.isArray(v) ? v.some((x) => !blank(x)) : !blank(v))
+
+// Whether a step's "More options" should open by itself: one of its fields
+// has a value (a timeout other than the default counts).
+export function moreOptionsAuto(stage, kind) {
+  const st = stage || {}
+  if (kind === 'gate') {
+    return filled(st.retry) || filled(st.before) || (st.timeout_min != null && st.timeout_min !== DEFAULT_TIMEOUT)
+  }
+  return filled(st.before) || filled(st.project)
+}
+
+const errorUnder = (fieldsError, prefix) =>
+  fieldsError.some((f) => f.errors.length > 0 && prefix.every((p, i) => f.name[i] === p))
+
+// Rarely used fields, collapsed. Opens by itself when any of them has a value
+// or an error; otherwise the person decides.
+function MoreOptions({ name, kind, children }) {
+  const [userOpen, setUserOpen] = useState(null)
+  return (
+    <Form.Item noStyle shouldUpdate={() => true}>
+      {({ getFieldValue, getFieldsError }) => {
+        const keys = kind === 'gate' ? ['retry', 'before', 'timeout_min'] : ['project', 'before']
+        const errs = getFieldsError()
+        const hasError = keys.some((k) => errorUnder(errs, ['stages', name, k]))
+        const open = hasError || (userOpen ?? moreOptionsAuto(getFieldValue(['stages', name]), kind))
+        return (
+          <div data-testid="more-options" data-open={open ? 'true' : 'false'}>
+            <Collapse
+              ghost
+              size="small"
+              className="co-wf-more"
+              activeKey={open ? ['more'] : []}
+              onChange={(k) => setUserOpen((Array.isArray(k) ? k : [k]).includes('more'))}
+              items={[{ key: 'more', label: 'More options', forceRender: true, children }]}
+            />
+          </div>
+        )
+      }}
     </Form.Item>
   )
 }
@@ -72,58 +159,68 @@ function ProjectSelect({ name, projects, required }) {
 function GateFields({ name, projects }) {
   return (
     <>
-      <ProjectSelect name={name} projects={projects} required />
-      <Form.Item label="Commands (1 to 10, run in order, stop at the first failure)" style={{ marginBottom: 8 }}>
+      <ProjectSelect name={name} projects={projects} required label="Where to run it" />
+      <Form.Item
+        label="Commands to run"
+        extra="Add one command per box. They run in order and stop at the first one that fails."
+        style={{ marginBottom: 14 }}
+      >
         <Form.List name={[name, 'run']}>
           {(rows, { add, remove }) => (
             <>
               {rows.map((r) => (
-                <Space key={r.key} align="start" style={{ display: 'flex', marginBottom: 4 }}>
-                  <Form.Item name={r.name} rules={[cmdRule]} style={{ marginBottom: 0 }}>
-                    <Input style={{ width: 460 }} placeholder="pytest -q" aria-label="Command" />
+                <div key={r.key} className="co-wf-row">
+                  <Form.Item name={r.name} rules={[cmdRule]} style={{ marginBottom: 6 }}>
+                    <Input placeholder="e.g. npm test" aria-label="Command" className="co-wf-mono" />
                   </Form.Item>
                   <Button type="text" danger icon={<DeleteOutlined />} disabled={rows.length <= 1} onClick={() => remove(r.name)} aria-label="Remove command" />
-                </Space>
+                </div>
               ))}
               <Button size="small" type="dashed" icon={<PlusOutlined />} disabled={rows.length >= 10} onClick={() => add('')}>
-                Add command
+                Add a command
               </Button>
             </>
           )}
         </Form.List>
       </Form.Item>
-      <Form.Item noStyle shouldUpdate>
-        {({ getFieldValue }) => {
-          const run = getFieldValue(['stages', name, 'run']) || []
-          const single = run.length === 1
-          return (
-            <Form.Item
-              name={[name, 'retry']}
-              label="Retry command"
-              extra={single ? 'Run once more if the command fails.' : 'Retry works only with exactly one command.'}
-              dependencies={[['stages', name, 'run']]}
-              rules={[
-                {
-                  validator: (_, v) => {
-                    if (!v || !single) return Promise.resolve()
-                    const r = checkCommand(v)
-                    if (r) return Promise.reject(new Error(r))
-                    if (v.trim() === (run[0] || '').trim()) return Promise.reject(new Error('retry must differ from the command'))
-                    return Promise.resolve()
+      <MoreOptions name={name} kind="gate">
+        <Form.Item noStyle shouldUpdate>
+          {({ getFieldValue }) => {
+            const run = getFieldValue(['stages', name, 'run']) || []
+            const single = run.length === 1
+            return (
+              <Form.Item
+                name={[name, 'retry']}
+                label="If it fails, re-run only the failures with (optional)"
+                extra={
+                  single
+                    ? 'Then the full command runs once more. Only that full run can pass the step.'
+                    : 'This works only when there is exactly one command.'
+                }
+                dependencies={[['stages', name, 'run']]}
+                rules={[
+                  {
+                    validator: (_, v) => {
+                      if (!v || !single) return Promise.resolve()
+                      const r = checkCommand(v)
+                      if (r) return Promise.reject(new Error(r))
+                      if (v.trim() === (run[0] || '').trim()) return Promise.reject(new Error('this must differ from the command'))
+                      return Promise.resolve()
+                    },
                   },
-                },
-              ]}
-              style={{ marginBottom: 8 }}
-            >
-              <Input style={{ width: 460 }} disabled={!single} placeholder="optional" aria-label="Retry command" />
-            </Form.Item>
-          )
-        }}
-      </Form.Item>
-      <BeforeList name={name} />
-      <Form.Item name={[name, 'timeout_min']} label="Timeout (minutes)" style={{ marginBottom: 0 }}>
-        <InputNumber min={1} max={720} precision={0} />
-      </Form.Item>
+                ]}
+                style={{ marginBottom: 14 }}
+              >
+                <Input disabled={!single} placeholder="e.g. npm test -- --only-failures" data-testid="gate-retry" className="co-wf-mono" />
+              </Form.Item>
+            )
+          }}
+        </Form.Item>
+        <BeforeList name={name} />
+        <Form.Item name={[name, 'timeout_min']} label="Give up after (minutes)" style={{ marginBottom: 0 }}>
+          <InputNumber min={1} max={720} precision={0} />
+        </Form.Item>
+      </MoreOptions>
     </>
   )
 }
@@ -131,29 +228,37 @@ function GateFields({ name, projects }) {
 function ApprovalFields({ name, projects }) {
   return (
     <>
-      <Form.Item name={[name, 'message']} label="Message" rules={[{ max: 2000 }]} style={{ marginBottom: 8 }}>
-        <Input.TextArea autoSize={{ minRows: 2, maxRows: 6 }} maxLength={2000} placeholder="What the approver should check" />
+      <Form.Item name={[name, 'message']} label="What should they check?" rules={[{ max: 2000 }]} style={{ marginBottom: 14 }}>
+        <Input.TextArea autoSize={{ minRows: 2, maxRows: 6 }} maxLength={2000} placeholder="e.g. Read the summary and check that the new page looks right." />
       </Form.Item>
-      <ProjectSelect name={name} projects={projects} required={false} />
-      <BeforeList name={name} />
+      <MoreOptions name={name} kind="approval">
+        <ProjectSelect name={name} projects={projects} required={false} label="Project (optional)" />
+        <BeforeList name={name} />
+      </MoreOptions>
     </>
   )
 }
 
-// Fields of one stage that depend on its kind. `agentFields` is the existing
-// agent items editor, rendered only for the Agents kind.
+// Fields of one step that depend on its type. `agentFields` is the agents
+// editor, rendered only for the "Agents do the work" type.
 export default function StageFields({ name, projects = [], agentFields }) {
   return (
-    <>
-      <KindSelect name={name} />
-      <Form.Item noStyle shouldUpdate>
-        {({ getFieldValue }) => {
-          const kind = getFieldValue(['stages', name, 'kind']) || 'agent'
-          if (kind === 'gate') return <GateFields name={name} projects={projects} />
-          if (kind === 'approval') return <ApprovalFields name={name} projects={projects} />
-          return agentFields
-        }}
-      </Form.Item>
-    </>
+    <Form.Item noStyle shouldUpdate>
+      {({ getFieldValue }) => {
+        const kind = getFieldValue(['stages', name, 'kind']) || 'agent'
+        return (
+          <>
+            <KindSelect name={name} kind={kind} />
+            {kind === 'gate' ? (
+              <GateFields name={name} projects={projects} />
+            ) : kind === 'approval' ? (
+              <ApprovalFields name={name} projects={projects} />
+            ) : (
+              agentFields
+            )}
+          </>
+        )
+      }}
+    </Form.Item>
   )
 }

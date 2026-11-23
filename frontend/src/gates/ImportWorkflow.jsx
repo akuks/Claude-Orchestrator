@@ -49,7 +49,7 @@ export default function ImportWorkflow({ open, onClose, onImported }) {
 
   return (
     <Modal
-      title="Import workflow"
+      title="Import from a file"
       open={open}
       onCancel={onClose}
       onOk={go}
@@ -58,26 +58,29 @@ export default function ImportWorkflow({ open, onClose, onImported }) {
       confirmLoading={busy}
     >
       <Radio.Group value={mode} onChange={(e) => setMode(e.target.value)} style={{ marginBottom: 10 }}>
-        <Radio.Button value="paste">Paste</Radio.Button>
-        <Radio.Button value="repo">Repo file</Radio.Button>
+        <Radio.Button value="paste">Paste the text</Radio.Button>
+        <Radio.Button value="repo">A file in a project</Radio.Button>
       </Radio.Group>
       {mode === 'paste' ? (
         <Input.TextArea
           rows={10}
           value={text}
           onChange={(e) => setText(e.target.value)}
-          placeholder="Paste an exported workflow (markdown with one json block)"
+          placeholder="Paste the text of an exported workflow file"
+          aria-label="Exported workflow text"
         />
       ) : (
         <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
           <Select
             placeholder="Project"
+            aria-label="Project"
             value={projectId}
             onChange={pickProject}
             options={projects.map((p) => ({ value: p.id, label: p.name }))}
           />
           <Select
             placeholder="Workflow file"
+            aria-label="Workflow file"
             value={file}
             onChange={setFile}
             options={files.map((f) => ({ value: f.name, label: f.name }))}

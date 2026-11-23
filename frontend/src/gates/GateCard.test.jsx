@@ -4,7 +4,7 @@ import { flush, render } from '../home/testRender'
 
 vi.mock('../api', () => ({ api: { allowWorkflowGate: vi.fn(), workflowGateLog: vi.fn() } }))
 import { api } from '../api'
-import GateCard from './GateCard'
+import GateCard, { gateLead } from './GateCard'
 
 const stage = { name: 'Tests', kind: 'gate', run: ['pytest -q', 'ruff check'], project: 'p1' }
 const row = (o = {}) => ({ id: 'g1', stage_index: 1, command: 'pytest -q', kind: 'tests', outcome: 'failed', exit_code: 1, duration_ms: 2500, passed: 3, failed: 1, failing: ['test_a'], has_log: true, ...o })
@@ -61,5 +61,47 @@ describe('GateCard', () => {
     await flush()
     expect(api.allowWorkflowGate).toHaveBeenCalledWith('r1', 1)
     expect(onChanged).toHaveBeenCalled()
+  })
+
+  it('leads with the pass sentence and the test count', async () => {
+    const c = await mount({ state: { status: 'passed', status_text: 'passed' }, gateRuns: [row({ kind: 'full', outcome: 'passed', exit_code: 0, passed: 61, failed: 0, failing: [] })] })
+    expect(c.querySelector('[data-testid="gate-lead"]').textContent).toBe('Passed — 61 tests passed')
+    expect(c.querySelector('[data-testid="gate-words"]')).toBeNull()
+    const d = c.querySelector('[data-testid="gate-details"]')
+    expect(d.open).toBe(false)
+    expect(d.textContent).toContain('exit code 0')
+    expect(d.textContent).toContain('Full run')
+    expect(d.textContent).not.toContain('Check Tests')
+  })
+  it('leads with the fail sentence, then the failing names', async () => {
+    const c = await mount({ state: { status: 'failed' }, gateRuns: [row({ passed: 61, failed: 2, failing: ['test_a', 'test_b'] })] })
+    expect(c.querySelector('[data-testid="gate-lead"]').textContent).toBe('Failed — 2 of 63 tests failed')
+    expect([...c.querySelectorAll('[data-testid="gate-failing"] li')].map((l) => l.textContent)).toEqual(['test_a', 'test_b'])
+    expect(c.querySelector('[data-testid="gate-show-log"]').textContent).toBe('Show the last lines of the log')
+  })
+  it('says it plainly when the counts are unknown', async () => {
+    const c = await mount({ state: { status: 'failed', reason: 'exit 2' }, gateRuns: [row({ passed: null, failed: null, failing: [] })] })
+    expect(c.querySelector('[data-testid="gate-lead"]').textContent).toBe('Failed — the check did not pass')
+    const d = await mount({ state: { status: 'passed' }, gateRuns: [row({ outcome: 'passed', passed: null, failed: null, failing: [] })] })
+    expect(d.querySelector('[data-testid="gate-lead"]').textContent).toBe('Passed — the commands succeeded')
+    expect(gateLead({ status: 'passed' }, []).text).toBe('Passed — the commands succeeded')
+  })
+  it('counts a pass from the full run, not the re-run of failures', () => {
+    const rows = [row({ kind: 'full', passed: 60, failed: 1 }), row({ kind: 'retry', outcome: 'passed', passed: 1, failed: 0 }), row({ kind: 'full', outcome: 'passed', passed: 61, failed: 0 })]
+    expect(gateLead({ status: 'passed' }, rows).text).toBe('Passed — 61 tests passed')
+  })
+
+  it('says which command failed and how, in plain words', async () => {
+    const c = await mount({ state: { status: 'failed', reason: 'false, exit 1' }, gateRuns: [row({ command: 'false', passed: null, failed: null, failing: [] })] })
+    const alert = c.querySelector('[data-testid="gate-blocked"]')
+    expect(alert.textContent).toBe('The command false failed (exit code 1)')
+    expect(alert.querySelector('code').textContent).toBe('false')
+    const d = await mount({ state: { status: 'failed', reason: 'x, timed out after 5 min' }, gateRuns: [row({ command: 'x', outcome: 'timed_out', exit_code: null, passed: null, failed: null, failing: [] })] })
+    expect(d.querySelector('[data-testid="gate-blocked"]').textContent).toBe('The command x took too long and was stopped')
+    expect(d.querySelector('[data-testid="gate-lead"]').textContent).toBe('Failed — the check did not finish in time')
+  })
+  it('keeps the server reason for a refusal', async () => {
+    const c = await mount({ state: { status: 'failed', reason: 'the guard refused: rm -rf /' }, gateRuns: [] })
+    expect(c.querySelector('[data-testid="gate-blocked"]').textContent).toBe('the guard refused: rm -rf /')
   })
 })

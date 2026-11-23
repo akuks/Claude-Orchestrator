@@ -4,7 +4,7 @@ import { flush, render } from '../home/testRender'
 
 vi.mock('../api', () => ({ api: { approveWorkflowStage: vi.fn(), rejectWorkflowStage: vi.fn() } }))
 import { api } from '../api'
-import ApprovalCard from './ApprovalCard'
+import ApprovalCard, { approvalLead } from './ApprovalCard'
 
 describe('ApprovalCard', () => {
   let view
@@ -37,5 +37,12 @@ describe('ApprovalCard', () => {
     expect(btn.disabled).toBe(true)
     await act(async () => btn.click())
     expect(api.rejectWorkflowStage).not.toHaveBeenCalled()
+  })
+
+  it('leads with a plain sentence', async () => {
+    const c = await mount()
+    expect(c.querySelector('[data-testid="approval-lead"]').textContent).toBe('Waiting for someone to approve this step')
+    expect(approvalLead('approved')).toBe('Approved')
+    expect(approvalLead('rejected')).toBe('Rejected')
   })
 })

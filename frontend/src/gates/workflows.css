@@ -1,0 +1,500 @@
+/* Workflow screens: list, editor, template picker, check and approval cards. */
+
+.co-wf-sr {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+}
+.co-wf-muted {
+  color: var(--co-text-secondary);
+  font-size: 13px;
+  margin: 0 0 12px;
+}
+.co-wf-mono input,
+input.co-wf-mono {
+  font-family: var(--co-mono);
+}
+
+/* ---- List page ---------------------------------------------------------- */
+.co-wf-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+  margin-bottom: 16px;
+}
+.co-wf-head h2 {
+  margin: 0;
+  font-size: 20px;
+  font-weight: 650;
+  color: var(--co-text);
+}
+.co-wf-head p {
+  margin: 2px 0 0;
+  color: var(--co-text-secondary);
+  font-size: 14px;
+}
+.co-wf-head-actions {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.co-wf-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
+  gap: 14px;
+}
+.co-wf-card {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 14px 16px;
+  border: 1px solid var(--co-border);
+  border-radius: 12px;
+  background: var(--co-surface-solid);
+  min-width: 0;
+}
+.co-wf-card-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 8px;
+}
+.co-wf-card-name {
+  font-size: 15px;
+  font-weight: 650;
+  color: var(--co-text);
+  word-break: break-word;
+}
+.co-wf-card-desc {
+  font-size: 13px;
+  color: var(--co-text-secondary);
+  margin: 0;
+}
+.co-wf-card-foot {
+  margin-top: auto;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+  color: var(--co-text-muted);
+}
+.co-wf-empty {
+  padding: 28px 16px;
+  border: 1px dashed var(--co-border);
+  border-radius: 12px;
+  text-align: center;
+}
+.co-wf-section {
+  margin: 24px 0 8px;
+  font-size: 15px;
+  font-weight: 650;
+  color: var(--co-text);
+}
+.co-wf-runs {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.co-wf-run {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 12px;
+  border: 1px solid var(--co-border);
+  border-radius: 10px;
+  color: var(--co-text);
+  min-width: 0;
+}
+.co-wf-run:hover {
+  background: var(--co-hover);
+  color: var(--co-text);
+}
+.co-wf-run-tag {
+  margin: 0;
+  min-width: 120px;
+  text-align: center;
+}
+.co-wf-run-name {
+  font-weight: 600;
+  white-space: nowrap;
+}
+.co-wf-run-input {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--co-text-secondary);
+}
+.co-wf-run-step {
+  font-size: 12px;
+  color: var(--co-text-secondary);
+  white-space: nowrap;
+}
+@media (max-width: 600px) {
+  .co-wf-run {
+    flex-wrap: wrap;
+  }
+  .co-wf-run-input {
+    flex-basis: 100%;
+  }
+}
+
+/* ---- Step flow (cards and templates) ------------------------------------ */
+.co-wf-flow {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+}
+.co-wf-flow-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+.co-wf-flow-arrow {
+  color: var(--co-text-muted);
+  font-size: 10px;
+}
+.co-wf-flow-empty {
+  font-size: 12px;
+  color: var(--co-text-muted);
+}
+.co-wf-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 2px 9px;
+  border-radius: 999px;
+  border: 1px solid var(--co-border);
+  background: var(--co-hover);
+  font-size: 12px;
+  color: var(--co-text);
+}
+.co-wf-pill-gate .anticon {
+  color: var(--co-success-text);
+}
+.co-wf-pill-approval .anticon {
+  color: var(--co-warning-text);
+}
+.co-wf-pill-agent .anticon {
+  color: var(--co-primary);
+}
+.co-wf-pill-count {
+  color: var(--co-text-secondary);
+}
+.co-wf-pill-count::before {
+  content: '· ';
+}
+
+/* ---- Template picker ---------------------------------------------------- */
+.co-wf-group {
+  margin: 14px 0 8px;
+  font-size: 13px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--co-text-secondary);
+}
+.co-wf-tpl-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
+  gap: 10px;
+}
+.co-wf-tpl {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 12px 14px;
+  border: 1px solid var(--co-border);
+  border-radius: 12px;
+  min-width: 0;
+}
+.co-wf-tpl:hover {
+  border-color: var(--co-active-border);
+}
+.co-wf-tpl-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 8px;
+}
+.co-wf-tpl-name {
+  font-weight: 650;
+  color: var(--co-text);
+}
+.co-wf-tpl-desc {
+  font-size: 13px;
+  color: var(--co-text-secondary);
+  overflow: hidden;
+  display: -webkit-box;
+  -webkit-line-clamp: 3;
+  line-clamp: 3;
+  -webkit-box-orient: vertical;
+}
+
+/* ---- Editor ------------------------------------------------------------- */
+.co-wf-steps {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  margin-top: 6px;
+}
+.co-wf-step {
+  border: 1px solid var(--co-border);
+  border-radius: 12px;
+  padding: 14px 16px 6px;
+  background: var(--co-surface-solid);
+}
+.co-wf-step-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 12px;
+}
+.co-wf-step-no {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  border-radius: 50%;
+  background: var(--co-gradient);
+  color: #fff;
+  font-weight: 700;
+  font-size: 13px;
+}
+.co-wf-step-head .ant-form-item {
+  flex: 1;
+  min-width: 0;
+  margin-bottom: 0;
+}
+.co-wf-step-name input,
+input.co-wf-step-name {
+  font-weight: 600;
+}
+/* Step type selector: each option reads as a choice, the chosen one stands out. */
+.co-wf-kind.ant-segmented {
+  padding: 0;
+  gap: 8px;
+  background: transparent;
+}
+.co-wf-kind.ant-segmented .ant-segmented-group {
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.co-wf-kind.ant-segmented .ant-segmented-item {
+  flex: 1 1 170px;
+  border: 1px solid var(--co-guide);
+  border-radius: 10px;
+  color: var(--co-text-secondary);
+  transition: border-color 0.15s, background 0.15s;
+}
+.co-wf-kind.ant-segmented .ant-segmented-item:hover:not(.ant-segmented-item-selected) {
+  border-color: var(--co-active-border);
+  background: var(--co-hover);
+  color: var(--co-text);
+}
+.co-wf-kind.ant-segmented .ant-segmented-item-selected {
+  border-color: var(--co-primary);
+  background: var(--co-active-bg);
+  color: var(--co-text);
+  font-weight: 650;
+  box-shadow: inset 0 0 0 1px var(--co-primary);
+}
+.co-wf-kind.ant-segmented .ant-segmented-item-selected .anticon {
+  color: var(--co-primary);
+}
+.co-wf-kind.ant-segmented .ant-segmented-thumb {
+  display: none;
+}
+.co-wf-kind.ant-segmented .ant-segmented-item-label {
+  min-height: 36px;
+  line-height: 36px;
+}
+.co-wf-kind-opt {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  white-space: nowrap;
+}
+.co-wf-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+  margin-bottom: 6px;
+}
+.co-wf-row > .ant-form-item,
+.co-wf-row > .ant-input,
+.co-wf-row > .ant-input-affix-wrapper {
+  flex: 1;
+  min-width: 0;
+}
+.co-wf-chips,
+.co-wf-inserts {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+}
+.co-wf-inserts {
+  margin-bottom: 4px;
+}
+.co-wf-chips-label {
+  font-size: 12px;
+  color: var(--co-text-secondary);
+}
+.co-wf-agents {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin-bottom: 10px;
+}
+.co-wf-agent {
+  padding: 10px 12px;
+  border: 1px solid var(--co-border);
+  border-radius: 10px;
+  background: var(--co-hover);
+}
+.co-wf-agent-top {
+  display: flex;
+  align-items: flex-end;
+  gap: 6px;
+}
+.co-wf-agent-top > .ant-btn {
+  margin-bottom: 8px;
+}
+.co-wf-more {
+  margin: 0 -12px 8px;
+}
+.co-wf-more .ant-collapse-header-text {
+  font-weight: 600;
+  color: var(--co-text-secondary);
+}
+
+/* ---- Run page: check and approval cards ---------------------------------- */
+.co-gate,
+.co-approval {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.co-gate-lead,
+.co-approval-lead {
+  font-size: 15px;
+  font-weight: 650;
+  color: var(--co-text);
+}
+.co-gate-lead-passed,
+.co-approval-lead-approved {
+  color: var(--co-success-text);
+}
+.co-gate-lead-failed,
+.co-approval-lead-rejected {
+  color: var(--co-danger-text);
+}
+.co-gate-words,
+.co-gate-progress,
+.co-gate-summary,
+.co-gate-others,
+.co-gate-hidden,
+.co-approval-by,
+.co-approval-reason {
+  font-size: 13px;
+  color: var(--co-text-secondary);
+}
+.co-gate-failing {
+  margin: 0;
+  padding-left: 18px;
+  font-family: var(--co-mono);
+  font-size: 12px;
+  color: var(--co-danger-text);
+  word-break: break-word;
+}
+.co-gate-failing-title {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--co-text);
+}
+.co-gate-flaky-names {
+  font-size: 13px;
+  color: var(--co-warning-text);
+}
+.co-gate-log {
+  margin: 6px 0 0;
+  max-height: 320px;
+  overflow: auto;
+  padding: 10px 12px;
+  border-radius: 8px;
+  background: var(--co-terminal-bg);
+  border: 1px solid var(--co-terminal-border);
+  color: var(--co-terminal-text);
+  font-family: var(--co-mono);
+  font-size: 12px;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+.co-gate code,
+.co-gate .ant-alert-message code {
+  font-family: var(--co-mono);
+  font-size: 12px;
+  padding: 1px 5px;
+  border-radius: 4px;
+  background: var(--co-hover);
+  border: 1px solid var(--co-border);
+}
+.co-gate-details > summary {
+  cursor: pointer;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--co-text-secondary);
+}
+.co-gate-runs {
+  list-style: none;
+  margin: 8px 0 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.co-gate-run {
+  padding: 8px 10px;
+  border: 1px solid var(--co-border);
+  border-radius: 8px;
+  font-size: 12px;
+  color: var(--co-text-secondary);
+  word-break: break-word;
+}
+.co-gate-run code {
+  font-family: var(--co-mono);
+  color: var(--co-text);
+}
+.co-approval-msg {
+  margin: 0;
+  padding: 10px 12px;
+  border-left: 3px solid var(--co-primary);
+  background: var(--co-hover);
+  border-radius: 6px;
+  color: var(--co-text);
+  white-space: pre-wrap;
+}
+.co-approval-actions,
+.co-approval-reject {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  align-items: flex-start;
+}
+.co-approval-reject .ant-input {
+  flex: 1 1 260px;
+}
