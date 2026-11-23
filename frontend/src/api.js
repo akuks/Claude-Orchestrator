@@ -241,6 +241,9 @@ export const api = {
   installSkill: (payload) => req('POST', '/skills', payload),
   updateSkill: (id, payload) => req('PATCH', `/skills/${id}`, payload),
   deleteSkill: (id) => req('DELETE', `/skills/${id}`),
+  skillTemplate: () => req('GET', '/skills/template'),
+  lintSkillText: (text) => req('POST', '/skills/lint', { text }),
+  lintSkillPack: (id) => req('GET', `/skills/${id}/lint`),
   // ---- Context Store (curated knowledge docs, tiered) ----
   listContextDocs: (params = {}) => req('GET', `/context-docs${qs(params)}`),
   previewContext: (projectId) => req('GET', `/context-docs/preview${qs({ project_id: projectId })}`),

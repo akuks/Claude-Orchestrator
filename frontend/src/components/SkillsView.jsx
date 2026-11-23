@@ -16,6 +16,7 @@ import {
 } from 'antd'
 import { DeleteOutlined, PlusOutlined, ReloadOutlined } from '@ant-design/icons'
 import { api } from '../api'
+import SkillLint, { PackResults } from '../skills/SkillLint'
 
 function InstallModal({ open, projects, onClose, onDone }) {
   const [form] = Form.useForm()
@@ -85,6 +86,7 @@ export default function SkillsView({ projects = [], isAdmin = false }) {
   const [loading, setLoading] = useState(false)
   const [installing, setInstalling] = useState(null)
   const [modalOpen, setModalOpen] = useState(false)
+  const [lintPack, setLintPack] = useState(null) // {name, results}
 
   const projName = (id) => projects.find((p) => p.id === id)?.name
 
@@ -127,6 +129,14 @@ export default function SkillsView({ projects = [], isAdmin = false }) {
     }
   }
 
+  const lintOne = async (row) => {
+    try {
+      setLintPack({ name: row.name, results: await api.lintSkillPack(row.id) })
+    } catch (e) {
+      message.error(e.message)
+    }
+  }
+
   const remove = async (id) => {
     try {
       await api.deleteSkill(id)
@@ -162,6 +172,14 @@ export default function SkillsView({ projects = [], isAdmin = false }) {
       width: 90,
       render: (en, row) =>
         isAdmin ? <Switch checked={en} onChange={(v) => toggle(row, v)} /> : en ? <Tag color="green">on</Tag> : <Tag>off</Tag>,
+    },
+    {
+      title: '',
+      key: 'l',
+      width: 70,
+      render: (_, row) => (
+        <Button size="small" onClick={() => lintOne(row)} data-testid={`lint-pack-${row.id}`}>Lint</Button>
+      ),
     },
     isAdmin && {
       title: '',
@@ -211,8 +229,14 @@ export default function SkillsView({ projects = [], isAdmin = false }) {
         </Space>
       )}
 
+      <SkillLint />
+
       <Table rowKey="id" size="middle" loading={loading} columns={columns} dataSource={packs} pagination={false}
         locale={{ emptyText: 'No skill packs yet — install one from the curated list or a git repo.' }} />
+
+      <Modal open={!!lintPack} title={lintPack ? `Lint: ${lintPack.name}` : ''} footer={null} onCancel={() => setLintPack(null)}>
+        <PackResults results={lintPack?.results} />
+      </Modal>
 
       <InstallModal open={modalOpen} projects={projects} onClose={() => setModalOpen(false)} onDone={refresh} />
     </>
