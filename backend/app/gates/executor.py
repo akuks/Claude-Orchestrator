@@ -31,10 +31,21 @@ def shell_path() -> str:
 def gate_env(project) -> dict[str, str]:
     env = credentials.base_env()
     agent_env._apply_project_env(env, dict(getattr(project, "env", None) or {}))
-    env["CI"] = "1"
     for k in list(env):
-        if k.startswith("CO_") or k in agent_env.PROJECT_ENV_BLOCKED:
+        if (k.startswith("CO_") or k in agent_env.PROJECT_ENV_BLOCKED or k == "SSH_AUTH_SOCK"
+                or k.endswith("ASKPASS")):
             del env[k]
+    home = _gates_root() / "_home"
+    _mkdir_private(_gates_root())
+    _mkdir_private(home)
+    env.update({
+        "CI": "1",
+        "HOME": str(home),
+        "GIT_CONFIG_NOSYSTEM": "1",
+        "GIT_CONFIG_GLOBAL": os.devnull,
+        "XDG_CONFIG_HOME": str(home / ".config"),
+        "XDG_CACHE_HOME": str(home / ".cache"),
+    })
     return env
 
 
@@ -122,17 +133,29 @@ def _read_tail(path: Path, n: int) -> str:
         return f.read().decode("utf-8", "replace")
 
 
-async def _pump(proc, fd: int) -> None:
-    written = 0
+def _write_all(fd: int, data: bytes) -> int:
+    done = 0
+    while done < len(data):
+        n = os.write(fd, data[done:])
+        if n <= 0:
+            raise OSError("short write")
+        done += n
+    return done
+
+
+async def _pump(proc, fd: int, state: dict) -> None:
+    """Copy the pipe to the log up to LOG_CAP; always keep draining so the child never blocks."""
     while True:
         chunk = await proc.stdout.read(65536)
         if not chunk:
             return
-        room = LOG_CAP - written
-        if room > 0:
+        room = LOG_CAP - state["written"]
+        if room > 0 and not state.get("error"):
             part = chunk[:room]
-            os.write(fd, part)
-            written += len(part)
+            try:
+                state["written"] += _write_all(fd, part)
+            except OSError as e:
+                state["error"] = str(e)
 
 
 async def run_command(cmd, *, cwd, env, log_path, timeout_s, on_spawn=None) -> Outcome:
@@ -148,7 +171,8 @@ async def run_command(cmd, *, cwd, env, log_path, timeout_s, on_spawn=None) -> O
             stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT, start_new_session=True)
         if on_spawn:
             on_spawn(proc)
-        pump = asyncio.ensure_future(_pump(proc, fd))
+        state: dict = {"written": 0, "error": None}
+        pump = asyncio.ensure_future(_pump(proc, fd, state))
         try:
             await asyncio.wait_for(proc.wait(), timeout_s)
             outcome = "passed" if proc.returncode == 0 else "failed"
@@ -162,8 +186,12 @@ async def run_command(cmd, *, cwd, env, log_path, timeout_s, on_spawn=None) -> O
         # Drain what is left (children holding the pipe are killed on timeout).
         try:
             await asyncio.wait_for(pump, 5.0 if outcome != "timed_out" else 2.0)
-        except (asyncio.TimeoutError, asyncio.CancelledError):
+        except asyncio.TimeoutError:
             pass
+        except asyncio.CancelledError:
+            pump.cancel()
+            await asyncio.shield(kill_group(proc))
+            raise
         if outcome != "timed_out":
             # leftover background children in the group must not outlive the command
             try:

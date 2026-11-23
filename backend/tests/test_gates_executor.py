@@ -131,3 +131,45 @@ def test_log_file_and_prune(tmp_path):
     assert sorted(p.name for p in d.glob("stage0-*.log")) == [f"stage0-{n}.log" for n in range(3, 8)]
     with pytest.raises(ValueError):
         ex.log_file("../x", 0, 0)
+
+
+def test_gate_env_isolates_home(monkeypatch):
+    monkeypatch.setenv("SSH_AUTH_SOCK", "/tmp/x")
+    proj = types.SimpleNamespace(env={"HOME": "/root", "GIT_CONFIG_GLOBAL": "/x", "GIT_ASKPASS": "a",
+                                      "SSH_ASKPASS": "b", "XDG_CONFIG_HOME": "/y"})
+    env = ex.gate_env(proj)
+    home = (settings.workspaces_dir / "_gates" / "_home")
+    assert env["HOME"] == str(home) and stat.S_IMODE(home.stat().st_mode) == 0o700
+    assert env["GIT_CONFIG_NOSYSTEM"] == "1" and env["GIT_CONFIG_GLOBAL"] == os.devnull
+    assert env["XDG_CONFIG_HOME"].startswith(str(home)) and env["XDG_CACHE_HOME"].startswith(str(home))
+    assert "SSH_AUTH_SOCK" not in env and not [k for k in env if k.endswith("ASKPASS")]
+
+
+def test_cancel_during_drain(tmp_path, monkeypatch):
+    # a background child keeps the pipe open after the shell exits, so the drain window is long
+    pidf = tmp_path / "pid"
+
+    async def go():
+        t = asyncio.ensure_future(ex.run_command(
+            f"(sleep 30 & echo $! > {pidf}); true", cwd=tmp_path,
+            env=ex.gate_env(types.SimpleNamespace(env={})), log_path=tmp_path / "d.log", timeout_s=60))
+        for _ in range(100):
+            if pidf.exists() and pidf.read_text().strip():
+                break
+            await asyncio.sleep(0.1)
+        await asyncio.sleep(0.5)  # shell has exited; pump is draining
+        t.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await t
+
+    asyncio.run(go())
+    assert _wait_gone(int(pidf.read_text()))
+
+
+def test_write_error_keeps_draining(tmp_path, monkeypatch):
+    def boom(fd, data):
+        raise OSError(28, "no space")
+
+    monkeypatch.setattr(ex.os, "write", boom)
+    o, _ = _run(f"{sys.executable} -c \"for i in range(20000): print('x'*50)\"", tmp_path)
+    assert o.outcome == "passed"
