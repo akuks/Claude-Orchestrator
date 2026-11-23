@@ -30,6 +30,8 @@ import {
   WarningOutlined,
 } from '@ant-design/icons'
 import { api } from '../api'
+import BriefFields from '../briefs/BriefFields'
+import { BRIEF_LABELS, briefMissing, briefPayload } from '../briefs/brief'
 import { TIER_OPTIONS, modelOptions } from '../agents/tiers'
 
 function AgentModal({ open, agent, seed, projects, modelTiers, onClose, onSaved }) {
@@ -244,9 +246,11 @@ function RunModal({ agent, projects, onClose, onRan }) {
   const [files, setFiles] = useState([]) // single-run attachments
   const [bulkText, setBulkText] = useState('')
   const [projectId, setProjectId] = useState(undefined)
+  const [briefError, setBriefError] = useState('')
 
   useEffect(() => {
     if (agent) {
+      setBriefError('')
       form.setFieldsValue({ prompt: agent.default_prompt })
       setProjectId(agent.project_id || undefined)
       setMode('single')
@@ -263,6 +267,13 @@ function RunModal({ agent, projects, onClose, onRan }) {
   const runSingle = async () => {
     const v = await form.validateFields().catch(() => null)
     if (!v) return
+    const brief = briefPayload(v.brief)
+    const missing = briefMissing(v.brief)
+    if (missing.length) {
+      setBriefError(`The brief needs: ${missing.map((k) => BRIEF_LABELS[k]).join(', ')} (${missing.join(', ')})`)
+      return
+    }
+    setBriefError('')
     setRunning(true)
     try {
       const input_files = await Promise.all(
@@ -275,6 +286,7 @@ function RunModal({ agent, projects, onClose, onRan }) {
         prompt: v.prompt || undefined,
         project_id: projectId || undefined,
         input_files,
+        ...(brief ? { brief } : {}),
       })
       message.success(
         task.status === 'awaiting_approval' ? 'Queued for approval' : 'Agent run started'
@@ -282,7 +294,8 @@ function RunModal({ agent, projects, onClose, onRan }) {
       onRan?.()
       onClose()
     } catch (e) {
-      message.error(e.message)
+      if (brief) setBriefError(e.message)
+      else message.error(e.message)
     } finally {
       setRunning(false)
     }
@@ -392,6 +405,7 @@ function RunModal({ agent, projects, onClose, onRan }) {
             options={projectOptions}
           />
         </Form.Item>
+        {mode === 'single' && <BriefFields error={briefError} />}
       </Form>
     </Modal>
   )

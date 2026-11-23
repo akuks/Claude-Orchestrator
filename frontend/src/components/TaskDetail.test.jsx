@@ -381,3 +381,41 @@ describe('decision_review run-log line', () => {
     expect(renderLine({ type: 'decision_review', payload: { proposed: 2, stale: [4] } }).text).toBe('Suggested 2 decisions for review · flagged D-004 as maybe out of date')
   })
 })
+
+describe('TaskDetail: brief', () => {
+  let view
+  const RealWS = globalThis.WebSocket
+  afterEach(async () => {
+    await view?.unmount()
+    view = null
+    globalThis.WebSocket = RealWS
+    FakeSocket.all = []
+  })
+  const send = (ev) => act(async () => FakeSocket.all.at(-1).onmessage({ data: JSON.stringify(ev) }))
+
+  it('shows the brief panel with an inherited bound', async () => {
+    globalThis.WebSocket = FakeSocket
+    api.getTask.mockImplementationOnce(async (id) => ({
+      id, title: 'T', status: 'running', prompt: 'p',
+      brief: { goal: 'Ship it', can_change: ['src/**'], cannot_change: ['db/**'], done: 'd', stop: 's' },
+      brief_bounds: [{ task_id: 'parent1', can_change: ['src/**'], cannot_change: ['secrets/**'] }],
+    }))
+    view = await render(<TaskDetail inline taskId="a" />)
+    await flush()
+    const panel = view.container.querySelector('[data-testid="brief-panel"]')
+    expect(panel.textContent).toContain('Ship it')
+    expect(panel.textContent).toContain('src/**')
+    expect(view.container.querySelector('[data-testid="brief-bound"]').textContent).toContain('Also bound by an enclosing brief parent1')
+  })
+  it('renders brief guard events', async () => {
+    globalThis.WebSocket = FakeSocket
+    view = await render(<TaskDetail inline taskId="a" />)
+    await flush()
+    await send({ seq: 1, type: 'guard', payload: { event: 'PreToolUse', tool: 'Edit', summary: 'db/x.sql', decision: 'deny', rule_ids: ['brief-scope'], reason: 'no' } })
+    await send({ seq: 2, type: 'guard', payload: { event: 'brief_scope', shell_roots: 2, file_tools_only: [] } })
+    await flush()
+    const text = view.container.textContent
+    expect(text).toContain('Outside the task brief')
+    expect(text).toContain('Brief: 2 CANNOT folders also guarded for shell commands')
+  })
+})

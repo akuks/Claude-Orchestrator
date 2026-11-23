@@ -12,6 +12,8 @@ import {
 } from 'antd'
 import { UploadOutlined } from '@ant-design/icons'
 import { api } from '../api'
+import BriefFields from '../briefs/BriefFields'
+import { BRIEF_LABELS, briefMissing, briefPayload } from '../briefs/brief'
 
 // Read a File into base64 (strips the data: URL prefix).
 function fileToBase64(file) {
@@ -33,6 +35,7 @@ export default function CreateTaskModal({
   const [form] = Form.useForm()
   const [submitting, setSubmitting] = useState(false)
   const [fileList, setFileList] = useState([])
+  const [briefError, setBriefError] = useState('')
 
   useEffect(() => {
     if (open) form.setFieldsValue({ project_id: activeProjectId || undefined })
@@ -45,6 +48,13 @@ export default function CreateTaskModal({
     } catch {
       return
     }
+    const brief = briefPayload(values.brief)
+    const missing = briefMissing(values.brief)
+    if (missing.length) {
+      setBriefError(`The brief needs: ${missing.map((k) => BRIEF_LABELS[k]).join(', ')} (${missing.join(', ')})`)
+      return
+    }
+    setBriefError('')
     setSubmitting(true)
     try {
       const input_files = await Promise.all(
@@ -65,14 +75,17 @@ export default function CreateTaskModal({
         claude_md: values.project_id ? undefined : values.claude_md || undefined,
         requires_approval: !!values.requires_approval,
         input_files,
+        ...(brief ? { brief } : {}),
       })
       message.success('Task created')
       form.resetFields()
+      setBriefError('')
       setFileList([])
       onCreated?.()
       onClose()
     } catch (e) {
-      message.error(e.message)
+      if (briefPayload(values.brief) && /brief|can_change|cannot_change|goal|done|stop|setup|log|retries|tie_break|outputs/i.test(e.message || '')) setBriefError(e.message)
+      else message.error(e.message)
     } finally {
       setSubmitting(false)
     }
@@ -177,6 +190,7 @@ export default function CreateTaskModal({
         <Form.Item name="claude_md" label="CLAUDE.md (optional, injected into workspace)">
           <Input.TextArea rows={2} placeholder="Project instructions for this task" />
         </Form.Item>
+        <BriefFields error={briefError} />
         <Form.Item label="Input files (optional)">
           <Upload
             multiple

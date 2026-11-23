@@ -1,4 +1,5 @@
 import { parseTime } from '../time'
+import { briefScopeLine } from '../briefs/brief'
 
 // co-guard UI helpers (pure): rule names, countdowns, settings help, and the
 // run-log line for a `guard` task event. Every text here is shown as plain
@@ -28,6 +29,7 @@ export const RULE_NAMES = {
   'db-write': 'Write to a production database',
   'guest-quarantine': "Run a reviewed repo's code",
   'readonly-source': 'Change a read-only source',
+  'brief-scope': 'Outside the task brief',
 }
 
 // Custom rule ids (org.<slug>, project.<slug>, repo.<slug>) read as "Org rule <slug>".
@@ -230,6 +232,7 @@ export function guardLine(p = {}, ctx = {}) {
   }
   if (ev === 'reference_skipped')
     return { kind: 'override', text: `co-guard: a reference project was not mounted (${p.reason || 'skipped'})` }
+  if (ev === 'brief_scope') return { kind: 'info', text: briefScopeLine(p) }
   if (ev === 'readonly_skipped')
     return { kind: 'override', text: `co-guard: read-only path ${p.path || ''} skipped (${p.reason || 'skipped'})` }
   if (ev === 'rules_file') {
