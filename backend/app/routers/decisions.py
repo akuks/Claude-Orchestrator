@@ -16,6 +16,7 @@ from ..schemas import DecisionIn, DecisionOut, DecisionPatch, DecisionSupersede
 router = APIRouter(prefix="/projects/{project_id}/decisions", tags=["decisions"])
 
 STALE = "changed by someone else — reload"
+INACTIVE = "this decision is no longer active"
 
 
 def _now() -> datetime:
@@ -46,6 +47,11 @@ async def _get(s, project_id: str, number: int) -> ProjectDecision:
     if d is None:
         raise HTTPException(404, "Decision not found")
     return d
+
+
+def _require_active(d: ProjectDecision) -> None:
+    if d.status != "active":
+        raise HTTPException(409, INACTIVE)
 
 
 def _check_kind_see(kind: str, see: Optional[str]) -> None:
@@ -117,6 +123,7 @@ async def patch_decision(project_id: str, number: int, payload: DecisionPatch, r
     async with SessionLocal() as s:
         await require_project_role(s, request.state.principal, project_id, "maintainer")
         d = await _get(s, project_id, number)
+        _require_active(d)
         body = payload.model_dump(exclude_unset=True)
         version = body.pop("version")
         body = {k: v for k, v in body.items() if v is not None or k == "see"}
@@ -142,6 +149,7 @@ async def verify_decision(project_id: str, number: int, request: Request):
     async with SessionLocal() as s:
         await require_project_role(s, request.state.principal, project_id, "maintainer")
         d = await _get(s, project_id, number)
+        _require_active(d)
         await _bump(s, d, last_verified_at=_now())
         return _out(d, await _names(s, [d]))
 
@@ -151,6 +159,7 @@ async def retire_decision(project_id: str, number: int, request: Request):
     async with SessionLocal() as s:
         await require_project_role(s, request.state.principal, project_id, "maintainer")
         d = await _get(s, project_id, number)
+        _require_active(d)
         await _bump(s, d, status="retired", superseded_by=None)
         return _out(d, await _names(s, [d]))
 
@@ -160,6 +169,7 @@ async def supersede_decision(project_id: str, number: int, payload: DecisionSupe
     async with SessionLocal() as s:
         await require_project_role(s, request.state.principal, project_id, "maintainer")
         d = await _get(s, project_id, number)
+        _require_active(d)
         if payload.by == d.number:
             raise HTTPException(422, "a decision cannot supersede itself")
         by = (await s.execute(select(ProjectDecision).where(

@@ -175,3 +175,22 @@ def test_create_validation(world, body, needle):
 def test_text_redacted(world):
     d = _mk(world, title="tok ghp_" + "a" * 36 + " end")
     assert "ghp_" not in d["title"]
+
+
+def test_non_active_refused(world):
+    w = world
+    b = w["base"]
+    for t in "abc":
+        _mk(w, title=t)
+    assert w["maint"].post(f"{b}/1/supersede", json={"by": 2}).status_code == 200  # 1 superseded
+    assert w["maint"].post(f"{b}/3/retire").status_code == 200  # 3 retired
+    for n in (1, 3):
+        calls = [
+            w["maint"].post(f"{b}/{n}/verify"), w["maint"].post(f"{b}/{n}/retire"),
+            w["maint"].post(f"{b}/{n}/supersede", json={"by": 2}),
+            w["maint"].patch(f"{b}/{n}", json={"version": w["maint"].get(f"{b}/{n}").json()["version"], "title": "x"}),
+        ]
+        for r in calls:
+            assert r.status_code == 409 and r.json()["detail"] == "this decision is no longer active", (n, r.text)
+    d = w["maint"].get(f"{b}/1").json()
+    assert d["status"] == "superseded" and d["superseded_by"] == 2 and d["title"] == "a"
