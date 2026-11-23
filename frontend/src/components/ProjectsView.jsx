@@ -42,6 +42,7 @@ import ProjectCards from '../projects/ProjectCards'
 import GuardSettings from '../guard/GuardSettings'
 import { canEditGuard } from '../guard/guard'
 import DecisionsPane from '../decisions/DecisionsPane'
+import LaunchTab from '../launch/LaunchTab'
 import { FRESH_SUGGEST, freshSessionError } from '../usage/usage'
 
 dayjs.extend(relativeTime)
@@ -454,6 +455,15 @@ export function ProjectDrawer({ project, tab, onTab, currentUser, onClose, onSav
                   }}
                 />
               ),
+            },
+            {
+              key: 'launch',
+              label: (
+                <span>
+                  <FileTextOutlined /> Launch
+                </span>
+              ),
+              children: <LaunchTab key={project.id} project={project} canEdit={canEditGuard(project, currentUser)} />,
             },
             {
               key: 'guard',

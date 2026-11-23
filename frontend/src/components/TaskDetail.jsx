@@ -56,6 +56,7 @@ import { ThreadQuestions } from '../questions/QuestionsSection'
 import { usageLine, useUsage } from '../usage/usage'
 import AskCard from '../asks/AskCard'
 import { decisionNoteLine, decisionReviewLine } from '../decisions/decisions'
+import { criticalPathsLine } from '../launch/launch'
 
 // co-guard lines in the run log: one icon per kind (guard.js guardLine).
 const GUARD_ICON = {
@@ -105,6 +106,7 @@ function UsageLine({ line }) {
   )
 }
 
+
 const EVENT_STYLE = {
   started: { color: 'var(--co-terminal-muted)', prefix: '▶' },
   system: { color: 'var(--co-terminal-muted)', prefix: '·' },
@@ -117,6 +119,7 @@ const EVENT_STYLE = {
   decision_note: { color: 'var(--co-terminal-muted)', prefix: '·' },
   decision_review: { color: 'var(--co-terminal-muted)', prefix: '·' },
   test_result: { color: 'var(--co-terminal-muted)', prefix: '·' },
+  critical_paths: { color: 'var(--co-terminal-muted)', prefix: '·' },
 }
 
 // "Tests: 61 passed, 2 failed (a, b)": zero and missing parts are left out.
@@ -170,6 +173,9 @@ export function renderLine(ev) {
       break
     case 'test_result':
       text = testResultLine(p)
+      break
+    case 'critical_paths':
+      text = criticalPathsLine(p)
       break
     default:
       text = JSON.stringify(p)

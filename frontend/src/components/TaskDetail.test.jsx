@@ -385,6 +385,14 @@ describe('decision_review run-log line', () => {
   })
 })
 
+describe('critical_paths run-log line', () => {
+  it('renders the chip text', () => {
+    expect(renderLine({ type: 'critical_paths', payload: { paths: ['src/a.py', 'src/b.py'], globs: ['src/**'] } }).text).toBe(
+      'This run changed 2 critical path(s): src/a.py, src/b.py',
+    )
+  })
+})
+
 describe('TaskDetail: brief', () => {
   let view
   const RealWS = globalThis.WebSocket
