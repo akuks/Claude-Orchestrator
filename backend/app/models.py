@@ -1,5 +1,5 @@
 import uuid
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 
 from sqlalchemy import (
     Boolean,
@@ -7,6 +7,7 @@ from sqlalchemy import (
     UniqueConstraint,
     text,
     JSON,
+    Date,
     DateTime,
     Float,
     ForeignKey,
@@ -74,6 +75,9 @@ class Task(Base):
     stage_index: Mapped[int | None] = mapped_column(Integer, nullable=True)
     # Which attempt of the stage this task belongs to (gate retries, phase 5a).
     stage_attempt: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
+    # The launch-list item this task is linked to (phase 5b); same project as the task.
+    launch_item_id: Mapped[str | None] = mapped_column(
+        ForeignKey("launch_items.id", ondelete="SET NULL"), nullable=True, index=True)
     # Whether this task may open outbound SSH/SCP/SFTP. False → ssh/scp/sftp are
     # added to --disallowedTools (deny wins even under bypassPermissions). Ad-hoc
     # tasks default True; agent tasks inherit the agent's allow_remote flag.
@@ -215,6 +219,8 @@ class Project(Base):
     fresh_session_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
     # High-water mark of recorded decision numbers (phase 4a); never decreases.
     decision_seq: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
+    # High-water mark of launch-list item numbers (phase 5b); never decreases.
+    launch_seq: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
 
 
@@ -430,6 +436,41 @@ class ProjectDecision(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now, onupdate=_now)
     stale_flagged_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     stale_reason: Mapped[str | None] = mapped_column(String(300), nullable=True)
+
+
+class ProjectLaunch(Base):
+    """A project's launch settings (phase 5b): one row per project, created on first write.
+    `version` is an optimistic lock."""
+
+    __tablename__ = "project_launches"
+
+    project_id: Mapped[str] = mapped_column(ForeignKey("projects.id", ondelete="CASCADE"), primary_key=True)
+    launch_date: Mapped[date | None] = mapped_column(Date, nullable=True)
+    critical_paths: Mapped[list] = mapped_column(JSON, default=list, server_default="[]")
+    version: Mapped[int] = mapped_column(Integer, default=1, server_default="1")
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now, onupdate=_now)
+
+
+class LaunchItem(Base):
+    """One launch-list item (phase 5b), shown #<number>. section before | after;
+    status open | started | done | dropped. `version` is an optimistic lock."""
+
+    __tablename__ = "launch_items"
+    __table_args__ = (
+        UniqueConstraint("project_id", "number", name="uq_launch_items_project_number"),
+    )
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=_uuid)
+    project_id: Mapped[str] = mapped_column(ForeignKey("projects.id", ondelete="CASCADE"), index=True)
+    number: Mapped[int] = mapped_column(Integer)
+    title: Mapped[str] = mapped_column(String(200))
+    section: Mapped[str] = mapped_column(String(8), default="before", server_default="before")
+    status: Mapped[str] = mapped_column(String(10), default="open", server_default="open")
+    added_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    done_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    added_by: Mapped[str | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
+    version: Mapped[int] = mapped_column(Integer, default=1, server_default="1")
 
 
 class DecisionProposal(Base):

@@ -1,4 +1,4 @@
-from datetime import datetime
+from datetime import date, datetime
 import re
 from typing import Annotated, Any, Literal, Optional
 
@@ -24,6 +24,7 @@ class TaskCreate(BaseModel):
     input_files: list[InputFile] = Field(default_factory=list)
     requires_approval: bool = False
     brief: Optional[Any] = None  # checked by clean_brief (a plain-text 422), not by Pydantic
+    launch_item_id: Optional[str] = None  # an item of the project's launch list (phase 5b)
 
 
 class TaskOut(BaseModel):
@@ -41,6 +42,7 @@ class TaskOut(BaseModel):
     max_budget_usd: Optional[float] = None
     attempt: int = 0
     stage_attempt: int = 0
+    launch_item_id: Optional[str] = None
     exit_code: Optional[int]
     error: Optional[str]
     result_text: Optional[str]
@@ -1036,3 +1038,50 @@ class ProposalOut(BaseModel):
 class ProposalList(BaseModel):
     items: list[ProposalOut]
     pending: int
+
+
+# --------------------------------------------------------------------------- launch list (phase 5b)
+
+
+class LaunchPut(BaseModel):
+    launch_date: Optional[date] = None
+    critical_paths: list[str] = Field(default_factory=list)
+    version: Optional[int] = None  # required once the launch row exists
+
+
+class LaunchItemIn(BaseModel):
+    title: str
+    section: str = "before"
+
+
+class LaunchItemPatch(BaseModel):
+    version: int
+    title: Optional[str] = None
+    section: Optional[str] = None
+    status: Optional[str] = None
+
+
+class LaunchSettingsOut(BaseModel):
+    launch_date: Optional[date] = None
+    critical_paths: list[str] = []
+    version: int
+
+
+class LaunchItemOut(BaseModel):
+    id: str
+    number: int
+    title: str
+    section: str
+    status: str
+    added_at: datetime
+    started_at: Optional[datetime] = None
+    done_at: Optional[datetime] = None
+    added_by: Optional[str] = None
+    added_by_name: Optional[str] = None
+    version: int
+
+
+class LaunchOut(BaseModel):
+    launch: Optional[LaunchSettingsOut] = None
+    items: list[LaunchItemOut] = []
+    all_linked_done: dict[int, bool] = {}

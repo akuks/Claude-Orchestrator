@@ -31,6 +31,7 @@ from .database import SessionLocal
 from .events import broker
 from .gates import test_results
 from .gates.testcmd import looks_like_test
+from .launch import store as launch_store
 from .guard import co_hook as guard_co_hook
 from .guard import grants as guard_grants
 from .guard import policy_inputs
@@ -397,6 +398,11 @@ class WorkerManager:
             task.status = Status.RUNNING
             task.started_at = _now()
             task.run_pgid = task.run_proc_start = None  # this run's are recorded at spawn
+            try:  # launch list: a linked open item becomes started; never fails the task
+                async with s.begin_nested():
+                    await launch_store.mark_started_for_task(s, task)
+            except Exception:  # noqa: BLE001
+                log.debug("launch auto-start failed for task %s", task_id, exc_info=True)
             prompt = task.prompt
             model = task.model
             max_turns = task.max_turns

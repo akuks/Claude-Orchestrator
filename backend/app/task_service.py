@@ -14,7 +14,7 @@ from fastapi import HTTPException
 
 from .briefs.validate import child_scope, clean_brief
 from .constants import Status
-from .models import Project, Task
+from .models import LaunchItem, Project, Task
 
 
 @contextlib.contextmanager
@@ -96,6 +96,7 @@ async def build_task(
     stage_index: int | None = None,
     created_by: str | None = None,
     brief: dict | None = None,
+    launch_item_id: str | None = None,
 ) -> Task:
     """Create a Task row (flushed, not committed) in the given session.
 
@@ -110,6 +111,10 @@ async def build_task(
     project_obj = await s.get(Project, project_id) if project_id else None
     parent = await s.get(Task, parent_task_id) if parent_task_id else None
     own = clean_brief(brief)
+    if launch_item_id:  # a launch item of the task's own project, or a plain-reason ValueError (422)
+        item = await s.get(LaunchItem, launch_item_id)
+        if item is None or not project_id or item.project_id != project_id:
+            raise ValueError("launch_item_id must be an item of the task's project")
     if parent is not None:
         own, bounds = child_scope(parent.brief, parent.brief_bounds, parent.id, own)
     else:
@@ -147,6 +152,7 @@ async def build_task(
         created_by=created_by,
         brief=own,
         brief_bounds=bounds if own else None,
+        launch_item_id=launch_item_id or None,
     )
     s.add(task)
     await s.flush()  # assign id

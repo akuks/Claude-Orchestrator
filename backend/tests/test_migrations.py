@@ -12,7 +12,7 @@ from sqlalchemy.orm import Session
 from app import models
 from app.database import _alembic_cfg, _baseline_metadata, run_migrations
 
-HEAD = "0014"  # the latest revision
+HEAD = "0015"  # the latest revision
 
 
 def _tables(db) -> set[str]:
@@ -461,3 +461,53 @@ def test_migration_0014_upgrade_downgrade(scratch_url):
         return sc.exec_driver_sql("SELECT version_num FROM alembic_version").scalar()
 
     assert _inspect(url, check_down) == "0013"
+
+
+def test_migration_0015_upgrade_downgrade(scratch_url):
+    from alembic import command
+
+    url = scratch_url
+    command.upgrade(_alembic_cfg(url), "0014")
+    def old_rows(sc, insp):  # a project and a task from before 0015
+        sc.exec_driver_sql(
+            "INSERT INTO projects (id, name, slug, directory, default_model, env, memory, memory_enabled,"
+            " archived, auto_review_prs, created_at) VALUES ('p15', 'old', 'old', '/x', 'sonnet', '{}', '',"
+            " true, false, false, CURRENT_TIMESTAMP)")
+        sc.exec_driver_sql(
+            "INSERT INTO tasks (id, title, prompt, status, priority, tags, model, max_turns, attempt, allow_remote,"
+            " read_only, requires_approval, risk, created_at) VALUES ('t15', 't', 'p', 'completed', 'normal', '[]',"
+            " '', 25, 0, true, false, false, 'info', CURRENT_TIMESTAMP)")
+
+    _inspect(url, old_rows)
+    command.upgrade(_alembic_cfg(url), "0015")
+
+    def check(sc, insp):
+        assert "launch_seq" in {c["name"] for c in insp.get_columns("projects")}
+        assert "launch_item_id" in {c["name"] for c in insp.get_columns("tasks")}
+        assert {"project_id", "launch_date", "critical_paths", "version", "updated_at"} <= {
+            c["name"] for c in insp.get_columns("project_launches")}
+        assert {"id", "project_id", "number", "title", "section", "status", "added_at", "started_at",
+                "done_at", "added_by", "version"} <= {c["name"] for c in insp.get_columns("launch_items")}
+        uq = {tuple(u["column_names"]) for u in insp.get_unique_constraints("launch_items")}
+        assert ("project_id", "number") in uq
+        assert ("project_id",) in {tuple(i["column_names"]) for i in insp.get_indexes("launch_items")}
+        assert ("launch_item_id",) in {tuple(i["column_names"]) for i in insp.get_indexes("tasks")}
+        assert any(f["referred_table"] == "launch_items" for f in insp.get_foreign_keys("tasks"))
+        return sc.exec_driver_sql("SELECT version_num FROM alembic_version").scalar()
+
+    assert _inspect(url, check) == "0015"
+
+    def old_read(sc, insp):
+        return (sc.exec_driver_sql("SELECT launch_seq FROM projects WHERE id='p15'").scalar(),
+                sc.exec_driver_sql("SELECT launch_item_id FROM tasks WHERE id='t15'").scalar())
+
+    assert _inspect(url, old_read) == (0, None)
+    command.downgrade(_alembic_cfg(url), "0014")
+
+    def check_down(sc, insp):
+        assert not ({"project_launches", "launch_items"} & set(insp.get_table_names()))
+        assert "launch_seq" not in {c["name"] for c in insp.get_columns("projects")}
+        assert "launch_item_id" not in {c["name"] for c in insp.get_columns("tasks")}
+        return sc.exec_driver_sql("SELECT version_num FROM alembic_version").scalar()
+
+    assert _inspect(url, check_down) == "0014"

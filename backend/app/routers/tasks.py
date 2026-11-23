@@ -102,6 +102,7 @@ async def create_task(payload: TaskCreate, request: Request):
                 requires_approval=payload.requires_approval,
                 created_by=request.state.principal.user.id,
                 brief=payload.brief,
+                launch_item_id=payload.launch_item_id,
             )
         await s.commit()
         await s.refresh(task)
