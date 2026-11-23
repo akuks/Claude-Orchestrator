@@ -1535,7 +1535,7 @@ class WorkerManager:
             return
         try:
             res = await asyncio.to_thread(test_results.parse, flat)
-            if res.runner is None:
+            if res.runner is None or (res.passed is None and res.failed is None and res.skipped is None):
                 return
             secrets = ctx.get("secrets") or []
             await emit("test_result", {

@@ -57,3 +57,9 @@ def test_cap_and_parser_error(monkeypatch):
     monkeypatch.setattr(test_results, "parse", boom)
     got, _ = _run([_use("a", "pytest"), _res("a", PYTEST_OUT)])
     assert [t for t, _p in got] == ["tool_use", "tool_result"]
+
+
+def test_no_chip_without_counts():
+    out = "ok  \texample.com/pkg\t0.5s\nok  \texample.com/other\t0.2s\n"
+    got, _ = _run([_use("a", "go test ./..."), _res("a", out)])
+    assert not [1 for t, _p in got if t == "test_result"]
