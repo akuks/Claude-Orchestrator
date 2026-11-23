@@ -778,6 +778,8 @@ class WorkflowRunner:
                 spent = await _spent(s, run)
                 if not new > spent:
                     raise ValueError(f"the budget must be more than the ${spent:.2f} already spent")
+                if new - spent < BUDGET_MIN:
+                    raise ValueError("the new limit must leave at least $0.01 to spend")
                 run.budget_usd = new
                 runlog.append(run, f"Budget raised to ${new:.2f} by {_user_name(user)}")
                 await s.commit()
@@ -1120,7 +1122,9 @@ class WorkflowRunner:
                     return None
                 ok, spent, remaining = await _budget_ok(s, run)
                 if not ok:
-                    _budget_hold(run, i, {**st, "fix_pending": fx.round}, spent)
+                    # Remember what failed: the hold's own reason replaces it on screen.
+                    fr = st.get("fail_reason") if st.get("status") == "budget" else st.get("reason")
+                    _budget_hold(run, i, {**st, "fix_pending": fx.round, "fail_reason": fr}, spent)
                     await s.commit()
                     return None
                 from .config import settings
@@ -1154,7 +1158,11 @@ class WorkflowRunner:
                 task.stage_attempt = _attempt(run, i)
                 st.pop("fix_pending", None)
                 # A new dict: build_task flushed, so an in-place change would look unchanged.
-                reason = st.get("reason") if st.get("status") == "fixing" else None  # drop "budget reached"
+                # Drop "budget reached" but keep the stage's failure reason ("What failed").
+                reason = st.get("reason")
+                if st.get("status") == "budget":
+                    reason = st.get("fail_reason")
+                st.pop("fail_reason", None)
                 _put_state(run, i, {**st, "status": "fixing", "fix_task": task.id, "reason": reason})
                 if run.status == RUN_PAUSED:
                     run.status = RUN_RUNNING  # the cap was raised: resume

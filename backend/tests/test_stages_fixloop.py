@@ -566,7 +566,8 @@ def test_budget_held_fix_resumes_as_fix_task(fakes):
         assert len(fx) == 1 and "fix" in fx[0].tags
         assert fx[0].max_budget_usd == pytest.approx(2.0)  # min(agent 5.0, remaining 2.0)
         assert run.status == "running" and st["status"] == "fixing" and st["fix_task"] == fx[0].id
-        assert "fix_pending" not in st
+        assert "fix_pending" not in st and "fail_reason" not in st
+        assert st["reason"] and "budget reached" not in st["reason"]  # "What failed" kept
         assert fakes.calls == ["pytest -q"]  # the gate did not run again
         await _end_task(fx[0].id)
         await r._advance(rid)
@@ -732,5 +733,33 @@ def test_stored_id_of_agent_moved_away_fails(fakes):
         run = await _run(rid)
         assert run.status == "failed"
         assert run.stage_state["0"]["reason"] == "the fixer agent is not available"
+
+    asyncio.run(go())
+
+
+def test_manual_retry_resets_fix_tries(fakes):
+    fakes.script["pytest -q"] = [FAIL("t")] * 4
+
+    async def go():
+        pid = await _project()
+        a = await _agent(pid)
+        rid = await _make_run([gate(pid, a.id, rounds=1)], [pid])
+        r = WorkflowRunner(FakeWorker(), 999)
+        await r.start_run(rid)
+        await settle(r)
+        run = await _run(rid)
+        assert run.stage_state["0"]["fix_round"] == 1
+        await _end_task(run.stage_state["0"]["fix_task"])
+        await r._advance(rid)
+        await settle(r)
+        run = await _run(rid)
+        assert run.status == "failed"
+        assert await r.retry_run(rid)
+        await settle(r)
+        run = await _run(rid)
+        st = run.stage_state["0"]
+        assert run.status == "running" and st["status"] == "fixing"
+        assert st["fix_round"] == 1  # a fresh first try, not "exhausted"
+        assert len(await _tasks(rid, 0)) == 2  # a second fix task was allowed
 
     asyncio.run(go())

@@ -220,3 +220,10 @@ def test_raise_risk_put(client):
     r = maint.put(base, json={"version": r.json()["launch"]["version"], "raise_risk": False})
     assert r.json()["launch"]["raise_risk"] is False
     assert maint.put(base, json={"version": r.json()["launch"]["version"], "raise_risk": "yes"}).status_code == 422
+
+
+def test_bad_output_name_is_cleaned_and_cut(client):
+    with pytest.raises(ValueError) as e:
+        validate([agent_stage(item={"outputs": ["X" * 100 + "\x1b[31mred"]})])
+    msg = str(e.value)
+    assert "X" * 40 in msg and "X" * 41 not in msg and "\x1b" not in msg

@@ -49,7 +49,7 @@ def _outputs(item: dict, name: str) -> list[str] | None:
     for o in outs:
         if not isinstance(o, str) or not _OUTPUT_NAME.match(o):
             raise ValueError(
-                f"Step '{name}': output name {o!r} must be 1 to 40 characters: a lowercase letter, "
+                f"Step '{name}': output name '{clean_text(str(o))[:40]}' must be 1 to 40 characters: a lowercase letter, "
                 "then lowercase letters, digits or _")
         if o in seen:
             raise ValueError(f"Step '{name}': output name '{o}' is repeated")

@@ -130,3 +130,25 @@ def test_visibility_and_cap(client, tmp_path):
     u = login_as(f"wi-{uuid.uuid4().hex[:6]}@test.local")
     assert u.get("/workflows/repo-files", params={"project_id": pid}).status_code == 404
     assert u.post("/workflows/import", json={"project_id": pid, "file": "w00.md"}).status_code == 403
+
+
+def test_budget_round_trip_and_validation(client):
+    import json
+    a = _agent_name()
+    stages = [{"name": "S", "items": [{"agent": a, "prompt": "p"}]}]
+
+    def doc(**kw):
+        return "```json\n" + json.dumps({"name": "bud", "description": "d", "stages": stages, **kw}) + "\n```\n"
+
+    r = client.post("/workflows/import", json={"text": doc(budget_usd=7.5)})
+    assert r.status_code == 201, r.text
+    assert r.json()["budget_usd"] == 7.5
+    md = client.get(f"/workflows/{r.json()['id']}/export").text
+    assert '"budget_usd": 7.5' in md
+    r2 = client.post("/workflows/import", json={"text": md})
+    assert r2.status_code == 201 and r2.json()["budget_usd"] == 7.5
+    plain = client.post("/workflows/import", json={"text": doc()})
+    assert plain.json()["budget_usd"] is None
+    assert "budget_usd" not in client.get(f"/workflows/{plain.json()['id']}/export").text
+    for bad in (0, -1, 20000, "5"):
+        assert client.post("/workflows/import", json={"text": doc(budget_usd=bad)}).status_code == 422, bad

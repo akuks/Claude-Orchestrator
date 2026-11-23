@@ -103,6 +103,8 @@ def templates_out() -> list[dict]:
 def export_markdown(wf) -> str:
     desc = wf.description or ""
     doc = {"name": wf.name, "description": desc, "stages": wf.stages or []}
+    if wf.budget_usd is not None:
+        doc["budget_usd"] = wf.budget_usd
     shown = desc.replace("```", "'''")
     title = " ".join((wf.name or "").split())
     parts = [f"# {title}", ""]
@@ -128,7 +130,10 @@ def parse_import(text: str) -> dict:
         raise ValueError(f"The json block is not valid JSON: {e}") from None
     if not isinstance(data, dict):
         raise ValueError("The json block must be an object with name, description and stages")
-    return {"name": data.get("name"), "description": data.get("description"), "stages": data.get("stages")}
+    out = {"name": data.get("name"), "description": data.get("description"), "stages": data.get("stages")}
+    if data.get("budget_usd") is not None:
+        out["budget_usd"] = data["budget_usd"]  # WorkflowCreate validates it like a save
+    return out
 
 
 # ---- repo workflow files ----------------------------------------------------

@@ -369,6 +369,22 @@ def test_raise_resumes(no_tick):
     asyncio.run(go())
 
 
+def test_raise_leaving_under_a_cent_refused(no_tick):
+    async def go():
+        a = await _agent()
+        rid = await _make_run([stage(a), stage(a, name="Next")], budget=1.0)
+        r = WorkflowRunner(FakeWorker(), 999)
+        await r.start_run(rid)
+        await _set(rid, 0, Status.COMPLETED, cost=1.0)
+        await r._advance(rid)
+        with pytest.raises(ValueError, match="at least \\$0.01 to spend"):
+            await r.raise_budget(rid, 1.005, ANN)
+        run = await _run(rid)
+        assert run.budget_usd == 1.0 and run.status == "paused"
+
+    asyncio.run(go())
+
+
 def test_raise_refused_on_inactive_run(no_tick):
     async def go():
         a = await _agent()

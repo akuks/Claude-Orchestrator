@@ -212,7 +212,8 @@ def test_gate_output_hidden_for_other_project(client, monkeypatch):
     state = {
         "0": {"status": "passed", "summary": "Gate A ok", "reason": None},
         "1": {"status": "failed", "summary": "Gate B failed: y, 2 failed: secret_test", "reason": "y, exit 1: secret_test",
-              "hits": ["touches /etc"], "flaky": ["secret_test"], "handout": "h"},
+              "hits": ["touches /etc"], "flaky": ["secret_test"], "handout": "h",
+              "fix_task": "ft-1", "fix_check": "fc-1", "fix_pending": 1, "fix_round": 1},
     }
     rid = _run(pa, stages=stages, state=state, current=1)
     async def addpid():
@@ -232,7 +233,7 @@ def test_gate_output_hidden_for_other_project(client, monkeypatch):
     assert j["live"] is None
     s1 = j["stage_state"]["1"]
     assert s1["hidden"] is True and s1["status"] == "failed" and "status_text" in s1
-    for k in ("summary", "hits", "reason", "others", "flaky"):
+    for k in ("summary", "hits", "reason", "others", "flaky", "fix_task", "fix_check", "fix_pending", "fix_round"):
         assert k not in s1
     assert "secret_test" not in str(j)
     assert j["stage_state"]["0"]["summary"] == "Gate A ok" and "hidden" not in j["stage_state"]["0"]
