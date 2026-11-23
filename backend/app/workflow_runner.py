@@ -17,6 +17,14 @@ with "outputs invalid: <reason>". Later prompts read them as {{stageN.name}} and
 {{prev.name}}. stage_state[i].expects maps task id -> declared names.
 Any stage may carry `before` pre-flight lines; an unmet line holds the stage
 (the run stays running) and is checked again on every tick.
+Phase 5c also adds:
+  * auto-retry once: an agent stage with `auto_retry: true` whose attempt failed (no task
+    cancelled; siblings finished) starts one new attempt by itself, through the same
+    mechanics as a manual Retry (`_new_attempt`). stage_state[i].auto_retried records it.
+  * a per-run budget cap (run.budget_usd): before an agent stage (or auto-retry) starts,
+    `_budget_ok` sums total_cost_usd over all of the run's tasks; with less than 0.01 left
+    the run pauses (stage status "budget", `_budget_hold`) and resumes on the next advance
+    once `raise_budget` lifts the cap. Each new task's cap is min(agent cap, remaining).
 
 Stage shape (on the workflow / run snapshot):
     [{"name": "Develop", "items": [{"agent": "<id|name>", "prompt": "..."}]},
@@ -38,7 +46,7 @@ import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
-from sqlalchemy import delete, select, update
+from sqlalchemy import delete, func, select, update
 
 from .constants import Status
 from .database import SessionLocal
@@ -63,6 +71,8 @@ FLAKY_WORDS = "a flaky test is not a fixed test"
 GATE_ERROR_WORDS = "the gate could not run (internal error)"
 UNCHANGED_WORDS = "failed then passed unchanged"
 GATE_LIVE = ("waiting", "running")  # gate states that want a live process
+BUDGET_MIN = 0.01  # below this remainder a capped run pauses instead of starting work
+BUDGET_MAX = 10000.0
 
 log = logging.getLogger(__name__)
 
@@ -212,6 +222,64 @@ async def _stage_outputs(s, run: WorkflowRun, up_to_stage: int,
     return out
 
 
+async def _spent(s, run) -> float:
+    """Sum of total_cost_usd over every task of the run (every attempt); None counts as 0."""
+    v = (
+        await s.execute(
+            select(func.coalesce(func.sum(Task.total_cost_usd), 0.0)).where(Task.workflow_run_id == run.id)
+        )
+    ).scalar()
+    return float(v or 0.0)
+
+
+async def _budget_ok(s, run) -> tuple[bool, float | None, float | None]:
+    """(ok, spent, remaining) for starting new paid work on the run. A run without
+    budget_usd is always ok: (True, None, None). Otherwise ok is remaining >= 0.01."""
+    budget = run.budget_usd
+    if budget is None:
+        return True, None, None
+    spent = await _spent(s, run)
+    remaining = round(float(budget) - spent, 6)
+    return remaining >= BUDGET_MIN, spent, remaining
+
+
+def _budget_cap(own: float | None, remaining: float | None) -> float | None:
+    """A new task's max_budget_usd: min(own cap, remaining), or own when the run is uncapped."""
+    if remaining is None:
+        return own
+    return remaining if own is None else min(own, remaining)
+
+
+def _budget_hold(run, i: int, st: dict, spent: float) -> None:
+    """Pause the run at stage i because the budget is used up: stage status "budget" and the
+    fixed log line (once per spent/budget pair). The run resumes on the next advance after
+    the cap is raised."""
+    reason = f"budget reached (${spent:.2f} of ${float(run.budget_usd or 0):.2f})"
+    if st.get("status") != "budget" or st.get("reason") != reason:
+        runlog.append(run, f"Step {_stage_name(run, i)} held: {reason}")
+    _put_state(run, i, {**st, "status": "budget", "reason": reason})
+    run.status = RUN_PAUSED
+
+
+def _new_attempt(run, i: int, auto: bool = False) -> int:
+    """Begin a new attempt of stage i (manual Retry or auto-retry): bump the attempt, keep
+    log_seq and auto_retried, set the run running and log it. Earlier tasks are kept; the
+    caller then starts the stage. Returns the new attempt."""
+    old = get_state(run, i)
+    fresh = {"attempt": _attempt(run, i) + 1}
+    for k in ("log_seq", "auto_retried"):
+        if k in old:
+            fresh[k] = old[k]
+    if auto:
+        fresh["auto_retried"] = True
+    _put_state(run, i, fresh)
+    run.status = RUN_RUNNING
+    name = _stage_name(run, i)
+    runlog.append(run, f"Step {name} retried automatically" if auto
+                  else f"Step {name} retried (attempt {fresh['attempt'] + 1})")
+    return fresh["attempt"]
+
+
 async def _preflight(lines) -> str | None:
     """None when every pre-flight line is met; otherwise the plain reason. Never raises:
     an unreadable line or a check that cannot answer counts as not met."""
@@ -259,6 +327,15 @@ async def _start_stage(s, run: WorkflowRun, stage_index: int, worker, pre: dict 
     old = get_state(run, stage_index)
     attempt = _attempt(run, stage_index)
 
+    remaining = None
+    if kind == "agent":
+        ok, spent, remaining = await _budget_ok(s, run)
+        if not ok:
+            _budget_hold(run, stage_index, old, spent)
+            return []
+        if old.get("status") == "budget" and run.status == RUN_PAUSED:
+            run.status = RUN_RUNNING  # the cap was raised: resume
+
     lines = list(stage.get("before") or [])
     reason = None
     if lines:
@@ -270,8 +347,9 @@ async def _start_stage(s, run: WorkflowRun, stage_index: int, worker, pre: dict 
         return []
 
     st: dict = {"attempt": attempt, "started_at": _iso()}
-    if "log_seq" in old:
-        st["log_seq"] = old["log_seq"]
+    for k in ("log_seq", "auto_retried"):
+        if k in old:
+            st[k] = old[k]
     name = _stage_name(run, stage_index)
 
     if kind == "gate":
@@ -287,6 +365,8 @@ async def _start_stage(s, run: WorkflowRun, stage_index: int, worker, pre: dict 
 
     st["status"] = "running"
     _put_state(run, stage_index, st)
+    from .config import settings
+
     agents = (await s.execute(select(Agent))).scalars().all()
     by_id = {a.id: a for a in agents}
     by_name = {a.name: a for a in agents}
@@ -317,7 +397,10 @@ async def _start_stage(s, run: WorkflowRun, stage_index: int, worker, pre: dict 
             project_id=agent.project_id,
             model=await tiers.agent_model(s, agent),
             max_turns=agent.max_turns,
-            max_budget_usd=agent.max_budget_usd,
+            max_budget_usd=_budget_cap(
+                agent.max_budget_usd if agent.max_budget_usd is not None else settings.default_task_budget_usd,
+                remaining,
+            ),
             priority=agent.priority,
             tags=(agent.tags or []) + ["workflow"],
             agent_id=agent.id,
@@ -570,13 +653,7 @@ class WorkflowRunner:
                 i = run.current_stage
                 if not (0 <= i < len(run.stages or [])):
                     return None
-                old = get_state(run, i)
-                fresh = {"attempt": _attempt(run, i) + 1}
-                if "log_seq" in old:
-                    fresh["log_seq"] = old["log_seq"]
-                _put_state(run, i, fresh)
-                run.status = RUN_RUNNING
-                runlog.append(run, f"Step {_stage_name(run, i)} retried (attempt {fresh['attempt'] + 1})")
+                _new_attempt(run, i)
                 return await self._start_and_commit(s, run, i, pre)
 
         post = await self._locked(run_id, fn)
@@ -622,6 +699,34 @@ class WorkflowRunner:
                 await s.commit()
 
         await self._locked(run_id, fn)
+
+    async def raise_budget(self, run_id: str, budget_usd: float, user) -> None:
+        """Set the run's budget cap to `budget_usd` (must be more than spent, 0.01..10000,
+        run active). Under the run lock, so it cannot interleave a tick or a cancel; the
+        run then advances (a run held on "budget" resumes)."""
+        try:
+            new = float(budget_usd)
+        except (TypeError, ValueError):
+            raise ValueError("the budget must be a number") from None
+        if not BUDGET_MIN <= new <= BUDGET_MAX:
+            raise ValueError("the budget must be between 0.01 and 10000")
+
+        async def fn(pre):
+            async with SessionLocal() as s:
+                run = await s.get(WorkflowRun, run_id)
+                if run is None:
+                    raise ValueError("run not found")
+                if run.status not in ACTIVE_RUN:
+                    raise ValueError("the run is not active")
+                spent = await _spent(s, run)
+                if not new > spent:
+                    raise ValueError(f"the budget must be more than the ${spent:.2f} already spent")
+                run.budget_usd = new
+                runlog.append(run, f"Budget raised to ${new:.2f} by {_user_name(user)}")
+                await s.commit()
+
+        await self._locked(run_id, fn)
+        await self._advance(run_id)
 
     async def allow_gate(self, run_id: str, i: int, user) -> None:
         """Allow this hand-out's guard-flagged commands to run ("Allow and run")."""
@@ -760,7 +865,7 @@ class WorkflowRunner:
             st = get_state(run, i)
             status = st.get("status")
 
-            if status == "held":
+            if status in ("held", "budget"):
                 return await self._start_and_commit(s, run, i, pre)
 
             if kind == "gate":
@@ -812,7 +917,13 @@ class WorkflowRunner:
             if not tasks:
                 return None
             statuses = [t.status for t in tasks]
-            if any(x in (Status.FAILED, Status.CANCELLED) for x in statuses):
+            bad = any(x in (Status.FAILED, Status.CANCELLED) for x in statuses)
+            if bad and self._auto_retry_due(run, i, st, statuses):
+                if not any(x in Status.ACTIVE for x in statuses):
+                    _new_attempt(run, i, auto=True)
+                    return await self._start_and_commit(s, run, i, pre)
+                bad = False  # wait for the siblings to end, then retry
+            if bad:
                 run.status = RUN_FAILED
                 if status != "failed":
                     n = sum(1 for x in statuses if x in (Status.FAILED, Status.CANCELLED))
@@ -843,6 +954,15 @@ class WorkflowRunner:
                 run.status = RUN_RUNNING
                 await s.commit()
             return None
+
+    @staticmethod
+    def _auto_retry_due(run, i: int, st: dict, statuses: list) -> bool:
+        """An agent stage with auto_retry that has not used it yet, whose current attempt has
+        a failed task (an "outputs invalid" one included) and no cancelled one."""
+        stage = run.stages[i] if 0 <= i < len(run.stages or []) else None
+        return (isinstance(stage, dict) and stage.get("auto_retry") is True
+                and not st.get("auto_retried") and st.get("status") != "failed"
+                and Status.FAILED in statuses and Status.CANCELLED not in statuses)
 
     async def _start_and_commit(self, s, run, i: int, pre: dict) -> _Post:
         """Start stage i in this session and commit (a held stage is checked again).

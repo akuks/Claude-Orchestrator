@@ -678,6 +678,12 @@ class WorkflowRunOut(WorkflowRunSummaryOut):
         return ({} if info.field_name == "stage_state" else []) if v is None else v
 
 
+class BudgetRaise(BaseModel):
+    """POST /workflows/runs/{id}/budget: the new cap (must also be more than spent)."""
+
+    budget_usd: float = Field(ge=0.01, le=10000, strict=True)
+
+
 class StageReject(BaseModel):
     reason: str
 

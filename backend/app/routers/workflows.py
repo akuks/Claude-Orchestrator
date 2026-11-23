@@ -24,6 +24,7 @@ from ..redaction import clean_text
 from .. import workflow_templates as wft
 from ..workflow_runner import ACTIVE_RUN, gate_status_text
 from ..schemas import (
+    BudgetRaise,
     LiveItemOut,
     LiveStageOut,
     StageReject,
@@ -645,6 +646,7 @@ async def get_run(run_id: str, request: Request):
         "gate_runs": gate_runs,
         "live": live,
         "totals": tot,
+        "budget": {"spent": tot["cost_usd"], "budget_usd": run_out.budget_usd},
         "log": out["log"],
     }
 
@@ -713,6 +715,19 @@ async def allow_gate(run_id: str, i: int, request: Request):
             raise HTTPException(403, "Insufficient role")
     try:
         await request.app.state.workflow_runner.allow_gate(run_id, i, p.user)
+    except ValueError as e:
+        raise HTTPException(409, str(e)) from None
+    return await _run_after(run_id)
+
+
+@router.post("/runs/{run_id}/budget", response_model=WorkflowRunSummaryOut)
+async def raise_budget(run_id: str, payload: BudgetRaise, request: Request):
+    """Raise the run's budget cap (must be more than spent); a run held on its budget resumes."""
+    p = request.state.principal
+    async with SessionLocal() as s:
+        await _require_run(s, p, run_id, manage=True)
+    try:
+        await request.app.state.workflow_runner.raise_budget(run_id, payload.budget_usd, p.user)
     except ValueError as e:
         raise HTTPException(409, str(e)) from None
     return await _run_after(run_id)
