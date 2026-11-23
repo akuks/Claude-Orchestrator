@@ -31,7 +31,7 @@ from .database import SessionLocal
 from .events import broker
 from .gates import test_results
 from .gates.testcmd import looks_like_test
-from .launch import store as launch_store
+from .launch import critical, store as launch_store
 from .guard import co_hook as guard_co_hook
 from .guard import grants as guard_grants
 from .guard import policy_inputs
@@ -805,6 +805,7 @@ class WorkerManager:
 
         if task_id in self._cancelled:
             self._cancelled.discard(task_id)
+            await self._emit_critical_paths(task_id, ctx, emit)
             await emit("completed", {"status": Status.CANCELLED})
             await self._finish(task_id, Status.CANCELLED, exit_code=exit_code)
             return
@@ -840,6 +841,7 @@ class WorkerManager:
             return
 
         status = Status.FAILED if failed else Status.COMPLETED
+        await self._emit_critical_paths(task_id, ctx, emit)
         await emit(
             "completed",
             {
@@ -1473,6 +1475,7 @@ class WorkerManager:
                     if usage is not None and not obj.get("parent_tool_use_id") and block.get("id"):
                         usage.on_tool_use_main(str(block["id"]), str(name or ""), block.get("input") or {})
                     self._remember_test_call(ctx, name, block)
+                    self._remember_edit(ctx, name, block, obj)
                     await emit("tool_use", {"name": name, "input": block.get("input"),
                                             "id": block.get("id"), "parent": obj.get("parent_tool_use_id") or None})
                     if name and name.startswith("mcp__"):
@@ -1513,6 +1516,47 @@ class WorkerManager:
             result["output_tokens"] = usage.get("output_tokens")
         if etype in ("assistant", "user") and ctx.get("usage") is not None:
             await self._usage_tick(ctx)
+
+    # ---- critical-path warning (phase 5b, F64) -----------------------------------
+
+    EDIT_CALLS_MAX = 500
+
+    @staticmethod
+    def _remember_edit(ctx, name, block, obj) -> None:
+        """Remember the file-edit tool calls (<= 500; only name and the target paths are kept)."""
+        try:
+            if name not in critical.EDIT_TOOLS or not isinstance(block.get("input"), dict):
+                return
+            calls = ctx.setdefault("edit_calls", [])
+            if len(calls) < WorkerManager.EDIT_CALLS_MAX:
+                inp = block["input"]
+                calls.append({"name": name, "input": {k: inp[k] for k in ("file_path", "notebook_path") if k in inp}})
+        except Exception:  # noqa: BLE001
+            log.debug("edit call note failed", exc_info=True)
+
+    @staticmethod
+    async def _emit_critical_paths(task_id: str, ctx, emit) -> None:
+        """One ``critical_paths`` event when the run changed files matching its project's critical globs.
+        Called before the final ``completed`` event. Never raises, never fails the task."""
+        try:
+            calls = ctx.get("edit_calls")
+            if not calls:
+                return
+            async with SessionLocal() as s:
+                task = await s.get(Task, task_id)
+                pid = await effective_project_id(s, task) if task is not None else None
+                project = await s.get(Project, pid) if pid else None
+                row = await launch_store.get_or_none(s, pid) if project is not None else None
+                globs = list(row.critical_paths or []) if row is not None else []
+                directory = project.directory if project is not None else None
+            if not globs or not directory:
+                return
+            paths, hit_globs = critical.hits(
+                await asyncio.to_thread(critical.changed_paths, calls, directory), globs)
+            if paths:
+                await emit("critical_paths", {"paths": paths[:critical.MAX_PATHS], "globs": hit_globs})
+        except Exception:  # noqa: BLE001 - a warning chip never breaks a run
+            log.debug("critical path check failed", exc_info=True)
 
     # ---- test-result chip (F116b) ------------------------------------------------
 

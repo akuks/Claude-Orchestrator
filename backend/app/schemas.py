@@ -114,6 +114,11 @@ class QuestionAnswer(BaseModel):
     suggest_decision: bool = False
 
 
+class QuestionLaunchItem(BaseModel):
+    number: int
+    title: str
+
+
 class QuestionOut(BaseModel):
     id: str
     task_id: str
@@ -133,6 +138,7 @@ class QuestionOut(BaseModel):
     created_at: datetime
     task_title: Optional[str] = None
     can_answer: bool = False
+    launch_item: Optional[QuestionLaunchItem] = None
 
     model_config = {"from_attributes": True}
 

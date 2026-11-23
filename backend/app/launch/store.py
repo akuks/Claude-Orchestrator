@@ -55,3 +55,32 @@ async def mark_started_for_task(s, task) -> None:
     now = _now()
     await s.execute(update(LaunchItem).where(LaunchItem.id == item_id, LaunchItem.status == "open").values(
         status="started", started_at=now, version=LaunchItem.version + 1))
+
+
+MATCH_MIN = 3
+
+
+async def blocked_items(s, questions) -> dict[str, dict]:
+    """``{question id: {number, title}}`` for the open questions whose ``question`` or ``blocks`` text names an
+    open launch item (case-insensitive substring, title >= 3 chars) of the question's project. One query
+    for all projects involved; the lowest item number wins."""
+    pids = {q.project_id for q in questions if q.project_id and q.status == "open"}
+    if not pids:
+        return {}
+    rows = (await s.execute(select(LaunchItem).where(LaunchItem.project_id.in_(pids), LaunchItem.status == "open")
+                            .order_by(LaunchItem.number))).scalars().all()
+    by_project: dict[str, list] = {}
+    for i in rows:
+        title = i.title.strip()
+        if len(title) >= MATCH_MIN:
+            by_project.setdefault(i.project_id, []).append((i.number, title, title.casefold()))
+    out: dict[str, dict] = {}
+    for q in questions:
+        if q.status != "open" or q.project_id not in by_project:
+            continue
+        text = f"{q.question or ''}\n{q.blocks or ''}".casefold()
+        for number, title, key in by_project[q.project_id]:
+            if key in text:
+                out[q.id] = {"number": number, "title": title}
+                break
+    return out
