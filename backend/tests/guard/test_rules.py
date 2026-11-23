@@ -3661,3 +3661,37 @@ def test_mcp_defaults(env, tools, defaults, name, decision):
     if defaults is not None:
         pol["mcp_defaults"] = defaults
     assert evaluate(name, {}, pol, str(env.P)).decision == decision
+
+
+# ---- brief CANNOT folders (phase 4c): readonly roots with source "brief" ----------------------------------
+
+BRIEF_DENIED = ["echo x > migrations/a.sql", "sed -i s/a/b/ migrations/a.sql", "rm -rf migrations",
+                "cp a.sql migrations/", "cd migrations && touch b"]
+BRIEF_FREE = ["pytest", "npm test", "echo x > out.txt"]
+
+
+@pytest.fixture
+def briefed(env):
+    (env.P / "migrations").mkdir()
+    env.policy["readonly_paths"] = [{"path": str(env.P / "migrations"), "source": "brief",
+                                     "reason": "the task's brief says CANNOT change migrations/**"}]
+    return env
+
+
+@pytest.mark.parametrize("cmd", BRIEF_DENIED)
+def test_brief_cannot_folder_denies_shell_writes(briefed, cmd):
+    v = evaluate("Bash", {"command": cmd}, briefed.policy, str(briefed.P))
+    assert v.decision == "deny" and "readonly-source" in hard_ids(v), v
+    assert any("the task's brief says CANNOT change migrations/**" in h.reason for h in v.hits)
+
+
+@pytest.mark.parametrize("cmd", BRIEF_FREE)
+def test_brief_cannot_folder_leaves_other_commands(briefed, cmd):
+    v = evaluate("Bash", {"command": cmd}, briefed.policy, str(briefed.P))
+    assert "readonly-source" not in ids(v)
+
+
+def test_readonly_unknown_source_is_unparseable(briefed):
+    briefed.policy["readonly_paths"][0]["source"] = "other"
+    v = evaluate("Bash", {"command": "pytest"}, briefed.policy, str(briefed.P))
+    assert v.decision == "deny" and "unparseable" in hard_ids(v), v
