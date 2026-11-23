@@ -3,6 +3,8 @@
 import asyncio
 import pathlib
 import uuid
+
+import pytest
 from datetime import datetime, timezone
 
 from sqlalchemy import select
@@ -93,6 +95,15 @@ class FakeRunner:
         self.calls.append(("allow", run_id, i))
         if self.err:
             raise ValueError(self.err)
+
+
+@pytest.fixture(autouse=True)
+def _quiet_runner(client, monkeypatch):
+    """Stop the app's background tick before a test creates its fake runs, so it never advances them."""
+    async def _no_tick():
+        return None
+
+    monkeypatch.setattr(app.state.workflow_runner, "_tick", _no_tick)
 
 
 def _patch(monkeypatch, **kw):
