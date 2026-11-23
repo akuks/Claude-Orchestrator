@@ -872,7 +872,8 @@ The tab lists the newest 100.
 - **Agents.** The run's agent is told, in the decision index, how to file a
   suggestion (`POST /tasks/{id}/decision-proposals` with its own token); at most
   **3 per task**.
-- **People.** *Suggest* on the Decisions tab, or the same route as a task manager.
+- **People.** `POST /projects/{id}/decisions/proposals` (there is no button on the Decisions tab yet), or
+  the task route above as a task manager.
 
 A suggestion is a `decision`, `rule` or `lesson` (not `reference`) with the same
 text rules as a decision; a person or agent filing one with invalid touches
@@ -881,20 +882,22 @@ defensively; a reply that is not the expected shape adds nothing.
 
 **Maybe out of date.** After the same run, active decisions whose *touches*
 match a file the commits changed are flagged with a reason (*path changed in
-abc123 (task title)*), shown on the Decisions tab and in Health. Rules: only a
+abc123 (task title)*), shown as a "May be out of date" tag with the reason on the decision's row. Rules: only a
 decision last verified more than **14 days** ago; not re-flagged within **1 day**;
 at most **2 per commit** and **6 per run**. **Still valid** (verify) clears the
 flag. Flagging changes neither the version nor the edited time.
 
 **Conditions.** The automatic parts (run, close) need all of: an *own*
 project, the `decisions` ground-rules switch on, `CO_PROPOSALS_ENABLED`, and a
-Claude credential for the run's owner (or, at close, the person closing); with
-none, the model call is skipped silently. Stale flags need no credential. They
+Claude credential for the run's owner (or, at close, the person closing). A missing
+credential skips only the model call (stale flags still run); missing own trust, the
+`decisions` switch or `CO_PROPOSALS_ENABLED` skips the automatic parts entirely. They
 run in the background and never fail the run or the close.
 
 **Caps.** At most **50 pending** suggestions per project
 (`CO_PROPOSALS_PENDING_CAP`): automatic ones are dropped when full, a person or
-agent gets 429. Identical suggestions are not added twice.
+agent gets 429. A run's commits, a thread's lessons and an answer are each suggested
+once (people's and agents' suggestions are not de-duplicated).
 
 | Setting | Default |
 |---|---|
