@@ -22,6 +22,18 @@ from app.main import app
 from app.models import Task, TaskEvent, TaskHandoff
 from conftest import login_as, wait_task
 
+
+@pytest.fixture(autouse=True)
+def _no_lessons_job(monkeypatch):
+    """Closing a handoff starts a background lessons job (own tests in test_proposals_lessons); on SQLite its
+    reads would race the next write of these tests."""
+    from app.decisions import after_run
+
+    async def noop(root_id, closer_id):
+        return None
+
+    monkeypatch.setattr(after_run, "lessons_after_close", noop)
+
 POLICY = {"project_dir": "/work/proj", "home": "/home/someone"}
 
 

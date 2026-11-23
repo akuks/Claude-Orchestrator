@@ -465,3 +465,78 @@ def test_questions_rule_in_main_text_only_when_on():
         assert gr.QUESTIONS_RULE not in gr.helper_text(gr.DEFAULTS, external)
     assert "questions" in gr.included(gr.DEFAULTS)
     assert "/tasks/$CO_TASK_ID/questions" in gr.QUESTIONS_RULE
+
+
+# ---- phase 4b: the answer as a suggested decision ----------------------------------------------
+
+
+def _proposals(project_id):
+    from app.models import DecisionProposal
+
+    async def go():
+        async with SessionLocal() as s:
+            return (await s.execute(select(DecisionProposal).where(DecisionProposal.project_id == project_id)
+                                    )).scalars().all()
+
+    return _run(go())
+
+
+def _project_task(client, admin_id):
+    proj = client.post("/projects", json={"name": f"sg-{uuid.uuid4().hex[:6]}"}).json()
+    return proj, _task(admin_id, project_id=proj["id"])
+
+
+def test_answer_suggests_decision(client, admin_id, submitted):
+    proj, tid = _project_task(client, admin_id)
+    qid = client.post(f"/tasks/{tid}/questions", json=Q).json()["id"]
+    r = client.post(f"/questions/{qid}/answer", json={"answer": "SQLite, it is a prototype",
+                                                      "suggest_decision": True})
+    assert r.status_code == 201, r.text
+    assert r.json()["suggestion"] == "added"
+    rows = _proposals(proj["id"])
+    assert len(rows) == 1 and rows[0].status == "pending" and rows[0].source == "answer"
+    assert rows[0].title == " ".join(Q["question"].split())[:200]
+    assert rows[0].why.startswith("Answer: ") and rows[0].evidence == f"question {qid}"
+    assert rows[0].proposed_by == admin_id and rows[0].task_id == tid
+
+
+def test_answer_suggestion_skipped_never_blocks(client, admin_id, submitted, monkeypatch):
+    from app.config import settings
+
+    # the queue is full
+    proj, tid = _project_task(client, admin_id)
+    qid = client.post(f"/tasks/{tid}/questions", json=Q).json()["id"]
+    monkeypatch.setattr(settings, "proposals_pending_cap", 0)
+    r = client.post(f"/questions/{qid}/answer", json={"answer": "yes", "suggest_decision": True})
+    assert r.status_code == 201 and r.json()["suggestion"] == "skipped: the suggestion queue is full"
+    assert r.json()["task"]["id"]
+    monkeypatch.setattr(settings, "proposals_pending_cap", 50)
+
+    # a question of only zero-width characters (stored directly)
+    proj, tid = _project_task(client, admin_id)
+    qid = client.post(f"/tasks/{tid}/questions", json=Q).json()["id"]
+
+    async def blank():
+        async with SessionLocal() as s:
+            (await s.get(TaskQuestion, qid)).question = "​​"
+            await s.commit()
+
+    _run(blank())
+    r = client.post(f"/questions/{qid}/answer", json={"answer": "yes", "suggest_decision": True})
+    assert r.status_code == 201 and r.json()["suggestion"].startswith("skipped: ")
+    assert r.json()["task"]["id"] and _proposals(proj["id"]) == []
+
+    # a task without a project
+    tid = _task(admin_id)
+    qid = client.post(f"/tasks/{tid}/questions", json=Q).json()["id"]
+    r = client.post(f"/questions/{qid}/answer", json={"answer": "yes", "suggest_decision": True})
+    assert r.status_code == 201 and r.json()["suggestion"] == "skipped: the task has no project"
+    assert r.json()["task"]["id"]
+
+
+def test_answer_without_flag_has_null_suggestion(client, admin_id, submitted):
+    proj, tid = _project_task(client, admin_id)
+    qid = client.post(f"/tasks/{tid}/questions", json=Q).json()["id"]
+    r = client.post(f"/questions/{qid}/answer", json={"answer": "yes"})
+    assert r.status_code == 201 and r.json()["suggestion"] is None
+    assert _proposals(proj["id"]) == []

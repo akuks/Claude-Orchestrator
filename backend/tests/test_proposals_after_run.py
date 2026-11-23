@@ -227,6 +227,9 @@ def test_parse_items():
     many = p(json.dumps([{"title": "A", "why": "w", "touches": [f"src/f{i}.py" for i in range(25)]}]), limit=2)
     assert len(many[0]["touches"]) <= 20
     assert p("not json", limit=2) == []
+    assert p('see [1] and [{"title":"A","why":"w"}]', limit=2)[0]["title"] == "A"
+    assert p("[1, 2] only", limit=2) == []
+    assert p("[" * 50000 + '[{"title":"A","why":"w"}]', limit=2) == []
     assert p(json.dumps([{"title": "A", "why": "w", "kind": "reference"}]), limit=2) == []
     assert p(json.dumps([{"title": "A", "why": "w"}]), limit=2)[0]["kind"] == "decision"
     assert p(json.dumps(["str", 3, {"title": "A", "why": "w"}]), limit=2)[0]["title"] == "A"
@@ -369,3 +372,82 @@ def test_no_event_when_nothing(client, repo, model):
     rec = _Rec()
     _after(tid, rec)
     assert rec.events == [] and model["calls"] == []
+
+
+def _switch_off(monkeypatch):
+    async def off(s):
+        return {"ground_rules": {"decisions": False}}
+
+    monkeypatch.setattr(after_run.policy_store, "org_settings", off)
+
+
+@pytest.mark.parametrize("how", ["switch", "trust", "enabled"])
+def test_after_task_disabled_no_call(client, repo, model, monkeypatch, how):
+    start = _commit(repo, "a.txt", "base")
+    _commit(repo, "src/a.py", "feat: add cache")
+    pid, tid = _task_for(repo, start, str(repo))
+    if how == "switch":
+        _switch_off(monkeypatch)
+    elif how == "enabled":
+        monkeypatch.setattr(settings, "proposals_enabled", False)
+    else:
+        async def go():
+            async with SessionLocal() as s:
+                (await s.get(Project, pid)).trust = "external"
+                await s.commit()
+
+        _run(go())
+    rec = _Rec()
+    _after(tid, rec)
+    assert model["calls"] == [] and _rows(pid) == [] and rec.events == []
+
+
+def test_after_task_cap_full_drops(client, repo, model, monkeypatch):
+    start = _commit(repo, "a.txt", "base")
+    _commit(repo, "src/a.py", "feat: add cache")
+    pid, tid = _task_for(repo, start, str(repo))
+    monkeypatch.setattr(settings, "proposals_pending_cap", 0)
+    rec = _Rec()
+    _after(tid, rec)
+    assert _rows(pid) == [] and rec.events == []
+
+
+def test_after_task_cap_filled_by_reply(client, repo, model, monkeypatch):
+    start = _commit(repo, "a.txt", "base")
+    _commit(repo, "src/a.py", "feat: add cache")
+    pid, tid = _task_for(repo, start, str(repo))
+    orig = proposals.pending_count
+    n = {"i": 0}
+
+    async def counted(s, p):  # not full when the job checks, full when the rows are added
+        n["i"] += 1
+        return 0 if n["i"] == 1 else settings.proposals_pending_cap
+
+    monkeypatch.setattr(proposals, "pending_count", counted)
+    _after(tid, _Rec())
+    monkeypatch.setattr(proposals, "pending_count", orig)
+    assert len(model["calls"]) == 1 and _rows(pid) == []
+
+
+def test_after_task_redacts_secret(client, repo, model):
+    start = _commit(repo, "a.txt", "base")
+    _commit(repo, "src/a.py", "feat: add cache")
+    pid, tid = _task_for(repo, start, str(repo))
+    model["env"] = {"A": "b", "API_TOKEN": "supersecretvalue123"}
+    model["reply"] = json.dumps([{"title": "Use key supersecretvalue123 here", "why": "token supersecretvalue123 ok"}])
+    _after(tid, _Rec())
+    rows = _rows(pid)
+    assert len(rows) == 1
+    assert "supersecretvalue123" not in rows[0].title + rows[0].why
+
+
+def test_after_task_emit_raising_keeps_rows(client, repo, model):
+    start = _commit(repo, "a.txt", "base")
+    _commit(repo, "src/a.py", "feat: add cache")
+    pid, tid = _task_for(repo, start, str(repo))
+
+    async def bad(*a, **k):
+        raise RuntimeError("emit failed")
+
+    _after(tid, bad)
+    assert len(_rows(pid)) == 1

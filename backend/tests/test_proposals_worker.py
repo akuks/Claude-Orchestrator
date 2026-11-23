@@ -34,7 +34,7 @@ def test_worker_starts_after_task(client, monkeypatch):
     assert done["status"] == "completed", done.get("error")
     _wait_calls(calls, 1)
     assert len(calls) == 1 and calls[0][0] == done["id"] and callable(calls[0][2])
-    assert calls[0][1] == done.get("owner_id", calls[0][1])
+    assert done["created_by"] and calls[0][1] == done["created_by"]
 
 
 def test_worker_skips_after_task_on_failure(client, monkeypatch):
