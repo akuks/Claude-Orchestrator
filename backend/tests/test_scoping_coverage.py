@@ -40,6 +40,8 @@ NOT_PROJECT_BOUND = {
     ("GET", "/templates/presets"): "built-in static presets, no stored data",
     ("GET", "/workflows/presets"): "built-in static presets, no stored data",
     ("GET", "/skills/presets"): "built-in static presets, no stored data",
+    ("POST", "/skills/lint"): "pure text lint of the posted body, reads and stores nothing",
+    ("GET", "/skills/template"): "built-in static skill template, no stored data",
     # Directory-style reads that never carry project data.
     ("GET", "/teams"): "team names/members are visible to everyone by spec; teams hold no project data",
     ("GET", "/users/directory"): "id/name/email of active users for the Members picker, by spec",
