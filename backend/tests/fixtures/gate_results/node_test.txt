@@ -1,0 +1,17 @@
+✔ adds (0.4ms)
+✖ divides by zero (1.5ms)
+✖ keeps order (2.0ms)
+﹣ later (0.1ms) # not ready
+ℹ tests 5
+ℹ pass 1
+ℹ fail 2
+ℹ cancelled 1
+ℹ skipped 0
+ℹ todo 1
+
+✖ failing tests:
+
+✖ divides by zero (1.5ms)
+  AssertionError: expected 1 to equal 2
+✖ keeps order (2.0ms)
+  AssertionError: nope

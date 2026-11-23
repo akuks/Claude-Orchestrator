@@ -1,0 +1,8 @@
+ FAIL  src/a.test.ts > suite > divides
+AssertionError: x
+ FAIL  src/a.test.ts > suite > orders
+ ❯ src/a.test.ts (3 tests | 2 failed) 9ms
+   × divides 12ms
+
+ FAIL  src/a.test.ts > suite > divides
+      Tests  2 failed | 10 passed | 1 skipped (13)

@@ -1,0 +1,15 @@
+  suite
+    ✓ adds
+    1) divides
+    2) orders
+
+  8 passing (2s)
+  2 failing
+
+  1) suite
+       divides:
+     AssertionError: x
+
+  2) other thing
+
+     AssertionError: y

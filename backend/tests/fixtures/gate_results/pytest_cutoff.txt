@@ -1,0 +1,4 @@
+collected 63 items
+
+tests/test_a.py ..F.s    [ 45%]
+tests/test_b.py ...E
