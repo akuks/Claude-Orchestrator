@@ -426,6 +426,10 @@ async def _spawn(s, approvals: list[ActionApproval], root: Task, decider_id) -> 
         model=parent.model,
         max_turns=parent.max_turns,
         max_budget_usd=parent.max_budget_usd,  # a thread step keeps the budget cut and bands
+        read_only=parent.read_only,
+        system_prompt=parent.system_prompt,
+        brief=parent.brief,
+        brief_bounds=parent.brief_bounds,
         parent_task_id=parent.id,
         origin="guard",
         root_id=root.id,

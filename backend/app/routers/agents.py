@@ -18,7 +18,7 @@ from ..schemas import (
     TaskOut,
 )
 from ..models import Task
-from ..task_service import build_task
+from ..task_service import brief_422, build_task
 
 router = APIRouter(prefix="/agents", tags=["agents"])
 
@@ -413,25 +413,27 @@ async def run_agent(agent_id: str, payload: AgentRun, request: Request):
         project_id = payload.project_id or agent.project_id
         await require_project_role(s, request.state.principal, project_id)
         await _require_parent(s, request, payload.parent_task_id)
-        task = await build_task(
-            s,
-            prompt=prompt,
-            title=f"{agent.name}: {prompt.splitlines()[0][:60]}",
-            project_id=project_id,
-            model=await tiers.agent_model(s, agent),
-            max_turns=agent.max_turns,
-            max_budget_usd=agent.max_budget_usd,
-            priority=agent.priority,
-            tags=(agent.tags or []) + ["agent"],
-            agent_id=agent.id,
-            system_prompt=agent.system_prompt or None,
-            requires_approval=agent.requires_approval,
-            allow_remote=agent.allow_remote,
-            read_only=agent.read_only,
-            input_files=[f.model_dump() for f in payload.input_files],
-            parent_task_id=payload.parent_task_id,
-            created_by=await _creator(s, request, payload.parent_task_id),
-        )
+        with brief_422():
+            task = await build_task(
+                s,
+                prompt=prompt,
+                title=f"{agent.name}: {prompt.splitlines()[0][:60]}",
+                project_id=project_id,
+                model=await tiers.agent_model(s, agent),
+                max_turns=agent.max_turns,
+                max_budget_usd=agent.max_budget_usd,
+                priority=agent.priority,
+                tags=(agent.tags or []) + ["agent"],
+                agent_id=agent.id,
+                system_prompt=agent.system_prompt or None,
+                requires_approval=agent.requires_approval,
+                allow_remote=agent.allow_remote,
+                read_only=agent.read_only,
+                input_files=[f.model_dump() for f in payload.input_files],
+                parent_task_id=payload.parent_task_id,
+                created_by=await _creator(s, request, payload.parent_task_id),
+                brief=payload.brief,
+            )
         await s.commit()
         await s.refresh(task)
         out = TaskOut.model_validate(task)
@@ -485,24 +487,26 @@ async def dispatch(payload: DispatchRequest, request: Request):
             await _require_dispatch_target(s, p, pid)
         outs = []
         for item, agent, project_id in targets:
-            task = await build_task(
-                s,
-                prompt=item.prompt,
-                title=f"{agent.name}: {item.prompt.splitlines()[0][:60]}",
-                project_id=project_id,
-                model=await tiers.agent_model(s, agent),
-                max_turns=agent.max_turns,
-                max_budget_usd=agent.max_budget_usd,
-                priority=agent.priority,
-                tags=(agent.tags or []) + ["agent", "delegated"],
-                agent_id=agent.id,
-                system_prompt=agent.system_prompt or None,
-                requires_approval=agent.requires_approval,
-                allow_remote=agent.allow_remote,
-                read_only=agent.read_only,
-                parent_task_id=payload.parent_task_id,
-                created_by=creator,
-            )
+            with brief_422():
+                task = await build_task(
+                    s,
+                    prompt=item.prompt,
+                    title=f"{agent.name}: {item.prompt.splitlines()[0][:60]}",
+                    project_id=project_id,
+                    model=await tiers.agent_model(s, agent),
+                    max_turns=agent.max_turns,
+                    max_budget_usd=agent.max_budget_usd,
+                    priority=agent.priority,
+                    tags=(agent.tags or []) + ["agent", "delegated"],
+                    agent_id=agent.id,
+                    system_prompt=agent.system_prompt or None,
+                    requires_approval=agent.requires_approval,
+                    allow_remote=agent.allow_remote,
+                    read_only=agent.read_only,
+                    parent_task_id=payload.parent_task_id,
+                    created_by=creator,
+                    brief=item.brief,
+                )
             outs.append(task)
         await s.commit()
         for t in outs:

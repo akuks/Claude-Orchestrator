@@ -113,6 +113,7 @@ async def _start_stage(s, run: WorkflowRun, stage_index: int, worker) -> list[st
             system_prompt=agent.system_prompt or None,
             requires_approval=agent.requires_approval,
             allow_remote=agent.allow_remote,
+            read_only=agent.read_only,
             workflow_run_id=run.id,
             stage_index=stage_index,
             created_by=run.created_by,

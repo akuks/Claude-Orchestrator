@@ -49,22 +49,31 @@ def _rel_path(raw: str, what: str) -> str:
     return out
 
 
-def _touches(value) -> list[str]:
+def path_list(value, what: str, max_items: int, *, max_wildcards: int | None = None) -> list[str]:
+    """A list of relative in-project paths or globs (``what`` is "a <name> entry"), normalised and
+    deduplicated. Raises ValueError with a plain reason."""
+    name = what.removeprefix("a ").removesuffix(" entry")
     if not isinstance(value, (list, tuple)):
-        raise ValueError("touches must be a list of paths")
-    if len(value) > MAX_TOUCHES:
-        raise ValueError(f"touches may have at most {MAX_TOUCHES} entries")
+        raise ValueError(f"{name} must be a list of paths")
+    if len(value) > max_items:
+        raise ValueError(f"{name} may have at most {max_items} entries")
     out: list[str] = []
     for item in value:
         if not isinstance(item, str):
-            raise ValueError("touches entries must be text")
+            raise ValueError(f"{name} entries must be text")
         item = redact(clean_text(item), []).strip()
         if len(item) > MAX_TOUCH:
-            raise ValueError(f"a touches entry may be at most {MAX_TOUCH} characters")
-        norm = _rel_path(item, "a touches entry")
+            raise ValueError(f"{what} may be at most {MAX_TOUCH} characters")
+        norm = _rel_path(item, what)
+        if max_wildcards is not None and norm.count("*") + norm.count("?") > max_wildcards:
+            raise ValueError(f"{what} may have at most {max_wildcards} wildcards")
         if norm not in out:
             out.append(norm)
     return out
+
+
+def _touches(value) -> list[str]:
+    return path_list(value, "a touches entry", MAX_TOUCHES)
 
 
 def clean_fields(data: dict, *, partial: bool) -> dict:
