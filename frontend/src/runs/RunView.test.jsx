@@ -398,6 +398,25 @@ describe('RunView: hand-overs, fixes and the spending limit', () => {
     expect(c.querySelector('[data-testid="task-detail-stub"]').textContent).toBe('fx')
   })
 
+  it('a passed check keeps its fix attempts reachable, earlier attempts included', async () => {
+    api.getWorkflowRun.mockImplementation(async () => ({
+      run: run({ current_stage: 1, stages: [{ name: 'Plan', items: [] }, { name: 'Tests', kind: 'gate', run: ['pytest -q'], project: 'p1', fix: { agent: 'ag1', rounds: 2 } }] }),
+      tasks: [
+        t('a', 0, 'completed'),
+        t('old', 1, 'failed', { stage_attempt: 0, title: '[Tests] Fixer: fix round 1' }),
+        t('fx', 1, 'completed', { stage_attempt: 1, title: '[Tests] Fixer: fix round 1' }),
+      ],
+      stage_state: { 1: { status: 'passed', fix_round: 1, fix_task: 'fx', attempt: 1 } },
+      gate_runs: [],
+    }))
+    const c = await mount()
+    const rows = [...c.querySelectorAll('[data-testid="gate-fix-attempt"]')]
+    expect(rows.length).toBe(2)
+    expect(c.querySelector('[data-testid="task-detail-stub"]')).toBeNull()
+    await act(async () => rows[0].querySelector('[data-testid="gate-fix-attempt-open"]').click())
+    expect(c.querySelector('[data-testid="task-detail-stub"]').textContent).toBe('old')
+  })
+
   it('shows the spending in the header', async () => {
     api.getWorkflowRun.mockImplementation(async () => ({ run: run(), tasks: [t('c', 1, 'running')], budget: { spent: 0.5, budget_usd: 2 } }))
     const c = await mount()

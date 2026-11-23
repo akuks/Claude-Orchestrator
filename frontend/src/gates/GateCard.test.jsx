@@ -126,4 +126,27 @@ describe('GateCard', () => {
     expect(c.querySelector('[data-testid="gate-lead"]').textContent).toBe('The check failed. An agent is fixing it (try 1 of 1).')
     expect(c.querySelector('[data-testid="gate-fix-task"]')).toBeNull()
   })
+  it('keeps the fix attempts listed after the check passes', async () => {
+    const onOpenTask = vi.fn()
+    const c = await mount({
+      state: { status: 'passed', fix_round: 2, fix_task: 'f2' },
+      gateRuns: [row({ outcome: 'passed', exit_code: 0, failed: 0, failing: [] })],
+      tasks: [
+        { id: 'f1', stage_index: 1, status: 'failed', title: '[Tests] Fixer: fix round 1' },
+        { id: 'f2', stage_index: 1, status: 'completed', title: '[Tests] Fixer: fix round 2' },
+        { id: 'other', stage_index: 0, status: 'completed', title: '[Plan] A: plan' },
+      ],
+      onOpenTask,
+    })
+    const rows = [...c.querySelectorAll('[data-testid="gate-fix-attempt"]')]
+    expect(c.querySelector('[data-testid="gate-fix-attempts"]').textContent).toContain('Fix attempts')
+    expect(rows.map((r) => r.textContent)).toEqual(['Try 1 Did not finishOpen', 'Try 2 DoneOpen'])
+    expect(c.querySelector('[data-testid="gate-fix-task"]')).toBeNull()
+    await act(async () => rows[0].querySelector('[data-testid="gate-fix-attempt-open"]').click())
+    expect(onOpenTask).toHaveBeenCalledWith('f1')
+  })
+  it('no fix attempts list without fix tasks', async () => {
+    const c = await mount({ state: { status: 'passed' }, tasks: [] })
+    expect(c.querySelector('[data-testid="gate-fix-attempts"]')).toBeNull()
+  })
 })

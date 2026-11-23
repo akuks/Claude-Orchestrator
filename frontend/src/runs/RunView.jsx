@@ -503,7 +503,7 @@ export default function RunView({ id, user, projects = [], navigate, onOpenCrede
                 gateRuns={data?.gate_runs || []}
                 canAllow={canAllow}
                 onChanged={load}
-                tasks={stageTasks}
+                tasks={[...earlier, ...stageTasks]}
                 onOpenTask={setTaskId}
               />
             ) : kind === 'approval' ? (

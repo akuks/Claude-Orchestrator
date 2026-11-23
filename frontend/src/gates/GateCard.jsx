@@ -23,6 +23,26 @@ export function gateWords(stage, state, live) {
   return status.replace('_', ' ')
 }
 
+const FIX_STATUS = {
+  queued: 'Waiting to start',
+  running: 'Working on it',
+  awaiting_approval: 'Waiting for approval',
+  completed: 'Done',
+  failed: 'Did not finish',
+  cancelled: 'Cancelled',
+}
+
+// The fix tasks of a check step, oldest first, with their try number (from the
+// server's title "…: fix round k", else their position).
+export function fixAttempts(tasks = [], index) {
+  return tasks
+    .filter((t) => t.stage_index === index)
+    .map((t, i) => {
+      const m = String(t.title || '').match(/fix round (\d+)\s*$/)
+      return { task: t, k: m ? Number(m[1]) : i + 1, status: FIX_STATUS[t.status] || String(t.status || '').replace(/_/g, ' ') }
+    })
+}
+
 const plural = (n, one, many) => `${n} ${n === 1 ? one : many}`
 
 // The plain sentence a check step leads with, and its tone. `rows` are this
@@ -141,6 +161,7 @@ export default function GateCard({ runId, index, stage, state, live, gateRuns = 
   const rows = gateRuns.filter((r) => r.stage_index === index)
   const last = rows[rows.length - 1]
   const lead = gateLead(st, rows, stage)
+  const attempts = fixAttempts(tasks, index)
   const fixTask = st.status === 'fixing' && st.fix_task ? tasks.find((t) => t.id === st.fix_task) : null
   const words = gateWords(stage, st, mine)
   const showWords = words && words !== (st.status || 'waiting').replace('_', ' ')
@@ -239,6 +260,23 @@ export default function GateCard({ runId, index, stage, state, live, gateRuns = 
             )
           }
         />
+      )}
+      {attempts.length > 0 && (
+        <div className="co-gate-fixes" data-testid="gate-fix-attempts">
+          <div className="co-gate-failing-title">Fix attempts</div>
+          <ul className="co-gate-runs">
+            {attempts.map((a) => (
+              <li key={a.task.id} className="co-gate-run" data-testid="gate-fix-attempt">
+                <span>Try {a.k}</span> <Tag>{a.status}</Tag>
+                {onOpenTask && (
+                  <Button size="small" type="link" onClick={() => onOpenTask(a.task.id)} data-testid="gate-fix-attempt-open">
+                    Open
+                  </Button>
+                )}
+              </li>
+            ))}
+          </ul>
+        </div>
       )}
       {logRow && <LogToggle key={logRow.id} runId={runId} row={logRow} testid="gate-show-log" />}
       {rows.length > 0 && (

@@ -495,6 +495,22 @@ describe('TaskDetail: launch item and risk', () => {
     expect(view.container.querySelector('[data-testid="task-launch-item-error"]').textContent).toContain('must be an open or started item')
   })
 
+  it("the task's creator gets the select even without can_manage", async () => {
+    globalThis.WebSocket = FakeSocket
+    api.getTask.mockImplementation(async () => task({ can_manage: false, created_by: 'u1' }))
+    api.getLaunch.mockResolvedValue({ items })
+    api.setTaskLaunchItem.mockResolvedValue(task({ can_manage: false, created_by: 'u1', launch_item_id: 'i1' }))
+    view = await render(<TaskDetail inline taskId="a" currentUser={{ id: 'u1' }} />)
+    await flush()
+    await openSelect()
+    await pick('#1 Billing page')
+    expect(api.setTaskLaunchItem).toHaveBeenCalledWith('a', 'i1')
+    await view.unmount()
+    view = await render(<TaskDetail inline taskId="a" currentUser={{ id: 'u2' }} />)
+    await flush()
+    expect(view.container.querySelector('[data-testid="task-launch-item"]')).toBeNull()
+  })
+
   it('hidden from people who cannot change it, and for tasks without a project', async () => {
     globalThis.WebSocket = FakeSocket
     api.getTask.mockImplementationOnce(async () => task({ can_manage: false }))

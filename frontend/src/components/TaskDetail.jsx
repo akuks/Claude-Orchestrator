@@ -666,7 +666,7 @@ export default function TaskDetail({ taskId, onClose, onChanged, onOpenTask, onO
           <Descriptions.Item label="Cost">
             {task.total_cost_usd != null ? fmtCost(task.total_cost_usd) : '—'}
           </Descriptions.Item>
-          {task.project_id && task.can_manage === true && (
+          {task.project_id && (task.can_manage === true || (!!currentUser?.id && task.created_by === currentUser.id)) && (
             <Descriptions.Item label="Launch item" span={2}>
               <LaunchItemSelect
                 task={task}
