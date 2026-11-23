@@ -428,7 +428,7 @@ class WorkerManager:
                 async with s.begin_nested():
                     await launch_store.mark_started_for_task(s, task)
             except Exception:  # noqa: BLE001
-                log.debug("launch auto-start failed for task %s", task_id, exc_info=True)
+                log.warning("launch auto-start failed for task %s", task_id, exc_info=True)
             prompt = task.prompt
             model = task.model
             max_turns = task.max_turns

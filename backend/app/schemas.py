@@ -1084,12 +1084,12 @@ class LaunchFactsOut(BaseModel):
 
 
 class LaunchItemIn(BaseModel):
-    title: str
+    title: Optional[Any] = None
     section: str = "before"
 
 
 class LaunchItemPatch(BaseModel):
-    version: int
+    version: Optional[int] = None
     title: Optional[str] = None
     section: Optional[str] = None
     status: Optional[str] = None

@@ -48,11 +48,11 @@ TEMPLATES: dict[str, dict] = {
             _agent("Plan", [("Planner", "Plan this change and write the briefs. Do not implement it.\n\nWork: {{input}}")]),
             _approval("Approve plan", "Read the plan and approve it before anyone builds."),
             _agent("Build", [
-                ("Builder", _build("Implement the first half of the plan, test first.")),
-                ("Builder", _build("Implement the second half of the plan, test first.")),
+                ("Builder", _build("Implement the first half of the plan, test first.\n\nPlan:\n{{stage1}}")),
+                ("Builder", _build("Implement the second half of the plan, test first.\n\nPlan:\n{{stage1}}")),
             ]),
             _gate("Test"),
-            _agent("Review", [("Reviewer", "Review the change on this branch against the plan and rank your findings.\n\nWork: {{input}}")]),
+            _agent("Review", [("Reviewer", "Review the change on this branch against the plan and rank your findings.\n\nPlan:\n{{stage1}}\n\nWork: {{input}}")]),
             _approval("Approve release", "Check the review and approve the release."),
         ],
     },
@@ -61,7 +61,7 @@ TEMPLATES: dict[str, dict] = {
         "description": "Outline the document, write it, then review it. No tests.",
         "stages": [
             _agent("Outline", [("Planner", "Outline the document: sections and what each must say.\n\nWork: {{input}}")]),
-            _agent("Write", [("Builder", _build("Write the document from the outline."))]),
+            _agent("Write", [("Builder", _build("Write the document from the outline.\n\nOutline:\n{{prev}}"))]),
             _agent("Review", [("Reviewer", "Review the document for accuracy and clarity and rank your findings.\n\nWork: {{input}}")]),
         ],
     },
@@ -70,7 +70,7 @@ TEMPLATES: dict[str, dict] = {
         "description": "A quick experiment: build it, check that it runs, then review what was learned.",
         "stages": [
             _agent("Explore", [("Builder", _build("Build a small experiment that answers the question."))]),
-            _agent("Check", [("Checker", "Run the experiment and report what happens, facts only.\n\nWork: {{input}}")]),
+            _agent("Check", [("Checker", "Run the experiment and report what happens, facts only.\n\nExperiment:\n{{prev}}\n\nWork: {{input}}")]),
             _agent("Review", [("Reviewer", "Review what the experiment showed and what it leaves open.\n\nWork: {{input}}")]),
         ],
     },
@@ -189,7 +189,7 @@ def _list_sync(project) -> dict:
     if path is None:
         return {"files": [], "reason": reason}
     try:
-        names = sorted(n for n in os.listdir(path) if FILE_RE.match(n))
+        names = sorted(n for n in os.listdir(path) if FILE_RE.fullmatch(n))
     except OSError:
         return {"files": [], "reason": "The workflows folder cannot be read"}
     files = []
@@ -208,7 +208,7 @@ async def list_repo_files(project) -> dict:
 
 
 def _read_sync(project, name: str) -> str:
-    if not isinstance(name, str) or not FILE_RE.match(name):
+    if not isinstance(name, str) or not FILE_RE.fullmatch(name):
         raise ValueError("Not a valid workflow file name")
     path, reason = _repo_dir(project)
     if path is None:

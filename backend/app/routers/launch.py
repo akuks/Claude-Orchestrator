@@ -131,6 +131,8 @@ async def add_item(project_id: str, payload: LaunchItemIn, request: Request):
     principal = request.state.principal
     async with SessionLocal() as s:
         await require_project_role(s, principal, project_id)
+        if payload.title is None:
+            raise HTTPException(422, "title is required")
         title = _clean_title(payload.title)
         _check_section(payload.section)
         if await _title_taken(s, project_id, title):
@@ -150,7 +152,9 @@ async def patch_item(project_id: str, number: int, payload: LaunchItemPatch, req
         role = await require_project_role(s, request.state.principal, project_id)
         maintainer = role == "maintainer"
         body = payload.model_dump(exclude_unset=True)
-        version = body.pop("version")
+        version = body.pop("version", None)
+        if version is None:
+            raise HTTPException(422, "version is required")
         body = {k: v for k, v in body.items() if v is not None}
         item = await _get_item(s, project_id, number)
         values: dict = {}
