@@ -85,6 +85,9 @@
   gap: 16px;
   align-items: start;
 }
+.co-run-body-full {
+  grid-template-columns: minmax(0, 1fr);
+}
 @media (max-width: 1000px) {
   .co-run-body {
     grid-template-columns: 1fr;

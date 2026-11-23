@@ -35,7 +35,7 @@ vi.mock('../comets/Comets3D', async (importOriginal) => {
 })
 
 import { api } from '../api'
-import RunView from './RunView'
+import RunView, { totalsLine } from './RunView'
 import { canManageRun, defaultTaskFor, earlierAttemptTasks, runStages, stageState, tasksOfStage } from './runStages'
 
 const err = (status, msg = 'x') => Object.assign(new Error(msg), { status })
@@ -311,5 +311,42 @@ describe('RunView', () => {
     const outer = [...c.querySelectorAll('.co-run-tasks')].filter((u) => !d.contains(u))
     expect(outer[0].querySelectorAll('[data-testid="run-task"]').length).toBe(1)
     expect(seen.stages.at(-1)[1]).toMatchObject({ state: 'current', task_count: 1 })
+  })
+
+  it('a run paused on an approval step points at the step, and the step panel is full width', async () => {
+    api.getWorkflowRun.mockImplementation(async () => ({
+      run: run({ status: 'paused', current_stage: 1, stages: [{ name: 'Tests', kind: 'gate', run: ['x'] }, { name: 'Sign-off', kind: 'approval', message: 'ok?' }] }),
+      tasks: [],
+      stage_state: { 0: { status: 'passed' }, 1: { status: 'waiting_approval' } },
+      totals: { stages_done: 1, stages: 2, minutes: 1.6, cost_usd: 0, tokens: 0, line: 'So far: …' },
+    }))
+    const c = await mount()
+    expect(c.querySelector('[data-testid="run-paused"]').textContent).toBe('Waiting for someone to approve the step below.')
+    expect(c.querySelector('[data-testid="run-body"]').className).toContain('co-run-body-full')
+    expect(c.querySelector('[data-testid="run-stage-state"]')).toBeNull()
+    expect(c.querySelector('[data-testid="run-status"]').textContent).toBe('Waiting for you')
+    expect(c.querySelector('[data-testid="run-totals-line"]').textContent).toBe('1 of 2 steps done · 1.6 min')
+    expect(c.querySelector('[data-testid="run-task-count"]')).toBeNull()
+  })
+
+  it('a run paused on a task approval keeps the Approvals wording', async () => {
+    api.getWorkflowRun.mockImplementation(async () => ({
+      run: run({ status: 'paused' }),
+      tasks: [t('c', 1, 'awaiting_approval')],
+    }))
+    const c = await mount()
+    expect(c.querySelector('[data-testid="run-paused"]').textContent).toContain('decide it in Approvals')
+    expect(c.querySelector('[data-testid="run-stage-state"]').textContent).toBe('Waiting for approval')
+    expect(c.querySelector('[data-testid="run-task-count"]')).not.toBeNull()
+  })
+})
+
+describe('totalsLine', () => {
+  it('adds cost and tokens only when above zero', () => {
+    expect(totalsLine({ stages_done: 1, stages: 2, minutes: 1.6, cost_usd: 0, tokens: 0 })).toBe('1 of 2 steps done · 1.6 min')
+    expect(totalsLine({ stages_done: 2, stages: 2, minutes: 12.4, cost_usd: 2.1, tokens: 1_200_000 })).toBe('2 of 2 steps done · 12 min · $2.10 · 1.2M tokens')
+    expect(totalsLine({ stages_done: 0, stages: 1, minutes: 0, cost_usd: 0, tokens: 41_200 })).toBe('0 of 1 step done · 0.0 min · 41k tokens')
+    expect(totalsLine({ line: 'server line' })).toBe('server line')
+    expect(totalsLine(null)).toBeNull()
   })
 })

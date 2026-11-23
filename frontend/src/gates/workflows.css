@@ -236,8 +236,10 @@ input.co-wf-mono {
   font-size: 13px;
   color: var(--co-text-secondary);
   overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  display: -webkit-box;
+  -webkit-line-clamp: 3;
+  line-clamp: 3;
+  -webkit-box-orient: vertical;
 }
 
 /* ---- Editor ------------------------------------------------------------- */
@@ -280,6 +282,45 @@ input.co-wf-mono {
 .co-wf-step-name input,
 input.co-wf-step-name {
   font-weight: 600;
+}
+/* Step type selector: each option reads as a choice, the chosen one stands out. */
+.co-wf-kind.ant-segmented {
+  padding: 0;
+  gap: 8px;
+  background: transparent;
+}
+.co-wf-kind.ant-segmented .ant-segmented-group {
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.co-wf-kind.ant-segmented .ant-segmented-item {
+  flex: 1 1 170px;
+  border: 1px solid var(--co-guide);
+  border-radius: 10px;
+  color: var(--co-text-secondary);
+  transition: border-color 0.15s, background 0.15s;
+}
+.co-wf-kind.ant-segmented .ant-segmented-item:hover:not(.ant-segmented-item-selected) {
+  border-color: var(--co-active-border);
+  background: var(--co-hover);
+  color: var(--co-text);
+}
+.co-wf-kind.ant-segmented .ant-segmented-item-selected {
+  border-color: var(--co-primary);
+  background: var(--co-active-bg);
+  color: var(--co-text);
+  font-weight: 650;
+  box-shadow: inset 0 0 0 1px var(--co-primary);
+}
+.co-wf-kind.ant-segmented .ant-segmented-item-selected .anticon {
+  color: var(--co-primary);
+}
+.co-wf-kind.ant-segmented .ant-segmented-thumb {
+  display: none;
+}
+.co-wf-kind.ant-segmented .ant-segmented-item-label {
+  min-height: 36px;
+  line-height: 36px;
 }
 .co-wf-kind-opt {
   display: inline-flex;
@@ -402,6 +443,15 @@ input.co-wf-step-name {
   font-size: 12px;
   white-space: pre-wrap;
   word-break: break-word;
+}
+.co-gate code,
+.co-gate .ant-alert-message code {
+  font-family: var(--co-mono);
+  font-size: 12px;
+  padding: 1px 5px;
+  border-radius: 4px;
+  background: var(--co-hover);
+  border: 1px solid var(--co-border);
 }
 .co-gate-details > summary {
   cursor: pointer;

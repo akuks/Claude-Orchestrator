@@ -33,6 +33,7 @@ export function KindSelect({ name, kind }) {
   return (
     <Form.Item name={[name, 'kind']} label="What happens in this step" extra={KIND_HELP[kind]} style={{ marginBottom: 14 }}>
       <Segmented
+        className="co-wf-kind"
         block
         onChange={onChange}
         options={KIND_OPTIONS.map((o) => ({
@@ -161,7 +162,7 @@ function GateFields({ name, projects }) {
       <ProjectSelect name={name} projects={projects} required label="Where to run it" />
       <Form.Item
         label="Commands to run"
-        extra="One per line item. They run in order and stop at the first one that fails."
+        extra="Add one command per box. They run in order and stop at the first one that fails."
         style={{ marginBottom: 14 }}
       >
         <Form.List name={[name, 'run']}>

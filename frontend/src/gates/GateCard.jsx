@@ -1,12 +1,12 @@
 import { useState } from 'react'
 import { Alert, Button, Tag, message } from 'antd'
 import { api } from '../api'
-import { plainServerText } from './gates'
 import './workflows.css'
 
 const OUTCOME_COLOR = { passed: 'success', failed: 'error', refused: 'error', timeout: 'error', timed_out: 'error' }
-const OUTCOME_WORDS = { passed: 'passed', failed: 'failed', refused: 'not allowed', timeout: 'took too long', timed_out: 'took too long' }
-const RUN_KIND_WORDS = { full: 'full run', retry: 're-run of failures' }
+const OUTCOME_WORDS = { passed: 'Passed', failed: 'Failed', refused: 'Not allowed', timeout: 'Took too long', timed_out: 'Took too long' }
+const RUN_KIND_WORDS = { full: 'Full run', retry: 'Re-run of failures' }
+const TIMED_OUT = new Set(['timeout', 'timed_out'])
 
 // The honest state words. The server sends `status_text`; the fallback builds
 // the same fixed words from the state and the live handle.
@@ -40,8 +40,7 @@ export function gateLead(state, rows = []) {
       const total = (last.passed || 0) + last.failed
       return { tone: 'failed', text: `Failed — ${last.failed} of ${plural(total, 'test', 'tests')} failed` }
     }
-    if (last && (last.outcome === 'timeout' || last.outcome === 'timed_out'))
-      return { tone: 'failed', text: 'Failed — it took too long and was stopped' }
+    if (last && TIMED_OUT.has(last.outcome)) return { tone: 'failed', text: 'Failed — the check did not finish in time' }
     return { tone: 'failed', text: 'Failed — the check did not pass' }
   }
   if (status === 'running') return { tone: 'running', text: 'Running the check…' }
@@ -54,6 +53,27 @@ export function gateLead(state, rows = []) {
 
 
 const ms = (v) => (v == null ? null : v >= 1000 ? `${(v / 1000).toFixed(1)}s` : `${v}ms`)
+
+// Why a failed check failed, in plain words. The server's reason starts with
+// "<command>, …" when a command ran; anything else (a refusal by the guard, a
+// missing project) is shown as the server wrote it.
+export function failureMessage(reason, last) {
+  if (!reason) return null
+  const ran = last?.command && String(reason).startsWith(`${last.command}, `)
+  if (ran && TIMED_OUT.has(last.outcome))
+    return (
+      <>
+        The command <code>{last.command}</code> took too long and was stopped
+      </>
+    )
+  if (ran && last.exit_code != null)
+    return (
+      <>
+        The command <code>{last.command}</code> failed (exit code {last.exit_code})
+      </>
+    )
+  return reason
+}
 
 function LogToggle({ runId, row, testid }) {
   const [log, setLog] = useState(null) // null = hidden; { lines, truncated } | { error }
@@ -180,7 +200,7 @@ export default function GateCard({ runId, index, stage, state, live, gateRuns = 
           {st.others_more > 0 ? ` and ${st.others_more} more` : ''}
         </div>
       )}
-      {st.status === 'failed' && st.reason && <Alert type="error" showIcon message={st.reason} data-testid="gate-blocked" />}
+      {st.status === 'failed' && st.reason && <Alert type="error" showIcon message={failureMessage(st.reason, last)} data-testid="gate-blocked" />}
       {st.status === 'needs_approval' && (
         <Alert
           type="warning"
@@ -204,17 +224,14 @@ export default function GateCard({ runId, index, stage, state, live, gateRuns = 
         />
       )}
       {logRow && <LogToggle key={logRow.id} runId={runId} row={logRow} testid="gate-show-log" />}
-      {(rows.length > 0 || st.summary) && (
+      {rows.length > 0 && (
         <details className="co-gate-details" data-testid="gate-details">
           <summary>Details</summary>
-          {st.summary && <div className="co-gate-summary">{plainServerText(st.summary)}</div>}
-          {rows.length > 0 && (
-            <ul className="co-gate-runs" aria-label="Each run of the commands">
-              {rows.map((r) => (
-                <GateRun key={r.id} runId={runId} row={r} />
-              ))}
-            </ul>
-          )}
+          <ul className="co-gate-runs" aria-label="Each run of the commands">
+            {rows.map((r) => (
+              <GateRun key={r.id} runId={runId} row={r} />
+            ))}
+          </ul>
         </details>
       )}
     </div>

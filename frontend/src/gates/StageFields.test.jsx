@@ -147,3 +147,13 @@ describe('AgentItems insert buttons', () => {
     await w.unmount()
   })
 })
+
+describe('step type selector', () => {
+  it('marks the chosen type and shows its help', async () => {
+    const v = await render(<Harness stage={{ name: 'g', kind: 'gate', run: ['pytest -q'], timeout_min: 60 }} />)
+    await flush()
+    expect(v.container.querySelector('.co-wf-kind .ant-segmented-item-selected').textContent).toContain('Run a check')
+    expect(v.container.textContent).toContain('Add one command per box. They run in order and stop at the first one that fails.')
+    await v.unmount()
+  })
+})
