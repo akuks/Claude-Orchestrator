@@ -141,7 +141,7 @@ function RulesFileStatus({ projectId }) {
 // project's action policy (trust, quarantine, no-answer mode, read-only
 // folders, reference projects, project rules). Maintainers and admins edit;
 // everyone else reads.
-export default function GuardSettings({ project, canEdit, onSaved }) {
+export default function GuardSettings({ project, canEdit, onSaved, ruleDraft, onRuleDraftUsed }) {
   const start = useMemo(() => initial(project), [project])
   const [v, setV] = useState(start)
   const [saving, setSaving] = useState(false)
@@ -407,7 +407,7 @@ export default function GuardSettings({ project, canEdit, onSaved }) {
       <Divider orientation="left" plain>
         Project rules
       </Divider>
-      <RuleTable scope="project" projectId={project.id} canEdit={canEdit} />
+      <RuleTable scope="project" projectId={project.id} canEdit={canEdit} draft={ruleDraft} onDraftUsed={onRuleDraftUsed} />
 
       <Divider orientation="left" plain>
         Repo rules file

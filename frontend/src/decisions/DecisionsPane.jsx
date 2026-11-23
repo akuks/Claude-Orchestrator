@@ -1,0 +1,207 @@
+import { useCallback, useEffect, useState } from 'react'
+import { Alert, Button, Empty, Popconfirm, Radio, Select, Space, Tag, Typography, message } from 'antd'
+import { PlusOutlined } from '@ant-design/icons'
+import { api } from '../api'
+import DecisionForm from './DecisionForm'
+import { KINDS, KIND_COLORS, makeRuleDraft } from './decisions'
+
+const day = (s) => (s ? String(s).slice(0, 10) : '')
+
+function problems(item) {
+  const out = []
+  if (item.touches_unmatched?.length) out.push(`matches no file: ${item.touches_unmatched.join(', ')}`)
+  if (item.see_missing) out.push('the file in "see" is missing')
+  const c = item.changed_since_verified
+  if (c) out.push(`${c.count} commit(s) touched these files since it was verified${c.subjects?.length ? `: ${c.subjects.join('; ')}` : ''}`)
+  if (item.unverified_days != null) out.push(`not verified for ${item.unverified_days} days`)
+  return out
+}
+
+function HealthPanel({ health, canEdit, onVerify }) {
+  if (!health || health.available === false) return null
+  const items = (health.items || []).filter((i) => problems(i).length)
+  if (!health.git_error && !items.length) return null
+  return (
+    <Alert
+      type="warning"
+      showIcon
+      style={{ marginBottom: 12 }}
+      data-testid="decisions-health"
+      message="Decision health"
+      description={
+        <div>
+          {health.git_error && <div data-testid="health-git-error">{health.git_error}</div>}
+          {items.map((i) => (
+            <div key={i.number} data-testid={`health-${i.number}`}>
+              <b>{i.display_id}</b> {problems(i).join(' · ')}{' '}
+              {canEdit && (
+                <Button size="small" type="link" onClick={() => onVerify(i.number)} data-testid={`health-verify-${i.number}`}>
+                  Verify
+                </Button>
+              )}
+            </div>
+          ))}
+        </div>
+      }
+    />
+  )
+}
+
+function Row({ pid, d, canEdit, busy, act, onEdit, onRule, active }) {
+  const [open, setOpen] = useState(false)
+  const [by, setBy] = useState(null)
+  const others = active.filter((x) => x.number !== d.number)
+  return (
+    <div className="co-decision" data-testid={`decision-${d.number}`} style={{ padding: '10px 0', borderBottom: '1px solid var(--co-border, #f0f0f0)' }}>
+      <Space wrap size={6}>
+        <b>{d.display_id}</b>
+        <Tag color={KIND_COLORS[d.kind]} bordered={false}>{d.kind}</Tag>
+        {d.status !== 'active' && <Tag data-testid="decision-status">{d.status}{d.superseded_by ? ` by ${`D-${String(d.superseded_by).padStart(3, '0')}`}` : ''}</Tag>}
+        <span>{d.title}</span>
+      </Space>
+      <div>
+        {(d.touches || []).map((t) => (
+          <code key={t} style={{ marginRight: 6 }}>{t}</code>
+        ))}
+      </div>
+      {d.why && (
+        <div>
+          <Typography.Text type="secondary" ellipsis={open ? false : true} style={{ display: 'block' }}>{d.why}</Typography.Text>
+          <Button size="small" type="link" style={{ padding: 0 }} onClick={() => setOpen(!open)}>{open ? 'Less' : 'More'}</Button>
+        </div>
+      )}
+      {d.see && <div><Typography.Text type="secondary">See: {d.see}</Typography.Text></div>}
+      <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+        decided by {d.decided_by_name || 'unknown'} on {day(d.decided_at)} · verified {day(d.last_verified_at)}
+      </Typography.Text>
+      {canEdit && d.status === 'active' && (
+        <Space wrap size={4} style={{ display: 'flex', marginTop: 4 }}>
+          <Button size="small" onClick={() => onEdit(d)}>Edit</Button>
+          <Button size="small" disabled={busy} onClick={() => act(() => api.verifyDecision(pid, d.number))} data-testid={`verify-${d.number}`}>Still true</Button>
+          <Popconfirm title={`Retire ${d.display_id}?`} okText="Retire" onConfirm={() => act(() => api.retireDecision(pid, d.number))}>
+            <Button size="small" disabled={busy} data-testid={`retire-${d.number}`}>Retire</Button>
+          </Popconfirm>
+          <Select
+            size="small"
+            style={{ minWidth: 150 }}
+            placeholder="Superseded by…"
+            value={by}
+            data-testid={`supersede-${d.number}`}
+            options={others.map((x) => ({ value: x.number, label: `${x.display_id} ${x.title}` }))}
+            onChange={(v) => {
+              setBy(v)
+              act(() => api.supersedeDecision(pid, d.number, v))
+            }}
+          />
+          <Button size="small" onClick={() => onRule(d)} data-testid={`rule-${d.number}`}>Make this a rule</Button>
+        </Space>
+      )}
+    </div>
+  )
+}
+
+// Project drawer tab: recorded decisions, health, and (maintainers) the writes.
+export default function DecisionsPane({ project, canEdit, onMakeRule }) {
+  const pid = project.id
+  const [status, setStatus] = useState('active')
+  const [kind, setKind] = useState('')
+  const [rows, setRows] = useState([])
+  const [health, setHealth] = useState(null)
+  const [error, setError] = useState(null)
+  const [notice, setNotice] = useState(null)
+  const [busy, setBusy] = useState(false)
+  const [modal, setModal] = useState(null) // {decision}
+
+  const load = useCallback(async () => {
+    try {
+      const list = await api.listDecisions(pid, { status, kind })
+      setRows(Array.isArray(list) ? list : [])
+      setError(null)
+    } catch (e) {
+      setError(e.message)
+    }
+    try {
+      setHealth(await api.decisionsHealth(pid))
+    } catch (_) {
+      setHealth(null)
+    }
+  }, [pid, status, kind])
+  useEffect(() => {
+    load()
+  }, [load])
+
+  const act = async (fn) => {
+    setBusy(true)
+    try {
+      await fn()
+      setNotice(null)
+      await load()
+    } catch (e) {
+      message.error(e.message)
+      if (e.status === 409) {
+        setNotice(e.message)
+        await load()
+      }
+    } finally {
+      setBusy(false)
+    }
+  }
+  const activeAll = rows.filter((r) => r.status === 'active')
+
+  return (
+    <div data-testid="decisions-pane">
+      <Typography.Paragraph type="secondary">
+        Recorded decisions name the files they touch; agents are shown them before they edit those files.
+      </Typography.Paragraph>
+      <HealthPanel health={health} canEdit={canEdit} onVerify={(n) => act(() => api.verifyDecision(pid, n))} />
+      <Space wrap style={{ marginBottom: 8 }}>
+        <Radio.Group
+          optionType="button"
+          value={status}
+          onChange={(e) => setStatus(e.target.value)}
+          options={[{ value: 'active', label: 'Active' }, { value: 'all', label: 'All' }]}
+          data-testid="decisions-status"
+        />
+        <Select
+          style={{ width: 140 }}
+          value={kind}
+          onChange={setKind}
+          data-testid="decisions-kind"
+          options={[{ value: '', label: 'All kinds' }, ...KINDS.map((k) => ({ value: k, label: k }))]}
+        />
+        {canEdit && (
+          <Button type="primary" icon={<PlusOutlined />} onClick={() => setModal({ decision: null })} data-testid="decision-add">
+            Add decision
+          </Button>
+        )}
+      </Space>
+      {notice && <Alert type="warning" showIcon style={{ marginBottom: 8 }} message={notice} data-testid="decisions-notice" />}
+      {error && <Alert type="error" showIcon style={{ marginBottom: 8 }} message={error} />}
+      {rows.length === 0 && !error && <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="No decisions yet" />}
+      {rows.map((d) => (
+        <Row
+          key={d.number}
+          pid={pid}
+          d={d}
+          canEdit={canEdit}
+          busy={busy}
+          active={activeAll}
+          act={act}
+          onEdit={(x) => setModal({ decision: rows.find((r) => r.number === x.number) })}
+          onRule={(x) => onMakeRule?.(makeRuleDraft(x))}
+        />
+      ))}
+      <DecisionForm
+        open={Boolean(modal)}
+        projectId={pid}
+        decision={modal?.decision || null}
+        onClose={() => setModal(null)}
+        onSaved={load}
+        onConflict={(m) => {
+          setNotice(m)
+          load()
+        }}
+      />
+    </div>
+  )
+}

@@ -54,6 +54,7 @@ import TokensPanel from '../usage/TokensPanel'
 import { ThreadQuestions } from '../questions/QuestionsSection'
 import { usageLine, useUsage } from '../usage/usage'
 import AskCard from '../asks/AskCard'
+import { decisionNoteLine } from '../decisions/decisions'
 
 // co-guard lines in the run log: one icon per kind (guard.js guardLine).
 const GUARD_ICON = {
@@ -112,9 +113,10 @@ const EVENT_STYLE = {
   log: { color: 'var(--co-terminal-muted)', prefix: '' },
   error: { color: 'var(--co-terminal-error)', prefix: '✖' },
   completed: { color: 'var(--co-terminal-success)', prefix: '✔' },
+  decision_note: { color: 'var(--co-terminal-muted)', prefix: '·' },
 }
 
-function renderLine(ev) {
+export function renderLine(ev) {
   const s = EVENT_STYLE[ev.type] || { color: 'var(--co-terminal-text)', prefix: '' }
   const p = ev.payload || {}
   let text
@@ -144,6 +146,9 @@ function renderLine(ev) {
       break
     case 'context_store':
       text = `knowledge base — ${p.docs} doc(s) indexed (~${p.index_approx_tokens} tokens): ${(p.paths || []).join(', ')}`
+      break
+    case 'decision_note':
+      text = decisionNoteLine(p)
       break
     default:
       text = JSON.stringify(p)

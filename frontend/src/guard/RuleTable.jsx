@@ -24,18 +24,20 @@ export function checkRule({ pattern, match }) {
   return null
 }
 
-function RuleModal({ open, rule, scope, projectId, onClose, onSaved }) {
+function RuleModal({ open, rule, draft, scope, projectId, onClose, onSaved }) {
   const [form] = Form.useForm()
   const [error, setError] = useState(null)
   const [saving, setSaving] = useState(false)
   const isEdit = Boolean(rule)
 
   useEffect(() => {
-    if (open) setError(null)
-  }, [open, rule])
+    if (open) setError(draft && !draft.pattern ? 'this decision names no plain path; enter the pattern to match' : null)
+  }, [open, rule, draft])
   const initial = rule
     ? { kind: rule.kind, match: rule.match, pattern: rule.pattern, reason: rule.reason, enabled: rule.enabled }
-    : { kind: 'confirm', match: 'text', pattern: '', reason: '', name: '', enabled: true }
+    : draft
+      ? { kind: draft.kind, match: draft.match === 'regex' ? 'regex' : 'text', pattern: draft.pattern, reason: (draft.reason || '').slice(0, REASON_MAX), name: '', enabled: true }
+      : { kind: 'confirm', match: 'text', pattern: '', reason: '', name: '', enabled: true }
 
   const submit = async () => {
     const v = form.getFieldsValue(true)
@@ -124,7 +126,8 @@ function RuleModal({ open, rule, scope, projectId, onClose, onSaved }) {
 
 // Custom co-guard rules of one scope: the org's (projectId unset) or a
 // project's. canEdit: add / edit / delete / enable. Everything is plain text.
-export default function RuleTable({ scope = 'org', projectId, canEdit = false, title, help = true }) {
+// draft: a pre-filled new rule to open in the editor (never saved by itself); onDraftUsed clears it.
+export default function RuleTable({ scope = 'org', projectId, canEdit = false, title, help = true, draft, onDraftUsed }) {
   const [rules, setRules] = useState([])
   const [loading, setLoading] = useState(false)
   const [loadError, setLoadError] = useState(null)
@@ -147,6 +150,13 @@ export default function RuleTable({ scope = 'org', projectId, canEdit = false, t
   useEffect(() => {
     load()
   }, [load])
+
+  useEffect(() => {
+    if (draft && canEdit) {
+      setModal({ rule: null, draft })
+      onDraftUsed?.()
+    }
+  }, [draft, canEdit]) // eslint-disable-line react-hooks/exhaustive-deps
 
   const toggle = async (rule, enabled) => {
     setBusy(rule.id)
@@ -266,6 +276,7 @@ export default function RuleTable({ scope = 'org', projectId, canEdit = false, t
       <RuleModal
         open={Boolean(modal)}
         rule={modal?.rule || null}
+        draft={modal?.draft || null}
         scope={scope}
         projectId={projectId}
         onClose={() => setModal(null)}

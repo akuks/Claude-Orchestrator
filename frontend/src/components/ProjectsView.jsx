@@ -30,6 +30,7 @@ import {
   RadarChartOutlined,
   SafetyOutlined,
   TeamOutlined,
+  FileTextOutlined,
 } from '@ant-design/icons'
 import dayjs from 'dayjs'
 import { when } from '../time'
@@ -39,6 +40,7 @@ import ProjectMembers from './ProjectMembers'
 import ProjectCards from '../projects/ProjectCards'
 import GuardSettings from '../guard/GuardSettings'
 import { canEditGuard } from '../guard/guard'
+import DecisionsPane from '../decisions/DecisionsPane'
 import { FRESH_SUGGEST, freshSessionError } from '../usage/usage'
 
 dayjs.extend(relativeTime)
@@ -389,6 +391,7 @@ export function GitStateWarning({ projectId }) {
 
 export function ProjectDrawer({ project, tab, onTab, currentUser, onClose, onSaved }) {
   const canEdit = project?.my_role === 'maintainer'
+  const [ruleDraft, setRuleDraft] = useState(null) // "Make this a rule": opens the project rule editor pre-filled
 
   return (
     <Drawer open={!!project} onClose={onClose} width={680} title={project?.name || ''} destroyOnHidden>
@@ -417,13 +420,37 @@ export function ProjectDrawer({ project, tab, onTab, currentUser, onClose, onSav
               children: <MemoryPane project={project} canEdit={canEdit} onSaved={onSaved} />,
             },
             {
+              key: 'decisions',
+              label: (
+                <span>
+                  <FileTextOutlined /> Decisions
+                </span>
+              ),
+              children: (
+                <DecisionsPane
+                  project={project}
+                  canEdit={canEditGuard(project, currentUser)}
+                  onMakeRule={(d) => {
+                    setRuleDraft(d)
+                    onTab('guard')
+                  }}
+                />
+              ),
+            },
+            {
               key: 'guard',
               label: (
                 <span>
                   <SafetyOutlined /> Guard
                 </span>
               ),
-              children: <GuardSettings project={project} canEdit={canEditGuard(project, currentUser)} onSaved={onSaved} />,
+              children: <GuardSettings
+                  project={project}
+                  canEdit={canEditGuard(project, currentUser)}
+                  onSaved={onSaved}
+                  ruleDraft={ruleDraft}
+                  onRuleDraftUsed={() => setRuleDraft(null)}
+                />,
             },
           ]}
         />
