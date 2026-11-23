@@ -588,8 +588,8 @@ def test_fix_head_alone_does_not_gate(fakes, log, gated):
         assert (await _run(rid)).status == "paused"
         await _end_task(t.id, Status.QUEUED)  # approved
         await r._advance(rid)
-        assert (await _run(rid)).status == "running"
-        assert run.stage_state["0"]["status"] == "fixing"
+        run = await _run(rid)
+        assert run.status == "running" and run.stage_state["0"]["status"] == "fixing"
 
     asyncio.run(go())
 
@@ -621,5 +621,49 @@ def test_preflight_hold_after_fix_keeps_round(fakes):
         run = await _run(rid)
         assert run.stage_state["0"]["fix_round"] == 1
         assert run.status == "failed" and len(await _tasks(rid)) == 1
+
+    asyncio.run(go())
+
+
+@pytest.mark.parametrize("by", ["id", "legacy_name"])
+def test_same_named_agent_elsewhere_does_not_break_gate(fakes, by):
+    """Stored id (new) or a legacy stored name: a same-named agent in another project is
+    ignored and the gate's own fixer gets the task."""
+    fakes.script["pytest -q"] = [FAIL("t"), oc()]
+
+    async def go():
+        pid, other = await _project(), await _project()
+        name = "fx-dup-" + uuid.uuid4().hex[:8]
+        a = await _agent(pid, name=name)
+        await _agent(other, name=name)
+        rid = await _make_run([gate(pid, a.id if by == "id" else name)], [pid])
+        r = WorkflowRunner(FakeWorker(), 999)
+        await r.start_run(rid)
+        await settle(r)
+        run = await _run(rid)
+        assert run.stage_state["0"]["status"] == "fixing"
+        (t,) = await _tasks(rid)
+        assert t.agent_id == a.id and t.project_id == pid
+
+    asyncio.run(go())
+
+
+def test_stored_id_of_agent_moved_away_fails(fakes):
+    fakes.script["pytest -q"] = [FAIL("t")]
+
+    async def go():
+        pid, other = await _project(), await _project()
+        a = await _agent(pid)
+        await _agent(pid, name=a.name + "-x")
+        rid = await _make_run([gate(pid, a.id)], [pid])
+        async with SessionLocal() as s:
+            (await s.get(Agent, a.id)).project_id = other
+            await s.commit()
+        r = WorkflowRunner(FakeWorker(), 999)
+        await r.start_run(rid)
+        await settle(r)
+        run = await _run(rid)
+        assert run.status == "failed"
+        assert run.stage_state["0"]["reason"] == "the fixer agent is not available"
 
     asyncio.run(go())

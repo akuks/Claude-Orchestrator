@@ -94,7 +94,8 @@ def test_fix_ok_by_id_and_name(client):
     pid = mkproj()
     aid, aname = mkagent(pid)
     assert validate([gate(pid, fix={"agent": aid, "rounds": 2})])[0]["fix"] == {"agent": aid, "rounds": 2}
-    assert validate([gate(pid, fix={"agent": aname, "rounds": 3})])[0]["fix"] == {"agent": aname, "rounds": 3}
+    # A name is accepted on input; the resolved id is what is stored.
+    assert validate([gate(pid, fix={"agent": aname, "rounds": 3})])[0]["fix"] == {"agent": aid, "rounds": 3}
     assert validate([gate(pid, fix={"agent": aid})])[0]["fix"]["rounds"] == 1
     assert "fix" not in validate([gate(pid, fix=None)])[0]
 
@@ -105,6 +106,20 @@ def test_fix_rounds_rejected(client, rounds):
     aid, _ = mkagent(pid)
     with pytest.raises(ValueError, match="rounds"):
         validate([gate(pid, fix={"agent": aid, "rounds": rounds})])
+
+
+def test_fix_name_resolved_inside_gate_project(client):
+    """A same-named agent in another project neither blocks nor hijacks the gate's fixer."""
+    pid, other = mkproj(), mkproj()
+    name = "fx-same-" + uuid.uuid4().hex[:8]
+    mine, _ = mkagent(pid, name)
+    mkagent(other, name)
+    assert validate([gate(pid, fix={"agent": name})])[0]["fix"] == {"agent": mine, "rounds": 1}
+    with pytest.raises(ValueError, match="another project"):
+        validate([gate(mkproj(), fix={"agent": name})])
+    mkagent(pid, name)  # now two in the gate's own project
+    with pytest.raises(ValueError, match="ambiguous"):
+        validate([gate(pid, fix={"agent": name})])
 
 
 def test_fix_agent_rejected(client):

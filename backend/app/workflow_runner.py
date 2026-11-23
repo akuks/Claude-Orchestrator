@@ -487,16 +487,19 @@ def _fix_due(stage: dict, st: dict, out) -> bool:
 
 
 async def _fix_agent(s, ref, project_id) -> Agent | None:
-    """The gate's fixer agent: `ref` is an id or a unique name, and the agent must still be
-    in the gate's project. None when missing, ambiguous or moved."""
+    """The gate's fixer agent. `ref` is the agent id (stored since the fix round 1 of 5c
+    task 4) or, for an older saved stage, a name looked up ONLY inside the gate's project,
+    so a same-named agent elsewhere cannot break the gate. The agent must still be in the
+    gate's project. None when missing, ambiguous within the project, or moved."""
     if not isinstance(ref, str) or not ref or not project_id:
         return None
-    agents = (await s.execute(select(Agent).where((Agent.id == ref) | (Agent.name == ref)))).scalars().all()
-    by_id = [a for a in agents if a.id == ref]
-    agent = by_id[0] if by_id else (agents[0] if len(agents) == 1 else None)
-    if agent is None or agent.project_id != project_id:
-        return None
-    return agent
+    agent = await s.get(Agent, ref)
+    if agent is not None:
+        return agent if agent.project_id == project_id else None
+    inside = (
+        await s.execute(select(Agent).where(Agent.name == ref, Agent.project_id == project_id))
+    ).scalars().all()
+    return inside[0] if len(inside) == 1 else None
 
 
 @dataclass

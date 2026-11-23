@@ -69,18 +69,28 @@ async def _fix(s, st: dict, name: str) -> dict | None:
     rounds = fix.get("rounds", 1)
     if isinstance(rounds, bool) or not isinstance(rounds, int) or not 1 <= rounds <= 3:
         raise ValueError(f"Step '{name}': fix rounds must be a whole number from 1 to 3")
-    agents = (await s.execute(select(Agent).where((Agent.id == ref) | (Agent.name == ref)))).scalars().all()
-    if not agents:
-        raise ValueError(f"Step '{name}': unknown fix agent {ref}")
-    by_id = [a for a in agents if a.id == ref]
-    agent = by_id[0] if by_id else (agents[0] if len(agents) == 1 else None)
+    # An id, or a name looked up inside the gate's project (names are not unique across
+    # projects). The resolved agent ID is stored, so a later same-named agent elsewhere
+    # cannot change or break the gate.
+    pid = st.get("project")
+    agent = await s.get(Agent, ref)
     if agent is None:
-        raise ValueError(f"Step '{name}': fix agent name {ref} is ambiguous, use its id")
+        named = (await s.execute(select(Agent).where(Agent.name == ref))).scalars().all()
+        if not named:
+            raise ValueError(f"Step '{name}': unknown fix agent {ref}")
+        inside = [a for a in named if pid and a.project_id == pid]
+        if len(inside) > 1:
+            raise ValueError(f"Step '{name}': fix agent name {ref} is ambiguous, use its id")
+        if not inside:
+            if all(not a.project_id for a in named):
+                raise ValueError(f"Step '{name}': fix agent {ref} has no project")
+            raise ValueError(f"Step '{name}': fix agent {ref} belongs to another project")
+        agent = inside[0]
     if not agent.project_id:
         raise ValueError(f"Step '{name}': fix agent {ref} has no project")
-    if agent.project_id != st.get("project"):
+    if agent.project_id != pid:
         raise ValueError(f"Step '{name}': fix agent {ref} belongs to another project")
-    return {"agent": ref, "rounds": rounds}
+    return {"agent": agent.id, "rounds": rounds}
 
 
 def _before(st: dict, name: str) -> list[str]:
