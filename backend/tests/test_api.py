@@ -134,9 +134,9 @@ def test_presets_include_governed_dev_templates(client):
     # Reviewer is not a remote/gated role.
     assert not presets["Code Reviewer"].get("allow_remote")
     # Cost-aware model defaults: cheap models for review/QA, mid for dev.
-    assert presets["Code Reviewer"]["model"] == "haiku"
-    assert presets["QA / Tester"]["model"] == "haiku"
-    assert presets["Backend Developer"]["model"] == "sonnet"
+    assert presets["Code Reviewer"]["tier"] == "light"
+    assert presets["QA / Tester"]["tier"] == "light"
+    assert presets["Backend Developer"]["tier"] == "standard"
     # Creating an agent from the DevOps template carries its governance through.
     a = client.post("/agents", json={
         "name": "Deployer", "system_prompt": devops["system_prompt"],
