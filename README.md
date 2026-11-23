@@ -1280,7 +1280,7 @@ Reviewer, Checker) plus approval and gate stages.
   saved until an admin saves it.
 - **Gates need a project.** A template's gate carries `run: ["npm test"]` and no
   project. The editor shows "Set the project's own test command in the gate." The admin picks
-  the project and the real command; save is refused until then.
+  the project and the real command; save is refused until a project is set.
 - **Builders** are told: "Commit on the current branch. Do not merge or push."
 - **Missing helpers.** If a template names an agent that does not exist, the editor
   lists it ("Add these helpers from Agents → presets first") and save stays refused
