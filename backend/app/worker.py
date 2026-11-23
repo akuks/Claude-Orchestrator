@@ -36,6 +36,7 @@ from .guard import runtime as guard_runtime
 from .guard.plugin import ensure_plugin
 from .models import (Agent, Artifact, McpCall, Project, SkillPack, Task, TaskEvent, TaskHandoff, TaskQuestion,
                      TaskUsage, User)
+from .briefs import scope as brief_scope
 from .redaction import redact, redact_obj, secrets_from_env
 from .resume import gitfacts, ground_rules, handoff, prompting, recovery
 from .resume.texts import CRED_NOTE, RECOVERED_CONTINUE
@@ -161,6 +162,10 @@ def _short(value, secrets: list[str] | None = None) -> str:
     return text[:_MAX_TOOL_RESULT_CHARS]
 
 
+COORDINATOR_BRIEF_LINE = (
+    "Give a builder a brief (goal, can_change, cannot_change, done, stop); co-guard enforces its CAN/CANNOT change.")
+
+
 async def _coordinator_context(s, task_id: str, me_id: str) -> str:
     """Build the registry + delegation instructions injected into a coordinator's
     prompt: the other agents it can delegate to, and how to dispatch to them."""
@@ -191,9 +196,10 @@ async def _coordinator_context(s, task_id: str, me_id: str) -> str:
         f"```\ncurl -s -X POST {base}/agents/dispatch -H \"Authorization: Bearer $CO_API_TOKEN\" -H 'Content-Type: application/json' -d '{{\n"
         '  "parent_task_id": "' + task_id + '",\n'
         '  "items": [\n'
-        '    {"agent": "<exact agent name>", "prompt": "<what that agent should do>"},\n'
+        '    {"agent": "<exact agent name>", "prompt": "<what that agent should do>", "brief": {"goal": "…", "can_change": ["src/**"], "cannot_change": ["migrations/**"], "done": "…", "stop": "…"}},\n'
         '    {"agent": "<exact agent name>", "prompt": "<...>"}\n'
         "  ]\n}'\n```\n"
+        f"{COORDINATOR_BRIEF_LINE}\n"
         "Each item becomes a real child task (shown under you). For a dependent stage "
         "(e.g. test AFTER code, deploy AFTER test), dispatch the first stage, then "
         f"poll each child with `curl -s -H \"Authorization: Bearer $CO_API_TOKEN\" {base}/tasks/<child_id>` until its status is "
@@ -556,6 +562,10 @@ class WorkerManager:
         if guard_inputs.decisions_index:  # phase 4a: the project's decision index, after the ground rules
             main_text = "\n\n".join(filter(None, [main_text, guard_inputs.decisions_index]))
             included.append("decisions")
+        brief_text = redact(guard_inputs.brief_text, run_secrets) if guard_inputs.brief_text else None
+        if brief_text:  # phase 4c: re-sent on every step and kept through compaction
+            main_text = "\n\n".join(filter(None, [main_text, brief_text]))
+            included.append("brief")
         system_prompt = "\n\n".join(filter(None, [system_prompt, guard_inputs.data_line, main_text]))
         await emit("ground_rules", {"included": included})
 
@@ -1130,6 +1140,15 @@ class WorkerManager:
             mcp_tools=(mcp or {}).get("tool_policies"),
             extra=inputs.policy,
         )
+        if inputs.brief_layers:  # phase 4c: no scope, no task (fail closed like the rest of the setup)
+            try:
+                brief_event = brief_scope.apply(policy, inputs.brief_layers)
+            except Exception as e:  # noqa: BLE001
+                msg = f"co-guard could not be set up; task not started: the brief's scope: {e}"
+                await emit("error", {"message": msg})
+                await self._finish(task_id, Status.FAILED, error=msg)
+                return None, None, None
+            await emit("guard", brief_event)
         policy_file = guard_runtime.write_policy(task_id, policy)
         sub_env.update(
             {

@@ -16,6 +16,8 @@ docstring) and says what the worker must add to the ``claude`` command:
 * ``decisions_index`` - the same index, for the worker to append after the ground rules, or None.
 * ``data_line`` - ``co_hook.DATA_LINE`` for an external project (the worker
   appends it to ``--append-system-prompt``), else None.
+* ``brief_text`` / ``brief_layers`` - the task's brief (phase 4c) as system-prompt text and as scope layers
+  for ``briefs.scope.apply``; None / [] without a brief.
 * ``events`` - ``guard`` events about what was left out (a reference project
   the owner cannot see or whose folder is gone, by id only; a relative
   readonly path with no project folder), how many references were mounted
@@ -48,6 +50,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
 from ..access import project_role
+from ..briefs import render, scope
 from ..auth import Principal
 from ..decisions import snapshot as decisions_snapshot
 from ..decisions.texts import SUGGEST_LINE
@@ -69,6 +72,8 @@ class PolicyInputs:
     main_text: str = ""  # the enabled ground rules, for the main session's --append-system-prompt
     ground_included: list[str] = field(default_factory=list)  # which rules those are
     decisions_index: str | None = None  # the project's decision index (phase 4a), after the ground rules
+    brief_text: str | None = None  # the task's brief for the system prompt (phase 4c), None without one
+    brief_layers: list = field(default_factory=list)  # its scope layers for the policy (briefs.scope.layers)
 
 
 def _epoch(dt: datetime) -> float:
@@ -201,6 +206,12 @@ async def gather(s, *, task, project, owner_id: str | None, mcp: dict | None) ->
         if snap and index:
             policy["decisions"] = snap
             policy["decisions_index"] = index
-    return PolicyInputs(policy=policy, add_dirs=refs, data_line=DATA_LINE if trust == "external" else None,
+    brief = getattr(task, "brief", None)  # JSON null reads as None: falsy is no brief
+    brief_text = brief_layers = None
+    if brief and isinstance(brief, dict):
+        bounds = getattr(task, "brief_bounds", None) or []
+        brief_text = render.brief_text(brief, bounds)
+        brief_layers = scope.layers(task.id, brief, bounds)
+    return PolicyInputs(policy=policy, brief_text=brief_text, brief_layers=brief_layers or [], add_dirs=refs, data_line=DATA_LINE if trust == "external" else None,
                         events=events, main_text=ground_rules.main_text(ground),
                         ground_included=ground_rules.included(ground), decisions_index=index)
