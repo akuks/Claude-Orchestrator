@@ -197,6 +197,34 @@ describe('races and fixes', () => {
   })
 })
 
+describe('project switch with actions in flight', () => {
+  it('a late verify / edit save for p1 leaves p2 alone', async () => {
+    let resVerify, rejSave
+    api.listDecisions.mockImplementation(async (pid) => (pid === 'p1' ? [dec(12), dec(15)] : [dec(30)]))
+    api.verifyDecision.mockImplementation(() => new Promise((r) => { resVerify = r }))
+    api.updateDecision.mockImplementation(() => new Promise((_, j) => { rejSave = j }))
+    view = await render(<DecisionsPane key="p1" project={{ id: 'p1' }} canEdit />)
+    await flush()
+    const c = view.container
+    await click(q(c, 'verify-12'))
+    await click([...q(c, 'decision-15').querySelectorAll('button')].find((b) => b.textContent === 'Edit'))
+    await click(document.querySelector('[data-testid="decision-save"]'))
+    await view.rerender(<DecisionsPane key="p2" project={{ id: 'p2' }} canEdit />)
+    await flush()
+    api.listDecisions.mockClear()
+    await act(async () => {
+      resVerify({})
+      rejSave(Object.assign(new Error('changed by someone else — reload'), { status: 409 }))
+    })
+    await flush()
+    expect(api.listDecisions).not.toHaveBeenCalled()
+    expect(q(c, 'decision-30')).not.toBeNull()
+    expect(q(c, 'decision-12')).toBeNull()
+    expect(q(c, 'decisions-notice')).toBeNull()
+    expect(document.querySelector('[data-testid="decision-form"]')).toBeNull()
+  })
+})
+
 describe('elsewhere', () => {
   it('renders a decision_note run-log line', () => {
     expect(renderLine({ type: 'decision_note', payload: { ids: [12, 15], path: 'src/a.js' } }).text).toBe('Showed D-012, D-015 before editing src/a.js')

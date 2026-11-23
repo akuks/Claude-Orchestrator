@@ -428,6 +428,7 @@ export function ProjectDrawer({ project, tab, onTab, currentUser, onClose, onSav
               ),
               children: (
                 <DecisionsPane
+                  key={project.id}
                   project={project}
                   canEdit={canEditGuard(project, currentUser)}
                   onMakeRule={(d) => {

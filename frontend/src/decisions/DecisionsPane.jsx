@@ -121,9 +121,18 @@ export default function DecisionsPane({ project, canEdit, onMakeRule }) {
   const [modal, setModal] = useState(null) // {decision}
 
   const seq = useRef(0)
+  const alive = useRef(true) // false once unmounted: late responses never touch state or refetch
+  useEffect(() => {
+    alive.current = true
+    return () => {
+      alive.current = false
+      seq.current++
+    }
+  }, [])
   // Every async result is checked against the latest request; a late answer for
   // an older project or filter is dropped. Returns the rows, or null if stale/failed.
   const load = useCallback(async () => {
+    if (!alive.current) return null
     const mine = ++seq.current
     let list = null
     try {
@@ -168,16 +177,18 @@ export default function DecisionsPane({ project, canEdit, onMakeRule }) {
     setBusy(true)
     try {
       await fn()
+      if (!alive.current) return
       setNotice(null)
       await load()
     } catch (e) {
+      if (!alive.current) return
       message.error(e.message)
       if (e.status === 409) {
         setNotice(e.message)
         await load()
       }
     } finally {
-      setBusy(false)
+      if (alive.current) setBusy(false)
     }
   }
   const activeAll = rows.filter((r) => r.status === 'active')
@@ -233,8 +244,10 @@ export default function DecisionsPane({ project, canEdit, onMakeRule }) {
         onClose={() => setModal(null)}
         onSaved={load}
         onConflict={async (m) => {
+          if (!alive.current) return
           setNotice(m)
           const list = await load()
+          if (!alive.current) return
           // show the fresh entry (new version and fields) in the open form
           setModal((cur) => {
             if (!cur?.decision) return cur
