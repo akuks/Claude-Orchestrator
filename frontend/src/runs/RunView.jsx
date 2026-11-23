@@ -332,7 +332,7 @@ export default function RunView({ id, user, projects = [], navigate, onOpenCrede
   const headStatus = sstate?.[String(run.current_stage)]?.status
   const budget = data?.budget
   const hasBudget = budget?.budget_usd != null
-  const budgetHeld = Object.values(sstate || {}).some((st) => st?.status === 'budget')
+  const budgetHeld = active && Object.values(sstate || {}).some((st) => st?.status === 'budget')
   const pausedText =
     stageKind(headDef) === 'approval' && headStatus === 'waiting_approval'
       ? 'Waiting for someone to approve the step below.'
