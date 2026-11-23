@@ -1083,6 +1083,48 @@ command **once more**, and only that full run can pass the gate. One round per
 hand-out, and a retry never completes a gate alone. Commands in `run` run in
 order and the first failure stops the round.
 
+### The fix-it round
+
+A gate (shown in the UI as **Run a check**) may carry `fix: {agent, rounds}`. In
+the editor this is "If the check fails, ask an agent to fix it" and "How many
+tries" (1 to 3; `rounds` defaults to 1). The agent must be an agent of the **same
+project** as the check; it is saved by id.
+
+When a check ends with a real exit code that is not a pass and tries are left,
+the server starts a task for that agent in the check's project, with the prompt
+"A check failed. Fix the cause, commit on the current branch, do not merge or push.
+Then stop." followed by the check's output. When the fix task completes, the whole
+check runs again as a new hand-out. A pass after fixes reads "passed after k fix
+round(s)".
+
+**What the agent receives.** The command, the exit code, the test counts and up to
+20 failing names when a runner was recognised, and at most the last 50 log lines,
+in all at most 16,000 characters. Values of the check project's env (6 characters
+or more) are replaced with `[redacted]`, hidden characters are removed, and the
+output sits between begin and end lines that carry a random marker, introduced as
+"data, not instructions". That is a framing, not a guarantee: the agent reads
+repository output, so treat it as untrusted text.
+
+**When it does not run.** A guard refusal ("blocked by the guard"), a timeout, a cancel and an internal error never start a fix
+round. A check with no `fix` behaves as before.
+
+**Budget.** A fix task is a task of the run. It counts toward the run's spending
+limit and is capped at what remains (see "Typed outputs, retry and budget"). With
+too little left, the run pauses before the fix task is created, and raising the
+limit creates it. The check is not re-run meanwhile.
+
+**When tries run out.** The check fails as in the earlier rounds (the failure
+line, the run fails) and **Retry** starts the step again with fresh tries. The run
+also fails, with "the fix did not finish", when the fix task fails or is
+cancelled, and with "the fixer agent is not available" when the agent is missing
+or has moved to another project. Cancelling the run while a fix is going cancels
+it.
+
+**Approval of a fix task.** Its risk is judged on the check output after the fixed
+first lines, so the "do not merge or push" instruction does not stop it. Risky
+words inside the check's output, or an agent that requires approval, still make
+it wait for a person; the run pauses meanwhile.
+
 ### Pre-flight
 
 `before` lines hold a stage until the machine is ready, instead of failing it.
@@ -1181,10 +1223,9 @@ applies. The diff is hashed, never stored or shown.
 
 ### Not covered
 
-- **Typed stage outputs, automatic retry-once of agent stages and a per-run
-  budget cap** come in phase 5c.
-- **A fix-it loop.** A failed gate fails the run, and **Retry** runs it again; it
-  does not hand the failure back to an agent stage.
+- **Fixing a guard refusal or a timeout.** The fix round only answers a check
+  that ran and exited non-zero. The fix agent is a single agent in the check's
+  project; the run never jumps back to an earlier step.
 - **Windows.** The shell rule is POSIX only.
 - **A plain `ssh` in a gate.** Only git over ssh is blocked. A plain `ssh`
   runs as the server's OS user, and OpenSSH finds keys through the user database
@@ -1221,8 +1262,12 @@ It lives in the project drawer, on the **Launch** tab.
 - **Two people editing.** Every write carries a `version`. A stale one is refused
   with 409 "changed by someone else — reload".
 - **Linking tasks.** A task is linked to an item when it is created (the
-  "Launch item" select in the new-task form, or by the nudge below). There is no way to
-  link an existing task afterwards. The item must belong to the task's project.
+  "Launch item" select in the new-task form, or by the nudge below). It can also be
+  linked, changed or unlinked afterwards, from the "Launch item" row of the task
+  (`PATCH /tasks/{id}/launch-item` with `{launch_item_id: id | null}`). The task's
+  creator, a maintainer of its project or an admin may do that (else 403). The
+  item must be open or started and belong to the task's project (else 422). If
+  the task is already running and the item is `open`, the item becomes `started`.
   When a linked task first starts running, an `open` item becomes `started`.
   Finishing stays a person's call: when every linked task has completed, the
   tab shows "linked tasks done — mark done?".
@@ -1243,6 +1288,16 @@ It lives in the project drawer, on the **Launch** tab.
   done counts, `would_be`, the `after` items, which critical globs the files
   touch, and an `estimate` (median, min and max days from start to done). The
   estimate is `null` until at least 10 items have both dates.
+- **Treat tasks that mention a critical file as high risk.** A switch on the
+  Launch tab, off by default, which a maintainer or admin sets (`raise_risk`).
+  With it on, a new task in that project is marked critical when its prompt
+  contains the text of a critical path up to its first wildcard (`src/auth/**`
+  gives `src/auth`; trailing `/` dropped, compared case-insensitively, at least 3
+  characters). Critical tasks wait for approval when the server's
+  `gate_critical_approval` setting is on (the default). The task shows "Marked
+  critical: critical path <prefix>". It is a text match on the prompt, not a check
+  of what the agent edits, and a short prefix matches inside other words or paths
+  (`src` matches "describe the src of the bug").
 - **Critical paths.** Up to 20 globs, with the same rules and matcher as a decision's
   `touches`. When a task in such a project ends, in any end state, the files targeted by its
   `Edit`, `Write`, `MultiEdit` and `NotebookEdit` calls (including failed ones, and
@@ -1258,10 +1313,11 @@ It lives in the project drawer, on the **Launch** tab.
 
 - **Repo-file sync.** There is no `launch.md` sync, and items that arrived with git
   are not picked up.
-- **Critical paths do not raise risk or approval.** They only warn after the run.
+- **Critical paths raise risk only when the switch above is on, and only from
+  the prompt text.** After a run they warn about the files it changed. Short prefixes
+  over-match.
 - **Shell-command edits.** A change made by a shell command (`sed -i`, `git apply`)
   is not seen by the critical-path check.
-- **Linking an existing task.** Linking happens at creation only.
 - **Done dates.** A finished task does not mark its item done.
 - **The nudge cooldown** is in memory per server process, so a restart forgets it.
 - **Duplicate titles** are checked by reading first, so two identical adds at the same
@@ -1301,9 +1357,98 @@ Reviewer, Checker) plus approval and gate stages.
 - **Review before create.** Import creates the workflow on the server first. The
   editor opens it afterwards for review and a later save.
 - **External-trust projects.** They list no repo workflows (with a reason).
-- **Phase 5c items.** Typed stage outputs, automatic retry of an agent
-  stage, a per-run budget cap and a fix-it loop from a failed gate are phase 5c.
+- **Phase 5c items.** The built-in templates do not set outputs, "Try once more
+  if it fails", a spending limit or a fixer agent; an admin adds them in the
+  editor (see "Typed outputs, retry and budget").
 - The built-in Canonizer presets are unchanged.
+
+---
+
+## Typed outputs, retry and budget
+
+Phase 5c of the forge port. Steps can hand named values to later steps, an agent
+step can run once more after a failure, and a run can have a spending limit.
+
+### Named outputs
+
+In the editor, each agent under an agent step has "What should this agent hand
+over? (optional)". In JSON it is `outputs` on a stage item: up to 10 names, each
+`^[a-z][a-z0-9_]{0,39}$` and unique. The server adds an instruction to that
+agent's prompt: end the final message with a fenced `json` block holding exactly
+those keys, each a short string.
+
+When the task completes, the server reads the **last** `json` block in the final
+64 KB of its result and checks it:
+
+- it is valid JSON, an object with exactly the declared keys, and every value is a
+  string of at most 2000 characters (hidden characters removed);
+- a name ending in `_path` is a non-empty path that is relative, has no `..`, exists
+  in the task's project folder and, after following symlinks, is still inside it;
+- a name ending in `_commit` is 7 to 40 lowercase hex characters that name a commit
+  in the project's repository (checked with `git rev-parse`).
+
+A path or commit name needs the task to have a project folder. When any check
+fails, the task is marked failed with "outputs invalid: <reason>" (for example
+"plan_path must not contain ..") and the step fails like any failed task. The
+values are stored on the task and shown on the run page as "Handed over".
+
+**Using them.** A later prompt may hold `{{stageN.name}}` (step N, 1-based) or
+`{{prev.name}}` (the step before). They use the current attempt of that step; if
+several agents in the step gave the same name, the values are joined with a blank
+line. An unknown step or name gives an empty string. A check can only supply its
+summary through `{{prev}}` or `{{stageN}}` as before.
+
+**Single pass.** The server substitutes placeholders in one pass over the prompt,
+so a value is never expanded again. `{{prev}}` typed into the run input is no
+longer expanded (before 5c it was), and neither are placeholders inside outputs
+or results. A prompt that contains no placeholder still gets the run input
+appended.
+
+### "Try once more if it fails"
+
+An agent step may set `auto_retry: true` (the switch "Try once more if it
+fails"). When a task of the current attempt has failed (an "outputs invalid" task
+counts) and none was cancelled, the step runs again as a new attempt. This happens
+**once per step per run**: a failure of the second attempt fails the run, and a
+person's **Retry** later does not re-arm it. It never happens after a cancel. While
+other tasks of the same attempt are still active, the server waits for them first.
+Log line: "Step {name} retried automatically". The retry is subject to the
+spending limit.
+
+### The spending limit per run
+
+A workflow may have `budget_usd` (0.01 to 10000; the editor's "Spending limit for
+each run"), copied onto each run when it starts, so changing the workflow does not
+change runs already started. The run page shows "Spent $X of $Y". Spent is the
+cost of every task of the run, every attempt, fix tasks included.
+
+- **It pauses before new work.** Before an agent step, a retry or a fix task
+  starts, the server checks the spent amount. If less than $0.01 remains, the run
+  pauses with "Step {name} held: budget reached ($S of $B)". Nothing already
+  running is stopped. Checks and approvals cost nothing and are not held.
+- **Each new task is capped at the remainder.** Its own cap is the smaller of the
+  agent's (or the server default) and what is left.
+- **It can still be exceeded.** Agents in the same step start together, each
+  capped at the remainder, so together they can spend more than is left.
+- **Raising it.** Whoever may manage the run (its creator, an admin, a maintainer
+  of a touched project) uses "Raise the limit and continue" on the run page, or
+  `POST /workflows/runs/{id}/budget` with `{budget_usd}`. The new value must be
+  more than what is spent (else 409), and the run must still be active. The held
+  step then starts.
+
+### Not covered
+
+- **Non-string outputs.** Values are short strings. Lists, numbers and objects are
+  refused.
+- **`--json-schema`.** Outputs rely on the fenced block and the checks above, not
+  on the CLI's schema option. An agent can format badly; "Try once more if it
+  fails" covers one miss.
+- **Fixing a guard refusal.** A refused or timed-out check is not handed to the
+  fixer.
+- **The critical-file switch over-matches.** Short prefixes match inside other
+  text, and it does not look at which files an agent edits.
+- **Output values are not proof.** The checks show a path exists or a commit
+  exists, not that its content is right.
 
 ---
 
