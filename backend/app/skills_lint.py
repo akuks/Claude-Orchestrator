@@ -30,14 +30,31 @@ Write in the imperative, second person. Lint the file in Skills before you use i
    Evidence: the word count and the quoted line with its path.
 """
 
-_COMMENT = re.compile(r"<!--[\s\S]*?-->")
 _FIELD = re.compile(r"^([A-Za-z-]+):\s*(.*)$")
 _USE_WHEN = re.compile(r"^Use when\b", re.ASCII)
 _PART = re.compile(r"^\d+\.\s", re.ASCII)
 
 
+def _strip_comments(text: str) -> str:
+    """Blank HTML comments but keep their line breaks. One linear pass; an
+    unterminated comment runs to the end of the input."""
+    out: list[str] = []
+    pos = 0
+    while True:
+        a = text.find("<!--", pos)
+        if a < 0:
+            out.append(text[pos:])
+            break
+        out.append(text[pos:a])
+        b = text.find("-->", a + 4)
+        end = len(text) if b < 0 else b + 3
+        out.append("\n" * text.count("\n", a, end))
+        pos = end
+    return "".join(out)
+
+
 def _lines(text: str) -> list[str]:
-    stripped = _COMMENT.sub(lambda m: re.sub(r"[^\n]", "", m.group(0)), text)
+    stripped = _strip_comments(text)
     return stripped.replace("\r", "").split("\n")
 
 
@@ -81,16 +98,17 @@ def lint(text: str) -> list[dict]:
         for k, s in enumerate(starts)
     ]
     if any(_has("Input:", t) for _, t in parts):
-        verify = False
-        for line, t in parts:
-            if _has("Verify:", t):
-                verify = True
-                if not _has("Evidence:", t):
+        last = len(parts) - 1
+        for k, (line, t) in enumerate(parts):
+            missing = [f for f in ("Input:", "Action:", "Output:") if not _has(f, t)]
+            if k == last:
+                if not _has("Verify:", t):
+                    err(line, "the last part must be the Verify: part, with Evidence:")
+                elif not _has("Evidence:", t):
                     err(line, "the Verify: part is missing Evidence: (what check ran and what output proves it)")
+            elif _has("Verify:", t) and missing:
+                err(line, "Verify: must be the last part")
             else:
-                for f in ("Input:", "Action:", "Output:"):
-                    if not _has(f, t):
-                        err(line, f"part is missing {f}")
-        if not verify:
-            err(parts[0][0], "no Verify: part (the last part must verify, with Evidence:)")
+                for f in missing:
+                    err(line, f"part is missing {f}")
     return errs

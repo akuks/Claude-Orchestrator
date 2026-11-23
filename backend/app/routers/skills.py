@@ -52,13 +52,14 @@ class LintIn(BaseModel):
 
 
 MAX_PACK_FILES = 200
+MAX_PACK_ENTRIES = 20000
 
 
 @router.post("/lint")
 async def lint_text(payload: LintIn):
-    if len(payload.text.encode("utf-8")) > skills_lint.MAX_BYTES:
+    if len(payload.text) > skills_lint.MAX_BYTES or len(payload.text.encode("utf-8", "replace")) > skills_lint.MAX_BYTES:
         raise HTTPException(422, "text is over 256 KB")
-    problems = skills_lint.lint(payload.text)
+    problems = await asyncio.to_thread(skills_lint.lint, payload.text)
     return {"ok": not problems, "problems": problems}
 
 
@@ -92,7 +93,13 @@ def _read_capped(path: str):
 
 def _lint_pack_dir(root: str) -> list[dict]:
     out: list[dict] = []
+    seen = 0
+    trunc = {"file": ".", "problems": [{"line": 1, "message": "pack too large: not every file was checked"}]}
     for dirpath, dirnames, filenames in os.walk(root, followlinks=False):
+        seen += len(dirnames) + len(filenames)
+        if seen > MAX_PACK_ENTRIES:
+            out.append(trunc)
+            return out
         dirnames[:] = sorted(d for d in dirnames if d != ".git" and not os.path.islink(os.path.join(dirpath, d)))
         for fn in sorted(filenames):
             if fn != "SKILL.md":
@@ -104,6 +111,7 @@ def _lint_pack_dir(root: str) -> list[dict]:
             except OSError:
                 continue
             if len(out) >= MAX_PACK_FILES:
+                out.append(trunc)
                 return out
             rel = os.path.relpath(full, root)
             text = _read_capped(full)

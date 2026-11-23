@@ -1,4 +1,5 @@
 import asyncio
+import time
 import os
 import uuid
 
@@ -123,7 +124,7 @@ def test_pack_lint_file_cap(client, tmp_path):
         d.mkdir()
         (d / "SKILL.md").write_text(GOOD)
     r = client.get(f"/skills/{_pack(tmp_path)}/lint")
-    assert len(r.json()) == 200
+    assert len(r.json()) == 201 and r.json()[-1]['problems'][0]['message'].startswith('pack too large')
 
 
 def test_pack_lint_visibility_and_missing(client, tmp_path):
@@ -134,3 +135,24 @@ def test_pack_lint_visibility_and_missing(client, tmp_path):
     assert other.get(f"/skills/{pack}/lint").status_code == 404
     assert client.get(f"/skills/{pack}/lint").status_code == 200
     assert client.get("/skills/nope/lint").status_code == 404
+
+
+def test_unterminated_comment_is_linear():
+    t0 = time.monotonic()
+    p = lint("<!--" * (MAX_BYTES // 4))
+    assert time.monotonic() - t0 < 1
+    assert p and p[0]["line"] == 1
+
+
+def test_unterminated_comment_hides_rest_keeps_lines():
+    assert lint(GOOD + "<!-- 9. Input: oops\n\n") == []
+
+
+def test_verify_must_be_last_part():
+    t = "\n".join(["---", "name: d", "description: Use when x.", "---",
+                   "1. Input: a. Action: b. Output: c.",
+                   "2. Verify: ok. Evidence: e.",
+                   "3. Input: a. Action: b. Output: c.",
+                   "4. Input: a. Action: b. Output: c.", ""])
+    e = lint(t)
+    assert {"line": 8, "message": "the last part must be the Verify: part, with Evidence:"} in e
