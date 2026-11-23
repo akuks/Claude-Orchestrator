@@ -110,6 +110,14 @@ describe('phase 5c payload', () => {
     const ap = stagePayload({ name: 'OK', kind: 'approval', message: 'm', fix: { agent: 'a' }, auto_retry: true })
     expect(ap).toEqual({ name: 'OK', kind: 'approval', before: [], message: 'm' })
   })
+  it('drops a fixer that is not in the check project once the agents are known', () => {
+    const base = { name: 'T', kind: 'gate', project: 'p1', run: ['pytest -q'], timeout_min: 60, fix: { agent: 'ag2', rounds: 2 } }
+    const agents = [{ id: 'ag1', project_id: 'p1' }, { id: 'ag2', project_id: 'p2' }]
+    expect('fix' in stagePayload(base, agents)).toBe(false)
+    expect(stagePayload({ ...base, fix: { agent: 'ag1', rounds: 2 } }, agents).fix).toEqual({ agent: 'ag1', rounds: 2 })
+    // agents not loaded: the server decides
+    expect(stagePayload(base, []).fix).toEqual({ agent: 'ag2', rounds: 2 })
+  })
   it('budget only when set; null only to clear a saved one', () => {
     expect(budgetPayload(5, null)).toEqual({ budget_usd: 5 })
     expect(budgetPayload(null, null)).toEqual({})

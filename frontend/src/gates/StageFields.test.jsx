@@ -216,6 +216,45 @@ describe('fix-it agent, retry switch and hand-over names', () => {
   })
 })
 
+describe('fixer follows the check project', () => {
+  it('a new project clears the fixer and asks to pick it again', async () => {
+    let form
+    function H() {
+      const [f] = Form.useForm()
+      form = f
+      return (
+        <Form form={f} initialValues={{ stages: [{ name: 'g', kind: 'gate', project: 'p1', run: ['pytest -q'], timeout_min: 60, fix: { agent: 'ag1', rounds: 2 } }] }}>
+          <Form.List name="stages">
+            {(fields) =>
+              fields.map((x) => (
+                <StageFields
+                  key={x.key}
+                  name={x.name}
+                  projects={[{ id: 'p1', name: 'Proj', directory: '/x' }, { id: 'p2', name: 'Other', directory: '/y' }]}
+                  agents={[{ id: 'ag1', name: 'Fixer', project_id: 'p1' }, { id: 'ag2', name: 'Fixer2', project_id: 'p2' }]}
+                />
+              ))
+            }
+          </Form.List>
+        </Form>
+      )
+    }
+    const v = await render(<H />)
+    await flush()
+    expect(v.container.querySelector('[data-testid="gate-fix-repick"]')).toBeNull()
+    const sel = v.container.querySelectorAll('.ant-select-selector')[0]
+    await act(async () => sel.dispatchEvent(new MouseEvent('mousedown', { bubbles: true })))
+    await flush()
+    const opt = [...document.body.querySelectorAll('.ant-select-item-option')].find((o) => o.textContent === 'Other')
+    await act(async () => opt.dispatchEvent(new MouseEvent('click', { bubbles: true })))
+    await flush()
+    expect(form.getFieldValue(['stages', 0, 'project'])).toBe('p2')
+    expect(form.getFieldValue(['stages', 0, 'fix'])).toBeUndefined()
+    expect(v.container.querySelector('[data-testid="gate-fix-repick"]').textContent).toBe('Pick the fixer again for this project')
+    await v.unmount()
+  })
+})
+
 describe('AgentItems hand-over names', () => {
   function H({ stages, at }) {
     return (

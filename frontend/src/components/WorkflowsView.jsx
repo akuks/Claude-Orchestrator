@@ -66,7 +66,7 @@ function WorkflowEditor({ open, workflow, prefill, hint, missing = [], agents, o
     setSaving(true)
     setError('')
     const { budget_usd: budget, ...rest } = v
-    const payload = { ...rest, stages: (v.stages || []).map(stagePayload), ...budgetPayload(budget, workflow?.budget_usd) }
+    const payload = { ...rest, stages: (v.stages || []).map((st) => stagePayload(st, agents)), ...budgetPayload(budget, workflow?.budget_usd) }
     try {
       if (isEdit) await api.updateWorkflow(workflow.id, payload)
       else await api.createWorkflow(payload)

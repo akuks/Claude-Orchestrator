@@ -99,7 +99,7 @@ function BeforeList({ name }) {
   )
 }
 
-function ProjectSelect({ name, projects, required, label }) {
+function ProjectSelect({ name, projects, required, label, onChange }) {
   const options = projects.filter((p) => (p.directory || '').trim()).map((p) => ({ value: p.id, label: p.name }))
   return (
     <Form.Item
@@ -108,7 +108,7 @@ function ProjectSelect({ name, projects, required, label }) {
       rules={required ? [{ required: true, message: 'Pick a project' }] : []}
       style={{ marginBottom: 14 }}
     >
-      <Select showSearch optionFilterProp="label" allowClear={!required} placeholder="Pick a project" options={options} />
+      <Select showSearch optionFilterProp="label" allowClear={!required} placeholder="Pick a project" options={options} onChange={onChange} />
     </Form.Item>
   )
 }
@@ -163,7 +163,7 @@ function MoreOptions({ name, kind, children }) {
 
 // "If the check fails, ask an agent to fix it": only agents of the check's
 // project can be picked. The agent is saved by its id.
-function FixFields({ name, agents }) {
+function FixFields({ name, agents, repick }) {
   return (
     <Form.Item noStyle shouldUpdate>
       {({ getFieldValue }) => {
@@ -193,6 +193,11 @@ function FixFields({ name, agents }) {
                 data-testid="gate-fix-agent"
               />
             </Form.Item>
+            {repick && !chosen && (
+              <div className="co-wf-muted" data-testid="gate-fix-repick" style={{ marginTop: -6, marginBottom: 10 }}>
+                Pick the fixer again for this project
+              </div>
+            )}
             {chosen && (
               <Form.Item name={[name, 'fix', 'rounds']} label="How many tries" style={{ marginBottom: 14 }}>
                 <InputNumber min={1} max={3} precision={0} placeholder="1" style={{ width: '100%' }} data-testid="gate-fix-rounds" />
@@ -206,9 +211,18 @@ function FixFields({ name, agents }) {
 }
 
 function GateFields({ name, projects, agents }) {
+  const form = Form.useFormInstance()
+  const [repick, setRepick] = useState(false)
+  // The fixer must belong to the check's project: a new project clears it.
+  const projectChanged = () => {
+    if (form.getFieldValue(['stages', name, 'fix', 'agent'])) {
+      form.setFieldValue(['stages', name, 'fix'], undefined)
+      setRepick(true)
+    }
+  }
   return (
     <>
-      <ProjectSelect name={name} projects={projects} required label="Where to run it" />
+      <ProjectSelect name={name} projects={projects} required label="Where to run it" onChange={projectChanged} />
       <Form.Item
         label="Commands to run"
         extra="Add one command per box. They run in order and stop at the first one that fails."
@@ -265,7 +279,7 @@ function GateFields({ name, projects, agents }) {
             )
           }}
         </Form.Item>
-        <FixFields name={name} agents={agents} />
+        <FixFields name={name} agents={agents} repick={repick} />
         <BeforeList name={name} />
         <Form.Item name={[name, 'timeout_min']} label="Give up after (minutes)" style={{ marginBottom: 0 }}>
           <InputNumber min={1} max={720} precision={0} style={{ width: '100%' }} />

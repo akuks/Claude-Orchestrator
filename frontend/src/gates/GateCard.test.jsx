@@ -121,6 +121,12 @@ describe('GateCard', () => {
     expect(onOpenTask).toHaveBeenCalledWith('fx1')
     expect(c.textContent).not.toMatch(/\b(gate|stage|pipeline)\b/i)
   })
+  it('reveals hidden characters in the failure reason', async () => {
+    const c = await mount({ state: { status: 'fixing', fix_round: 1, reason: 'refused: a\u202Eb' }, gateRuns: [] })
+    expect(c.querySelector('[data-testid="gate-fix-reason"]').textContent).toContain('⟦U+202E⟧')
+    const d = await mount({ state: { status: 'fixing', fix_round: 1, reason: 'x\u200By, exit 1' }, gateRuns: [row({ command: 'x\u200By' })] })
+    expect(d.querySelector('[data-testid="gate-fix-reason"] code').textContent).toContain('⟦U+200B⟧')
+  })
   it('no link when the fix task is not visible', async () => {
     const c = await mount({ state: { status: 'fixing', fix_round: 1, fix_task: 'hidden' }, tasks: [], onOpenTask: () => {} })
     expect(c.querySelector('[data-testid="gate-lead"]').textContent).toBe('The check failed. An agent is fixing it (try 1 of 1).')

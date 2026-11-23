@@ -378,6 +378,18 @@ describe('RunView: hand-overs, fixes and the spending limit', () => {
     expect(rows[1].querySelector('dd').textContent).toContain('U+202E')
   })
 
+  it('reveals hidden characters in the agent name of a hand-over', async () => {
+    api.getWorkflowRun.mockImplementation(async () => ({
+      run: run({ current_stage: 0, stages: [{ name: 'Plan', items: [] }] }),
+      tasks: [
+        t('a', 0, 'completed', { title: '[F] Pl\u202Ean: x', outputs: { s: '1' } }),
+        t('b', 0, 'completed', { title: '[F] B: y', outputs: { s: '2' } }),
+      ],
+    }))
+    const c = await mount()
+    expect(c.querySelector('.co-run-handed-agent').textContent).toContain('⟦U+202E⟧')
+  })
+
   it('no hand-over list when no task handed anything over', async () => {
     api.getWorkflowRun.mockImplementation(async () => ({ run: run(), tasks: [t('c', 1, 'running')] }))
     const c = await mount()

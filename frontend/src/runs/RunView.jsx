@@ -75,7 +75,7 @@ function HandedOver({ tasks }) {
         const { agent } = splitStageTitle(t.title)
         return (
           <dl key={t.id} className="co-run-handed-list">
-            {withOut.length > 1 && agent && <div className="co-run-handed-agent">{agent}</div>}
+            {withOut.length > 1 && agent && <div className="co-run-handed-agent">{revealHidden(agent).text}</div>}
             {Object.entries(t.outputs).map(([k, v]) => (
               <div key={k} className="co-run-handed-row" data-testid="run-handed-row">
                 <dt>{k}</dt>

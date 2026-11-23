@@ -106,15 +106,17 @@ function itemPayload(it) {
 }
 
 // The fix-it agent of a check step, only when one is chosen.
-function fixPayload(fix) {
+// With the agent list known, a fixer outside the check's project is dropped.
+function fixPayload(fix, project, agents) {
   if (!fix || !fix.agent) return null
+  if (Array.isArray(agents) && agents.length && !agents.some((a) => a.id === fix.agent && a.project_id === project)) return null
   const rounds = Number(fix.rounds)
   return { agent: fix.agent, rounds: rounds >= 1 && rounds <= 3 ? Math.round(rounds) : 1 }
 }
 
 const AGENT_DROP = new Set(['kind', 'before', 'run', 'retry', 'timeout_min', 'message', 'project', 'fix'])
 
-export function stagePayload(st) {
+export function stagePayload(st, agents) {
   const kind = stageKind(st)
   if (kind === 'agent') {
     // Keys keep their order, so an old step saves byte for byte as before.
@@ -139,7 +141,7 @@ export function stagePayload(st) {
       run,
       ...(run.length === 1 && retry ? { retry } : {}),
       timeout_min: st.timeout_min ?? 60,
-      ...(fixPayload(st.fix) ? { fix: fixPayload(st.fix) } : {}),
+      ...(fixPayload(st.fix, st.project, agents) ? { fix: fixPayload(st.fix, st.project, agents) } : {}),
     }
   }
   return { ...base, message: st.message || '', ...(st.project ? { project: st.project } : {}) }

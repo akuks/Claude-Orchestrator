@@ -1,6 +1,7 @@
 import { useState } from 'react'
 import { Alert, Button, Tag, message } from 'antd'
 import { api } from '../api'
+import { revealHidden } from '../guard/guard'
 import './workflows.css'
 
 const OUTCOME_COLOR = { passed: 'success', failed: 'error', refused: 'error', timeout: 'error', timed_out: 'error' }
@@ -89,16 +90,16 @@ export function failureMessage(reason, last) {
   if (ran && TIMED_OUT.has(last.outcome))
     return (
       <>
-        The command <code>{last.command}</code> took too long and was stopped
+        The command <code>{revealHidden(last.command).text}</code> took too long and was stopped
       </>
     )
   if (ran && last.exit_code != null)
     return (
       <>
-        The command <code>{last.command}</code> failed (exit code {last.exit_code})
+        The command <code>{revealHidden(last.command).text}</code> failed (exit code {last.exit_code})
       </>
     )
-  return reason
+  return revealHidden(String(reason)).text
 }
 
 function LogToggle({ runId, row, testid }) {
