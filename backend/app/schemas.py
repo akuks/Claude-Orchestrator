@@ -475,6 +475,7 @@ class AgentOut(BaseModel):
     read_only: bool = False
     folder: str = ""
     coordinator: bool = False
+    lint: list[str] = []  # non-blocking warnings (model / description), set by the agents router
     created_at: datetime
 
     model_config = {"from_attributes": True}

@@ -61,3 +61,16 @@ async def agent_model(s, agent) -> str | None:
     if agent.tier in TIERS:
         return (await org_tiers(s))[agent.tier]
     return None
+
+
+def lint_agent(model: str | None, description: str | None, tiers: dict) -> list[str]:
+    """Non-blocking warnings for an agent; a save is never refused for them."""
+    out = []
+    if model and model not in tier_values(tiers):
+        out.append(f'model "{model}" is not one of the org\'s tier models ({", ".join(tier_values(tiers))})')
+    d = (description or "").lower()
+    if "use for" not in d:
+        out.append('the description should say when to use this agent ("Use for …")')
+    if "because" not in d:
+        out.append('the description should say why ("… because …")')
+    return out
