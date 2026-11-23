@@ -142,6 +142,7 @@ def test_gate_env_isolates_home(monkeypatch):
     assert env["HOME"] == str(home) and stat.S_IMODE(home.stat().st_mode) == 0o700
     assert env["GIT_CONFIG_NOSYSTEM"] == "1" and env["GIT_CONFIG_GLOBAL"] == os.devnull
     assert env["XDG_CONFIG_HOME"].startswith(str(home)) and env["XDG_CACHE_HOME"].startswith(str(home))
+    assert env["GIT_SSH_COMMAND"] == "false" and env["GIT_SSH"] == "false"
     assert "SSH_AUTH_SOCK" not in env and not [k for k in env if k.endswith("ASKPASS")]
 
 
@@ -172,4 +173,4 @@ def test_write_error_keeps_draining(tmp_path, monkeypatch):
 
     monkeypatch.setattr(ex.os, "write", boom)
     o, _ = _run(f"{sys.executable} -c \"for i in range(20000): print('x'*50)\"", tmp_path)
-    assert o.outcome == "passed"
+    assert o.outcome == "passed" and "no space" in o.log_error

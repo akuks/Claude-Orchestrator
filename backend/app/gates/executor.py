@@ -40,6 +40,8 @@ def gate_env(project) -> dict[str, str]:
     _mkdir_private(home)
     env.update({
         "CI": "1",
+        "GIT_SSH_COMMAND": "false",
+        "GIT_SSH": "false",
         "HOME": str(home),
         "GIT_CONFIG_NOSYSTEM": "1",
         "GIT_CONFIG_GLOBAL": os.devnull,
@@ -103,6 +105,7 @@ class Outcome:
     finished_at: datetime
     duration_ms: int
     result: TestResult
+    log_error: str | None = None
 
 
 async def kill_group(proc) -> None:
@@ -164,6 +167,7 @@ async def run_command(cmd, *, cwd, env, log_path, timeout_s, on_spawn=None) -> O
     fd = os.open(str(log_path), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
     proc = None
     outcome = "failed"
+    state: dict = {"written": 0, "error": None}
     try:
         os.fchmod(fd, 0o600)
         proc = await asyncio.create_subprocess_exec(
@@ -171,7 +175,6 @@ async def run_command(cmd, *, cwd, env, log_path, timeout_s, on_spawn=None) -> O
             stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT, start_new_session=True)
         if on_spawn:
             on_spawn(proc)
-        state: dict = {"written": 0, "error": None}
         pump = asyncio.ensure_future(_pump(proc, fd, state))
         try:
             await asyncio.wait_for(proc.wait(), timeout_s)
@@ -208,4 +211,4 @@ async def run_command(cmd, *, cwd, env, log_path, timeout_s, on_spawn=None) -> O
     except Exception:  # noqa: BLE001 - an unparsable log is "no result"
         result = TestResult(None, None, None, None, None, ())
     code = None if outcome == "timed_out" else proc.returncode
-    return Outcome(outcome, code, started, finished, duration, result)
+    return Outcome(outcome, code, started, finished, duration, result, state["error"])
