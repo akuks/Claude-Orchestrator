@@ -37,6 +37,12 @@ describe('GateCard', () => {
     const c = await mount({ state: { status: 'passed' }, gateRuns: [row({ outcome: 'passed', exit_code: 0, flaky: ['test_a'] })] })
     expect(c.querySelector('[data-testid="gate-flaky"]').textContent).toContain('a flaky test is not a fixed test')
   })
+  it('says failed then passed unchanged for an empty flaky list', async () => {
+    const c = await mount({ state: { status: 'passed' }, gateRuns: [row({ outcome: 'passed', exit_code: 0, flaky: [] })] })
+    expect(c.querySelector('[data-testid="gate-flaky-unchanged"]').textContent).toContain('failed then passed unchanged')
+    const d = await mount({ state: { status: 'passed' }, gateRuns: [row({ outcome: 'passed', exit_code: 0, flaky: null })] })
+    expect(d.querySelector('[data-testid="gate-flaky-unchanged"]')).toBeNull()
+  })
   it('Show log fetches and renders lines as text', async () => {
     api.workflowGateLog.mockResolvedValue({ lines: ['hello', '<b>x</b>'], truncated: false })
     const c = await mount({ state: { status: 'failed' }, gateRuns: [row()] })

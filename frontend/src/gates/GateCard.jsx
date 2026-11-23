@@ -62,6 +62,11 @@ function GateRun({ runId, row }) {
         </ul>
       )}
       {row.flaky?.length > 0 && <div className="co-gate-flaky-names">Failed then passed: {row.flaky.join(', ')}</div>}
+      {Array.isArray(row.flaky) && row.flaky.length === 0 && (
+        <div className="co-gate-flaky-names" data-testid="gate-flaky-unchanged">
+          The command failed then passed unchanged
+        </div>
+      )}
       {row.has_log && (
         <>
           <Button size="small" type="link" loading={busy} onClick={toggle} data-testid="gate-show-log">
