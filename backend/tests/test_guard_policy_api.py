@@ -264,6 +264,31 @@ def test_org_settings_admin_writes(world):
                                             "dev_db_patterns": before["dev_db_patterns"]})
 
 
+def test_org_settings_model_tiers(world):
+    a, m = world["admin"], world["m"]
+    defaults = {"strongest": "opus", "standard": "sonnet", "light": "haiku"}
+    before = a.get("/guard/org-settings").json()
+    try:
+        assert before["model_tiers"] == defaults
+        a.put("/guard/org-settings", json={"disabled_rules": ["db-write"]})
+        r = a.put("/guard/org-settings", json={"model_tiers": {"strongest": "sonnet"}})
+        assert r.status_code == 200, r.text
+        assert r.json()["model_tiers"] == {**defaults, "strongest": "sonnet"}
+        assert r.json()["disabled_rules"] == ["db-write"]
+        assert m.get("/guard/org-settings").json()["model_tiers"]["strongest"] == "sonnet"
+        assert m.put("/guard/org-settings", json={"model_tiers": {}}).status_code == 403
+        r = a.put("/guard/org-settings", json={"model_tiers": {"light": "gpt-4"}})
+        assert r.status_code == 400
+        assert r.json()["detail"] == "model_tiers.light must be opus, sonnet, haiku or a claude-… model id"
+        r = a.put("/guard/org-settings", json={"model_tiers": {"fast": "opus"}})
+        assert r.json()["detail"] == "unknown model tier: fast"
+        r = a.put("/guard/org-settings", json={"model_tiers": []})
+        assert r.json()["detail"] == "model_tiers must be an object"
+        assert a.get("/guard/org-settings").json()["model_tiers"]["strongest"] == "sonnet"
+    finally:
+        a.put("/guard/org-settings", json={"model_tiers": {}, "disabled_rules": before["disabled_rules"]})
+
+
 @pytest.mark.parametrize("rid", ["self-protect", "agent-config", "readonly-source", "guest-quarantine",
                                  "mcp-block", "unparseable", "org.x", "nope"])
 def test_org_settings_reject_locked_rules(world, rid):

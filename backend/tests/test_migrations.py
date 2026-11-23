@@ -12,7 +12,7 @@ from sqlalchemy.orm import Session
 from app import models
 from app.database import _alembic_cfg, _baseline_metadata, run_migrations
 
-HEAD = "0012"  # the latest revision
+HEAD = "0013"  # the latest revision
 
 
 def _tables(db) -> set[str]:
@@ -390,7 +390,7 @@ def test_migration_0012_upgrade_downgrade(scratch_url):
 
     url = scratch_url
     command.upgrade(_alembic_cfg(url), "0011")
-    command.upgrade(_alembic_cfg(url), "head")
+    command.upgrade(_alembic_cfg(url), "0012")
 
     def check(sc, insp):
         assert {"stale_flagged_at", "stale_reason"} <= {c["name"] for c in insp.get_columns("project_decisions")}
@@ -407,3 +407,28 @@ def test_migration_0012_upgrade_downgrade(scratch_url):
     command.downgrade(_alembic_cfg(url), "0011")
     assert _inspect(url, lambda sc, insp: "decision_proposals" in insp.get_table_names()) is False
     assert _inspect(url, lambda sc, insp: "stale_reason" in {c["name"] for c in insp.get_columns("project_decisions")}) is False
+
+
+def test_migration_0013_upgrade_downgrade(scratch_url):
+    from alembic import command
+
+    url = scratch_url
+    command.upgrade(_alembic_cfg(url), "0012")
+    command.upgrade(_alembic_cfg(url), "head")
+
+    def check(sc, insp):
+        assert "model_tiers" in {c["name"] for c in insp.get_columns("guard_org_settings")}
+        assert "tier" in {c["name"] for c in insp.get_columns("agents")}
+        assert {"brief", "brief_bounds"} <= {c["name"] for c in insp.get_columns("tasks")}
+        return sc.exec_driver_sql("SELECT version_num FROM alembic_version").scalar()
+
+    assert _inspect(url, check) == "0013"
+    command.downgrade(_alembic_cfg(url), "0012")
+
+    def check_down(sc, insp):
+        assert "model_tiers" not in {c["name"] for c in insp.get_columns("guard_org_settings")}
+        assert "tier" not in {c["name"] for c in insp.get_columns("agents")}
+        assert not ({"brief", "brief_bounds"} & {c["name"] for c in insp.get_columns("tasks")})
+        return sc.exec_driver_sql("SELECT version_num FROM alembic_version").scalar()
+
+    assert _inspect(url, check_down) == "0012"
