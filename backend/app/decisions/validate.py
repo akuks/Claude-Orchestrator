@@ -52,7 +52,7 @@ def _touches(value) -> list[str]:
     for item in value:
         if not isinstance(item, str):
             raise ValueError("touches entries must be text")
-        item = clean_text(item).strip()
+        item = redact(clean_text(item), []).strip()
         if len(item) > MAX_TOUCH:
             raise ValueError(f"a touches entry may be at most {MAX_TOUCH} characters")
         norm = _rel_path(item, "a touches entry")
