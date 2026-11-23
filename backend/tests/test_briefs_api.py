@@ -264,3 +264,35 @@ def test_workflow_step_from_read_only_agent_is_read_only(client, submitted):
             return rows
 
     assert _run(scenario()) == [True]
+
+
+def test_patch_agent_null_model_and_tier(client):
+    a = _agent(client, model="sonnet")
+    r = client.patch(f"/agents/{a['id']}", json={"model": None, "tier": "standard"})
+    assert r.status_code == 200, r.text
+    assert r.json()["tier"] == "standard"
+    assert not r.json()["model"]
+    r = client.patch(f"/agents/{a['id']}", json={"tier": None})
+    assert r.status_code == 200, r.text
+    assert r.json()["tier"] is None
+
+
+def test_task_without_brief_stores_sql_null(client):
+    from sqlalchemy import text
+
+    t = client.post("/tasks", json={"prompt": "plain"}).json()
+
+    async def go():
+        async with SessionLocal() as s:
+            return (await s.execute(text("SELECT brief IS NULL, brief_bounds IS NULL FROM tasks WHERE id=:i"),
+                                    {"i": t["id"]})).one()
+
+    assert tuple(_run(go())) == (True, True)
+
+
+def test_duplicate_copies_system_prompt(client):
+    t = client.post("/tasks", json={"prompt": "p"}).json()
+    _finish(t["id"], system_prompt="custom sys")
+    d = client.post(f"/tasks/{t['id']}/duplicate")
+    assert d.status_code == 201, d.text
+    assert _row(d.json()["id"]).system_prompt == "custom sys"
