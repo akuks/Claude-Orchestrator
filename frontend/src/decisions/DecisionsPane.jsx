@@ -1,8 +1,9 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { Alert, Button, Empty, Modal, Popconfirm, Radio, Select, Space, Tag, Typography, message } from 'antd'
+import { Alert, Button, Empty, Modal, Popconfirm, Radio, Select, Space, Tag, Tooltip, Typography, message } from 'antd'
 import { PlusOutlined } from '@ant-design/icons'
 import { api } from '../api'
 import DecisionForm from './DecisionForm'
+import ProposalsQueue from './ProposalsQueue'
 import { INACTIVE_MSG, KINDS, KIND_COLORS, makeRuleDraft } from './decisions'
 
 const day = (s) => (s ? String(s).slice(0, 10) : '')
@@ -58,7 +59,15 @@ function Row({ pid, d, canEdit, busy, act, onEdit, onRule, active }) {
         <Tag color={KIND_COLORS[d.kind]} bordered={false}>{d.kind}</Tag>
         {d.status !== 'active' && <Tag data-testid="decision-status">{d.status}{d.superseded_by ? ` by ${`D-${String(d.superseded_by).padStart(3, '0')}`}` : ''}</Tag>}
         <span>{d.title}</span>
+        {d.stale_flagged_at && d.status === 'active' && (
+          <Tooltip title={d.stale_reason}>
+            <Tag color="orange" bordered={false} data-testid="decision-stale">May be out of date</Tag>
+          </Tooltip>
+        )}
       </Space>
+      {d.stale_flagged_at && d.status === 'active' && d.stale_reason && (
+        <div><Typography.Text type="secondary" style={{ fontSize: 12 }}>{d.stale_reason}</Typography.Text></div>
+      )}
       <div>
         {(d.touches || []).map((t) => (
           <code key={t} style={{ marginRight: 6 }}>{t}</code>
@@ -78,6 +87,9 @@ function Row({ pid, d, canEdit, busy, act, onEdit, onRule, active }) {
         <Space wrap size={4} style={{ display: 'flex', marginTop: 4 }}>
           <Button size="small" onClick={() => onEdit(d)}>Edit</Button>
           <Button size="small" disabled={busy} onClick={() => act(() => api.verifyDecision(pid, d.number))} data-testid={`verify-${d.number}`}>Still true</Button>
+          {d.stale_flagged_at && (
+            <Button size="small" disabled={busy} onClick={() => act(() => api.verifyDecision(pid, d.number))} data-testid={`stillvalid-${d.number}`}>Still valid</Button>
+          )}
           <Popconfirm title={`Retire ${d.display_id}?`} okText="Retire" onConfirm={() => act(() => api.retireDecision(pid, d.number))}>
             <Button size="small" disabled={busy} data-testid={`retire-${d.number}`}>Retire</Button>
           </Popconfirm>
@@ -108,7 +120,7 @@ function Row({ pid, d, canEdit, busy, act, onEdit, onRule, active }) {
 }
 
 // Project drawer tab: recorded decisions, health, and (maintainers) the writes.
-export default function DecisionsPane({ project, canEdit, onMakeRule }) {
+export default function DecisionsPane({ project, canEdit, onMakeRule, onCount }) {
   const pid = project.id
   const [status, setStatus] = useState('active')
   const [kind, setKind] = useState('')
@@ -214,6 +226,7 @@ export default function DecisionsPane({ project, canEdit, onMakeRule }) {
       <Typography.Paragraph type="secondary">
         Recorded decisions name the files they touch; agents are shown them before they edit those files.
       </Typography.Paragraph>
+      <ProposalsQueue key={pid} project={project} canEdit={canEdit} onAccepted={load} onCount={onCount} />
       {healthError && <Typography.Text type="secondary" data-testid="health-unavailable">health check unavailable</Typography.Text>}
       <HealthPanel health={health} canEdit={canEdit} onVerify={(n) => act(() => api.verifyDecision(pid, n))} />
       <Space wrap style={{ marginBottom: 8 }}>

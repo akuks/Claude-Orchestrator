@@ -30,7 +30,7 @@ vi.mock('../api', () => ({
 }))
 
 import { api } from '../api'
-import TaskDetail from './TaskDetail'
+import TaskDetail, { renderLine } from './TaskDetail'
 
 // A fake socket that records what the component opens and closes.
 class FakeSocket {
@@ -373,5 +373,11 @@ describe('TaskDetail: the thread\'s questions (phase 3b)', () => {
     vi.useRealTimers()
     api.getTask.mockReset()
     api.getTask.mockImplementation(async (id) => ({ id, title: `Task ${id}`, status: 'running', prompt: 'p' }))
+  })
+})
+
+describe('decision_review run-log line', () => {
+  it('renders the review line', () => {
+    expect(renderLine({ type: 'decision_review', payload: { proposed: 2, stale: [4] } }).text).toBe('Suggested 2 decisions for review · flagged D-004 as maybe out of date')
   })
 })
