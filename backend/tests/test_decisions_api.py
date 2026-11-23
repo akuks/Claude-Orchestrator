@@ -297,3 +297,41 @@ def test_titles_are_one_line(world):
     assert d["why"] == "a\nb\nc" and d["source"] == "s t"
     r = world["maint"].patch(f"{world['base']}/1", json={"version": 1, "title": "p\nq"})
     assert r.json()["title"] == "p q"
+
+
+def _set_stale(pid, number):
+    from datetime import datetime, timezone
+
+    from sqlalchemy import update
+
+    from app.models import ProjectDecision
+
+    async def go():
+        async with SessionLocal() as s:
+            await s.execute(update(ProjectDecision).where(
+                ProjectDecision.project_id == pid, ProjectDecision.number == number).values(
+                stale_flagged_at=datetime.now(timezone.utc), stale_reason="src/a.py changed in abc1234 (t)"))
+            await s.commit()
+
+    asyncio.run(go())
+
+
+def test_stale_cleared_by_verify_patch_retire_supersede(world):
+    w = world
+    for _ in range(5):
+        _mk(w)
+    for n in range(1, 5):
+        _set_stale(w["pid"], n)
+    got = w["maint"].get(f"{w['base']}/1").json()
+    assert got["stale_flagged_at"] and got["stale_reason"].startswith("src/a.py changed in")
+    for n, call in (
+        (1, lambda: w["maint"].post(f"{w['base']}/1/verify")),
+        (2, lambda: w["maint"].patch(f"{w['base']}/2", json={"version": 1, "title": "new"})),
+        (3, lambda: w["maint"].post(f"{w['base']}/3/retire")),
+        (4, lambda: w["maint"].post(f"{w['base']}/4/supersede", json={"by": 5})),
+    ):
+        r = call()
+        assert r.status_code == 200, (n, r.text)
+        assert r.json()["stale_flagged_at"] is None and r.json()["stale_reason"] is None
+        again = w["maint"].get(f"{w['base']}/{n}").json()
+        assert again["stale_flagged_at"] is None and again["stale_reason"] is None

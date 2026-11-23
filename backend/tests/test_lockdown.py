@@ -377,6 +377,7 @@ def test_agent_token_allowlist_is_exact(thread):
         ("PUT", "/tasks/{task_id}/notes"),
         ("POST", "/tasks/{task_id}/questions"),
         ("GET", "/tasks/{task_id}/questions"),
+        ("POST", "/tasks/{task_id}/decision-proposals"),
         ("POST", "/guard/report"),
         ("POST", "/guard/approvals"),
         ("GET", "/guard/approvals/{approval_id}"),

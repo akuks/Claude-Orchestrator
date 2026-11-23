@@ -12,6 +12,7 @@ from sqlalchemy import select
 
 from app.database import SessionLocal
 from app.decisions import snapshot as snap_mod
+from app.decisions.texts import SUGGEST_LINE
 from app.guard import policy_inputs
 from app.guard import runtime as guard_runtime
 from app.models import GuardOrgSettings, Project, ProjectDecision, Task, TaskEvent
@@ -175,6 +176,17 @@ def test_index_cut_at_150_words():
     assert snap_mod.index_text(snap[:15]).split("\n")[-1].startswith("D-015")
 
 
+def test_index_ends_with_suggest_line(client, ground_restored):
+    _set_ground({})
+    pid = _project(client)
+    _decide(pid, 1, "cents")
+    inp = _gather(pid)
+    assert inp.decisions_index.endswith(SUGGEST_LINE) and inp.policy["decisions_index"].endswith(SUGGEST_LINE)
+    empty = _project(client)
+    inp = _gather(empty)
+    assert inp.decisions_index is None and "decisions_index" not in inp.policy
+
+
 # ---- policy keys --------------------------------------------------------------------------------
 
 
@@ -184,7 +196,7 @@ def test_policy_keys_own_switch_on(client, ground_restored):
     _decide(pid, 1, "cents", touches=["src/billing.py"])
     inp = _gather(pid)
     assert inp.policy["decisions"][0]["n"] == 1
-    assert inp.policy["decisions_index"] == f"{HEADER}\nD-001 cents" == inp.decisions_index
+    assert inp.policy["decisions_index"] == f"{HEADER}\nD-001 cents\n{SUGGEST_LINE}" == inp.decisions_index
     assert "decisions" not in inp.ground_included  # the worker adds it with the index
 
 
@@ -240,7 +252,7 @@ def test_run_system_prompt_gets_the_index(client, ground_restored):
     done = wait_task(client, r.json()["id"])
     assert done["status"] == "completed", done.get("error")
     sp = _system_prompt(read_probe_args(key))
-    index = f"{HEADER}\nD-001 Money is integer cents"
+    index = f"{HEADER}\nD-001 Money is integer cents\n{SUGGEST_LINE}"
     assert sp.endswith(index) and sp.index(gr.GROUNDING) < sp.index(index)
     assert _events(done["id"], "ground_rules")[0]["included"][-1] == "decisions"
     pol = json.loads(read_probe_file(key, "policy"))
