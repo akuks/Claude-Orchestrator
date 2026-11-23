@@ -167,3 +167,32 @@ def test_large_repo_is_bounded(monkeypatch, tmp_path):
     t = time.process_time()
     r = _run(SimpleNamespace(directory=str(tmp_path)), decs)
     assert time.process_time() - t < 3 and r["git_error"] is None and len(r["items"]) == 200
+
+
+def test_repo_without_commits(repo):
+    (repo / "src").mkdir()
+    (repo / "src" / "a.py").write_text("x")  # untracked: ls-files -co still lists it
+    old = datetime.now(timezone.utc) - timedelta(days=90)
+    r = _run(SimpleNamespace(directory=str(repo)), [_dec(1, ["src/**"], verified=old), _dec(2, ["nope/**"])])
+    assert r["git_error"] is None and r["ok"] == 1
+    assert r["items"] == [{"number": 2, "display_id": "D-002", "touches_unmatched": ["nope/**"],
+                           "see_missing": False, "changed_since_verified": None, "unverified_days": None}]
+
+
+def test_route_runs_git_after_the_session_is_closed(client, repo, monkeypatch):
+    from sqlalchemy import inspect
+
+    from app.routers import decisions as router_mod
+
+    seen = {}
+
+    async def fake_health(project, rows):
+        seen["detached"] = [inspect(x).detached for x in [project, *rows]]
+        return {"available": True, "git_error": None, "ok": len(rows), "items": []}
+
+    monkeypatch.setattr(router_mod, "decisions_health", fake_health)
+    pid = client.post("/projects", json={"name": f"h-{uuid.uuid4().hex[:8]}", "directory": str(repo)}).json()["id"]
+    assert client.post(f"/projects/{pid}/decisions", json={"title": "t", "touches": ["a"]}).status_code == 201
+    r = client.get(f"/projects/{pid}/decisions/health")
+    assert r.status_code == 200 and r.json()["ok"] == 1
+    assert seen["detached"] == [True, True]
