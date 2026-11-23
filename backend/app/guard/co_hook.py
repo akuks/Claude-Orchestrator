@@ -100,6 +100,7 @@ import re
 import sys
 import threading
 import time
+import unicodedata
 
 # urllib / ipaddress / hashlib are imported only on the approval path (cost:
 # every hook run starts a fresh interpreter; PostToolUse and allowed calls
@@ -890,10 +891,11 @@ def _brief_rel(policy, payload):
     """(real-path form, as-given normalised form) of the edited file relative to ``project_dir``; each None
     when it is outside it. The as-given form folds ``..`` without following symlinks, so a symlink or a
     ``..`` cannot hide a path from CANNOT."""
-    real = _rel_target(policy, payload, "project_dir")
     ti = payload.get("tool_input")
     ti = ti if isinstance(ti, dict) else {}
-    target = ti.get("file_path") or ti.get("notebook_path")
+    keys = ("notebook_path", "file_path") if payload.get("tool_name") == "NotebookEdit" else ("file_path",)
+    target = next((ti[k] for k in keys if ti.get(k)), None)
+    real = _rel_target(policy, {"cwd": payload.get("cwd"), "tool_input": {"file_path": target}}, "project_dir")
     root = policy.get("project_dir")
     given = None
     if isinstance(target, str) and target and "\0" not in target and isinstance(root, str) and root:
@@ -908,6 +910,10 @@ def _brief_rel(policy, payload):
     return real, given
 
 
+def _nfc(text):
+    return unicodedata.normalize("NFC", text) if CASE_INSENSITIVE else text
+
+
 def _brief_layers(brief):
     """The validated layers, or None when the key is not the shape the server writes."""
     if not isinstance(brief, dict) or not isinstance(brief.get("layers"), list) or not brief["layers"]:
@@ -917,7 +923,8 @@ def _brief_layers(brief):
             return None
         for k in ("can", "cannot"):
             v = layer.get(k)
-            if not isinstance(v, list) or not all(isinstance(g, str) for g in v):
+            if not isinstance(v, list) or not all(isinstance(g, str) and _glob_parts(g, "x", None) is not None
+                                                  for g in v):
                 return None
     return brief["layers"]
 
@@ -928,16 +935,16 @@ def brief_denial(policy, payload, tool):
     if tool not in BRIEF_TOOLS or "brief" not in policy:
         return None
     layers = _brief_layers(policy["brief"])
-    if layers is None:
+    if layers is None or not isinstance(policy.get("project_dir"), str) or not policy["project_dir"]:
         return BRIEF_MALFORMED
-    forms = [r for r in dict.fromkeys(_brief_rel(policy, payload)) if r]
+    forms = [_nfc(r) for r in dict.fromkeys(_brief_rel(policy, payload)) if r]
     for rel in forms:
         for i, layer in enumerate(layers):
             who = "the task's brief" if i == 0 else f"an enclosing brief (task {layer['task']})"
             for g in layer["cannot"]:
-                if matches(g, rel):
+                if matches(_nfc(g), rel):
                     return f"this changes {rel}, which {who} says CANNOT change ({g})"
-            if layer["can"] and not any(matches(g, rel) for g in layer["can"]):
+            if layer["can"] and not any(matches(_nfc(g), rel) for g in layer["can"]):
                 globs = cut(", ".join(layer["can"]), BRIEF_CAN_MAX)
                 return f"this changes {rel}, which is outside what {who} says CAN change ({globs})"
     return None
