@@ -78,6 +78,11 @@ class Settings(BaseSettings):
     memory_max_chars: int = 6000  # ~1500 tokens
     memory_call_timeout_seconds: int = 120
 
+    # Suggested decisions (phase 4b)
+    proposals_enabled: bool = True
+    proposals_pending_cap: int = 50
+    proposals_model: str = "haiku"
+
     # Auth (multi-user)
     session_ttl_days: int = 7
     login_max_failures: int = 5

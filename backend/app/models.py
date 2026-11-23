@@ -423,6 +423,36 @@ class ProjectDecision(Base):
     version: Mapped[int] = mapped_column(Integer, default=1, server_default="1")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now, onupdate=_now)
+    stale_flagged_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    stale_reason: Mapped[str | None] = mapped_column(String(300), nullable=True)
+
+
+class DecisionProposal(Base):
+    """A suggested decision awaiting review (phase 4b).
+    source run | lesson | answer | agent | person; status pending | accepted | rejected."""
+
+    __tablename__ = "decision_proposals"
+    __table_args__ = (
+        UniqueConstraint("project_id", "dedupe_key", name="uq_decision_proposals_project_dedupe"),
+        Index("ix_decision_proposals_project_id_status", "project_id", "status"),
+    )
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=_uuid)
+    project_id: Mapped[str] = mapped_column(ForeignKey("projects.id", ondelete="CASCADE"), index=True)
+    task_id: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    source: Mapped[str] = mapped_column(String(12))
+    kind: Mapped[str] = mapped_column(String(12), default="decision", server_default="decision")
+    title: Mapped[str] = mapped_column(String(200))
+    why: Mapped[str] = mapped_column(Text, default="", server_default="")
+    touches: Mapped[list] = mapped_column(JSON, default=list, server_default="[]")
+    evidence: Mapped[str] = mapped_column(String(300), default="", server_default="")
+    dedupe_key: Mapped[str | None] = mapped_column(String(80), nullable=True)
+    status: Mapped[str] = mapped_column(String(12), default="pending", server_default="pending")
+    proposed_by: Mapped[str | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
+    reviewed_by: Mapped[str | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
+    reviewed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    decision_number: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
 
 
 class ActionGrant(Base):
