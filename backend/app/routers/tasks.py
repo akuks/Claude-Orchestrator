@@ -391,6 +391,7 @@ async def duplicate_task(task_id: str, request: Request):
         new = Task(
             title=f"{src.title} (copy)",
             prompt=src.prompt,
+            system_prompt=src.system_prompt,
             project=src.project,
             project_id=src.project_id,
             priority=src.priority,

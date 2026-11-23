@@ -108,8 +108,8 @@ class Task(Base):
     origin: Mapped[str] = mapped_column(String(16), default="user", server_default="user")
     notes: Mapped[str | None] = mapped_column(Text, nullable=True)
     notes_updated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
-    brief: Mapped[dict | None] = mapped_column(JSON, nullable=True)  # CAN/CANNOT change brief (phase 4c)
-    brief_bounds: Mapped[list | None] = mapped_column(JSON, nullable=True)  # enclosing briefs' scopes
+    brief: Mapped[dict | None] = mapped_column(JSON(none_as_null=True), nullable=True)  # CAN/CANNOT change brief (phase 4c)
+    brief_bounds: Mapped[list | None] = mapped_column(JSON(none_as_null=True), nullable=True)  # enclosing briefs' scopes
     heartbeat_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     run_pgid: Mapped[int | None] = mapped_column(Integer, nullable=True)
     run_proc_start: Mapped[str | None] = mapped_column(String(64), nullable=True)

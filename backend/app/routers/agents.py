@@ -385,6 +385,8 @@ async def update_agent(agent_id: str, payload: AgentUpdate, request: Request):
         agent = await _get_or_404(s, agent_id)
         if "tier" in data:
             data["tier"] = data["tier"] or None
+        if "model" in data:
+            data["model"] = data["model"] or ""  # the column is NOT NULL; "" means no fixed model
         for k, v in data.items():
             setattr(agent, k, v)
         await s.commit()
