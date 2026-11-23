@@ -23,19 +23,12 @@ import {
 import ApprovalCard from '../gates/ApprovalCard'
 import GateCard from '../gates/GateCard'
 import RunLog from '../gates/RunLog'
-import { stageKind } from '../gates/gates'
+import { RUN_STATUS_COLOR, runStatusText, stageKind } from '../gates/gates'
 import './run.css'
 
 dayjs.extend(relativeTime)
 
 const POLL_MS = 3000
-const RUN_TAG = {
-  pending: 'default',
-  running: 'processing',
-  paused: 'warning',
-  completed: 'success',
-  failed: 'error',
-}
 const STAGE_TAG = {
   done: 'success',
   current: 'processing',
@@ -43,6 +36,30 @@ const STAGE_TAG = {
   failed: 'error',
   waiting_approval: 'warning',
 }
+// A step's state, in the same plain capitalised words as the run status.
+const STEP_STATE_TEXT = {
+  done: 'Done',
+  current: 'Running',
+  next: 'Not started',
+  failed: 'Failed',
+  waiting_approval: 'Waiting for approval',
+}
+
+const fmtMin = (m) => (m >= 10 ? Math.round(m).toFixed(0) : (Math.round(m * 10) / 10).toFixed(1))
+const fmtTokens = (n) => (n < 1000 ? String(n) : n < 999500 ? `${Math.round(n / 1000)}k` : `${(n / 1e6).toFixed(1)}M`)
+
+// "1 of 2 steps done · 1.6 min", plus cost and tokens only when above zero.
+// Falls back to the server's line when the numbers are missing.
+export function totalsLine(t) {
+  if (!t) return null
+  if (t.stages_done == null || t.stages == null) return t.line || null
+  const parts = [`${t.stages_done} of ${t.stages} step${t.stages === 1 ? '' : 's'} done`]
+  if (t.minutes != null) parts.push(`${fmtMin(Number(t.minutes) || 0)} min`)
+  if (Number(t.cost_usd) > 0) parts.push(`$${Number(t.cost_usd).toFixed(2)}`)
+  if (Number(t.tokens) > 0) parts.push(`${fmtTokens(Number(t.tokens))} tokens`)
+  return parts.join(' · ')
+}
+
 const money = (c) => `$${Number(c || 0).toFixed(2)}`
 const compact = (n) => (n >= 1000 ? `${(n / 1000).toFixed(n >= 10000 ? 0 : 1)}k` : String(n))
 
@@ -220,6 +237,16 @@ export default function RunView({ id, user, projects = [], navigate, onOpenCrede
   const cost = tasks.reduce((a, t) => a + (t.total_cost_usd || 0), 0)
   const tokens = tasks.reduce((a, t) => a + (t.input_tokens || 0) + (t.output_tokens || 0), 0)
   const manage = canManageRun(run, user, projects)
+  const totalsText = totalsLine(data?.totals)
+  const hasAgentSteps = (run.stages || []).some((st) => stageKind(st) === 'agent')
+  const headDef = run.stages?.[run.current_stage]
+  const headStatus = sstate?.[String(run.current_stage)]?.status
+  const pausedText =
+    stageKind(headDef) === 'approval' && headStatus === 'waiting_approval'
+      ? 'Waiting for someone to approve the step below.'
+      : stageKind(headDef) === 'gate' && headStatus === 'needs_approval'
+        ? 'Waiting for someone to allow the check below to run.'
+        : null
   const stage = selStage == null ? null : stages[selStage]
   const stageDef = selStage == null ? null : run.stages[selStage]
   const kind = stageKind(stageDef)
@@ -263,8 +290,8 @@ export default function RunView({ id, user, projects = [], navigate, onOpenCrede
           <div className="co-run-eyebrow">Workflow run</div>
           <h1 data-testid="run-title">
             {run.name}
-            <Tag color={RUN_TAG[run.status]} className="co-run-status">
-              {run.status}
+            <Tag color={RUN_STATUS_COLOR[run.status]} className="co-run-status" data-testid="run-status">
+              {runStatusText(run.status)}
             </Tag>
           </h1>
           <div className="co-run-sub" data-testid="run-subtitle">
@@ -273,21 +300,25 @@ export default function RunView({ id, user, projects = [], navigate, onOpenCrede
         </div>
         <div className="co-run-head-side">
           <div className="co-run-stats co-num" aria-label="Run totals">
-            {data?.totals?.line ? (
-              <span data-testid="run-totals-line">{data.totals.line}</span>
+            {totalsText ? (
+              <span data-testid="run-totals-line">{totalsText}</span>
             ) : (
-              <span>
-                <b>{money(cost)}</b> so far
+              <>
+                <span>
+                  <b>{money(cost)}</b> so far
+                </span>
+                {tokens > 0 && (
+                  <span>
+                    <b>{compact(tokens)}</b> tokens
+                  </span>
+                )}
+              </>
+            )}
+            {hasAgentSteps && (
+              <span data-testid="run-task-count">
+                <b>{tasks.length}</b> task{tasks.length === 1 ? '' : 's'}
               </span>
             )}
-            {tokens > 0 && (
-              <span>
-                <b>{compact(tokens)}</b> tokens
-              </span>
-            )}
-            <span>
-              <b>{tasks.length}</b> task{tasks.length === 1 ? '' : 's'}
-            </span>
           </div>
           {manage && (
             <div className="co-run-actions">
@@ -296,10 +327,10 @@ export default function RunView({ id, user, projects = [], navigate, onOpenCrede
                   type="primary"
                   icon={<ReloadOutlined />}
                   loading={busy}
-                  onClick={() => act(api.retryWorkflowRun, 'Retrying the failed stage')}
+                  onClick={() => act(api.retryWorkflowRun, 'Retrying the failed step')}
                   data-testid="run-retry"
                 >
-                  Retry failed stage
+                  Retry the failed step
                 </Button>
               )}
               {active && (
@@ -327,35 +358,42 @@ export default function RunView({ id, user, projects = [], navigate, onOpenCrede
           className="co-run-paused"
           type="warning"
           showIcon
+          data-testid="run-paused"
           message={
-            <>
-              Waiting on an approval — decide it in <a href="#/approvals">Approvals</a> to continue.
-            </>
+            pausedText || (
+              <>
+                Waiting on an approval — decide it in <a href="#/approvals">Approvals</a> to continue.
+              </>
+            )
           }
         />
       )}
 
-      <section className="co-surface co-run-timeline" aria-label="Stages">
+      <section className="co-surface co-run-timeline" aria-label="Steps">
         {stages.length ? (
           <Comets3D variant="timeline" stages={stages} selectedStage={selStage} onSelectStage={selectStage} />
         ) : (
-          <div className="co-run-empty">This run has no stages.</div>
+          <div className="co-run-empty">This run has no steps.</div>
         )}
       </section>
 
       {stage && (
-        <div className="co-run-body">
-          <section className="co-surface co-run-panel co-run-stage" data-testid="run-stage-tasks" aria-label={`Stage ${stage.name}`}>
+        <div className={`co-run-body${selTask ? '' : ' co-run-body-full'}`} data-testid="run-body">
+          <section className="co-surface co-run-panel co-run-stage" data-testid="run-stage-tasks" aria-label={`Step ${stage.name}`}>
             <header className="co-run-panel-head">
               <h2>
-                <span className="co-run-stage-no">Stage {selStage + 1}</span> {stage.name}
+                <span className="co-run-stage-no">Step {selStage + 1}</span> {stage.name}
               </h2>
               {stageDef?.items?.length > 1 && (
                 <span className="co-run-stage-parallel" data-testid="run-stage-parallel" title={stageDef.items.map((it) => it.agent).join(', ')}>
-                  parallel
+                  {stageDef.items.length} agents at once
                 </span>
               )}
-              <Tag color={STAGE_TAG[stage.state]}>{stateLabel(stage.state)}</Tag>
+              {kind === 'agent' && (
+                <Tag color={STAGE_TAG[stage.state]} data-testid="run-stage-state">
+                  {STEP_STATE_TEXT[stage.state] || stateLabel(stage.state)}
+                </Tag>
+              )}
             </header>
             {kind === 'gate' ? (
               <GateCard
@@ -377,7 +415,7 @@ export default function RunView({ id, user, projects = [], navigate, onOpenCrede
                 Not started yet
                 {stageDef?.items?.length ? (
                   <div className="co-run-empty-sub">
-                    {stageDef.items.length > 1 ? 'Runs in parallel: ' : 'Runs: '}
+                    {stageDef.items.length > 1 ? 'Agents working at the same time: ' : 'Agent: '}
                     {stageDef.items.map((it) => it.agent).join(', ')}
                   </div>
                 ) : null}
@@ -391,8 +429,8 @@ export default function RunView({ id, user, projects = [], navigate, onOpenCrede
             )}
           </section>
 
-          <div className="co-run-detail">
-            {selTask ? (
+          {selTask && (
+            <div className="co-run-detail">
               <TaskDetail
                 inline
                 currentUser={user}
@@ -402,10 +440,8 @@ export default function RunView({ id, user, projects = [], navigate, onOpenCrede
                 onOpenTask={openTask}
                 onOpenCredentials={onOpenCredentials}
               />
-            ) : kind !== 'agent' ? null : (
-              <div className="co-surface co-run-panel co-run-empty">Select a task to see its live output.</div>
-            )}
-          </div>
+            </div>
+          )}
         </div>
       )}
       <RunLog log={data?.log || run.log} />

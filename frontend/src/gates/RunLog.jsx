@@ -1,5 +1,6 @@
 import dayjs from 'dayjs'
 import { parseTime } from '../home/useHomeData'
+import { plainServerText } from './gates'
 
 // The run's log, newest first. Text only.
 export default function RunLog({ log }) {
@@ -11,7 +12,7 @@ export default function RunLog({ log }) {
       <ul>
         {lines.map((l, i) => (
           <li key={i}>
-            <span className="co-num">{l.at ? dayjs(parseTime(l.at)).format('HH:mm:ss') : ''}</span> {l.text}
+            <span className="co-num">{l.at ? dayjs(parseTime(l.at)).format('HH:mm:ss') : ''}</span> {plainServerText(l.text)}
           </li>
         ))}
       </ul>

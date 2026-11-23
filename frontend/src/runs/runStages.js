@@ -54,7 +54,7 @@ export function runStages(run, tasks, sstate) {
     if (gs && GATE_STATE[gs]) state = GATE_STATE[gs]
     else if (run.status === 'completed' && !statuses.length) state = 'done'
     else state = stageState(statuses, i, run.current_stage)
-    return { name: (st && st.name) || `Stage ${i + 1}`, state, task_count: statuses.length }
+    return { name: (st && st.name) || `Step ${i + 1}`, state, task_count: statuses.length }
   })
 }
 

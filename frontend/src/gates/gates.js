@@ -34,11 +34,56 @@ export function exportFileName(name) {
   return base ? `${base}.md` : 'workflow.md'
 }
 
+// Step types, in plain words. The values are the API's `kind`.
 export const KIND_OPTIONS = [
-  { value: 'agent', label: 'Agents' },
-  { value: 'gate', label: 'Command gate' },
-  { value: 'approval', label: 'Approval' },
+  { value: 'agent', label: 'Agents do the work' },
+  { value: 'gate', label: 'Run a check' },
+  { value: 'approval', label: 'Ask a person' },
 ]
+
+export const KIND_HELP = {
+  agent: 'Each agent gets its own instructions. Agents in the same step work at the same time.',
+  gate: 'The server runs your test or build command. It passes only if the command succeeds.',
+  approval: 'The workflow waits until someone approves.',
+}
+
+// A workflow run's status, in plain words.
+const RUN_STATUS_TEXT = {
+  pending: 'Starting',
+  running: 'Running',
+  paused: 'Waiting for you',
+  completed: 'Done',
+  failed: 'Failed',
+}
+
+export const RUN_STATUS_COLOR = {
+  pending: 'default',
+  running: 'processing',
+  paused: 'warning',
+  completed: 'success',
+  failed: 'error',
+}
+
+export function runStatusText(status) {
+  if (RUN_STATUS_TEXT[status]) return RUN_STATUS_TEXT[status]
+  const s = String(status || '').replace(/_/g, ' ').trim()
+  return s ? s[0].toUpperCase() + s.slice(1) : 'Unknown'
+}
+
+// "step 2 of 5" for a run's position.
+export function runStepText(run) {
+  const n = (run?.stages || []).length
+  if (!n) return ''
+  const at = Math.min((Number(run.current_stage) || 0) + 1, n)
+  return `step ${at} of ${n}`
+}
+
+// Append a placeholder to the end of a prompt, with one space between.
+export function appendPlaceholder(text, ph) {
+  const cur = typeof text === 'string' ? text : ''
+  if (!cur) return ph
+  return /\s$/.test(cur) ? cur + ph : `${cur} ${ph}`
+}
 
 export const stageKind = (st) => (st && (st.kind === 'gate' || st.kind === 'approval') ? st.kind : 'agent')
 
@@ -77,3 +122,11 @@ export function formStage(st) {
 
 export const stageLabel = (st) =>
   st.kind === 'gate' ? `⚙ ${st.name}` : st.kind === 'approval' ? `✋ ${st.name}` : st.name
+
+// Server-written lines name a check step "gate" ("Step X (gate) passed",
+// "Gate X failed: …"); show them with the word the screens use.
+export function plainServerText(text) {
+  return String(text ?? '')
+    .replace(/\(gate\)/g, '(check)')
+    .replace(/^Gate /, 'Check ')
+}
