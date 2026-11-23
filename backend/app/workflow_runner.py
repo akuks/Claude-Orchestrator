@@ -299,8 +299,9 @@ async def _start_stage(s, run: WorkflowRun, stage_index: int, worker, pre: dict 
     for item in stage.get("items") or []:
         agent = by_id.get(item.get("agent")) or by_name.get(item.get("agent"))
         if agent is None:
-            # Unknown agent -> fail the run rather than silently skip.
-            st.update(status="failed", reason=f"unknown agent {item.get('agent')}")
+            # Unknown agent -> fail the run rather than silently skip. A new dict: an
+            # earlier item's build_task flushed `st`, so an in-place change would not persist.
+            st = {**st, "status": "failed", "reason": f"unknown agent {item.get('agent')}"}
             _put_state(run, stage_index, st)
             runlog.append(run, f"Step {name} failed: unknown agent {item.get('agent')}")
             run.status = RUN_FAILED
@@ -691,11 +692,12 @@ class WorkflowRunner:
                 results.append((tid, values, None))
 
         async def fn(pre):
+            flipped: list[tuple[str, str]] = []
             async with SessionLocal() as s:
                 run = await s.get(WorkflowRun, run_id)
                 if (run is None or run.status not in ACTIVE_RUN or run.current_stage != v.index
                         or _attempt(run, v.index) != v.attempt):
-                    return None
+                    return flipped
                 for tid, values, reason in results:
                     t = await s.get(Task, tid)
                     if (t is None or t.status != Status.COMPLETED or t.outputs is not None
@@ -707,10 +709,22 @@ class WorkflowRunner:
                         t.status = Status.FAILED
                         t.error = f"outputs invalid: {reason}"
                         t.outputs = None
+                        flipped.append((tid, t.error))
                 await s.commit()
-                return None
+                return flipped
 
-        await self._locked(run_id, fn)
+        flipped = await self._locked(run_id, fn) or []
+        # After the lock: tell live views the task ended failed, as the worker does at
+        # its own terminal points (an `error`, then `completed` with the status).
+        emit = getattr(self.worker, "emit_offline", None)
+        if emit is None:
+            return
+        for tid, error in flipped:
+            for etype, payload in (("error", {"message": error}), ("completed", {"status": Status.FAILED})):
+                try:
+                    await emit(tid, etype, payload)
+                except Exception:  # noqa: BLE001 - an event failure never blocks advancing
+                    log.exception("workflow runner: emitting %s for task %s failed", etype, tid)
 
     async def _advance_locked(self, run_id: str, pre: dict) -> "_Post | None":
         async with SessionLocal() as s:

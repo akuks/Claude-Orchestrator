@@ -946,6 +946,10 @@ class WorkerManager:
             await s.commit()
         await broker.publish(task_id, {"seq": seq, "type": etype, "payload": payload})
 
+    async def emit_offline(self, task_id: str, etype: str, payload: dict) -> None:
+        """Public: an event for a task with no live run (the workflow runner uses it)."""
+        await self._emit_offline(task_id, etype, payload)
+
     def _emit_offline_for(self, task_id: str):
         async def emit(etype: str, payload: dict) -> None:
             await self._emit_offline(task_id, etype, payload)

@@ -14,7 +14,8 @@ from app.constants import Status
 from app.database import SessionLocal
 from app.gates import outputs
 from app.main import app
-from app.models import Agent, Project, Task, WorkflowRun
+from app.models import Agent, Project, Task, TaskEvent, WorkflowRun
+from app.worker import WorkerManager
 from app.workflow_runner import WorkflowRunner, substitute
 
 SUFFIX = ("When you finish, end your final message with a fenced ```json block holding exactly these keys, "
@@ -384,3 +385,66 @@ def test_run_detail_hides_expects(client, no_tick, repo):
     assert "expects" not in body["stage_state"]["0"]
     t0 = next(t for t in body["tasks"] if t["stage_index"] == 0)
     assert t0["outputs"] == {"plan_path": "docs/plan.md", "summary": "s"}
+
+
+class EmitWorker(FakeWorker):
+    """FakeWorker with the real offline emitter (it uses nothing else of the worker)."""
+
+    async def emit_offline(self, task_id, etype, payload):
+        await WorkerManager._emit_offline(self, task_id, etype, payload)
+
+
+def test_runner_invalid_outputs_emit_events(no_tick, repo):
+    async def go():
+        pid, (lead, dev) = await _setup(repo)
+        rid = await _make_run(_stages(lead, dev), pid)
+        r = WorkflowRunner(EmitWorker(), 999)
+        await r.start_run(rid)
+        await _finish(rid, 0, "no block")
+        await r._advance(rid)
+        [t0] = await _tasks(rid, 0)
+        assert t0.status == Status.FAILED
+        async with SessionLocal() as s:
+            evs = (await s.execute(select(TaskEvent).where(TaskEvent.task_id == t0.id)
+                                   .order_by(TaskEvent.seq))).scalars().all()
+        assert [(e.type, e.payload) for e in evs] == [
+            ("error", {"message": "outputs invalid: no ```json block at the end of the result"}),
+            ("completed", {"status": "failed"}),
+        ]
+        assert evs[0].seq < evs[1].seq
+
+    asyncio.run(go())
+
+
+def test_runner_emit_failure_does_not_block(no_tick, repo):
+    class BadEmit(FakeWorker):
+        async def emit_offline(self, *a):
+            raise RuntimeError("boom")
+
+    async def go():
+        pid, (lead, dev) = await _setup(repo)
+        rid = await _make_run(_stages(lead, dev), pid)
+        r = WorkflowRunner(BadEmit(), 999)
+        await r.start_run(rid)
+        await _finish(rid, 0, "no block")
+        await r._advance(rid)
+        assert (await _run(rid)).status == "failed"
+
+    asyncio.run(go())
+
+
+def test_unknown_agent_second_item_persists_stage_state(no_tick, repo):
+    async def go():
+        pid, (lead, dev) = await _setup(repo)
+        rid = await _make_run([{"name": "Dev", "items": [
+            {"agent": dev, "prompt": "x"},
+            {"agent": "no-such-agent-" + uuid.uuid4().hex[:8], "prompt": "y"},
+        ]}], pid)
+        r = WorkflowRunner(FakeWorker(), 999)
+        await r.start_run(rid)
+        run = await _run(rid)
+        assert run.status == "failed"
+        st = run.stage_state["0"]
+        assert st["status"] == "failed" and st["reason"].startswith("unknown agent no-such-agent-")
+
+    asyncio.run(go())
