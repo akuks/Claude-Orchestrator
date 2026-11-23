@@ -208,8 +208,11 @@ async def gather(s, *, task, project, owner_id: str | None, mcp: dict | None) ->
             policy["decisions_index"] = index
     brief = getattr(task, "brief", None)  # JSON null reads as None: falsy is no brief
     brief_text = brief_layers = None
-    if brief and isinstance(brief, dict):
+    if brief:
         bounds = getattr(task, "brief_bounds", None) or []
+        if not isinstance(brief, dict) or not isinstance(bounds, list) \
+                or not all(isinstance(b, dict) for b in bounds):
+            raise PolicyInputError("the task's brief is malformed")  # never fail open
         brief_text = render.brief_text(brief, bounds)
         brief_layers = scope.layers(task.id, brief, bounds)
     return PolicyInputs(policy=policy, brief_text=brief_text, brief_layers=brief_layers or [], add_dirs=refs, data_line=DATA_LINE if trust == "external" else None,

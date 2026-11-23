@@ -27,7 +27,7 @@ def shell_root_prefix(glob: str) -> str | None:
         return None
     prefix = glob[:-3] if glob.endswith("/**") else glob
     prefix = prefix.rstrip("/")
-    if not prefix or any(c in prefix for c in "*?[]{}"):
+    if not prefix or any(c in prefix for c in "*?"):
         return None
     return prefix
 
@@ -37,7 +37,9 @@ def apply(policy: dict, layers: list[dict]) -> dict:
     ro = policy.setdefault("readonly_paths", [])
     base = policy.get("project_dir") or ""
     seen = {e.get("path") for e in ro if isinstance(e, dict)}
-    roots, only = 0, []
+    counted: set[str] = set()  # distinct roots in force, whether added here or already there
+    only, outside = [], []
+    project_real = os.path.realpath(base)
     done: set[str] = set()
     for layer in layers:
         for glob in layer.get("cannot") or []:
@@ -49,9 +51,16 @@ def apply(policy: dict, layers: list[dict]) -> dict:
                 only.append(glob)
                 continue
             path = os.path.realpath(os.path.join(base, prefix))
+            if path != project_real and not path.startswith(project_real.rstrip("/") + "/"):
+                only.append(glob)  # a symlink out of the project: not ours to make readonly
+                outside.append(glob)
+                continue
+            counted.add(path)
             if path in seen:
                 continue
             seen.add(path)
             ro.append({"path": path, "reason": f"the task's brief says CANNOT change {glob}", "source": "brief"})
-            roots += 1
-    return {"event": "brief_scope", "shell_roots": roots, "file_tools_only": only}
+    ev = {"event": "brief_scope", "shell_roots": len(counted), "file_tools_only": only}
+    if outside:
+        ev["outside_project"] = outside
+    return ev
