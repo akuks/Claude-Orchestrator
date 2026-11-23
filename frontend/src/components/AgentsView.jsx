@@ -295,7 +295,7 @@ function RunModal({ agent, projects, onClose, onRan }) {
       onClose()
     } catch (e) {
       if (brief) setBriefError(e.message)
-      else message.error(e.message)
+      message.error(e.message)
     } finally {
       setRunning(false)
     }

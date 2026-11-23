@@ -84,8 +84,8 @@ export default function CreateTaskModal({
       onCreated?.()
       onClose()
     } catch (e) {
-      if (briefPayload(values.brief) && /brief|can_change|cannot_change|goal|done|stop|setup|log|retries|tie_break|outputs/i.test(e.message || '')) setBriefError(e.message)
-      else message.error(e.message)
+      if (brief) setBriefError(e.message)
+      message.error(e.message)
     } finally {
       setSubmitting(false)
     }

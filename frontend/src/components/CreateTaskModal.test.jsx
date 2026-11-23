@@ -3,7 +3,12 @@ import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vite
 import { flush, render } from '../home/testRender'
 
 vi.mock('../api', () => ({ api: { createTask: vi.fn(async (b) => b) } }))
+vi.mock('antd', async (orig) => {
+  const a = await orig()
+  return { ...a, message: { ...a.message, error: vi.fn(), success: vi.fn() } }
+})
 
+import { message } from 'antd'
 import { api } from '../api'
 import CreateTaskModal from './CreateTaskModal'
 
@@ -76,5 +81,34 @@ describe('CreateTaskModal brief', () => {
     await type(document.querySelector('#brief_stop'), 'stop')
     await submit()
     expect(document.querySelector('[data-testid="brief-error"]').textContent).toContain('at most 20 paths')
+  })
+  it('keeps the section open when a collapsed section has an error', async () => {
+    await open()
+    await type(document.querySelector('#brief_goal'), 'ship')
+    const header = () => document.querySelector('.ant-collapse-header')
+    await act(async () => header().click()) // open
+    await act(async () => header().click()) // collapse
+    expect(document.querySelector('.ant-collapse-item-active')).toBeNull()
+    await submit()
+    expect(api.createTask).not.toHaveBeenCalled()
+    expect(document.querySelector('[data-testid="brief-error"]')).not.toBeNull()
+    expect(document.querySelector('.ant-collapse-item-active')).not.toBeNull()
+  })
+  it('shows a server error inline and as a toast when a brief was sent', async () => {
+    api.createTask.mockRejectedValueOnce(new Error('the brief needs goal'))
+    await open()
+    await type(document.querySelector('#brief_goal'), 'ship')
+    await type(document.querySelector('#brief_done'), 'ok')
+    await type(document.querySelector('#brief_stop'), 'stop')
+    await submit()
+    expect(document.querySelector('[data-testid="brief-error"]').textContent).toContain('the brief needs goal')
+    expect(message.error).toHaveBeenCalledWith('the brief needs goal')
+  })
+  it('toasts only when no brief was sent', async () => {
+    api.createTask.mockRejectedValueOnce(new Error('boom'))
+    await open()
+    await submit()
+    expect(message.error).toHaveBeenCalledWith('boom')
+    expect(document.querySelector('[data-testid="brief-error"]')).toBeNull()
   })
 })

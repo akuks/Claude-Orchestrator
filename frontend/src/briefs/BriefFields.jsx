@@ -1,3 +1,4 @@
+import { useState } from 'react'
 import { Collapse, Form, Input, InputNumber, Select } from 'antd'
 
 const tags = (placeholder) => (
@@ -7,8 +8,11 @@ const tags = (placeholder) => (
 // The collapsible Brief section of a task form. Fields are `brief.*`; the
 // parent form owns the values (briefPayload turns them into the request).
 export default function BriefFields({ error }) {
+  const [keys, setKeys] = useState([])
   return (
     <Collapse
+      activeKey={error ? ['brief'] : keys}
+      onChange={(k) => setKeys([].concat(k))}
       size="small"
       style={{ marginBottom: 16 }}
       items={[
