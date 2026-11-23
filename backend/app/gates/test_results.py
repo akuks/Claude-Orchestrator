@@ -50,6 +50,9 @@ _PY_COLL = re.compile(r"collected (\d+) items?", _A)
 _FAIL_FILE = re.compile(r"FAIL +(\S.*)", _A)
 _VT_FAIL = re.compile(r"FAIL {2}(.+)", _A)
 _PY_PROG = re.compile(r"(\S+\.py) +([.FEsxX]+)(?: +\[ *\d+%\])?", _A)
+_PY_DOTS = re.compile(r"([.FEsxX]+) +\[ *\d+%\]", _A)  # pytest -q: no file name
+_PY_V_STATUS = {"PASSED": 0, "XPASS": 0, "FAILED": 1, "ERROR": 1, "SKIPPED": 2, "XFAIL": 2}
+_PCT_TAIL = re.compile(r"\[ *\d+%\]", _A)
 _PW_LINE = re.compile(r"(✓|✘|ok|x|-)\s+\d+\s+(.*)", _A)
 _COUNT_PART = re.compile(r"(\d+) ([a-z ]+)", _A)
 _TOTAL_TAIL = re.compile(r"\(\d+\)", _A)
@@ -193,17 +196,14 @@ def _scan(raw: str) -> _State | None:
     if "\r" in text:
         text = text.replace("\r", "")
     S = _State()
-    for i, line in enumerate(text.split("\n")):
+    # drop short lines up front (cheap): the shortest line any runner prints is 4 characters
+    for i, line in enumerate([ln for ln in text.split("\n") if len(ln) > 3]):
         if len(line) > MAX_LINE:
             line = line[:MAX_LINE]
-        k = 0
-        n = len(line)
-        while k < n and line[k] in " \t":
-            k += 1
-        if k == n:
-            continue
-        t = line[k:].rstrip()
-        if not t:
+        lead = line.lstrip(" \t")
+        k = len(line) - len(lead)
+        t = lead.rstrip()
+        if len(t) < 4:  # the shortest line any runner prints is 4 characters ("PASS", "ok 1")
             continue
         c = ord(t[0])
         if S.mocha_hold is not None:
@@ -226,7 +226,7 @@ def _scan(raw: str) -> _State | None:
             S.pw_in_failed = False
 
         if digit:
-            if k == 0:
+            if k == 0 and t.startswith("1.."):
                 m = _TAP_PLAN.match(t)
                 if m:
                     S.head["tap"] = int(m.group(1))
@@ -251,11 +251,14 @@ def _scan(raw: str) -> _State | None:
                     S.per["mocha"][1] += 1
                     _add(S.names["mocha"][1], m.group(1))
                     continue
-        if k == 0 and (c == 61 or digit):
+        if k == 0 and (c == 61 or digit) and " in " in t:
             m = _PY_SUM.fullmatch(t)
             if m:
                 S.sum["py"] = {"at": i, "c": _counts(m.group(1), ", ")}
                 continue
+
+        if digit and k == 0 and "]" not in t and ".py " not in t and "::" not in t:
+            continue  # nothing below can match a plain numeric line (fast path)
 
         if c == 0x2139:  # ℹ node-test summary
             m = _NODE_SUM.fullmatch(t)
@@ -399,16 +402,33 @@ def _scan(raw: str) -> _State | None:
                 _add(S.names["py"][0], _before_dash(t[6:]))
 
         # pytest progress lines: "tests/test_a.py ..F.s    [ 45%]"
-        if k == 0 and ".py " in t:
-            m = _PY_PROG.fullmatch(t)
+        if k == 0 and (".py " in t or t[-1] == "]"):
+            m = _PY_PROG.fullmatch(t) or _PY_DOTS.fullmatch(t)
             if m:
-                for ch in m.group(2):
+                for ch in m.group(m.lastindex):
                     if ch in ".X":
                         S.per["py"][0] += 1
                     elif ch in "FE":
                         S.per["py"][1] += 1
                     else:
                         S.per["py"][2] += 1
+        if k == 0 and "::" in t:  # pytest -v: "tests/a.py::test_x PASSED  [ 10%]"
+            u = t
+            if u.endswith("%]"):
+                j = u.rfind("[")
+                if j > 0 and _PCT_TAIL.fullmatch(u[j:]):
+                    u = u[:j].rstrip()
+            for w in (" SKIPPED (", " XFAIL ("):  # pytest -v prints the reason after the word
+                j = u.find(w)
+                if j > 0:
+                    u = u[:j] + w[:-2]
+                    break
+            head, sep, word = u.rpartition(" ")
+            if sep and word in _PY_V_STATUS and "::" in head:
+                idx = _PY_V_STATUS[word]
+                S.per["py"][idx] += 1
+                if idx == 1:
+                    _add(S.names["py"][1], head)
     if S.mocha_hold is not None:
         _flush_mocha(S, None)
     return S
@@ -496,6 +516,9 @@ def parse(text: str) -> TestResult:
             return _UNKNOWN
         sm = _summary_of(S, f)
         per = S.per[_KEY[f]]
+        if f == "go" and sum(per) == 0:
+            # only package lines ("ok  pkg 0.5s"): no per-test information
+            return TestResult("go", None, None, None, None, ())
         if sm:
             p, fl, sk, nr = sm["passed"], sm["failed"], sm["skipped"], sm["notRun"]
         else:
@@ -518,6 +541,8 @@ def progress(text: str) -> tuple[int, int | None, int] | None:
             return None
         per = S.per[_KEY[f]]
         sm = _summary_of(S, f)
+        if f == "go" and sum(per) == 0:
+            return None
         done = sum(per)
         failed = per[1]
         total: int | None = None
@@ -527,7 +552,7 @@ def progress(text: str) -> tuple[int, int | None, int] | None:
             total = S.head["py"]
         elif f == "tap" and "tap" in S.head:
             total = S.head["tap"]
-        if done == 0 and sm:
+        if sm:  # a finished run: the summary is the truth
             done = sm["passed"] + sm["failed"] + sm["skipped"]
             failed = sm["failed"]
         if total is None and sm:

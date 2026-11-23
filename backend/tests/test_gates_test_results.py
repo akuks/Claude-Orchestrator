@@ -72,7 +72,8 @@ def test_constants():
 
 
 @pytest.mark.parametrize("text", ["=" * 5_000_000, ("a" * 100_000 + "\n") * 50,
-                                  " " * 3_000_000 + "x", ("1 " * 2000 + "\n") * 500])
+                                  " " * 3_000_000 + "x", ("1 " * 2000 + "\n") * 500],
+                         ids=["equals", "long-lines", "spaces", "digits"])
 def test_hostile_input_is_fast(text):
     t0 = time.monotonic()
     parse(text)
@@ -88,3 +89,39 @@ def test_progress_partial_runs():
 def test_progress_line():
     assert progress_line((31, 63, 0)) == "31 of 63 tests done, 0 failed"
     assert progress_line((31, None, 0)) == "31 tests done, 0 failed"
+
+
+def test_go_package_lines_only_gives_unknown_counts():
+    r = parse("ok  \texample.com/a\t0.5s\nok  \texample.com/b\t(cached)\n")
+    assert r == TestResult("go", None, None, None, None, ())
+    assert progress("ok  \texample.com/a\t0.5s\n") is None
+
+
+def test_go_verbose_still_counts():
+    r = parse("--- PASS: TestA (0.00s)\nPASS\nok  \texample.com/a\t0.5s\n")
+    assert (r.runner, r.passed, r.total) == ("go", 1, 1)
+
+
+def test_many_short_lines_are_fast():
+    text = "ab\n" * 7_000_000  # about 21 MB
+    t0 = time.monotonic()
+    parse(text)
+    assert time.monotonic() - t0 < 2.0
+
+
+def test_progress_pytest_q_dots():
+    assert progress("collected 5 items\n\n..F.s                 [ 80%]\n") == (5, 5, 1)
+    assert progress("..F.s [ 80%]\n.. [100%]\n") == (7, None, 1)
+
+
+def test_progress_pytest_verbose():
+    text = (
+        "collected 5 items\n"
+        "tests/test_a.py::test_one PASSED                [ 20%]\n"
+        "tests/test_a.py::test_two[a b] FAILED           [ 40%]\n"
+        "tests/test_a.py::test_three SKIPPED (why)       [ 60%]\n"
+    )
+    assert progress(text) == (3, 5, 1)
+    text = text.replace("SKIPPED (why)", "SKIPPED")
+    assert progress(text) == (3, 5, 1)
+    assert parse(text).failing == ("tests/test_a.py::test_two[a b]",)
