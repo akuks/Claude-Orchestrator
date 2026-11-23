@@ -1233,8 +1233,9 @@ It lives in the project drawer, on the **Launch** tab.
 - **Scope nudge.** When you create a task in a project that has a launch list, the
   prompt is checked for new-scope wording ("can we add", "while we're at it", build
   verbs). On a match the form shows, inline: "This looks like new scope: the
-  launch list has N open items; this would become #M." (`M` is the project's last
-  item number plus one.) You can **Add to launch list**, put it **After launch**, or
+  launch list has N open items; this would become #M." (`M` is the next item
+  number from the project's counter, which never reuses a number, plus one, so it can skip numbers
+  after a delete.) You can **Add to launch list**, put it **After launch**, or
   **Run anyway**. It never blocks. Prompts of 400 or more characters and prompts that start
   with `/` are never scope, and a person is nudged at most once per 30 minutes per
   project. Tasks created by agents are never nudged.
@@ -1243,13 +1244,15 @@ It lives in the project drawer, on the **Launch** tab.
   touch, and an `estimate` (median, min and max days from start to done). The
   estimate is `null` until at least 10 items have both dates.
 - **Critical paths.** Up to 20 globs, with the same rules and matcher as a decision's
-  `touches`. When a task in such a project ends, in any end state, the paths its own
-  `Edit`, `Write`, `MultiEdit` and `NotebookEdit` calls changed are matched against
-  them. A hit adds a `critical_paths` event, shown on the task as "This run changed
+  `touches`. When a task in such a project ends, in any end state, the files targeted by its
+  `Edit`, `Write`, `MultiEdit` and `NotebookEdit` calls (including failed ones, and
+  earlier retry attempts) are matched against them. Paths outside the project directory
+  are ignored, at most 500 calls are remembered, and the event shows at most 10 paths. A hit adds a `critical_paths` event, shown on the task as "This run changed
   N critical path(s): ...".
 - **Questions.** An open question whose text names an open launch item (title of
   at least 3 characters, case-insensitive) shows "blocks launch item #3: Title".
-- A task cancelled during the retry backoff now ends `cancelled`, not failed.
+- A task cancelled during the retry backoff is ended as `cancelled` when the backoff
+  elapses, not left queued.
 
 ### Not covered
 
