@@ -379,6 +379,9 @@ describe('TaskDetail: the thread\'s questions (phase 3b)', () => {
 describe('decision_review run-log line', () => {
   it('renders the review line', () => {
     expect(renderLine({ type: 'decision_review', payload: { proposed: 2, stale: [4] } }).text).toBe('Suggested 2 decisions for review · flagged D-004 as maybe out of date')
+    expect(renderLine({ type: 'test_result', payload: { runner: 'pytest', passed: 61, failed: 2, skipped: 0, failing: ['a', 'b'] } }).text).toBe('Tests: 61 passed, 2 failed (a, b)')
+    expect(renderLine({ type: 'test_result', payload: { runner: 'go', passed: null, failed: 0, skipped: 3, failing: [] } }).text).toBe('Tests: 3 skipped')
+    expect(renderLine({ type: 'test_result', payload: { runner: 'go', passed: null, failed: null, skipped: null } }).text).toBe('Tests: none ran')
   })
 })
 
