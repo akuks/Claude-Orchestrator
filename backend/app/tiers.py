@@ -14,7 +14,8 @@ _MODEL_ID = re.compile(r"^claude-[a-z0-9][a-z0-9.-]{1,60}(\[1m\])?$")
 
 
 def _ok(value) -> bool:
-    return isinstance(value, str) and (value in VALID_MODELS or bool(_MODEL_ID.match(value)))
+    # at most 32 characters: Task.model and Agent.model are String(32)
+    return isinstance(value, str) and (value in VALID_MODELS or (len(value) <= 32 and bool(_MODEL_ID.match(value))))
 
 
 def normalized(stored) -> dict:
