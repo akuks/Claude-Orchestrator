@@ -1082,3 +1082,18 @@ def test_no_brief_no_policy_key_or_event(client):
     evs = _events(done["id"])
     assert not any(e.type == "guard" and e.payload.get("event") == "brief_scope" for e in evs)
     assert "brief" not in [e.payload for e in evs if e.type == "ground_rules"][0]["included"]
+
+
+def test_brief_scope_failure_fails_the_task_before_spawn(client, monkeypatch):
+    from app.briefs import scope
+
+    def boom(policy, layers):
+        raise RuntimeError("scope broke")
+
+    monkeypatch.setattr(scope, "apply", boom)
+    brief = {"goal": "g", "can_change": [], "cannot_change": ["migrations"], "done": "d", "stop": "s"}
+    key = env_probe_key()
+    done = _run(client, f"x [env-probe:{key}]", brief=brief)
+    assert done["status"] == "failed" and "co-guard could not be set up; task not started" in done["error"]
+    assert "scope broke" in done["error"]
+    assert read_probe_args(key) is None

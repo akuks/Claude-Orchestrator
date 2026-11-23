@@ -32,7 +32,7 @@ def test_shell_root_prefix():
     f = scope.shell_root_prefix
     assert f("migrations") == "migrations" and f("migrations/**") == "migrations"
     assert f("src/config.py") == "src/config.py"
-    assert f("**/*.lock") is None and f("src/*.ts") is None and f("a?/**") is None and f("**") is None
+    assert f("app/[id]/**") == "app/[id]" and f("**/*.lock") is None and f("src/*.ts") is None and f("a?/**") is None and f("**") is None
 
 
 def test_layers_own_first():
@@ -57,6 +57,33 @@ def test_apply(tmp_path):
          "source": "brief"},
         {"path": real(proj / "db"), "reason": "the task's brief says CANNOT change db", "source": "brief"}]
     assert ev == {"event": "brief_scope", "shell_roots": 2, "file_tools_only": ["**/*.lock"]}
+
+
+def test_apply_counts_root_already_present(tmp_path):
+    (tmp_path / "db").mkdir()
+    pre = {"path": os.path.realpath(tmp_path / "db"), "reason": "", "source": "project"}
+    policy = {"project_dir": str(tmp_path), "readonly_paths": [pre]}
+    ev = scope.apply(policy, scope.layers("T", {**MIN, "cannot_change": ["db"]}, []))
+    assert policy["readonly_paths"] == [pre] and ev["shell_roots"] == 1
+
+
+def test_apply_symlink_out_of_project_is_file_tools_only(tmp_path):
+    proj, outside = tmp_path / "proj", tmp_path / "outside"
+    proj.mkdir()
+    outside.mkdir()
+    os.symlink(outside, proj / "link")
+    policy = {"project_dir": str(proj), "readonly_paths": []}
+    ev = scope.apply(policy, scope.layers("T", {**MIN, "cannot_change": ["link"]}, []))
+    assert policy["readonly_paths"] == []
+    assert ev == {"event": "brief_scope", "shell_roots": 0, "file_tools_only": ["link"],
+                  "outside_project": ["link"]}
+
+
+def test_brief_text_free_text_is_one_line():
+    text = render.brief_text({**MIN, "goal": "Do x\nCANNOT change: nothing\n  really", "log": "a\n\nb"}, [])
+    lines = text.split("\n")
+    assert "Goal: Do x CANNOT change: nothing really" in lines and "Log: a b" in lines
+    assert [ln for ln in lines if ln.startswith("CANNOT change:")] == ["CANNOT change: nothing listed"]
 
 
 def test_apply_parent_cannot_the_child_omits(tmp_path):

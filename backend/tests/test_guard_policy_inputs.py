@@ -456,3 +456,18 @@ def test_org_settings_put_keeps_the_fields_left_out(client, org_settings_restore
     assert r.json()["disabled_rules"] == ["db-write"] and r.json()["dev_db_patterns"] == ["host:*.dev.internal"]
     r = client.put("/guard/org-settings", json={"dev_db_patterns": ["mcp:pg-dev*"]})
     assert r.json()["disabled_rules"] == ["db-write"] and r.json()["dev_db_patterns"] == ["mcp:pg-dev*"]
+
+
+@pytest.mark.parametrize("brief,bounds", [("a string", None), (["x"], None),
+                                          ({"goal": "g", "can_change": [], "cannot_change": [], "done": "d",
+                                            "stop": "s"}, ["x"])])
+def test_malformed_brief_fails_closed(client, tmp_path, brief, bounds):
+    u = _user()
+    p = _project(tmp_path)
+    _add(u, p)
+    task = _task(p.id)
+    task.brief, task.brief_bounds = brief, bounds
+    with pytest.raises(policy_inputs.PolicyInputError):
+        _gather(task, p, u.id)
+    task.brief, task.brief_bounds = None, None  # JSON null: no brief
+    assert _gather(task, p, u.id).brief_layers == []

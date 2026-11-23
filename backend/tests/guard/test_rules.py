@@ -3695,3 +3695,14 @@ def test_readonly_unknown_source_is_unparseable(briefed):
     briefed.policy["readonly_paths"][0]["source"] = "other"
     v = evaluate("Bash", {"command": "pytest"}, briefed.policy, str(briefed.P))
     assert v.decision == "deny" and "unparseable" in hard_ids(v), v
+
+
+def test_brief_cannot_folder_with_brackets(env):
+    from app.briefs import scope
+
+    (env.P / "app" / "[id]").mkdir(parents=True)
+    pol = dict(env.policy, project_dir=str(env.P), readonly_paths=[])
+    scope.apply(pol, scope.layers("T", {"can_change": [], "cannot_change": ["app/[id]/**"]}, []))
+    v = evaluate("Bash", {"command": "echo x > 'app/[id]/page.tsx'"}, pol, str(env.P))
+    assert v.decision == "deny" and "readonly-source" in hard_ids(v)
+    assert any("CANNOT change app/[id]/**" in h.reason for h in v.hits)
