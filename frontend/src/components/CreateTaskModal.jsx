@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import {
   Button,
   Form,
@@ -13,6 +13,7 @@ import {
 import { UploadOutlined } from '@ant-design/icons'
 import { api } from '../api'
 import BriefFields from '../briefs/BriefFields'
+import { revealHidden } from '../guard/guard'
 import ScopeNudge from '../launch/ScopeNudge'
 import { isOpen, titleFromPrompt } from '../launch/launch'
 import { BRIEF_LABELS, briefMissing, briefPayload } from '../briefs/brief'
@@ -40,6 +41,8 @@ export default function CreateTaskModal({
   const [briefError, setBriefError] = useState('')
   const [nudge, setNudge] = useState(null) // {open, would_be, values, brief}: waiting for a choice
   const [items, setItems] = useState([])
+  const lock = useRef(false) // double-submit guard
+  const made = useRef(null) // {key, id}: the launch item already created for this nudge
   const projectId = Form.useWatch('project_id', form)
 
   // Open and started items of the chosen project, for the "Launch item" select. Errors: no list.
@@ -57,11 +60,33 @@ export default function CreateTaskModal({
     }
   }, [open, projectId])
 
+  const resetNudge = () => {
+    setNudge(null)
+    made.current = null
+  }
+  useEffect(() => {
+    if (!open) resetNudge()
+  }, [open])
+  const close = () => {
+    resetNudge()
+    onClose()
+  }
+
   useEffect(() => {
     if (open) form.setFieldsValue({ project_id: activeProjectId || undefined })
   }, [open, activeProjectId])
 
   const submit = async () => {
+    if (lock.current) return
+    lock.current = true
+    try {
+      await submitInner()
+    } finally {
+      lock.current = false
+    }
+  }
+
+  const submitInner = async () => {
     let values
     try {
       values = await form.validateFields()
@@ -123,7 +148,7 @@ export default function CreateTaskModal({
       message.success('Task created')
       form.resetFields()
       setBriefError('')
-      setNudge(null)
+      resetNudge()
       setFileList([])
       onCreated?.()
       onClose()
@@ -139,26 +164,32 @@ export default function CreateTaskModal({
   const addAndCreate = async (section) => {
     const { values, brief } = nudge
     setSubmitting(true)
-    let item
-    try {
-      item = await api.addLaunchItem(values.project_id, { title: titleFromPrompt(values.prompt), section })
-    } catch (e) {
-      message.error(e.message)
-      setSubmitting(false)
-      return
+    const title = titleFromPrompt(values.prompt)
+    const key = `${values.project_id}|${section}|${title}`
+    let id = made.current?.key === key ? made.current.id : null
+    if (!id) {
+      try {
+        const item = await api.addLaunchItem(values.project_id, { title, section })
+        id = item?.id
+        made.current = { key, id }
+      } catch (e) {
+        message.error(e.message)
+        setSubmitting(false)
+        return
+      }
     }
     setSubmitting(false)
-    await create(values, brief, item?.id)
+    await create(values, brief, id)
   }
 
   return (
     <Modal
       title="New Task"
       open={open}
-      onCancel={onClose}
+      onCancel={close}
       width={640}
       footer={[
-        <Button key="cancel" onClick={onClose}>
+        <Button key="cancel" onClick={close}>
           Cancel
         </Button>,
         <Button key="run" type="primary" loading={submitting} onClick={submit}>
@@ -179,6 +210,7 @@ export default function CreateTaskModal({
       <Form
         form={form}
         layout="vertical"
+        onValuesChange={() => setNudge(null)}
         initialValues={{ priority: 'normal', max_turns: 25 }}
       >
         <Form.Item
@@ -212,7 +244,7 @@ export default function CreateTaskModal({
             <Select
               allowClear
               placeholder="Not linked"
-              options={items.map((i) => ({ value: i.id, label: `#${i.number} ${i.title}` }))}
+              options={items.map((i) => ({ value: i.id, label: `#${i.number} ${revealHidden(i.title).text}` }))}
             />
           </Form.Item>
         )}

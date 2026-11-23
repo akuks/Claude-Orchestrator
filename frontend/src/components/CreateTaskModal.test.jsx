@@ -192,6 +192,40 @@ describe('CreateTaskModal launch nudge', () => {
     expect(api.scopeCheck).not.toHaveBeenCalled()
     expect(api.createTask).toHaveBeenCalledTimes(1)
   })
+  it('editing the prompt clears the nudge, so nothing runs from a stale snapshot', async () => {
+    nudgeIt()
+    await openP()
+    await submit()
+    expect(q('scope-nudge')).not.toBeNull()
+    await type(document.querySelector('#prompt'), 'something else')
+    expect(q('scope-nudge')).toBeNull()
+    expect(api.createTask).not.toHaveBeenCalled()
+  })
+  it('a retry after a failed create reuses the item already made', async () => {
+    nudgeIt()
+    api.addLaunchItem.mockResolvedValue({ id: 'li9', number: 7 })
+    api.createTask.mockRejectedValueOnce(new Error('boom'))
+    await openP()
+    await submit()
+    await act(async () => q('nudge-add').click())
+    await flush()
+    expect(q('scope-nudge')).not.toBeNull()
+    await act(async () => q('nudge-add').click())
+    await flush()
+    expect(api.addLaunchItem).toHaveBeenCalledTimes(1)
+    expect(api.createTask).toHaveBeenCalledTimes(2)
+    expect(api.createTask.mock.calls[1][0].launch_item_id).toBe('li9')
+  })
+  it('a double click on Run Task submits once', async () => {
+    await open()
+    const b = [...document.querySelectorAll('.ant-modal button')].find((x) => x.textContent.includes('Run Task'))
+    await act(async () => {
+      b.click()
+      b.click()
+    })
+    await flush()
+    expect(api.createTask).toHaveBeenCalledTimes(1)
+  })
   it('lists open and started items in a Launch item select', async () => {
     api.getLaunch.mockResolvedValue({
       launch: null,

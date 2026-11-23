@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from 'react'
 import { Alert, Button, Empty, Input, Popconfirm, Space, Tag, Typography } from 'antd'
 import { api } from '../api'
+import { revealHidden } from '../guard/guard'
 import { ACTION_STATUS, STALE_MSG, bySection, rowActions } from './launch'
 
 const day = (s) => (s ? String(s).slice(0, 10) : '')
@@ -22,7 +23,7 @@ function Row({ item, canEdit, linkedDone, act }) {
             <Button size="small" onClick={() => { setEditing(false); setTitle(item.title) }}>Cancel</Button>
           </>
         ) : (
-          <span>{item.title}</span>
+          <span>{revealHidden(item.title).text}</span>
         )}
         {item.started_at && <Typography.Text type="secondary" style={{ fontSize: 12 }}>started {day(item.started_at)}</Typography.Text>}
         {item.done_at && <Typography.Text type="secondary" style={{ fontSize: 12 }}>done {day(item.done_at)}</Typography.Text>}
@@ -57,6 +58,16 @@ function Row({ item, canEdit, linkedDone, act }) {
 
 function Section({ title, section, items, canEdit, linked, act, add }) {
   const [text, setText] = useState('')
+  const [adding, setAdding] = useState(false)
+  const doAdd = async () => {
+    if (adding || !text.trim()) return
+    setAdding(true)
+    try {
+      if (await add(section, text.trim())) setText('')
+    } finally {
+      setAdding(false)
+    }
+  }
   const rows = bySection(items, section)
   return (
     <div data-testid={`launch-section-${section}`} style={{ marginBottom: 20 }}>
@@ -64,8 +75,8 @@ function Section({ title, section, items, canEdit, linked, act, add }) {
       {rows.length === 0 && <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="Nothing here yet" />}
       {rows.map((i) => <Row key={i.id} item={i} canEdit={canEdit} linkedDone={linked[String(i.number)]} act={act} />)}
       <Space.Compact style={{ marginTop: 8, width: '100%' }}>
-        <Input value={text} maxLength={200} placeholder={`Add an item ${section} launch`} onChange={(e) => setText(e.target.value)} data-testid={`launch-add-input-${section}`} onPressEnter={() => text.trim() && add(section, text.trim()).then((ok) => ok && setText(''))} />
-        <Button disabled={!text.trim()} data-testid={`launch-add-${section}`} onClick={async () => { if (await add(section, text.trim())) setText('') }}>Add</Button>
+        <Input value={text} maxLength={200} placeholder={`Add an item ${section} launch`} onChange={(e) => setText(e.target.value)} data-testid={`launch-add-input-${section}`} onPressEnter={doAdd} />
+        <Button disabled={!text.trim() || adding} data-testid={`launch-add-${section}`} onClick={doAdd}>Add</Button>
       </Space.Compact>
     </div>
   )
@@ -80,29 +91,32 @@ export default function LaunchTab({ project, canEdit }) {
   const [date, setDate] = useState('')
   const [paths, setPaths] = useState('')
 
-  const load = useCallback(async () => {
+  // `drafts`: also reset the date and paths inputs (first load, after Save, after a 409); other reloads keep them.
+  const load = useCallback(async (drafts = false) => {
     try {
       const d = await api.getLaunch(pid)
       setData(d)
-      setDate(d?.launch?.launch_date || '')
-      setPaths((d?.launch?.critical_paths || []).join('\n'))
+      if (drafts) {
+        setDate(d?.launch?.launch_date || '')
+        setPaths((d?.launch?.critical_paths || []).join('\n'))
+      }
       return true
     } catch (e) {
       setError(e.message)
       return false
     }
   }, [pid])
-  useEffect(() => { load() }, [load])
+  useEffect(() => { load(true) }, [load])
 
-  const guard = async (fn) => {
+  const guard = async (fn, resetDrafts = false) => {
     setError(null)
     try {
       await fn()
-      await load()
+      await load(resetDrafts)
       return true
     } catch (e) {
       if (e.status === 409) {
-        await load()
+        await load(true)
         setError(STALE_MSG)
       } else setError(e.message)
       return false
@@ -118,6 +132,7 @@ export default function LaunchTab({ project, canEdit }) {
         critical_paths: paths.split('\n').map((x) => x.trim()).filter(Boolean),
         version: data?.launch?.version ?? null,
       }),
+      true,
     )
 
   if (!data) return error ? <Alert type="error" showIcon message={error} data-testid="launch-error" /> : null
@@ -141,7 +156,7 @@ export default function LaunchTab({ project, canEdit }) {
               <Button size="small" type="primary" style={{ marginTop: 6 }} onClick={save} data-testid="launch-save">Save</Button>
             </>
           ) : (
-            <div>{(data.launch?.critical_paths || []).map((p) => <code key={p} style={{ marginRight: 6 }}>{p}</code>)}</div>
+            <div>{(data.launch?.critical_paths || []).map((p) => <code key={p} style={{ marginRight: 6 }}>{revealHidden(p).text}</code>)}</div>
           )}
         </div>
       </div>

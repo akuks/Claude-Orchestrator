@@ -1,3 +1,4 @@
+import { revealHidden } from '../guard/guard'
 // Launch list helpers (pure). Titles come from people and agents: callers render them as plain text.
 export const STALE_MSG = 'changed by someone else — reload'
 
@@ -30,7 +31,7 @@ export function titleFromPrompt(prompt) {
 }
 
 export const criticalPathsLine = (p) => {
-  const paths = Array.isArray(p?.paths) ? p.paths.filter((x) => typeof x === 'string') : []
+  const paths = Array.isArray(p?.paths) ? p.paths.filter((x) => typeof x === 'string').map((x) => revealHidden(x).text) : []
   return `This run changed ${paths.length} critical path(s): ${paths.join(', ')}`
 }
 
