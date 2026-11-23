@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { checkCommand, exportFileName, formStage, stageLabel, stagePayload } from './gates'
+import { appendPlaceholder, plainServerText, checkCommand, exportFileName, formStage, runStatusText, runStepText, stageLabel, stagePayload } from './gates'
 
 describe('checkCommand', () => {
   it('accepts a plain command', () => expect(checkCommand('pytest -q')).toBeNull())
@@ -37,5 +37,39 @@ describe('exportFileName', () => {
     expect(exportFileName('')).toBe('workflow.md')
     expect(exportFileName('   ')).toBe('workflow.md')
     expect(exportFileName(null)).toBe('workflow.md')
+  })
+})
+
+describe('plain run words', () => {
+  it('maps every run status to plain words', () => {
+    expect(runStatusText('pending')).toBe('Starting')
+    expect(runStatusText('running')).toBe('Running')
+    expect(runStatusText('paused')).toBe('Waiting for you')
+    expect(runStatusText('completed')).toBe('Done')
+    expect(runStatusText('failed')).toBe('Failed')
+    expect(runStatusText('some_new_state')).toBe('Some new state')
+    expect(runStatusText(undefined)).toBe('Unknown')
+  })
+  it('says "step N of M"', () => {
+    expect(runStepText({ current_stage: 1, stages: [{}, {}, {}, {}, {}] })).toBe('step 2 of 5')
+    expect(runStepText({ current_stage: 9, stages: [{}, {}] })).toBe('step 2 of 2')
+    expect(runStepText({ current_stage: 0, stages: [] })).toBe('')
+  })
+})
+
+describe('appendPlaceholder', () => {
+  it('adds at the end with one space', () => {
+    expect(appendPlaceholder('', '{{input}}')).toBe('{{input}}')
+    expect(appendPlaceholder(undefined, '{{input}}')).toBe('{{input}}')
+    expect(appendPlaceholder('Do this', '{{prev}}')).toBe('Do this {{prev}}')
+    expect(appendPlaceholder('Do this\n', '{{prev}}')).toBe('Do this\n{{prev}}')
+  })
+})
+
+describe('plainServerText', () => {
+  it('says check where the server says gate', () => {
+    expect(plainServerText('Step Tests (gate) passed, flaky')).toBe('Step Tests (check) passed, flaky')
+    expect(plainServerText('Gate Tests failed: x.')).toBe('Check Tests failed: x.')
+    expect(plainServerText('Step Sign (approval) approved by a')).toBe('Step Sign (approval) approved by a')
   })
 })
