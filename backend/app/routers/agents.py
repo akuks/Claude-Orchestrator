@@ -3,6 +3,7 @@ from sqlalchemy import select
 
 from ..access import project_role, require_project_role, require_task
 from ..auth import ensure_admin
+from .. import tiers
 from ..constants import VALID_MODELS
 from ..database import SessionLocal
 from ..models import Agent, Project
@@ -239,12 +240,18 @@ async def list_presets():
     return PRESETS
 
 
+async def _check_model_tier(s, model, tier) -> None:
+    if tier and tier not in tiers.TIERS:
+        raise HTTPException(400, f"Invalid tier. Use one of {', '.join(tiers.TIERS)}")
+    if model and not tiers.valid_agent_model(model, await tiers.org_tiers(s)):
+        raise HTTPException(400, f"Invalid model. Use one of {sorted(VALID_MODELS)} or a tier model")
+
+
 @router.post("", response_model=AgentOut, status_code=201)
 async def create_agent(payload: AgentCreate, request: Request):
     ensure_admin(request.state.principal)
-    if payload.model and payload.model not in VALID_MODELS:
-        raise HTTPException(400, f"Invalid model. Use one of {sorted(VALID_MODELS)}")
     async with SessionLocal() as s:
+        await _check_model_tier(s, payload.model, payload.tier)
         if payload.project_id and (await s.get(Project, payload.project_id)) is None:
             raise HTTPException(404, "Project not found")
         agent = Agent(
@@ -254,6 +261,7 @@ async def create_agent(payload: AgentCreate, request: Request):
             default_prompt=payload.default_prompt,
             project_id=payload.project_id,
             model=payload.model or "",
+            tier=payload.tier or None,
             max_turns=payload.max_turns,
             max_budget_usd=payload.max_budget_usd,
             priority=payload.priority,
@@ -291,10 +299,11 @@ async def _get_or_404(s, agent_id: str) -> Agent:
 async def update_agent(agent_id: str, payload: AgentUpdate, request: Request):
     ensure_admin(request.state.principal)
     data = payload.model_dump(exclude_unset=True)
-    if data.get("model") and data["model"] not in VALID_MODELS:
-        raise HTTPException(400, "Invalid model")
     async with SessionLocal() as s:
+        await _check_model_tier(s, data.get("model"), data.get("tier"))
         agent = await _get_or_404(s, agent_id)
+        if "tier" in data:
+            data["tier"] = data["tier"] or None
         for k, v in data.items():
             setattr(agent, k, v)
         await s.commit()
@@ -328,7 +337,7 @@ async def run_agent(agent_id: str, payload: AgentRun, request: Request):
             prompt=prompt,
             title=f"{agent.name}: {prompt.splitlines()[0][:60]}",
             project_id=project_id,
-            model=agent.model or None,
+            model=await tiers.agent_model(s, agent),
             max_turns=agent.max_turns,
             max_budget_usd=agent.max_budget_usd,
             priority=agent.priority,
@@ -400,7 +409,7 @@ async def dispatch(payload: DispatchRequest, request: Request):
                 prompt=item.prompt,
                 title=f"{agent.name}: {item.prompt.splitlines()[0][:60]}",
                 project_id=project_id,
-                model=agent.model or None,
+                model=await tiers.agent_model(s, agent),
                 max_turns=agent.max_turns,
                 max_budget_usd=agent.max_budget_usd,
                 priority=agent.priority,
@@ -445,7 +454,7 @@ async def bulk_run_agent(agent_id: str, payload: AgentBulkRun, request: Request)
                     prompt=p,
                     title=f"{agent.name}: {p.splitlines()[0][:60]}",
                     project_id=project_id,
-                    model=agent.model or None,
+                    model=await tiers.agent_model(s, agent),
                     max_turns=agent.max_turns,
                     max_budget_usd=agent.max_budget_usd,
                     priority=agent.priority,

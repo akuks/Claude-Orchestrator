@@ -20,6 +20,7 @@ from sqlalchemy import select, update
 
 from .constants import Status
 from .database import SessionLocal
+from . import tiers
 from .models import Agent, Task, WorkflowRun
 from .task_service import build_task
 
@@ -103,7 +104,7 @@ async def _start_stage(s, run: WorkflowRun, stage_index: int, worker) -> list[st
             prompt=prompt,
             title=f"[{stage.get('name', f'Stage {stage_index + 1}')}] {agent.name}: {prompt.splitlines()[0][:50]}",
             project_id=agent.project_id,
-            model=agent.model or None,
+            model=await tiers.agent_model(s, agent),
             max_turns=agent.max_turns,
             max_budget_usd=agent.max_budget_usd,
             priority=agent.priority,

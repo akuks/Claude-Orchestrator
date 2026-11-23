@@ -31,6 +31,7 @@ from pathlib import Path
 from sqlalchemy import and_, case, or_, select
 
 from ..models import ActionGrant, ActionRule, GuardOrgSettings
+from .. import tiers
 from ..resume import ground_rules
 from . import custom
 
@@ -44,9 +45,11 @@ def _str_list(value) -> list[str]:
 async def org_settings(s) -> dict:
     row = await s.get(GuardOrgSettings, 1)
     if row is None:
-        return {"disabled_rules": [], "dev_db_patterns": [], "ground_rules": ground_rules.normalized(None)}
+        return {"disabled_rules": [], "dev_db_patterns": [], "ground_rules": ground_rules.normalized(None),
+                "model_tiers": tiers.normalized(None)}
     return {"disabled_rules": _str_list(row.disabled_rules), "dev_db_patterns": _str_list(row.dev_db_patterns),
-            "ground_rules": ground_rules.normalized(row.ground_rules)}
+            "ground_rules": ground_rules.normalized(row.ground_rules),
+            "model_tiers": tiers.normalized(row.model_tiers)}
 
 
 def rule_entry(r: ActionRule) -> dict:

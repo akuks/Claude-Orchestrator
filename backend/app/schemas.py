@@ -426,6 +426,7 @@ class AgentCreate(BaseModel):
     default_prompt: Optional[str] = None  # default task input
     project_id: Optional[str] = None  # optional default project (overridable)
     model: Optional[str] = None
+    tier: Optional[str] = None  # strongest | standard | light (the org's model map); model overrides it
     max_turns: int = Field(default=25, ge=1, le=200)
     max_budget_usd: Optional[float] = Field(default=None, ge=0)
     priority: str = "normal"
@@ -444,6 +445,7 @@ class AgentUpdate(BaseModel):
     default_prompt: Optional[str] = None
     project_id: Optional[str] = None
     model: Optional[str] = None
+    tier: Optional[str] = None
     max_turns: Optional[int] = None
     max_budget_usd: Optional[float] = None
     priority: Optional[str] = None
@@ -463,6 +465,7 @@ class AgentOut(BaseModel):
     default_prompt: Optional[str]
     project_id: Optional[str]
     model: str
+    tier: Optional[str] = None
     max_turns: int
     max_budget_usd: Optional[float]
     priority: str
