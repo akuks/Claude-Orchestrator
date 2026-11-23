@@ -10,6 +10,11 @@ each active run it watches the current stage and:
     exit code decides (see `_gate_main`). A retry command, when set, runs once
     after a failed full run, then the full run once more.
   * approval stage (phase 5a): the run pauses until someone approves or rejects.
+An agent stage item may declare typed `outputs` (phase 5c): the task's prompt asks for a
+final ```json block, and once every task of the attempt has completed the values are
+parsed and checked (outside the lock) and stored on tasks.outputs, or the task fails
+with "outputs invalid: <reason>". Later prompts read them as {{stageN.name}} and
+{{prev.name}}. stage_state[i].expects maps task id -> declared names.
 Any stage may carry `before` pre-flight lines; an unmet line holds the stage
 (the run stays running) and is checked again on every tick.
 
@@ -28,6 +33,7 @@ the stage's {{prev}} text for gate and approval stages.
 
 import asyncio
 import logging
+import re
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -37,7 +43,7 @@ from sqlalchemy import delete, select, update
 from .constants import Status
 from .database import SessionLocal
 from . import tiers
-from .gates import codestate, executor, preflight, runlog, totals
+from .gates import codestate, executor, outputs as typed_outputs, preflight, runlog, totals
 from .gates.spec import stage_kind
 from .models import Agent, Project, Task, WorkflowGateRun, WorkflowRun
 from .redaction import clean_text
@@ -61,29 +67,45 @@ GATE_LIVE = ("waiting", "running")  # gate states that want a live process
 log = logging.getLogger(__name__)
 
 
-def substitute(prompt: str, run_input: str, stage_outputs: dict[int, str]) -> str:
-    """Fill placeholders in a stage prompt:
-      {{input}}   -> the run's input
-      {{prev}}    -> the previous stage's combined output
-      {{stageN}}  -> stage N's combined output (N is 1-based, matching the UI)
-    If no {{input}} placeholder exists, the input is appended (back-compat).
-    """
-    import re
+_PLACEHOLDER = re.compile(r"\{\{(input|prev|stage(\d+))(?:\.([a-z][a-z0-9_]{0,39}))?\}\}")
 
+
+def substitute(prompt: str, run_input: str, stage_outputs: dict[int, str],
+               named_outputs: dict[int, dict[str, str]] | None = None) -> str:
+    """Fill placeholders in a stage prompt:
+      {{input}}        -> the run's input
+      {{prev}}         -> the previous stage's combined output
+      {{stageN}}       -> stage N's combined output (N is 1-based, matching the UI)
+      {{prev.name}}    -> the previous stage's typed output `name`
+      {{stageN.name}}  -> stage N's typed output `name` (current attempt)
+    An unknown stage or name gives "". Single pass: the template is tokenised once, so
+    a substituted value that itself holds `{{...}}` is never expanded again.
+    If no {{input}} and no stage placeholder exists, the input is appended (back-compat).
+    """
+    named = named_outputs or {}
     p = prompt or ""
-    had_input = "{{input}}" in p
-    p = p.replace("{{input}}", run_input or "")
-    # {{prev}} = highest-numbered available stage output.
-    prev = ""
-    if stage_outputs:
-        prev = stage_outputs[max(stage_outputs)]
-    p = p.replace("{{prev}}", prev)
-    # {{stageN}} (1-based)
-    def _stage_sub(m):
-        n = int(m.group(1))
-        return stage_outputs.get(n - 1, "")
-    p = re.sub(r"\{\{stage(\d+)\}\}", _stage_sub, p)
-    if not had_input and run_input and "{{prev}}" not in (prompt or "") and not re.search(r"\{\{stage\d+\}\}", prompt or ""):
+    seen = {idx for idx in stage_outputs} | {idx for idx in named}
+    prev_idx = max(seen) if seen else None  # {{prev}} = highest-numbered available stage
+    had_input = had_stage = False
+
+    def _sub(m):
+        nonlocal had_input, had_stage
+        head, num, name = m.group(1), m.group(2), m.group(3)
+        if head == "input":
+            if name:
+                return m.group(0)  # {{input.x}} is not a placeholder
+            had_input = True
+            return run_input or ""
+        had_stage = True
+        idx = prev_idx if head == "prev" else int(num) - 1
+        if idx is None:
+            return ""
+        if name:
+            return (named.get(idx) or {}).get(name, "")
+        return stage_outputs.get(idx, "")
+
+    p = _PLACEHOLDER.sub(_sub, p)
+    if not had_input and run_input and not had_stage:
         p = f"{p}\n\n{run_input}"
     return p
 
@@ -147,9 +169,13 @@ def gate_status_text(stage: dict, state: dict, live: dict | None) -> str:
     return status
 
 
-async def _stage_outputs(s, run: WorkflowRun, up_to_stage: int) -> dict[int, str]:
+async def _stage_outputs(s, run: WorkflowRun, up_to_stage: int,
+                         named: dict[int, dict[str, str]] | None = None) -> dict[int, str]:
     """Output per stage index for stages < up_to_stage: agent stages give the combined
-    result_text of the CURRENT attempt's tasks; gate and approval stages give their summary."""
+    result_text of the CURRENT attempt's tasks; gate and approval stages give their summary.
+    When `named` is given it is filled with the current attempt's typed outputs per stage
+    ({stage index: {name: value}}); several items with the same name are joined with a
+    blank line."""
     rows = (
         await s.execute(
             select(Task).where(Task.workflow_run_id == run.id, Task.stage_index < up_to_stage)
@@ -166,6 +192,11 @@ async def _stage_outputs(s, run: WorkflowRun, up_to_stage: int) -> dict[int, str
             continue
         if (t.stage_attempt or 0) != _attempt(run, idx):
             continue
+        if named is not None and isinstance(t.outputs, dict):
+            got = named.setdefault(idx, {})
+            for k, v in t.outputs.items():
+                if isinstance(k, str) and isinstance(v, str):
+                    got[k] = f"{got[k]}\n\n{v}" if k in got else v
         if t.result_text:
             out.setdefault(idx, "")
             out[idx] += (("\n\n" if out[idx] else "") + t.result_text)
@@ -261,8 +292,10 @@ async def _start_stage(s, run: WorkflowRun, stage_index: int, worker, pre: dict 
     by_name = {a.name: a for a in agents}
     # Prior stages' outputs so a stage can build on what came before (e.g. a lead
     # planning stage feeding the dev stages via {{prev}}).
-    outputs = await _stage_outputs(s, run, stage_index) if stage_index > 0 else {}
+    named: dict[int, dict[str, str]] = {}
+    outputs = await _stage_outputs(s, run, stage_index, named) if stage_index > 0 else {}
     submits = []
+    expects: dict[str, list[str]] = {}  # task id -> declared output names
     for item in stage.get("items") or []:
         agent = by_id.get(item.get("agent")) or by_name.get(item.get("agent"))
         if agent is None:
@@ -272,7 +305,10 @@ async def _start_stage(s, run: WorkflowRun, stage_index: int, worker, pre: dict 
             runlog.append(run, f"Step {name} failed: unknown agent {item.get('agent')}")
             run.status = RUN_FAILED
             return []
-        prompt = substitute(item.get("prompt", ""), run.input, outputs)
+        prompt = substitute(item.get("prompt", ""), run.input, outputs, named)
+        names = [n for n in (item.get("outputs") or []) if isinstance(n, str)]
+        if names:
+            prompt = f"{prompt}\n\n{typed_outputs.suffix(names)}"
         task = await build_task(
             s,
             prompt=prompt,
@@ -293,7 +329,13 @@ async def _start_stage(s, run: WorkflowRun, stage_index: int, worker, pre: dict 
             created_by=run.created_by,
         )
         task.stage_attempt = attempt
+        if names:
+            expects[task.id] = names
         submits.append(task)
+    if expects:
+        # A new dict: build_task flushed the earlier state, so mutating `st` in place
+        # would look unchanged to SQLAlchemy.
+        _put_state(run, stage_index, {**st, "expects": expects})
     return submits
 
 
@@ -336,6 +378,17 @@ class _Post:
 
     results: list = field(default_factory=list)  # (task id, priority, created_at, status)
     spawns: list = field(default_factory=list)  # (stage index, hand-out)
+
+
+@dataclass
+class _Verify:
+    """A stage whose tasks all completed but whose typed outputs are not checked yet. The
+    checks (parse, file system, git) run outside the run lock; the result is written
+    under it after re-checking the stage and attempt."""
+
+    index: int
+    attempt: int
+    items: list = field(default_factory=list)  # (task id, names, result_text, project dir)
 
 
 def _next_cmd(stage: dict, st: dict):
@@ -611,8 +664,53 @@ class WorkflowRunner:
                 self._ended.pop(key, None)
 
     async def _advance(self, run_id: str, first: bool = False):
-        post = await self._locked(run_id, lambda pre: self._advance_locked(run_id, pre))
+        post = None
+        for _ in range(4):
+            post = await self._locked(run_id, lambda pre: self._advance_locked(run_id, pre))
+            if not isinstance(post, _Verify):
+                break
+            await self._check_outputs(run_id, post)
+            post = None
         await self._run_post(run_id, post)
+
+    async def _check_outputs(self, run_id: str, v: _Verify) -> None:
+        """Parse and verify the typed outputs of a finished agent stage (outside the run
+        lock), then store them, or fail the task with "outputs invalid: <reason>"
+        (under the lock, only when the stage and attempt are unchanged)."""
+        results = []
+        for tid, names, text, project_dir in v.items:
+            try:
+                values = typed_outputs.parse(text, names)
+                await typed_outputs.verify(values, project_dir)
+            except ValueError as e:
+                results.append((tid, None, str(e) or "invalid"))
+            except Exception:  # noqa: BLE001 - a check that cannot answer fails the outputs
+                log.exception("workflow runner: checking outputs of task %s failed", tid)
+                results.append((tid, None, "the outputs could not be checked"))
+            else:
+                results.append((tid, values, None))
+
+        async def fn(pre):
+            async with SessionLocal() as s:
+                run = await s.get(WorkflowRun, run_id)
+                if (run is None or run.status not in ACTIVE_RUN or run.current_stage != v.index
+                        or _attempt(run, v.index) != v.attempt):
+                    return None
+                for tid, values, reason in results:
+                    t = await s.get(Task, tid)
+                    if (t is None or t.status != Status.COMPLETED or t.outputs is not None
+                            or t.stage_index != v.index or (t.stage_attempt or 0) != v.attempt):
+                        continue
+                    if reason is None:
+                        t.outputs = values
+                    else:
+                        t.status = Status.FAILED
+                        t.error = f"outputs invalid: {reason}"
+                        t.outputs = None
+                await s.commit()
+                return None
+
+        await self._locked(run_id, fn)
 
     async def _advance_locked(self, run_id: str, pre: dict) -> "_Post | None":
         async with SessionLocal() as s:
@@ -714,6 +812,17 @@ class WorkflowRunner:
                 await s.commit()
                 return None
             if all(x == Status.COMPLETED for x in statuses):
+                expects = st.get("expects") or {}
+                todo = [t for t in tasks if t.id in expects and t.outputs is None]
+                if todo:
+                    pids = {t.project_id for t in todo if t.project_id}
+                    dirs = {p.id: p.directory for p in (
+                        await s.execute(select(Project).where(Project.id.in_(pids)))
+                    ).scalars().all()} if pids else {}
+                    return _Verify(i, _attempt(run, i), [
+                        (t.id, list(expects[t.id]), (t.result_text or "")[-typed_outputs.SCAN_BYTES:],
+                         dirs.get(t.project_id)) for t in todo
+                    ])
                 return await self._next_stage(s, run, i, pre, finish_agent=True)
             # Otherwise still running — make sure the run reflects that.
             if run.status == RUN_PAUSED:

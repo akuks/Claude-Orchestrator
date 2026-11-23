@@ -621,6 +621,8 @@ async def get_run(run_id: str, request: Request):
         for i, st in enumerate(run.stages or []):
             kind = spec.stage_kind(st)
             if kind == "agent":
+                if str(i) in stage_state:
+                    stage_state[str(i)].pop("expects", None)  # internal: task ids -> output names
                 continue
             entry = stage_state.setdefault(str(i), {})
             if kind == "gate":
