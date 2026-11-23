@@ -67,7 +67,8 @@ def test_escapes(brun, tmp_path):
     for tool, path in [("Edit", "src/../migrations/x.py"), ("Edit", str(brun.project / "migrations" / "x.py")),
                        ("Edit", "src/link/x.py"), ("NotebookEdit", "migrations/n.ipynb"),
                        ("MultiEdit", "migrations/x.py"), ("Write", "./migrations/../migrations/y")]:
-        assert decision(brun(edit(brun, path, tool))) == "deny", path
+        out = brun(edit(brun, path, tool))
+        assert decision(out) == "deny" and "(brief-scope)" in reason(out), path
     assert decision(brun(edit(brun, "migrations/x.py", agent="a1"))) == "deny"
 
 
@@ -141,3 +142,54 @@ def test_check_crash_denies(brun, monkeypatch, capsys):
 def test_no_brief_no_change(plugin, tmp_path, stub):  # noqa: F811
     r = Run(plugin, tmp_path, stub.base)
     assert decision(r(edit(r, "README.md", "Write"))) is None
+
+
+def test_notebook_path_wins_over_file_path(brun):
+    p = edit(brun, "migrations/n.ipynb", "NotebookEdit")
+    p["tool_input"]["file_path"] = "src/a.py"
+    assert decision(brun(p)) == "deny"
+
+
+def test_missing_project_dir_fails_closed(brun):
+    set_brief(brun, BRIEF, project_dir=None)
+    assert co_hook.BRIEF_MALFORMED in reason(brun(edit(brun, "src/a.py")))
+
+
+@pytest.mark.parametrize("glob", ["", "a" * 301, "*" * 31])
+def test_unusable_glob_is_malformed(brun, glob):
+    for lay in ({"task": "T1", "can": [glob], "cannot": []}, {"task": "T1", "can": [], "cannot": [glob]}):
+        set_brief(brun, {"layers": [lay]})
+        assert co_hook.BRIEF_MALFORMED in reason(brun(edit(brun, "src/a.py")))
+
+
+def test_symlinked_parent_outside_project_into_cannot(brun, tmp_path):
+    os.symlink(str(brun.project / "migrations"), str(tmp_path / "ln"))
+    assert decision(brun(edit(brun, str(tmp_path / "ln" / "x.py")))) == "deny"
+
+
+def test_as_given_form_catches_symlink_out_of_project(brun, tmp_path):
+    (tmp_path / "away").mkdir()
+    os.symlink(str(tmp_path / "away"), str(brun.project / "src" / "out"))
+    set_brief(brun, {"layers": [{"task": "T1", "can": [], "cannot": ["src/out/**"]}]})
+    assert decision(brun(edit(brun, "src/out/x.py", "Write"))) == "deny"
+
+
+def test_nfc_dodge():
+    import unicodedata
+    nfd = unicodedata.normalize("NFD", "src/caf\u00e9/x")
+    pol = {"project_dir": "/p", "brief": {"layers": [{"task": "T", "can": [], "cannot": ["src/caf\u00e9/**"]}]}}
+    pay = {"tool_name": "Write", "cwd": "/p", "tool_input": {"file_path": "/p/" + nfd}}
+    old = co_hook.CASE_INSENSITIVE
+    try:
+        co_hook.CASE_INSENSITIVE = True
+        assert co_hook.brief_denial(pol, pay, "Write")
+    finally:
+        co_hook.CASE_INSENSITIVE = old
+
+
+def test_decision_notes_still_shown_with_brief(plugin, tmp_path, stub):  # noqa: F811
+    d = [{"n": 15, "kind": "rule", "title": "Typed", "why": "", "see": "", "touches": ["src/**"],
+          "decided_at": "2026-11-20"}]
+    r = Run(plugin, tmp_path, stub.base, brief=BRIEF, decisions=d, decisions_index="x")
+    out = r(edit(r, "src/a.py"))
+    assert decision(out) is None and "Typed" in json.dumps(out)
