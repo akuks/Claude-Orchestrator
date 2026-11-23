@@ -36,6 +36,12 @@ remote's lazy fetch of a missing object), so every such call goes through
 * the decision health check's two reads: ``ls-files`` with exactly ``-co
   --exclude-standard -z`` (any order, nothing else), and ``log`` with
   ``--name-only`` and ``--since=<date>`` (both in ``ALLOWED_LOG_OPTIONS``);
+* repo-defined filter drivers off: before every command the repo's
+  ``filter.<name>.*`` config is listed (one internal read, ``config
+  --get-regexp -z ^filter\\.``) and each driver's ``clean``, ``smudge``,
+  ``process`` is set empty and ``required=false`` with ``-c``, so a
+  ``.gitattributes`` ``filter=`` line cannot make git run a program; more
+  than 50 drivers, or a listing that fails, refuses the command;
 * the gate code-state hash's two reads: ``diff`` with exactly
   ``--no-ext-diff --no-textconv --binary HEAD`` and ``ls-files`` with exactly
   ``--others --exclude-standard -z`` (each any order, nothing else).
@@ -161,6 +167,44 @@ def git_available() -> bool:
     return shutil.which("git") is not None
 
 
+MAX_FILTER_DRIVERS = 50
+
+
+def _filter_overrides(exe: str, directory, timeout: float) -> list[str] | GitResult:
+    """``-c`` arguments that disable every filter driver the repo defines, or a failing GitResult."""
+    try:
+        r = subprocess.run(
+            [exe, *SAFE_ARGS, "config", "--get-regexp", "-z", r"^filter\."], cwd=str(Path(directory)),
+            stdin=subprocess.DEVNULL, capture_output=True, timeout=max(0.01, timeout), env=git_env(directory),
+        )
+    except subprocess.TimeoutExpired:
+        return GitResult(False, "", True, "filter driver listing timed out")
+    except (OSError, ValueError) as e:
+        return GitResult(False, "", True, str(e))
+    out = r.stdout.decode("utf-8", "replace")
+    if r.returncode == 1 and not out:
+        return []  # no matches
+    if r.returncode != 0:
+        return GitResult(False, "", r.returncode < 0, r.stderr.decode("utf-8", "replace").strip(), r.returncode)
+    names: list[str] = []
+    for entry in out.split("\0"):
+        key = entry.split("\n", 1)[0]
+        if not key.startswith("filter.") or "." not in key[7:]:
+            continue
+        name = key[7:key.rindex(".")]
+        if name not in names:
+            names.append(name)
+    if len(names) > MAX_FILTER_DRIVERS:
+        return GitResult(False, "", True, "too many filter drivers")
+    if any("=" in n or "\n" in n or "\0" in n for n in names):
+        return GitResult(False, "", True, "unsupported filter driver name")
+    over: list[str] = []
+    for n in names:
+        for k, v in (("clean", ""), ("smudge", ""), ("process", ""), ("required", "false")):
+            over += ["-c", f"filter.{n}.{k}={v}"]
+    return over
+
+
 def run_git(directory, *args: str, timeout: float) -> GitResult:
     """Run ``git <SAFE_ARGS> <args>`` in ``directory`` (see the module doc);
     ValueError for a command outside the allowlist."""
@@ -168,10 +212,13 @@ def run_git(directory, *args: str, timeout: float) -> GitResult:
     exe = shutil.which("git")
     if exe is None:
         return GitResult(False, "", True, "git not found", missing=True)
+    over = _filter_overrides(exe, directory, timeout)
+    if isinstance(over, GitResult):
+        return over
     try:
         r = subprocess.run(
-            [exe, *SAFE_ARGS, *args], cwd=str(Path(directory)), stdin=subprocess.DEVNULL, capture_output=True,
-            timeout=max(0.01, timeout), env=git_env(directory),
+            [exe, *SAFE_ARGS, *over, *args], cwd=str(Path(directory)), stdin=subprocess.DEVNULL,
+            capture_output=True, timeout=max(0.01, timeout), env=git_env(directory),
         )
     except subprocess.TimeoutExpired:
         return GitResult(False, "", True, "timed out")

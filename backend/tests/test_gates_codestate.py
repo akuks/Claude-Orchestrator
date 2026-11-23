@@ -48,3 +48,38 @@ def test_not_a_repo(tmp_path):
 def test_unborn_repo(tmp_path):
     _git(str(tmp_path), "init", "-q")
     assert code_state(str(tmp_path)) is None
+
+
+@pytest.mark.parametrize("driver", ["evil", "my.evil.drv"])
+def test_filter_drivers_never_run(tmp_path, driver):
+    from app import gitsafe
+
+    d = tmp_path / "r"
+    d.mkdir()
+    marker = tmp_path / "marker"
+    _git(str(d), "init", "-q")
+    cmd = f"sh -c 'touch {marker}; cat'"
+    for k in ("clean", "process", "smudge"):
+        _git(str(d), "config", f"filter.{driver}.{k}", cmd)
+    (d / ".gitattributes").write_text(f"* filter={driver}\n")
+    (d / "f.txt").write_text("one\n")
+    _git(str(d), "add", "-A")
+    _git(str(d), "-c", "filter.%s.clean=" % driver, "-c", "filter.%s.process=" % driver, "commit", "-qm", "i")
+    marker.unlink(missing_ok=True)
+    (d / "f.txt").write_text("two\n")
+    assert code_state(str(d))
+    r = gitsafe.run_git(str(d), "status", "--porcelain=v1", "-z", "--untracked-files=all", "--no-renames",
+                        timeout=30)
+    assert r.ok
+    assert not marker.exists()
+
+
+def test_too_many_filter_drivers(tmp_path):
+    from app import gitsafe
+
+    d = str(tmp_path)
+    _git(d, "init", "-q")
+    for i in range(51):
+        _git(d, "config", f"filter.d{i}.clean", "cat")
+    r = gitsafe.run_git(d, "--version", timeout=30)
+    assert not r.ok and r.failed and r.err == "too many filter drivers"
