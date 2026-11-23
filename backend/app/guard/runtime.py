@@ -302,6 +302,7 @@ def build_policy(*, task_id: str, project, workspace: Path, cwd: Path, claude_co
         str(workspaces / "_system"),
         # other tasks' policies/spools, every user's private state and MCP configs
         str(workspaces / "_tasks"), str(workspaces / "_users"), str(workspaces / "_mcp_configs"),
+        str(workspaces / "_gates"),  # gate run logs
     ]
     if claude_config_dir:
         protected.append(str(claude_config_dir))
