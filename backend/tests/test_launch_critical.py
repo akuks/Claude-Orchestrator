@@ -224,3 +224,58 @@ def test_edits_survive_a_retry_until_finish(tmp_path):
     rows = asyncio.run(go())
     assert rows == [{"paths": ["src/a.py"], "globs": ["src/**"]}]
     assert tid not in w._run_edits
+
+
+def _status(tid):
+    async def go():
+        async with SessionLocal() as s:
+            return (await s.get(Task, tid)).status
+
+    return asyncio.run(go())
+
+
+def _crit_rows(tid):
+    from sqlalchemy import select
+    from app.models import TaskEvent
+
+    async def go():
+        async with SessionLocal() as s:
+            return [r.payload for r in (await s.execute(select(TaskEvent).where(
+                TaskEvent.task_id == tid, TaskEvent.type == "critical_paths"))).scalars()]
+
+    return asyncio.run(go())
+
+
+def _queued_with_edits(tmp_path, edits):
+    tid = _setup(tmp_path, ["src/**"])
+    w = WorkerManager()
+    w._run_edits[tid] = list(edits)
+    w._cancelled.add(tid)
+    return tid, w
+
+
+def test_cancel_during_retry_backoff_ends_task(tmp_path):
+    tid, w = _queued_with_edits(tmp_path, [{"name": "Edit", "input": {"file_path": "src/a.py"}}])
+    asyncio.run(w._retry_after(tid, 0, "normal", None))
+    assert _status(tid) == "cancelled"
+    assert tid not in w._cancelled and tid not in w._run_edits
+    assert _crit_rows(tid) == [{"paths": ["src/a.py"], "globs": ["src/**"]}]
+
+
+def test_cancel_while_requeued_reports_and_cleans(tmp_path):
+    tid, w = _queued_with_edits(tmp_path, [{"name": "Edit", "input": {"file_path": "src/a.py"}}])
+
+    async def go():
+        async with SessionLocal() as s:
+            await w._end_cancelled_queued(s, await s.get(Task, tid))
+
+    asyncio.run(go())
+    assert _status(tid) == "cancelled"
+    assert tid not in w._cancelled and tid not in w._run_edits
+    assert len(_crit_rows(tid)) == 1
+
+
+def test_cancel_without_edits_emits_nothing(tmp_path):
+    tid, w = _queued_with_edits(tmp_path, [])
+    asyncio.run(w._retry_after(tid, 0, "normal", None))
+    assert _status(tid) == "cancelled" and not _crit_rows(tid) and tid not in w._run_edits

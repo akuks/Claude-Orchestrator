@@ -301,9 +301,40 @@ class WorkerManager:
         if proc:
             self._signal_group(proc, signal.SIGTERM)
 
+    async def _end_cancelled_queued(self, s, task: Task) -> None:
+        """A cancelled step that never runs again (cancelled while queued or in a retry backoff): CANCELLED,
+        the `completed` event, the critical-path warning for the edits of its earlier attempts, and its
+        cancel / edit bookkeeping dropped."""
+        task_id = task.id
+        self._cancelled.discard(task_id)
+        edits = self._run_edits.pop(task_id, None)
+        self._run_ctx.pop(task_id, None)
+        if edits:
+            await self._emit_critical_paths(task_id, {"edit_calls": edits}, self._emit_offline_for(task_id))
+        task.status = Status.CANCELLED
+        task.completed_at = _now()
+        await s.commit()
+        await broker.publish(
+            task_id, {"seq": 0, "type": "completed", "payload": {"status": Status.CANCELLED}}
+        )
+        try:  # co-guard: drop follow-ups deferred on this step
+            await guard_grants.after_task_finished(task_id, submit=self.submit)
+        except Exception:  # noqa: BLE001
+            pass
+
     async def _retry_after(self, task_id, delay, priority, created_at) -> None:
         await asyncio.sleep(delay)
         if task_id in self._cancelled:
+            try:  # cancelled during the backoff: it ends here, not stuck QUEUED
+                async with SessionLocal() as s:
+                    task = await s.get(Task, task_id)
+                    if task is not None:
+                        await self._end_cancelled_queued(s, task)
+                    else:
+                        self._cancelled.discard(task_id)
+                        self._run_edits.pop(task_id, None)
+            except Exception:  # noqa: BLE001
+                log.exception("cancel during retry backoff failed for %s", task_id)
             return
         await self.submit(task_id, priority, created_at)
 
@@ -388,17 +419,7 @@ class WorkerManager:
             if task is None:
                 return
             if task_id in self._cancelled:
-                self._cancelled.discard(task_id)
-                task.status = Status.CANCELLED
-                task.completed_at = _now()
-                await s.commit()
-                await broker.publish(
-                    task_id, {"seq": 0, "type": "completed", "payload": {"status": Status.CANCELLED}}
-                )
-                try:  # co-guard: drop follow-ups deferred on this step
-                    await guard_grants.after_task_finished(task_id, submit=self.submit)
-                except Exception:  # noqa: BLE001
-                    pass
+                await self._end_cancelled_queued(s, task)
                 return
             task.status = Status.RUNNING
             task.started_at = _now()
