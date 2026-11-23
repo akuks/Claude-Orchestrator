@@ -28,7 +28,8 @@ from ..database import SessionLocal
 from ..decisions import after_run
 from ..guard import runtime as guard_runtime
 from .. import reports
-from ..models import ActionGrant, Artifact, DecisionProposal, Project, RunAsk, Task, TaskEvent, TaskHandoff, TaskQuestion, TaskUsage
+from ..launch import store as launch_store
+from ..models import ActionGrant, LaunchItem, Artifact, DecisionProposal, Project, RunAsk, Task, TaskEvent, TaskHandoff, TaskQuestion, TaskUsage
 from ..resume import handoff as resume_handoff
 from ..resume.texts import CONTINUE_PROMPT
 from ..task_service import brief_422, build_task
@@ -44,6 +45,7 @@ from ..schemas import (
     QuestionOut,
     StatsOut,
     TaskCreate,
+    TaskLaunchLink,
     TaskOut,
 )
 
@@ -324,6 +326,30 @@ async def get_events(task_id: str, request: Request, after_seq: int = 0):
             )
         ).scalars().all()
     return [EventOut.model_validate(e) for e in rows]
+
+
+@router.patch("/{task_id}/launch-item", response_model=TaskOut)
+async def link_launch_item(task_id: str, payload: TaskLaunchLink, request: Request):
+    """Link the task to an open or started launch item of its own project, or unlink with null.
+    Creator, project maintainer or admin. A running task linked to an open item starts the item."""
+    p = request.state.principal
+    async with SessionLocal() as s:
+        task = await require_task(s, p, task_id)
+        await _require_manage(s, p, task)
+        if payload.launch_item_id is None:
+            task.launch_item_id = None
+        else:
+            item = await s.get(LaunchItem, payload.launch_item_id)
+            if (item is None or not task.project_id or item.project_id != task.project_id
+                    or item.status not in ("open", "started")):
+                raise HTTPException(422, "launch_item_id must be an open or started item of the task's project")
+            task.launch_item_id = item.id
+            if task.status == Status.RUNNING:
+                await launch_store.mark_started_for_task(s, task)
+        await s.commit()
+        await s.refresh(task)
+        out = TaskOut.model_validate(task)
+        return await _viewer_flags(s, p, out, task)
 
 
 @router.post("/{task_id}/cancel", response_model=TaskOut)

@@ -261,6 +261,7 @@ def _bodies(world) -> dict:
         ("POST", "/tasks/{task_id}/questions"): {"question": "x?"},
         ("POST", "/questions/{question_id}/answer"): {"answer": "x"},
         ("POST", "/tasks/{task_id}/followup"): {"prompt": "x"},
+        ("PATCH", "/tasks/{task_id}/launch-item"): {"launch_item_id": None},
         ("POST", "/projects"): {"name": f"cov-new-{_uid()}"},
         ("POST", "/projects/import"): {"directories": ["/tmp"]},
         ("PATCH", "/projects/{project_id}"): {"name": f"cov-hijack-{_uid()}"},

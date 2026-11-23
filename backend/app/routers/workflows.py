@@ -763,7 +763,7 @@ async def gate_run_log(run_id: str, rid: str, request: Request):
         text, cut = _read_tail(path, _LOG_TAIL)
         if not text:
             return {"lines": [], "truncated": False}
-        text = clean_text(mask_values(text, ordered))
+        text = mask_values(clean_text(mask_values(text, ordered)), ordered)
         lines = text.splitlines()
         if cut and lines:
             lines = lines[1:]  # the first line is probably cut mid-way

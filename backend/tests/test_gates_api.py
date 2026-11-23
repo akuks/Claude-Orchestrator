@@ -320,6 +320,27 @@ def test_log_tail_redacts_and_caps(client, monkeypatch):
     assert client.get(f"/workflows/runs/{other}/gate-runs/{gid}/log").status_code == 404
 
 
+def test_log_tail_masks_secret_split_by_zero_width(client):
+    pid = _project(client)
+    secret = "zw-secret-value-42"
+
+    async def setenv():
+        async with SessionLocal() as s:
+            pr = await s.get(Project, pid)
+            pr.env = {"API": secret}
+            await s.commit()
+
+    asyncio.run(setenv())
+    rid = _run(pid)
+    d = executor._run_dir(rid)
+    d.mkdir(parents=True, exist_ok=True)
+    (d / "stage0-1.log").write_text("token zw-secr\u200bet-value-42 end\n")
+    gid = _gate_row(rid, log_name="stage0-1.log")
+    out = client.get(f"/workflows/runs/{rid}/gate-runs/{gid}/log").json()
+    txt = "\n".join(out["lines"])
+    assert "zw-secr" not in txt and "value-42" not in txt and "[redacted]" in txt
+
+
 def test_log_invisible_run_404(client):
     pid = _project(client)
     rid = _run(pid)

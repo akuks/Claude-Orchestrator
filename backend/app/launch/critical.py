@@ -44,3 +44,20 @@ def hits(paths: list[str], globs: list[str]) -> tuple[list[str], list[str]]:
     hit_paths = [p for p in paths if any(globmatch.matches(g, p) for g in globs)]
     hit_globs = [g for g in globs if any(globmatch.matches(g, p) for p in paths)]
     return hit_paths, hit_globs
+
+
+PREFIX_MIN = 3
+
+
+def prefixes(critical_paths) -> list[str]:
+    """The literal prefix of each glob (up to its first wildcard, trailing ``/`` stripped), lower-cased,
+    unique, in order; prefixes shorter than 3 characters are dropped."""
+    out: list[str] = []
+    for g in critical_paths or []:
+        if not isinstance(g, str):
+            continue
+        cut = min((g.find(c) for c in "*?[{" if c in g), default=len(g))
+        pre = g[:cut].rstrip("/").lower()
+        if len(pre) >= PREFIX_MIN and pre not in out:
+            out.append(pre)
+    return out

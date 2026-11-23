@@ -89,6 +89,10 @@ class TaskOut(BaseModel):
         return [] if v is None else v
 
 
+class TaskLaunchLink(BaseModel):
+    launch_item_id: Optional[str]  # required; null unlinks
+
+
 class FollowupCreate(BaseModel):
     prompt: str = Field(min_length=1)
 
