@@ -205,6 +205,10 @@ export const api = {
   getWorkflowRun: (id) => req('GET', `/workflows/runs/${id}`),
   cancelWorkflowRun: (id) => req('POST', `/workflows/runs/${id}/cancel`),
   retryWorkflowRun: (id) => req('POST', `/workflows/runs/${id}/retry`),
+  approveWorkflowStage: (id, i) => req('POST', `/workflows/runs/${id}/stages/${i}/approve`),
+  rejectWorkflowStage: (id, i, reason) => req('POST', `/workflows/runs/${id}/stages/${i}/reject`, { reason }),
+  allowWorkflowGate: (id, i) => req('POST', `/workflows/runs/${id}/stages/${i}/allow`),
+  workflowGateLog: (id, rid) => req('GET', `/workflows/runs/${id}/gate-runs/${rid}/log`),
 
   // ---- Skill packs (Claude Code plugins) ----
   listSkills: () => req('GET', '/skills'),

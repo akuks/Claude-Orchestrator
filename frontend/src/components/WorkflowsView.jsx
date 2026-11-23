@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState } from 'react'
 import {
+  Alert,
   Button,
   Card,
   Empty,
@@ -22,6 +23,8 @@ import {
 } from '@ant-design/icons'
 import { api } from '../api'
 import { useRoute } from '../shell/router'
+import StageFields from '../gates/StageFields'
+import { formStage, stageLabel, stagePayload } from '../gates/gates'
 
 const RUN_COLOR = {
   pending: 'default',
@@ -35,30 +38,40 @@ const RUN_COLOR = {
 function WorkflowModal({ open, workflow, agents, onClose, onSaved }) {
   const [form] = Form.useForm()
   const [saving, setSaving] = useState(false)
+  const [projects, setProjects] = useState([])
+  const [error, setError] = useState('')
   const isEdit = !!workflow
 
   useEffect(() => {
     if (!open) return
+    setError('')
     if (workflow) {
-      form.setFieldsValue(workflow)
+      form.setFieldsValue({ ...workflow, stages: (workflow.stages || []).map(formStage) })
     } else {
       form.resetFields()
-      form.setFieldsValue({ stages: [{ name: 'Develop', items: [{}] }] })
+      form.setFieldsValue({ stages: [{ name: 'Develop', kind: 'agent', items: [{}] }] })
     }
   }, [open, workflow])
+
+  useEffect(() => {
+    if (!open) return
+    api.listProjects?.().then((p) => setProjects(p || [])).catch(() => {})
+  }, [open])
 
   const submit = async () => {
     const v = await form.validateFields().catch(() => null)
     if (!v) return
     setSaving(true)
+    setError('')
+    const payload = { ...v, stages: (v.stages || []).map(stagePayload) }
     try {
-      if (isEdit) await api.updateWorkflow(workflow.id, v)
-      else await api.createWorkflow(v)
+      if (isEdit) await api.updateWorkflow(workflow.id, payload)
+      else await api.createWorkflow(payload)
       message.success(isEdit ? 'Workflow saved' : 'Workflow created')
       onSaved?.()
       onClose()
     } catch (e) {
-      message.error(e.message)
+      setError(e.message)
     } finally {
       setSaving(false)
     }
@@ -117,6 +130,10 @@ function WorkflowModal({ open, workflow, agents, onClose, onSaved }) {
                     <Button size="small" danger type="text" icon={<DeleteOutlined />} onClick={() => removeStage(stage.name)} />
                   }
                 >
+                  <StageFields
+                    name={stage.name}
+                    projects={projects}
+                    agentFields={(
                   <Form.List name={[stage.name, 'items']}>
                     {(items, { add: addItem, remove: removeItem }) => (
                       <>
@@ -150,14 +167,17 @@ function WorkflowModal({ open, workflow, agents, onClose, onSaved }) {
                       </>
                     )}
                   </Form.List>
+                    )}
+                  />
                 </Card>
               ))}
-              <Button type="dashed" block icon={<PlusOutlined />} onClick={() => addStage({ name: '', items: [{}] })}>
+              <Button type="dashed" block icon={<PlusOutlined />} onClick={() => addStage({ name: '', kind: 'agent', items: [{}] })}>
                 Add stage
               </Button>
             </div>
           )}
         </Form.List>
+        {error && <Alert type="error" showIcon message={error} style={{ marginTop: 10 }} />}
       </Form>
     </Modal>
   )
@@ -313,8 +333,8 @@ export default function WorkflowsView({ agents = [], isAdmin = false, runWorkflo
               {w.stages.map((st, i) => (
                 <span key={i} style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}>
                   <Tag style={{ margin: 0 }}>
-                    {st.name}
-                    {st.items.length > 1 ? ` ×${st.items.length}` : ''}
+                    {stageLabel(st)}
+                    {(st.items?.length || 0) > 1 ? ` ×${st.items.length}` : ''}
                   </Tag>
                   {i < w.stages.length - 1 && <CaretRightOutlined style={{ color: 'var(--co-text-muted)', fontSize: 10 }} />}
                 </span>
