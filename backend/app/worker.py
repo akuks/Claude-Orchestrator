@@ -229,6 +229,8 @@ class WorkerManager:
         # task_id -> the run's outside-commit base, fixed at spawn (F9); the
         # finish snapshot uses it too.
         self._run_since: dict[str, str | None] = {}
+        # task_id -> the live run's ctx, until _finish (critical-path warning on every end state)
+        self._run_ctx: dict[str, dict] = {}
         # task_id -> the live run's UsageTracker (phase 3b); _finish stores its last figures.
         self._usage: dict[str, usage_tracker.UsageTracker] = {}
         # task_id -> the live run's read state of co-guard's token-care spool lines (_new_usage_spool)
@@ -767,6 +769,7 @@ class WorkerManager:
                       "proc": proc, "emit": emit,
                       "spool": guard_runtime.task_dir(task_id) / guard_runtime.SPOOL_NAME},
         }
+        self._run_ctx[task_id] = ctx  # _finish reads its edit calls (critical-path warning)
         watch = asyncio.create_task(self._guard_watch(ctx))
         beat = asyncio.create_task(self._heartbeat_loop(task_id, ctx))
         try:
@@ -834,6 +837,7 @@ class WorkerManager:
                 await auth.revoke_task_tokens(s, task_id)
                 await s.commit()
             self._usage.pop(task_id, None)  # the next attempt counts afresh
+            self._run_ctx.pop(task_id, None)
             self._usage_spool.pop(task_id, None)  # (its spool was wiped by the ingest)
             asyncio.create_task(
                 self._retry_after(task_id, backoff, task_priority, task_created_at)
@@ -1539,6 +1543,9 @@ class WorkerManager:
         """One ``critical_paths`` event when the run changed files matching its project's critical globs.
         Called before the final ``completed`` event. Never raises, never fails the task."""
         try:
+            if ctx.get("critical_done"):
+                return
+            ctx["critical_done"] = True  # at most one event per attempt
             calls = ctx.get("edit_calls")
             if not calls:
                 return
@@ -1797,6 +1804,11 @@ class WorkerManager:
         artifacts: list[dict] | None = None,
         secrets: list[str] | None = None,
     ) -> None:
+        # every end state (timeout, guard stop, failure, crash): the critical-path warning, once; the normal
+        # and cancelled paths already emitted it before their `completed` event
+        run_ctx = self._run_ctx.pop(task_id, None)
+        if run_ctx is not None:
+            await self._emit_critical_paths(task_id, run_ctx, self._emit_offline_for(task_id))
         # Agent output (and stderr) can carry the run's credentials: redact
         # before saving (error before its cut). Known token shapes are always
         # scrubbed, even without the run's secret list.

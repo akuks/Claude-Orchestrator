@@ -62,12 +62,12 @@ MATCH_MIN = 3
 
 async def blocked_items(s, questions) -> dict[str, dict]:
     """``{question id: {number, title}}`` for the open questions whose ``question`` or ``blocks`` text names an
-    open launch item (case-insensitive substring, title >= 3 chars) of the question's project. One query
+    unfinished (open or started) launch item (case-insensitive substring, title >= 3 chars) of the question's project. One query
     for all projects involved; the lowest item number wins."""
     pids = {q.project_id for q in questions if q.project_id and q.status == "open"}
     if not pids:
         return {}
-    rows = (await s.execute(select(LaunchItem).where(LaunchItem.project_id.in_(pids), LaunchItem.status == "open")
+    rows = (await s.execute(select(LaunchItem).where(LaunchItem.project_id.in_(pids), LaunchItem.status.in_(("open", "started")))
                             .order_by(LaunchItem.number))).scalars().all()
     by_project: dict[str, list] = {}
     for i in rows:

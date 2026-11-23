@@ -83,3 +83,11 @@ def test_one_items_query_per_request(client, admin_id):
     finally:
         event.remove(sync_engine, "before_cursor_execute", count)
     assert len(seen) == 1
+
+
+def test_started_item_counts_as_open(client, admin_id):
+    pid_q = _seed(admin_id, [("Billing export", "started"), ("Gone", "dropped")],
+                  [("billing export?", None), ("gone?", None)])
+    got = _by_id(client)
+    assert got[pid_q[0]]["launch_item"] == {"number": 1, "title": "Billing export"}
+    assert got[pid_q[1]]["launch_item"] is None

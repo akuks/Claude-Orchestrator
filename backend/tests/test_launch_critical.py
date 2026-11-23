@@ -118,3 +118,50 @@ def test_error_never_raises(tmp_path):
     tid = _setup(tmp_path, ["src/**"])
     asyncio.run(w._emit_critical_paths(tid, ctx, emit))
     asyncio.run(w._emit_critical_paths("missing", ctx, emit))
+
+
+def test_finish_emits_on_failure_end_once(tmp_path):
+    from sqlalchemy import select
+    from app.models import TaskEvent
+
+    tid = _setup(tmp_path, ["src/**"])
+    w = WorkerManager()
+    got = []
+
+    async def emit(t, p):
+        got.append((t, p))
+
+    ctx = {"task_id": tid, "mcp_ids": {}, "secrets": [], "model_stored": True}
+
+    async def go():
+        await w._handle_stream_event(_use("1", "Edit", file_path="src/a.py"), emit, {}, ctx)
+        w._run_ctx[tid] = ctx
+        await w._finish(tid, "failed", error="Task exceeded time limit")  # timeout-style end
+        await w._finish(tid, "failed", error="again")  # second finish adds nothing
+        async with SessionLocal() as s:
+            return (await s.execute(select(TaskEvent).where(TaskEvent.task_id == tid,
+                                                            TaskEvent.type == "critical_paths"))).scalars().all()
+
+    rows = asyncio.run(go())
+    assert len(rows) == 1 and rows[0].payload == {"paths": ["src/a.py"], "globs": ["src/**"]}
+    assert not w._run_ctx
+
+
+def test_normal_path_then_finish_emits_once(tmp_path):
+    tid = _setup(tmp_path, ["src/**"])
+    w = WorkerManager()
+    got = []
+
+    async def emit(t, p):
+        got.append(t)
+
+    ctx = {"task_id": tid, "mcp_ids": {}, "secrets": [], "model_stored": True}
+
+    async def go():
+        await w._handle_stream_event(_use("1", "Edit", file_path="src/a.py"), emit, {}, ctx)
+        await w._emit_critical_paths(tid, ctx, emit)
+        w._run_ctx[tid] = ctx
+        await w._finish(tid, "completed")
+
+    asyncio.run(go())
+    assert got.count("critical_paths") == 1
