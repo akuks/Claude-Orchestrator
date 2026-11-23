@@ -45,7 +45,9 @@ remote's lazy fetch of a missing object), so every such call goes through
 * submodule internals are never entered: ``status`` and ``diff`` get
   ``--ignore-submodules=dirty`` from ``run_git`` itself (a submodule's own
   config could define filter drivers), so dirty submodule content is not
-  reported, only a changed gitlink; a driver name that is not printable ASCII
+  reported, only a changed gitlink; submodule diffs are pinned to the short
+  form (``-c diff.submodule=short``, ``-c status.submoduleSummary=false`` and
+  ``diff --submodule=short``), so no child ``git diff`` runs inside one; a driver name that is not printable ASCII
   (or holds ``=``) refuses the command ("unusual filter driver name");
 * the gate code-state hash's two reads: ``diff`` with exactly
   ``--no-ext-diff --no-textconv --binary HEAD`` and ``ls-files`` with exactly
@@ -78,6 +80,8 @@ SAFE_ARGS = (
     "-c", "gpg.x509.program=false",
     "-c", "diff.external=",
     "-c", "core.attributesFile=/dev/null",
+    "-c", "diff.submodule=short",
+    "-c", "status.submoduleSummary=false",
     "--no-pager",
     "--no-optional-locks",
 )
@@ -222,8 +226,9 @@ def run_git(directory, *args: str, timeout: float) -> GitResult:
     if isinstance(over, GitResult):
         return over
     if args[0] in ("status", "diff"):
-        # a submodule's own config could define filter drivers that git's child status would run
-        args = (args[0], "--ignore-submodules=dirty", *args[1:])
+        # a submodule's own config could define filter or diff drivers that git's child processes would run
+        extra = ("--ignore-submodules=dirty", "--submodule=short") if args[0] == "diff" else ("--ignore-submodules=dirty",)
+        args = (args[0], *extra, *args[1:])
     try:
         r = subprocess.run(
             [exe, *SAFE_ARGS, *over, *args], cwd=str(Path(directory)), stdin=subprocess.DEVNULL,

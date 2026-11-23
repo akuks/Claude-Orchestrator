@@ -124,3 +124,32 @@ def test_non_utf8_driver_name_refused(tmp_path):
         fh.write(b'[filter "x\xffy"]\n\tclean = cat\n')
     r = gitsafe.run_git(d, "status", "--porcelain=v1", "-z", "--untracked-files=all", "--no-renames", timeout=30)
     assert not r.ok and r.failed and r.err == "unusual filter driver name"
+
+
+def test_submodule_diff_driver_never_runs(tmp_path):
+    from app import gitsafe
+
+    marker = tmp_path / "marker"
+    sub = tmp_path / "subsrc"
+    sub.mkdir()
+    sd = str(sub)
+    _git(sd, "init", "-q")
+    (sub / "f.txt").write_text("aaaa\n")
+    (sub / ".gitattributes").write_text("f.txt diff=d\n")
+    _git(sd, "add", "-A")
+    _git(sd, "commit", "-qm", "s")
+    sup = tmp_path / "sup"
+    sup.mkdir()
+    d = str(sup)
+    _git(d, "init", "-q")
+    _git(d, "-c", "protocol.file.allow=always", "submodule", "add", "-q", sd, "sub")
+    _git(d, "commit", "-qm", "sm")
+    _git(d, "config", "diff.submodule", "diff")
+    inner = str(sup / "sub")
+    _git(inner, "config", "diff.d.command", f"sh -c 'touch {marker}; cat'")
+    (sup / "sub" / "f.txt").write_text("bbbb\n")
+    _git(inner, "commit", "-qam", "moved")
+    assert code_state(d)
+    r = gitsafe.run_git(d, "diff", "--no-ext-diff", "--no-textconv", "--binary", "HEAD", timeout=30)
+    assert r.ok
+    assert not marker.exists()
