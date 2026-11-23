@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import {
+  Alert,
   Button,
   Descriptions,
   Drawer,
@@ -7,6 +8,7 @@ import {
   Input,
   List,
   Popconfirm,
+  Select,
   Space,
   Tag,
   Typography,
@@ -120,6 +122,7 @@ const EVENT_STYLE = {
   decision_review: { color: 'var(--co-terminal-muted)', prefix: '·' },
   test_result: { color: 'var(--co-terminal-muted)', prefix: '·' },
   critical_paths: { color: 'var(--co-terminal-muted)', prefix: '·' },
+  risk: { color: 'var(--co-terminal-muted)', prefix: '·' },
 }
 
 // "Tests: 61 passed, 2 failed (a, b)": zero and missing parts are left out.
@@ -176,6 +179,9 @@ export function renderLine(ev) {
       break
     case 'critical_paths':
       text = criticalPathsLine(p)
+      break
+    case 'risk':
+      text = p.risk_reason ? `Marked critical: ${p.risk_reason}` : 'Marked critical'
       break
     default:
       text = JSON.stringify(p)
@@ -309,6 +315,63 @@ function DelegationTree({ thread, currentId, onOpenTask }) {
         <Node key={t.id} t={t} isChild={false} />
       ))}
     </div>
+  )
+}
+
+// Which launch item a task counts towards: open and started items of the
+// task's project, or none. Shown only to people who may change it; the server
+// still decides, and its reason (403/422) is shown under the select.
+function LaunchItemSelect({ task, onSaved }) {
+  const [items, setItems] = useState(null)
+  const [saving, setSaving] = useState(false)
+  const [error, setError] = useState(null)
+  const pid = task.project_id
+  useEffect(() => {
+    let live = true
+    setItems(null)
+    setError(null)
+    Promise.resolve(api.getLaunch?.(pid))
+      .then((d) => live && setItems(Array.isArray(d?.items) ? d.items : []))
+      .catch(() => live && setItems([]))
+    return () => {
+      live = false
+    }
+  }, [pid])
+  const current = task.launch_item_id || ''
+  const options = [{ value: '', label: 'None' }]
+  for (const i of items || []) {
+    if (i.status === 'open' || i.status === 'started' || i.id === current)
+      options.push({ value: i.id, label: `#${i.number} ${revealHidden(i.title).text}` })
+  }
+  if (current && !options.some((o) => o.value === current)) options.push({ value: current, label: 'A launch item' })
+  const change = async (v) => {
+    setSaving(true)
+    setError(null)
+    try {
+      const t = await api.setTaskLaunchItem(task.id, v || null)
+      if (t) onSaved?.(t)
+      message.success(v ? 'Linked to the launch item' : 'Unlinked from the launch item')
+    } catch (e) {
+      setError(e?.message || 'Could not change the launch item')
+    } finally {
+      setSaving(false)
+    }
+  }
+  return (
+    <>
+      <Select
+        size="small"
+        style={{ width: '100%' }}
+        value={current}
+        options={options}
+        loading={items == null || saving}
+        disabled={saving}
+        onChange={change}
+        aria-label="Launch item"
+        data-testid="task-launch-item"
+      />
+      {error && <Alert type="error" showIcon message={error} style={{ marginTop: 6 }} data-testid="task-launch-item-error" />}
+    </>
   )
 }
 
@@ -603,6 +666,17 @@ export default function TaskDetail({ taskId, onClose, onChanged, onOpenTask, onO
           <Descriptions.Item label="Cost">
             {task.total_cost_usd != null ? fmtCost(task.total_cost_usd) : '—'}
           </Descriptions.Item>
+          {task.project_id && task.can_manage === true && (
+            <Descriptions.Item label="Launch item" span={2}>
+              <LaunchItemSelect
+                task={task}
+                onSaved={(t) => {
+                  setTask((prev) => ({ ...prev, ...t }))
+                  onChanged?.()
+                }}
+              />
+            </Descriptions.Item>
+          )}
           <Descriptions.Item label="Prompt" span={2}>
             <Typography.Text style={{ whiteSpace: 'pre-wrap' }}>{task.prompt}</Typography.Text>
           </Descriptions.Item>

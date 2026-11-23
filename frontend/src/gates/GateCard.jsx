@@ -27,8 +27,14 @@ const plural = (n, one, many) => `${n} ${n === 1 ? one : many}`
 
 // The plain sentence a check step leads with, and its tone. `rows` are this
 // step's command runs, oldest first.
-export function gateLead(state, rows = []) {
+export function gateLead(state, rows = [], stage = null) {
   const status = state?.status || 'waiting'
+  if (status === 'fixing') {
+    const n = Number(stage?.fix?.rounds) || 1
+    const k = Number(state?.fix_round) || 1
+    return { tone: 'running', text: `The check failed. An agent is fixing it (try ${k} of ${n}).` }
+  }
+  if (status === 'budget') return { tone: 'waiting', text: 'Paused — this run reached its spending limit' }
   const last = rows[rows.length - 1]
   if (status === 'passed') {
     const full = [...rows].reverse().find((r) => r.kind !== 'retry') || last
@@ -128,13 +134,14 @@ function GateRun({ runId, row }) {
 
 // A "Run a check" step: a plain sentence with the test result first, the
 // failing tests, anything that needs a person, then the details collapsed.
-export default function GateCard({ runId, index, stage, state, live, gateRuns = [], canAllow = true, onChanged }) {
+export default function GateCard({ runId, index, stage, state, live, gateRuns = [], canAllow = true, onChanged, tasks = [], onOpenTask }) {
   const [busy, setBusy] = useState(false)
   const st = state || {}
   const mine = live && live.stage_index === index ? live : null
   const rows = gateRuns.filter((r) => r.stage_index === index)
   const last = rows[rows.length - 1]
-  const lead = gateLead(st, rows)
+  const lead = gateLead(st, rows, stage)
+  const fixTask = st.status === 'fixing' && st.fix_task ? tasks.find((t) => t.id === st.fix_task) : null
   const words = gateWords(stage, st, mine)
   const showWords = words && words !== (st.status || 'waiting').replace('_', ' ')
   const failing = st.status === 'failed' && last?.failing?.length ? last.failing : []
@@ -157,6 +164,16 @@ export default function GateCard({ runId, index, stage, state, live, gateRuns = 
       <div className={`co-gate-lead co-gate-lead-${lead.tone}`} data-testid="gate-lead">
         {lead.text}
       </div>
+      {st.status === 'fixing' && st.reason && (
+        <div className="co-gate-words" data-testid="gate-fix-reason">
+          What failed: {failureMessage(st.reason, last)}
+        </div>
+      )}
+      {fixTask && onOpenTask && (
+        <Button size="small" type="link" style={{ paddingInline: 0 }} onClick={() => onOpenTask(fixTask.id)} data-testid="gate-fix-task">
+          See what the agent is doing
+        </Button>
+      )}
       {showWords && (
         <div className="co-gate-words" data-testid="gate-words">
           {words}

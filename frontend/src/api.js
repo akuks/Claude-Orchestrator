@@ -100,6 +100,7 @@ export const api = {
   createTask: (payload) => req('POST', '/tasks', payload),
   cancelTask: (id) => req('POST', `/tasks/${id}/cancel`),
   retryTask: (id) => req('POST', `/tasks/${id}/retry`),
+  setTaskLaunchItem: (id, launch_item_id) => req('PATCH', `/tasks/${id}/launch-item`, { launch_item_id }),
   duplicateTask: (id) => req('POST', `/tasks/${id}/duplicate`),
   deleteTask: (id) => req('DELETE', `/tasks/${id}`),
   followupTask: (id, prompt) => req('POST', `/tasks/${id}/followup`, { prompt }),
@@ -233,6 +234,7 @@ export const api = {
   approveWorkflowStage: (id, i) => req('POST', `/workflows/runs/${id}/stages/${i}/approve`),
   rejectWorkflowStage: (id, i, reason) => req('POST', `/workflows/runs/${id}/stages/${i}/reject`, { reason }),
   allowWorkflowGate: (id, i) => req('POST', `/workflows/runs/${id}/stages/${i}/allow`),
+  raiseRunBudget: (id, budget_usd) => req('POST', `/workflows/runs/${id}/budget`, { budget_usd }),
   workflowGateLog: (id, rid) => req('GET', `/workflows/runs/${id}/gate-runs/${rid}/log`),
 
   // ---- Skill packs (Claude Code plugins) ----

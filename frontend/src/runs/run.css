@@ -237,3 +237,56 @@
   min-width: 0;
   word-break: break-word;
 }
+
+/* What an agents step handed over, and the spending-limit panel. */
+.co-run-handed {
+  margin-top: 12px;
+  padding-top: 10px;
+  border-top: 1px solid var(--co-border);
+}
+.co-run-handed-title {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--co-text-secondary);
+  margin-bottom: 6px;
+}
+.co-run-handed-list {
+  margin: 0 0 8px;
+}
+.co-run-handed-agent {
+  font-size: 12px;
+  color: var(--co-text-secondary);
+  margin-bottom: 2px;
+}
+.co-run-handed-row {
+  display: grid;
+  grid-template-columns: minmax(80px, max-content) 1fr;
+  gap: 10px;
+  font-size: 13px;
+  padding: 2px 0;
+}
+.co-run-handed-row dt {
+  font-family: var(--co-font-mono, ui-monospace, monospace);
+  color: var(--co-text-secondary);
+}
+.co-run-handed-row dd {
+  margin: 0;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+.co-run-budget-raise {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: 8px;
+  margin-top: 10px;
+}
+.co-run-budget-raise label {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.co-run-budget-label {
+  font-size: 12px;
+  color: var(--co-text-secondary);
+}

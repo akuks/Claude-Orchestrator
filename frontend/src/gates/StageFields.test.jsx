@@ -157,3 +157,100 @@ describe('step type selector', () => {
     await v.unmount()
   })
 })
+
+describe('fix-it agent, retry switch and hand-over names', () => {
+  const agents = [
+    { id: 'ag1', name: 'Fixer', project_id: 'p1' },
+    { id: 'ag2', name: 'Elsewhere', project_id: 'p2' },
+  ]
+  function H({ stage }) {
+    return (
+      <Form initialValues={{ stages: [stage] }}>
+        <Form.List name="stages">
+          {(fields) =>
+            fields.map((f) => (
+              <StageFields key={f.key} name={f.name} projects={[{ id: 'p1', name: 'Proj', directory: '/x' }]} agents={agents} agentFields={<div data-testid="agent-items" />} />
+            ))
+          }
+        </Form.List>
+      </Form>
+    )
+  }
+  it('lists only agents of the check project, by name, under More options', async () => {
+    const v = await render(<H stage={{ name: 'g', kind: 'gate', project: 'p1', run: ['pytest -q'], timeout_min: 60 }} />)
+    await flush()
+    const more = v.container.querySelector('[data-testid="more-options"]')
+    expect(more.querySelector('[data-testid="gate-fix"]')).not.toBeNull()
+    expect(more.textContent).toContain('If the check fails, ask an agent to fix it (optional)')
+    expect(more.textContent).toContain('The agent gets the failing output, fixes it, and the check runs again.')
+    await act(async () => {
+      v.container.querySelector('[data-testid="gate-fix-agent"] .ant-select-selector').dispatchEvent(new MouseEvent('mousedown', { bubbles: true }))
+    })
+    await flush()
+    const opts = [...document.body.querySelectorAll('.ant-select-item-option')].map((o) => o.textContent)
+    expect(opts).toEqual(['Fixer'])
+    expect(v.container.querySelector('[data-testid="gate-fix-rounds"]')).toBeNull()
+    await v.unmount()
+  })
+  it('opens More options and shows How many tries when a fixer is saved', async () => {
+    const v = await render(<H stage={{ name: 'g', kind: 'gate', project: 'p1', run: ['pytest -q'], timeout_min: 60, fix: { agent: 'ag1', rounds: 2 } }} />)
+    await flush()
+    expect(v.container.querySelector('[data-testid="more-options"]').dataset.open).toBe('true')
+    expect(v.container.querySelector('[data-testid="gate-fix-agent"]').textContent).toContain('Fixer')
+    expect(v.container.textContent).toContain('How many tries')
+    expect(moreOptionsAuto({ fix: { agent: 'ag1' } }, 'gate')).toBe(true)
+    await v.unmount()
+  })
+  it('an agents step has the retry switch with its help', async () => {
+    const v = await render(<H stage={{ name: 'a', kind: 'agent', auto_retry: true }} />)
+    await flush()
+    const sw = v.container.querySelector('[data-testid="agent-auto-retry"]')
+    expect(sw.getAttribute('aria-checked')).toBe('true')
+    expect(v.container.textContent).toContain('Try once more if it fails')
+    expect(v.container.textContent).toContain('Runs the step again one time. Never after someone cancels it.')
+    await v.unmount()
+    const g = await render(<H stage={{ name: 'g', kind: 'gate', run: ['x'] }} />)
+    await flush()
+    expect(g.container.querySelector('[data-testid="agent-auto-retry"]')).toBeNull()
+    await g.unmount()
+  })
+})
+
+describe('AgentItems hand-over names', () => {
+  function H({ stages, at }) {
+    return (
+      <Form initialValues={{ stages }}>
+        <Form.List name="stages">
+          {(fields) => fields.filter((f) => f.name === at).map((f) => <AgentItems key={f.key} stageName={f.name} stepIndex={at} agentOptions={[]} />)}
+        </Form.List>
+      </Form>
+    )
+  }
+  it('names under More options, closed until the agent has some', async () => {
+    const v = await render(<H at={0} stages={[{ name: 's', items: [{ agent: 'a', prompt: 'p' }] }]} />)
+    await flush()
+    const more = v.container.querySelector('[data-testid="agent-more"]')
+    expect(more.dataset.open).toBe('false')
+    expect(more.textContent).toContain('More options')
+    expect(more.textContent).toContain('What should this agent hand over? (optional)')
+    expect(more.textContent).toContain('Names for things later steps can use, like plan_path or summary. Use lowercase letters, numbers and _.')
+    await v.unmount()
+    const w = await render(<H at={0} stages={[{ name: 's', items: [{ agent: 'a', prompt: 'p', outputs: ['plan_path'] }] }]} />)
+    await flush()
+    expect(w.container.querySelector('[data-testid="agent-more"]').dataset.open).toBe('true')
+    await w.unmount()
+  })
+  it('a later step can insert an earlier step\'s names', async () => {
+    const stages = [
+      { name: 'Plan', items: [{ agent: 'a', prompt: 'p', outputs: ['plan_path', 'summary'] }] },
+      { name: 'Dev', items: [{ agent: 'b', prompt: 'Build from' }] },
+    ]
+    const v = await render(<H at={1} stages={stages} />)
+    await flush()
+    const btns = [...v.container.querySelectorAll('[data-testid="insert-output"]')]
+    expect(btns.map((b) => b.textContent)).toEqual(['plan_path', 'summary'])
+    await click(btns[0])
+    expect(v.container.querySelector('textarea').value).toBe('Build from {{stage1.plan_path}}')
+    await v.unmount()
+  })
+})
