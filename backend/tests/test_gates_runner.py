@@ -749,3 +749,64 @@ def test_gate_coroutine_error_fails_stage(fakes):
         assert fakes.calls == ["explode"]
 
     asyncio.run(go())
+
+
+# Fix round 2: the record writer holds the run lock; an in-process loss is not a "restart".
+
+
+def test_cancel_waits_for_gate_record_lock(fakes, monkeypatch):
+    real = totals.compute
+    entered, release = None, None
+
+    async def slow(s, run):
+        if not entered.is_set():
+            entered.set()
+            await release.wait()
+        return await real(s, run)
+
+    monkeypatch.setattr(totals, "compute", slow)
+
+    async def go():
+        nonlocal entered, release
+        entered, release = asyncio.Event(), asyncio.Event()
+        pid = await _project()
+        rid = await _make_run([gate(pid)], [pid])
+        r = WorkflowRunner(FakeWorker(), 999)
+        await r.start_run(rid)
+        await wait_for(entered.is_set)  # inside _gate_record_locked, holding the run lock
+        cancel = asyncio.create_task(r.cancel_run(rid))
+        await asyncio.sleep(0.05)
+        assert not cancel.done()
+        release.set()
+        assert await cancel
+        await settle(r)
+        assert [x.outcome for x in await _rows(rid)] == ["passed"]  # recorded, no extra cancelled row
+        run = await _run(rid)
+        assert run.status == "failed" and run.stage_state["0"]["status"] == "passed"
+
+    asyncio.run(go())
+
+
+def test_in_process_loss_is_not_called_a_restart(fakes, monkeypatch):
+    fakes.script["c1"] = [RuntimeError("boom"), oc()]
+
+    async def go():
+        pid = await _project()
+        rid = await _make_run([gate(pid, run=("c1",))], [pid])
+        r = WorkflowRunner(FakeWorker(), 999)
+
+        async def broken_error(*a, **k):
+            return None  # the failure could not be written
+
+        monkeypatch.setattr(r, "_gate_error", broken_error)
+        await r.start_run(rid)
+        await settle(r)
+        run = await _run(rid)
+        assert run.stage_state["0"]["status"] == "running" and r._gates == {}
+        await r._advance(rid)
+        await settle(r)
+        run = await _run(rid)
+        assert run.status == "completed" and fakes.calls == ["c1", "c1"]
+        assert not has(run, "resumed after a server restart")
+
+    asyncio.run(go())

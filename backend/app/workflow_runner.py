@@ -392,6 +392,9 @@ class WorkflowRunner:
         # several loops, production has one).
         self._locks: dict[str, asyncio.Lock] = {}
         self._lock_loops: dict[str, object] = {}
+        # (run_id, stage) -> hand-out of a gate task that ended in this process without
+        # finishing its stage, so a respawn is not reported as a server restart.
+        self._ended: dict[tuple[str, int], str] = {}
 
     async def start(self):
         self._task = asyncio.create_task(self._loop())
@@ -618,6 +621,9 @@ class WorkflowRunner:
             if rid not in active and not self._locks[rid].locked():
                 self._locks.pop(rid, None)
                 self._lock_loops.pop(rid, None)
+        for key in list(self._ended):
+            if key[0] not in active:
+                self._ended.pop(key, None)
 
     async def _advance(self, run_id: str, first: bool = False):
         post = await self._locked(run_id, lambda pre: self._advance_locked(run_id, pre))
@@ -671,7 +677,8 @@ class WorkflowRunner:
                     t = self._gates.get((run_id, i))
                     if t is not None and not t.done():
                         return None
-                    if status == "running":
+                    lost = self._ended.pop((run_id, i), None) == st.get("handout")
+                    if status == "running" and not lost:
                         # This process has no child for it: the server restarted mid-command.
                         runlog.append(run, f"Step {_stage_name(run, i)} (gate) resumed after a server restart")
                         await s.commit()
@@ -890,6 +897,9 @@ class WorkflowRunner:
         finally:
             if self._gates.get(key) is asyncio.current_task():
                 self._gates.pop(key, None)
+        if not advance:
+            # Ended here (dropped, held, refused or errored), not by a restart.
+            self._ended[key] = handout
         if advance:
             try:
                 await self._advance(run_id)
@@ -938,7 +948,7 @@ class WorkflowRunner:
             first = ((st.get("round") or "full") == "full" and not st.get("passed_cmds")
                      and st.get("status") == "waiting")
             pre_reason = None
-            decision, reasons = "allow", []
+            decision, reasons = None, []  # no verdict from this pass = no run (fail closed)
             if plan and has_dir:
                 if first:
                     pre_reason = await _preflight(stage.get("before") or [])
@@ -984,6 +994,8 @@ class WorkflowRunner:
                     await _hold(s, run, i, st, pre_reason)
                     await s.commit()
                     return None
+                if decision is None:
+                    return None  # the guard did not answer in this pass; try again later
                 if decision not in ("allow", "approve"):
                     why = "; ".join(reasons) or "denied"
                     fin = _now()
