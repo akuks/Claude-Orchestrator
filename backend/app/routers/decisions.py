@@ -9,8 +9,9 @@ from sqlalchemy import select, update
 
 from ..access import require_project_role
 from ..database import SessionLocal
+from ..decisions.health import health as decisions_health
 from ..decisions.validate import KINDS, clean_fields, display_id, next_number
-from ..models import ProjectDecision, User
+from ..models import Project, ProjectDecision, User
 from ..schemas import DecisionIn, DecisionOut, DecisionPatch, DecisionSupersede
 
 router = APIRouter(prefix="/projects/{project_id}/decisions", tags=["decisions"])
@@ -108,6 +109,17 @@ async def create_decision(project_id: str, payload: DecisionIn, request: Request
         await s.commit()
         await s.refresh(d)
         return _out(d, await _names(s, [d]))
+
+
+@router.get("/health")
+async def decisions_health_route(project_id: str, request: Request):
+    async with SessionLocal() as s:
+        await require_project_role(s, request.state.principal, project_id)
+        project = await s.get(Project, project_id)
+        rows = (await s.execute(select(ProjectDecision).where(
+            ProjectDecision.project_id == project_id, ProjectDecision.status == "active")
+            .order_by(ProjectDecision.number))).scalars().all()
+        return await decisions_health(project, list(rows))
 
 
 @router.get("/{number}", response_model=DecisionOut)
