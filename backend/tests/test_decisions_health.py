@@ -122,3 +122,48 @@ def test_gitsafe_new_forms():
                  ("log", "-p"), ("log", "--name-only", "-p"), ("log", "--output=/tmp/x")]:
         with pytest.raises(ValueError):
             gitsafe.check_args(args)
+
+
+def test_subjects_redacted_cleaned_and_cut(repo):
+    now = datetime.now(timezone.utc)
+    _commit(repo, "src/a.py", "init", now - timedelta(days=20))
+    tok = "ghp_" + "a1B2c3D4e5" * 4
+    _commit(repo, "src/a.py", f"fix {tok} zero​width " + "x" * 200, now - timedelta(days=1))
+    r = _run(SimpleNamespace(directory=str(repo)), [_dec(1, ["src/**"], verified=now - timedelta(days=5))])
+    subj = r["items"][0]["changed_since_verified"]["subjects"][0]
+    assert tok not in subj and "​" not in subj and len(subj) <= 120
+
+
+def test_git_error_still_reports_see_missing(tmp_path):
+    d = tmp_path / "plain"
+    d.mkdir()
+    r = _run(SimpleNamespace(directory=str(d)), [_dec(1, kind="reference", see="nope.md"), _dec(2, ["a"])])
+    assert r["git_error"] and r["ok"] == 1
+    assert [(i["number"], i["see_missing"]) for i in r["items"]] == [(1, True)]
+
+
+def test_too_many_files(monkeypatch, tmp_path):
+    from app.decisions import health as h
+    monkeypatch.setattr(h, "MAX_FILES", 10)
+    monkeypatch.setattr(gitsafe, "run_git", lambda *a, **k: gitsafe.GitResult(
+        True, "\0".join(f"f{i}" for i in range(11)), False))
+    r = _run(SimpleNamespace(directory=str(tmp_path)), [_dec(1, ["a"])])
+    assert r["git_error"] == "repository too large for the health check"
+
+
+def test_large_repo_is_bounded(monkeypatch, tmp_path):
+    import time
+    files = [f"pkg{i % 200}/mod{i}/file{i}.py" for i in range(20000)]
+    now = datetime.now(timezone.utc)
+    log = "".join(f"\x1e{i:040x}\x1f{now.isoformat()}\x1f s{i}\n\n" + "\n".join(files[i * 20:i * 20 + 20]) + "\n"
+                  for i in range(1000))
+
+    def fake(root, *a, **k):
+        return gitsafe.GitResult(True, "\0".join(files) if a[0] == "ls-files" else log, False)
+
+    monkeypatch.setattr(gitsafe, "run_git", fake)
+    decs = [_dec(n, [f"pkg{(n + j) % 200}/**/*.py" if j % 2 else f"nomatch{n}_{j}/**" for j in range(20)],
+                 verified=now - timedelta(days=1)) for n in range(200)]
+    t = time.process_time()
+    r = _run(SimpleNamespace(directory=str(tmp_path)), decs)
+    assert time.process_time() - t < 3 and r["git_error"] is None and len(r["items"]) == 200
