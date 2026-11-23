@@ -23,19 +23,12 @@ import {
 import ApprovalCard from '../gates/ApprovalCard'
 import GateCard from '../gates/GateCard'
 import RunLog from '../gates/RunLog'
-import { stageKind } from '../gates/gates'
+import { RUN_STATUS_COLOR, runStatusText, stageKind } from '../gates/gates'
 import './run.css'
 
 dayjs.extend(relativeTime)
 
 const POLL_MS = 3000
-const RUN_TAG = {
-  pending: 'default',
-  running: 'processing',
-  paused: 'warning',
-  completed: 'success',
-  failed: 'error',
-}
 const STAGE_TAG = {
   done: 'success',
   current: 'processing',
@@ -263,8 +256,8 @@ export default function RunView({ id, user, projects = [], navigate, onOpenCrede
           <div className="co-run-eyebrow">Workflow run</div>
           <h1 data-testid="run-title">
             {run.name}
-            <Tag color={RUN_TAG[run.status]} className="co-run-status">
-              {run.status}
+            <Tag color={RUN_STATUS_COLOR[run.status]} className="co-run-status" data-testid="run-status">
+              {runStatusText(run.status)}
             </Tag>
           </h1>
           <div className="co-run-sub" data-testid="run-subtitle">
@@ -296,10 +289,10 @@ export default function RunView({ id, user, projects = [], navigate, onOpenCrede
                   type="primary"
                   icon={<ReloadOutlined />}
                   loading={busy}
-                  onClick={() => act(api.retryWorkflowRun, 'Retrying the failed stage')}
+                  onClick={() => act(api.retryWorkflowRun, 'Retrying the failed step')}
                   data-testid="run-retry"
                 >
-                  Retry failed stage
+                  Retry the failed step
                 </Button>
               )}
               {active && (
@@ -335,24 +328,24 @@ export default function RunView({ id, user, projects = [], navigate, onOpenCrede
         />
       )}
 
-      <section className="co-surface co-run-timeline" aria-label="Stages">
+      <section className="co-surface co-run-timeline" aria-label="Steps">
         {stages.length ? (
           <Comets3D variant="timeline" stages={stages} selectedStage={selStage} onSelectStage={selectStage} />
         ) : (
-          <div className="co-run-empty">This run has no stages.</div>
+          <div className="co-run-empty">This run has no steps.</div>
         )}
       </section>
 
       {stage && (
         <div className="co-run-body">
-          <section className="co-surface co-run-panel co-run-stage" data-testid="run-stage-tasks" aria-label={`Stage ${stage.name}`}>
+          <section className="co-surface co-run-panel co-run-stage" data-testid="run-stage-tasks" aria-label={`Step ${stage.name}`}>
             <header className="co-run-panel-head">
               <h2>
-                <span className="co-run-stage-no">Stage {selStage + 1}</span> {stage.name}
+                <span className="co-run-stage-no">Step {selStage + 1}</span> {stage.name}
               </h2>
               {stageDef?.items?.length > 1 && (
                 <span className="co-run-stage-parallel" data-testid="run-stage-parallel" title={stageDef.items.map((it) => it.agent).join(', ')}>
-                  parallel
+                  {stageDef.items.length} agents at once
                 </span>
               )}
               <Tag color={STAGE_TAG[stage.state]}>{stateLabel(stage.state)}</Tag>
@@ -377,7 +370,7 @@ export default function RunView({ id, user, projects = [], navigate, onOpenCrede
                 Not started yet
                 {stageDef?.items?.length ? (
                   <div className="co-run-empty-sub">
-                    {stageDef.items.length > 1 ? 'Runs in parallel: ' : 'Runs: '}
+                    {stageDef.items.length > 1 ? 'Agents working at the same time: ' : 'Agent: '}
                     {stageDef.items.map((it) => it.agent).join(', ')}
                   </div>
                 ) : null}

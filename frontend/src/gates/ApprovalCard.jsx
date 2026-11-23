@@ -1,8 +1,26 @@
 import { useState } from 'react'
 import { Button, Input, message } from 'antd'
 import { api } from '../api'
+import './workflows.css'
 
-// An approval stage: the message, and (while waiting) Approve and Reject.
+const LEAD = {
+  waiting_approval: 'Waiting for someone to approve this step',
+  approved: 'Approved',
+  rejected: 'Rejected',
+  held: 'On hold — waiting until it is ready',
+  failed: 'Stopped',
+  waiting: 'Not reached yet',
+}
+
+// The plain sentence an "Ask a person" step leads with.
+export function approvalLead(status) {
+  if (!status) return LEAD.waiting
+  if (LEAD[status]) return LEAD[status]
+  const s = status.replace(/_/g, ' ')
+  return s[0].toUpperCase() + s.slice(1)
+}
+
+// An "Ask a person" step: what to check, and (while waiting) Approve and Reject.
 export default function ApprovalCard({ runId, index, stage, state, canDecide = true, onChanged }) {
   const [busy, setBusy] = useState(false)
   const [rejecting, setRejecting] = useState(false)
@@ -28,6 +46,9 @@ export default function ApprovalCard({ runId, index, stage, state, canDecide = t
 
   return (
     <div className="co-approval" data-testid="approval-card">
+      <div className={`co-approval-lead co-approval-lead-${st.status || 'waiting'}`} data-testid="approval-lead">
+        {approvalLead(st.status)}
+      </div>
       {stage?.message && <p className="co-approval-msg" data-testid="approval-message">{stage.message}</p>}
       {waiting && canDecide && (
         <div className="co-approval-actions">
@@ -45,8 +66,9 @@ export default function ApprovalCard({ runId, index, stage, state, canDecide = t
             value={reason}
             maxLength={500}
             rows={2}
-            placeholder="Why is it rejected? (required)"
+            placeholder="Why are you rejecting it? (required)"
             onChange={(e) => setReason(e.target.value)}
+            aria-label="Reason for rejecting"
             data-testid="approval-reason"
           />
           <Button
@@ -57,11 +79,10 @@ export default function ApprovalCard({ runId, index, stage, state, canDecide = t
             onClick={() => run(() => api.rejectWorkflowStage(runId, index, trimmed), 'Rejected')}
             data-testid="approval-confirm-reject"
           >
-            Confirm reject
+            Reject with this reason
           </Button>
         </div>
       )}
-      {!waiting && st.status && <div className="co-approval-status">{st.status.replace('_', ' ')}</div>}
       {st.status === 'rejected' && st.reason && <div className="co-approval-reason">Reason: {st.reason}</div>}
       {st.decided_by && <div className="co-approval-by">Decided by {st.decided_by}</div>}
     </div>

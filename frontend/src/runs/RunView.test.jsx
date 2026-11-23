@@ -101,7 +101,7 @@ describe('runStages', () => {
     expect(stages.map((s) => s.state)).toEqual(['done', 'done', 'done'])
   })
   it('names unnamed stages and tolerates missing data', () => {
-    expect(runStages(run({ stages: [{}] }), [])[0].name).toBe('Stage 1')
+    expect(runStages(run({ stages: [{}] }), [])[0].name).toBe('Step 1')
     expect(runStages(null, null)).toEqual([])
   })
 })
@@ -276,7 +276,7 @@ describe('RunView', () => {
     }))
     const c = await mount()
     const head = c.querySelector('[data-testid="run-stage-tasks"] header')
-    expect(head.querySelector('[data-testid="run-stage-parallel"]')?.textContent).toBe('parallel')
+    expect(head.querySelector('[data-testid="run-stage-parallel"]')?.textContent).toBe('2 agents at once')
   })
 
   it('a gate stage renders GateCard (timeline still renders) and the totals line shows', async () => {
