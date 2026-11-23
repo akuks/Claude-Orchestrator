@@ -64,7 +64,7 @@ def test_see_missing_and_outside(repo, tmp_path):
             _dec(3, kind="reference", see="../secret.txt")]
     r = _run(SimpleNamespace(directory=str(repo)), decs)
     assert [i["number"] for i in r["items"]] == [2, 3] and all(i["see_missing"] for i in r["items"])
-    assert r["ok"] == 1 - 0 or r["items"]  # D-001 has no touches and is fresh
+    assert r["ok"] == 1  # D-001 has no touches and is fresh
 
 
 def test_changed_since_verified(repo):
