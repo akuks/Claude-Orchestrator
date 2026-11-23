@@ -160,7 +160,7 @@ def test_migration_0011_upgrade_downgrade(scratch_url):  # noqa: F811
             " VALUES ('p11', 'old', 'old', '/x', 'sonnet', '{}', '', true, false, false, CURRENT_TIMESTAMP)")
 
     _inspect(url, seed)
-    command.upgrade(_alembic_cfg(url), "head")
+    command.upgrade(_alembic_cfg(url), "0011")
 
     def check(sc, insp):
         assert {"id", "project_id", "number", "kind", "title", "why", "see", "touches", "decided_by", "decided_at",
