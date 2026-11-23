@@ -6,6 +6,7 @@ follow-up step of the thread's newest main-line step (not a dispatched child), b
 (``_step_from`` under the global follow-up lock). It resumes that step's session when the answerer owns it,
 else starts fresh with the thread's handoff."""
 
+import logging
 from datetime import datetime, timezone
 
 from fastapi import APIRouter, HTTPException, Query, Request
@@ -21,6 +22,8 @@ from ..questions import service as questions
 from ..resume.texts import ACCEPT_ANSWER, ANSWER_PROMPT
 from ..schemas import QuestionAnswer, QuestionOut, TaskOut
 from .tasks import _manage_allowed, _require_manage, _step_from
+
+log = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/questions", tags=["questions"])
 
@@ -151,7 +154,8 @@ async def _suggest(s, q, answer: str, sender: str) -> str:
         return f"skipped: {e}"
     except proposals.QueueFull:
         return "skipped: the suggestion queue is full"
-    except Exception:  # noqa: BLE001
+    except Exception as e:  # noqa: BLE001
+        log.warning("suggesting the answer to question %s failed: %r", q.id, e)
         return "skipped: could not add the suggestion"
     return "skipped: already suggested" if row is None else "added"
 

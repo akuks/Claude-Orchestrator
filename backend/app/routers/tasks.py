@@ -774,7 +774,7 @@ async def propose_decision(task_id: str, payload: ProposalIn, request: Request):
     async with SessionLocal() as s:
         task = await _question_task(s, p, task_id)
         if not p.is_agent:
-            await _require_manage(s, p, task)
+            await _require_manage(s, p, task, need_contributor=True)
         pid = await effective_project_id(s, task)
         if pid is None:
             raise HTTPException(422, "this task has no project")
@@ -833,6 +833,7 @@ async def close_handoff(task_id: str, request: Request):
         row = await _thread_handoff(s, task)
         if row is None:
             raise HTTPException(404, "No handoff for this thread yet")
+        was_open = row.status != "closed"
         row.status = "closed"
         row.closed_at = datetime.now(timezone.utc)
         row.closed_by = p.user.id
@@ -840,9 +841,10 @@ async def close_handoff(task_id: str, request: Request):
         await s.commit()
         out = _handoff_out(row)
     # a background job (never raises); keep a reference so it is not collected mid-run
-    job = asyncio.create_task(after_run.lessons_after_close(root, p.user.id))
-    _LESSON_JOBS.add(job)
-    job.add_done_callback(_LESSON_JOBS.discard)
+    if was_open:
+        job = asyncio.create_task(after_run.lessons_after_close(root, p.user.id))
+        _LESSON_JOBS.add(job)
+        job.add_done_callback(_LESSON_JOBS.discard)
     return out
 
 

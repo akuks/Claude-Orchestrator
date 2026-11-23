@@ -216,7 +216,7 @@ async def accept_proposal(project_id: str, proposal_id: str, payload: ProposalAc
         await require_project_role(s, principal, project_id, "maintainer")
         prop = await _get_proposal(s, project_id, proposal_id)
         body = payload.model_dump()
-        data = _clean({**body, "source": ("suggestion: " + (prop.evidence or ""))[:300]}, partial=False)
+        data = _clean({**body, "source": (f"suggestion: {prop.evidence}" if prop.evidence else "suggestion")[:300]}, partial=False)
         _check_kind_see(data["kind"], data["see"] or None)
         # the claim: exactly one reviewer flips pending -> accepted; the loser changes nothing (no number used)
         now = _now()

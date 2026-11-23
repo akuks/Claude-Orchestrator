@@ -43,6 +43,9 @@ from .usage import tracker as usage_tracker
 
 log = logging.getLogger(__name__)
 
+# background after-run jobs; held so they are not garbage-collected mid-run
+_AFTER_JOBS: set = set()
+
 _MAX_TOOL_RESULT_CHARS = 2000
 
 
@@ -851,7 +854,9 @@ class WorkerManager:
             # Security review → extract structured findings into the tracker.
             asyncio.create_task(security.extract_findings(task_id, task_owner))
             # Suggested decisions and "maybe out of date" flags from the commits it made.
-            asyncio.create_task(after_run.after_task(task_id, task_owner, emit=self._emit_offline_for(task_id)))
+            job = asyncio.create_task(after_run.after_task(task_id, task_owner, emit=self._emit_offline_for(task_id)))
+            _AFTER_JOBS.add(job)
+            job.add_done_callback(_AFTER_JOBS.discard)
 
         # Notify if this run came from a schedule (honors its notify policy).
         asyncio.create_task(notifications.notify_task_finished(task_id))
