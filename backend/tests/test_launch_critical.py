@@ -165,3 +165,62 @@ def test_normal_path_then_finish_emits_once(tmp_path):
 
     asyncio.run(go())
     assert got.count("critical_paths") == 1
+
+
+def test_crash_path_live_emit_and_spool_seqs_distinct(tmp_path):
+    """_finish emits through the registered live emitter, so a following live event gets the next seq."""
+    tid = _setup(tmp_path, ["src/**"])
+    w = WorkerManager()
+    seqs = []
+    n = {"seq": 0}
+
+    async def live_emit(t, p):
+        n["seq"] += 1
+        seqs.append((n["seq"], t))
+
+    ctx = {"task_id": tid, "mcp_ids": {}, "secrets": [], "model_stored": True,
+           "edit_calls": w._run_edits.setdefault(tid, [])}
+
+    async def go():
+        await w._handle_stream_event(_use("1", "Edit", file_path="src/a.py"), live_emit, {}, ctx)
+        w._run_ctx[tid] = ctx
+        w._guard_live[tid] = {"emit": live_emit, "reported": {}}
+        await w._finish(tid, "failed", error="crash")
+        await live_emit("usage_band", {})  # a spool event after it
+
+    asyncio.run(go())
+    assert [t for _s, t in seqs] == ["tool_use", "critical_paths", "usage_band"]
+    assert len({s for s, _t in seqs}) == 3
+
+
+def test_edits_survive_a_retry_until_finish(tmp_path):
+    tid = _setup(tmp_path, ["src/**"])
+    w = WorkerManager()
+    got = []
+
+    async def emit(t, p):
+        got.append((t, p))
+
+    def new_ctx():
+        c = {"task_id": tid, "mcp_ids": {}, "secrets": [], "model_stored": True,
+             "edit_calls": w._run_edits.setdefault(tid, [])}
+        w._run_ctx[tid] = c
+        return c
+
+    async def go():
+        c1 = new_ctx()
+        await w._handle_stream_event(_use("1", "Edit", file_path="src/a.py"), emit, {}, c1)
+        w._run_ctx.pop(tid, None)  # the retry path drops the ctx
+        c2 = new_ctx()
+        await w._handle_stream_event(_use("2", "Edit", file_path="README.md"), emit, {}, c2)
+        await w._finish(tid, "completed")
+        from sqlalchemy import select
+        from app.models import TaskEvent
+
+        async with SessionLocal() as s:
+            return [r.payload for r in (await s.execute(select(TaskEvent).where(
+                TaskEvent.task_id == tid, TaskEvent.type == "critical_paths"))).scalars()]
+
+    rows = asyncio.run(go())
+    assert rows == [{"paths": ["src/a.py"], "globs": ["src/**"]}]
+    assert tid not in w._run_edits

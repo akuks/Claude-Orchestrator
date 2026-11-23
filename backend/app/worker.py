@@ -231,6 +231,8 @@ class WorkerManager:
         self._run_since: dict[str, str | None] = {}
         # task_id -> the live run's ctx, until _finish (critical-path warning on every end state)
         self._run_ctx: dict[str, dict] = {}
+        # task_id -> the edit calls of every attempt so far (kept across auto-retries, dropped by _finish)
+        self._run_edits: dict[str, list] = {}
         # task_id -> the live run's UsageTracker (phase 3b); _finish stores its last figures.
         self._usage: dict[str, usage_tracker.UsageTracker] = {}
         # task_id -> the live run's read state of co-guard's token-care spool lines (_new_usage_spool)
@@ -332,6 +334,7 @@ class WorkerManager:
         finally:
             self._run_secrets.pop(task_id, None)
             self._guard_live.pop(task_id, None)
+            self._run_ctx.pop(task_id, None)
             self._run_since.pop(task_id, None)
             self._active.discard(task_id)
             self._sem.release()
@@ -769,6 +772,7 @@ class WorkerManager:
                       "proc": proc, "emit": emit,
                       "spool": guard_runtime.task_dir(task_id) / guard_runtime.SPOOL_NAME},
         }
+        ctx["edit_calls"] = self._run_edits.setdefault(task_id, [])  # shared with the earlier attempts
         self._run_ctx[task_id] = ctx  # _finish reads its edit calls (critical-path warning)
         watch = asyncio.create_task(self._guard_watch(ctx))
         beat = asyncio.create_task(self._heartbeat_loop(task_id, ctx))
@@ -1807,8 +1811,13 @@ class WorkerManager:
         # every end state (timeout, guard stop, failure, crash): the critical-path warning, once; the normal
         # and cancelled paths already emitted it before their `completed` event
         run_ctx = self._run_ctx.pop(task_id, None)
+        self._run_edits.pop(task_id, None)
         if run_ctx is not None:
-            await self._emit_critical_paths(task_id, run_ctx, self._emit_offline_for(task_id))
+            # the live run's emitter keeps its own seq counter: use it while the run is registered, so a
+            # later spool event cannot reuse this seq
+            live_run = self._guard_live.get(task_id)
+            await self._emit_critical_paths(
+                task_id, run_ctx, live_run["emit"] if live_run else self._emit_offline_for(task_id))
         # Agent output (and stderr) can carry the run's credentials: redact
         # before saving (error before its cut). Known token shapes are always
         # scrubbed, even without the run's secret list.
