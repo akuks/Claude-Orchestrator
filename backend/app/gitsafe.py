@@ -42,6 +42,11 @@ remote's lazy fetch of a missing object), so every such call goes through
   ``process`` is set empty and ``required=false`` with ``-c``, so a
   ``.gitattributes`` ``filter=`` line cannot make git run a program; more
   than 50 drivers, or a listing that fails, refuses the command;
+* submodule internals are never entered: ``status`` and ``diff`` get
+  ``--ignore-submodules=dirty`` from ``run_git`` itself (a submodule's own
+  config could define filter drivers), so dirty submodule content is not
+  reported, only a changed gitlink; a driver name that is not printable ASCII
+  (or holds ``=``) refuses the command ("unusual filter driver name");
 * the gate code-state hash's two reads: ``diff`` with exactly
   ``--no-ext-diff --no-textconv --binary HEAD`` and ``ls-files`` with exactly
   ``--others --exclude-standard -z`` (each any order, nothing else).
@@ -168,6 +173,7 @@ def git_available() -> bool:
 
 
 MAX_FILTER_DRIVERS = 50
+_DRIVER_NAME_RE = re.compile(r"^[\x21-\x3c\x3e-\x7e]+$")  # printable ASCII, no space, no "="
 
 
 def _filter_overrides(exe: str, directory, timeout: float) -> list[str] | GitResult:
@@ -181,7 +187,7 @@ def _filter_overrides(exe: str, directory, timeout: float) -> list[str] | GitRes
         return GitResult(False, "", True, "filter driver listing timed out")
     except (OSError, ValueError) as e:
         return GitResult(False, "", True, str(e))
-    out = r.stdout.decode("utf-8", "replace")
+    out = r.stdout.decode("latin-1")  # byte-for-byte: a name is checked, never mangled
     if r.returncode == 1 and not out:
         return []  # no matches
     if r.returncode != 0:
@@ -196,8 +202,8 @@ def _filter_overrides(exe: str, directory, timeout: float) -> list[str] | GitRes
             names.append(name)
     if len(names) > MAX_FILTER_DRIVERS:
         return GitResult(False, "", True, "too many filter drivers")
-    if any("=" in n or "\n" in n or "\0" in n for n in names):
-        return GitResult(False, "", True, "unsupported filter driver name")
+    if any(not _DRIVER_NAME_RE.match(n) for n in names):
+        return GitResult(False, "", True, "unusual filter driver name")
     over: list[str] = []
     for n in names:
         for k, v in (("clean", ""), ("smudge", ""), ("process", ""), ("required", "false")):
@@ -215,6 +221,9 @@ def run_git(directory, *args: str, timeout: float) -> GitResult:
     over = _filter_overrides(exe, directory, timeout)
     if isinstance(over, GitResult):
         return over
+    if args[0] in ("status", "diff"):
+        # a submodule's own config could define filter drivers that git's child status would run
+        args = (args[0], "--ignore-submodules=dirty", *args[1:])
     try:
         r = subprocess.run(
             [exe, *SAFE_ARGS, *over, *args], cwd=str(Path(directory)), stdin=subprocess.DEVNULL,

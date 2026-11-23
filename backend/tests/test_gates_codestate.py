@@ -1,4 +1,5 @@
 import asyncio
+import os
 import subprocess
 
 import pytest
@@ -83,3 +84,43 @@ def test_too_many_filter_drivers(tmp_path):
         _git(d, "config", f"filter.d{i}.clean", "cat")
     r = gitsafe.run_git(d, "--version", timeout=30)
     assert not r.ok and r.failed and r.err == "too many filter drivers"
+
+
+def test_submodule_filter_never_runs(tmp_path):
+    from app import gitsafe
+
+    marker = tmp_path / "marker"
+    sub = tmp_path / "subsrc"
+    sub.mkdir()
+    sd = str(sub)
+    _git(sd, "init", "-q")
+    (sub / "f.txt").write_text("aaaa\n")
+    (sub / ".gitattributes").write_text("f.txt filter=sevil\n")
+    _git(sd, "add", "-A")
+    _git(sd, "commit", "-qm", "s")
+    sup = tmp_path / "sup"
+    sup.mkdir()
+    d = str(sup)
+    _git(d, "init", "-q")
+    _git(d, "-c", "protocol.file.allow=always", "submodule", "add", "-q", sd, "sub")
+    _git(d, "commit", "-qm", "sm")
+    _git(d, "config", "submodule.sub.ignore", "none")
+    _git(str(sup / "sub"), "config", "filter.sevil.clean", f"sh -c 'touch {marker}; cat'")
+    f = sup / "sub" / "f.txt"
+    f.write_text("bbbb\n")
+    os.utime(f, (1, 1))
+    assert code_state(d)
+    r = gitsafe.run_git(d, "status", "--porcelain=v1", "-z", "--untracked-files=all", "--no-renames", timeout=30)
+    assert r.ok
+    assert not marker.exists()
+
+
+def test_non_utf8_driver_name_refused(tmp_path):
+    from app import gitsafe
+
+    d = str(tmp_path)
+    _git(d, "init", "-q")
+    with open(tmp_path / ".git" / "config", "ab") as fh:
+        fh.write(b'[filter "x\xffy"]\n\tclean = cat\n')
+    r = gitsafe.run_git(d, "status", "--porcelain=v1", "-z", "--untracked-files=all", "--no-renames", timeout=30)
+    assert not r.ok and r.failed and r.err == "unusual filter driver name"
