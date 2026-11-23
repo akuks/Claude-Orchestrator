@@ -36,6 +36,13 @@ def test_validate():
         tiers.validate([])
 
 
+def test_validate_caps_model_id_at_32_chars():
+    ok = "claude-" + "a" * 25
+    assert len(ok) == 32 and tiers.validate({"light": ok})["light"] == ok
+    with pytest.raises(ValueError, match="^model_tiers.light must be"):
+        tiers.validate({"light": ok + "a"})
+
+
 def test_tier_values_and_valid_agent_model():
     t = {"strongest": "opus", "standard": "opus", "light": "claude-haiku-4-5"}
     assert tiers.tier_values(t) == ["opus", "claude-haiku-4-5"]
