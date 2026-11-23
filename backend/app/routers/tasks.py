@@ -26,7 +26,7 @@ from ..constants import VALID_MODELS, Priority, Status
 from ..database import SessionLocal
 from ..guard import runtime as guard_runtime
 from .. import reports
-from ..models import ActionGrant, Artifact, Project, RunAsk, Task, TaskEvent, TaskHandoff, TaskQuestion, TaskUsage
+from ..models import ActionGrant, Artifact, DecisionProposal, Project, RunAsk, Task, TaskEvent, TaskHandoff, TaskQuestion, TaskUsage
 from ..resume import handoff as resume_handoff
 from ..resume.texts import CONTINUE_PROMPT
 from ..task_service import build_task
@@ -36,6 +36,8 @@ from ..schemas import (
     ContinueCreate,
     EventOut,
     FollowupCreate,
+    ProposalIn,
+    ProposalOut,
     QuestionCreate,
     QuestionOut,
     StatsOut,
@@ -754,6 +756,42 @@ async def list_task_questions(task_id: str, request: Request):
             can = q.status == "open" and (await _manage_allowed(s, p, t, need_contributor=True))[0]
             res.append(questions.out(q, task_title=t.title, can_answer=can))
         return res
+
+
+@router.post("/{task_id}/decision-proposals", response_model=ProposalOut, status_code=201)
+async def propose_decision(task_id: str, payload: ProposalIn, request: Request):
+    """A suggested decision for the task's project (phase 4b): the agent token (own task, at most 3) or a
+    manager of the task. A person on the project's Decisions tab reviews it."""
+    from ..decisions import proposals
+    from ..decisions.texts import AGENT_LIMIT, QUEUE_FULL
+    from .decisions import _proposal_out
+
+    p = request.state.principal
+    async with SessionLocal() as s:
+        task = await _question_task(s, p, task_id)
+        if not p.is_agent:
+            await _require_manage(s, p, task)
+        pid = await effective_project_id(s, task)
+        if pid is None:
+            raise HTTPException(422, "this task has no project")
+        if p.is_agent:
+            n = (await s.execute(select(func.count()).select_from(DecisionProposal).where(
+                DecisionProposal.task_id == task_id, DecisionProposal.source == "agent"))).scalar_one()
+            if n >= proposals.AGENT_PER_TASK:
+                raise HTTPException(429, AGENT_LIMIT)
+        try:
+            fields = proposals.clean_proposal(payload.model_dump(), strict_touches=True)
+        except ValueError as e:
+            raise HTTPException(422, str(e))
+        try:
+            row = await proposals.add(
+                s, project_id=pid, fields=fields, source="agent" if p.is_agent else "person", task_id=task_id,
+                proposed_by=None if p.is_agent else p.user.id, on_full="raise")
+        except proposals.QueueFull:
+            raise HTTPException(429, QUEUE_FULL)
+        await s.commit()
+        await s.refresh(row)
+        return (await _proposal_out(s, [row]))[0]
 
 
 @router.get("/{task_id}/handoff")
