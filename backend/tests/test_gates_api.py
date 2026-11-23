@@ -331,3 +331,45 @@ def test_live_runs_gate_stage(client):
     rid = _run(pid, stages=stages, current=0, state={"0": {"status": "failed"}})
     item = next(i for i in client.get("/workflows/runs/live").json() if i["id"] == rid)
     assert item["stages"][0]["state"] == "failed"
+
+
+def test_retried_stage_tasks_report_their_attempt(client, monkeypatch):
+    from app.models import Task
+
+    pid = _project(client)
+    rid = _run(pid, stages=[{"name": "S", "items": []}], state={"0": {"attempt": 1, "status": "running"}})
+    for att in (0, 1):
+        _add(Task(title=f"t{att}", prompt="p", project_id=pid, status="failed" if att == 0 else "running",
+                  workflow_run_id=rid, stage_index=0, stage_attempt=att))
+    _patch(monkeypatch)
+    d = client.get(f"/workflows/runs/{rid}").json()
+    by_title = {t["title"]: t for t in d["tasks"]}
+    assert by_title["t0"]["stage_attempt"] == 0 and by_title["t1"]["stage_attempt"] == 1
+    assert d["stage_state"]["0"]["attempt"] == 1
+
+
+def test_old_run_readback_before_0014(client, monkeypatch):
+    from app.models import Task
+
+    pid = _project(client)
+    rid = _run(pid, stages=[{"name": "A", "items": []}, {"name": "B", "items": []}, {"name": "C", "items": []}],
+               state={}, status="completed", current=2)
+    _add(Task(title="old", prompt="p", project_id=pid, status="completed", workflow_run_id=rid, stage_index=0))
+    _patch(monkeypatch)
+    d = client.get(f"/workflows/runs/{rid}").json()
+    assert d["stage_state"] == {} and d["log"] == [] and d["gate_runs"] == []
+    assert d["tasks"][0]["stage_attempt"] == 0
+    assert d["totals"]["stages_done"] == 3
+    assert d["totals"]["line"].startswith("So far: 3 of 3 steps done")
+
+
+def test_reject_reason_validation_is_422(client, monkeypatch):
+    pid = _project(client)
+    stages = [{"name": "Sign", "kind": "approval", "project": pid, "message": "ok?"}]
+    rid = _run(pid, stages=stages, state={"0": {"status": "waiting_approval"}})
+    fr = _patch(monkeypatch)
+    url = f"/workflows/runs/{rid}/stages/0/reject"
+    for bad in ("", "   ", "x" * 501):
+        assert client.post(url, json={"reason": bad}).status_code == 422
+    assert fr.calls == []
+    assert client.post(url, json={"reason": "x" * 500}).status_code == 200

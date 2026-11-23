@@ -342,12 +342,19 @@ async def live_runs(request: Request):
         if runs:
             rows = (
                 await s.execute(
-                    select(Task.workflow_run_id, Task.stage_index, Task.status).where(
+                    select(Task.workflow_run_id, Task.stage_index, Task.status, Task.stage_attempt).where(
                         and_(Task.workflow_run_id.in_([r.id for r in runs]), clause)
                     )
                 )
             ).all()
-            for run_id, idx, st in rows:
+            cur = {
+                r.id: (r.stage_state or {}) for r in runs
+            }
+            for run_id, idx, st, att in rows:
+                # only the stage's current attempt (a retried stage keeps its old tasks)
+                want = int(((cur.get(run_id) or {}).get(str(idx)) or {}).get("attempt") or 0)
+                if (att or 0) != want:
+                    continue
                 by_run.setdefault(run_id, {}).setdefault(idx, []).append(st)
         for run in runs:
             by_stage = by_run.get(run.id, {})

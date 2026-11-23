@@ -18,7 +18,10 @@ from starlette.websockets import WebSocketDisconnect
 
 from app.database import SessionLocal
 from app.main import app
-from app.models import ActionApproval, ActionGrant, DecisionProposal, Finding, McpCall, Task, TaskHandoff, TaskQuestion
+from app.models import (
+    ActionApproval, ActionGrant, DecisionProposal, Finding, McpCall, Task, TaskHandoff, TaskQuestion,
+    WorkflowGateRun,
+)
 from conftest import login_as
 from test_lockdown import OPEN_ROUTES, _all_http_routes, _all_ws_routes
 
@@ -136,6 +139,10 @@ def world(client, tmp_path_factory):
         "stages": [{"name": "S", "items": [{"agent": agent["id"], "prompt": "do {{input}}"}]}],
     }))
     run = _ok(client.post(f"/workflows/{workflow['id']}/run", json={"input": f"cov-run-{tag}"}))
+    (gate_run_id,) = _add(WorkflowGateRun(
+        run_id=run["id"], stage_index=0, attempt=0, handout="h", command="true", kind="run",
+        outcome="passed", log_name=None,
+    ))
     schedule = _ok(client.post("/schedules", json={
         "name": f"cov-sch-{tag}", "cron": "0 3 * * *", "prompt": "hi",
         "requires_approval": True, "project_id": pid,
@@ -203,6 +210,8 @@ def world(client, tmp_path_factory):
         "pack_id": pack["id"],
         "server_id": server["id"],
         "run_id": run["id"],
+        "i": "0",
+        "rid": gate_run_id,
         "workflow_id": workflow["id"],
         "agent_id": agent["id"],
         "template_id": template["id"],
@@ -268,6 +277,7 @@ def _bodies(world) -> dict:
                                                                                       "title": "hijack"},
         ("POST", "/tasks/{task_id}/decision-proposals"): {"title": "hijack"},
         ("POST", "/approvals/{task_id}/reject"): {},
+        ("POST", "/workflows/runs/{run_id}/stages/{i}/reject"): {"reason": "x"},
         # co-guard: filing/reporting name P's task in the body (agent tokens only).
         ("POST", "/guard/approvals"): {"task_id": i["task_id"], "rule_ids": ["git-reset-hard"], "tool": "Bash"},
         ("POST", "/guard/report"): {"task_id": i["task_id"], "event": "PreToolUse", "decision": "deny"},

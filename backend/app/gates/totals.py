@@ -76,6 +76,14 @@ async def compute(s, run) -> dict:
         elif a and live and i == run.current_stage:
             minutes += _mins(a, now)
 
+    # Runs from before 0014 have no stage_state: count their finished stages from the position.
+    for i in range(len(stages)):
+        st = state.get(str(i))
+        if isinstance(st, dict) and (st.get("started_at") or st.get("finished_at")):
+            continue
+        if run.status == "completed" or i < (run.current_stage or 0):
+            done += 1
+
     last = None
     if last_i is not None:
         sg = stages[last_i] if 0 <= last_i < len(stages) else {}

@@ -74,3 +74,17 @@ def test_line_exact():
     assert totals.line(t2) == "So far: 1 of 2 steps done, 10 min, $0.01, 900 tokens (last: A, 4.3 min, $0.00)"
     assert totals.line({**t2, "tokens": 41_400, "last": None}).endswith("$0.01, 41k tokens")
     assert totals.line({**t2, "tokens": 999_700, "last": None}).endswith("1.0M tokens")
+
+
+def test_compute_counts_old_run_stages_without_state(client):
+    def mk(status, current):
+        return WorkflowRun(id=uuid.uuid4().hex, workflow_id="w", name="n", stages=[{}, {}, {}],
+                           status=status, current_stage=current, stage_state={})
+
+    async def go():
+        async with SessionLocal() as s:
+            return (await totals.compute(s, mk("completed", 2)), await totals.compute(s, mk("running", 2)))
+
+    done, mid = asyncio.run(go())
+    assert done["stages_done"] == 3
+    assert mid["stages_done"] == 2

@@ -579,7 +579,7 @@ class WorkflowRunner:
                 who = _user_name(user)
                 st.update(status="waiting", allowed=True, decided_by=who, decided_at=_iso(), reason=None)
                 _put_state(run, i, st)
-                runlog.append(run, f"Step {_stage_name(run, i)} (gate) allowed by {who}")
+                runlog.append(run, f"Step {_stage_name(run, i)} (gate) allowed")
                 await s.commit()
                 return st.get("handout")
 

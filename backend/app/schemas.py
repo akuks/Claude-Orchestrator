@@ -40,6 +40,7 @@ class TaskOut(BaseModel):
     max_turns: int
     max_budget_usd: Optional[float] = None
     attempt: int = 0
+    stage_attempt: int = 0
     exit_code: Optional[int]
     error: Optional[str]
     result_text: Optional[str]
@@ -662,7 +663,15 @@ class WorkflowRunOut(WorkflowRunSummaryOut):
 
 
 class StageReject(BaseModel):
-    reason: str = Field(..., max_length=2000)
+    reason: str
+
+    @field_validator("reason")
+    @classmethod
+    def _reason_len(cls, v):
+        v = (v or "").strip()
+        if not 1 <= len(v) <= 500:
+            raise ValueError("a reason of 1 to 500 characters is required")
+        return v
 
 
 class LiveStageOut(BaseModel):
