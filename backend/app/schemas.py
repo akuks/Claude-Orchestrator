@@ -897,3 +897,50 @@ class AskOut(BaseModel):
     answered_at: Optional[datetime] = None
 
     model_config = {"from_attributes": True}
+
+
+# --------------------------------------------------------------------------- decisions (phase 4a)
+
+
+class DecisionIn(BaseModel):
+    kind: str = "decision"
+    title: str
+    why: str = ""
+    see: Optional[str] = None
+    touches: list[str] = Field(default_factory=list)
+    source: str = ""
+
+
+class DecisionPatch(BaseModel):
+    version: int
+    kind: Optional[str] = None
+    title: Optional[str] = None
+    why: Optional[str] = None
+    see: Optional[str] = None
+    touches: Optional[list[str]] = None
+    source: Optional[str] = None
+
+
+class DecisionSupersede(BaseModel):
+    by: int
+
+
+class DecisionOut(BaseModel):
+    id: str
+    number: int
+    display_id: str
+    kind: str
+    title: str
+    why: str
+    see: Optional[str] = None
+    touches: list[str]
+    decided_by: Optional[str] = None
+    decided_by_name: Optional[str] = None
+    decided_at: datetime
+    last_verified_at: datetime
+    source: str
+    status: str
+    superseded_by: Optional[int] = None
+    version: int
+    created_at: datetime
+    updated_at: datetime
