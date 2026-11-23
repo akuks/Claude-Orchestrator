@@ -8,7 +8,7 @@ import pytest
 
 from app.database import SessionLocal
 from app.launch import facts
-from app.models import LaunchItem
+from app.models import LaunchItem, Project
 from conftest import login_as
 
 
@@ -36,6 +36,8 @@ def _seed(pid, rows):
                 s.add(LaunchItem(project_id=pid, number=n, title=f"item {n}", section=sec, status=st,
                                  started_at=base if span is not None else None,
                                  done_at=base + timedelta(days=span) if span is not None else None))
+            proj = await s.get(Project, pid)
+            proj.launch_seq = max(proj.launch_seq or 0, max(r[0] for r in rows))
             await s.commit()
     asyncio.run(go())
 
@@ -96,3 +98,13 @@ def test_files_validation(world):
 
 def test_outsider_404(world):
     assert world["out"].get(world["base"]).status_code == 404
+
+
+def test_would_be_follows_counter_after_delete(world):
+    w = world
+    for n in (1, 2, 3):
+        assert w["c"].post(f"/projects/{w['pid']}/launch/items", json={"title": f"t{n}"}).status_code == 201
+    assert w["admin"].delete(f"/projects/{w['pid']}/launch/items/3").status_code == 204
+    assert w["c"].get(w["base"]).json()["would_be"] == 4
+    r = w["c"].post(f"/projects/{w['pid']}/launch/scope-check", json={"prompt": "can we add x"})
+    assert r.json()["would_be"] == 4

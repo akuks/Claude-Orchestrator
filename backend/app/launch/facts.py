@@ -7,6 +7,9 @@ import statistics
 from datetime import timezone
 
 from ..decisions import globmatch
+from sqlalchemy import select
+
+from ..models import Project
 from . import store
 
 ESTIMATE_MIN = 10
@@ -52,6 +55,7 @@ def estimate(items) -> dict | None:
 
 async def compute(s, project_id: str, files: list[str]) -> dict:
     row = await store.get_or_none(s, project_id)
+    seq = await s.scalar(select(Project.launch_seq).where(Project.id == project_id)) or 0
     items = await store.launch_items_for(s, project_id)
     before = [i for i in items if i.section == "before"]
     globs = list(row.critical_paths or []) if row is not None else []
@@ -60,7 +64,7 @@ async def compute(s, project_id: str, files: list[str]) -> dict:
         "launch_date": row.launch_date if row is not None else None,
         "open": sum(1 for i in before if i.status in ("open", "started")),
         "done": sum(1 for i in before if i.status == "done"),
-        "would_be": max((i.number for i in items), default=0) + 1,
+        "would_be": seq + 1,
         "after": [f"#{i.number} {i.title}" for i in items if i.section == "after" and i.status in ("open", "started")],
         "critical_touched": touched,
         "estimate": estimate(items),
