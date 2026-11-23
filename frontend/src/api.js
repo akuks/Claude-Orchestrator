@@ -35,6 +35,21 @@ async function req(method, path, body) {
   return res.json()
 }
 
+async function reqText(path) {
+  const res = await fetch(path, { headers: { 'X-Requested-With': 'co' }, credentials: 'same-origin' })
+  if (res.status === 401) unauthorizedHandler?.()
+  if (!res.ok) {
+    let detail = res.statusText
+    try {
+      detail = (await res.json()).detail || detail
+    } catch (_) {}
+    const err = new Error(typeof detail === 'string' ? detail : JSON.stringify(detail))
+    err.status = res.status
+    throw err
+  }
+  return res.text()
+}
+
 function qs(params = {}) {
   const s = new URLSearchParams(
     Object.entries(params).filter(([, v]) => v != null && v !== '')
@@ -201,6 +216,10 @@ export const api = {
   // ---- Workflows (saved stage pipelines) ----
   listWorkflows: () => req('GET', '/workflows'),
   workflowPresets: () => req('GET', '/workflows/presets'),
+  workflowTemplates: () => req('GET', '/workflows/templates'),
+  exportWorkflow: (id) => reqText(`/workflows/${id}/export`),
+  importWorkflow: (payload) => req('POST', '/workflows/import', payload),
+  workflowRepoFiles: (projectId) => req('GET', `/workflows/repo-files${qs({ project_id: projectId })}`),
   createWorkflow: (payload) => req('POST', '/workflows', payload),
   updateWorkflow: (id, payload) => req('PATCH', `/workflows/${id}`, payload),
   deleteWorkflow: (id) => req('DELETE', `/workflows/${id}`),

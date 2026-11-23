@@ -17,6 +17,8 @@ import {
 import {
   CaretRightOutlined,
   DeleteOutlined,
+  DownloadOutlined,
+  ImportOutlined,
   PlayCircleOutlined,
   PlusOutlined,
   ReloadOutlined,
@@ -24,6 +26,8 @@ import {
 import { api } from '../api'
 import { useRoute } from '../shell/router'
 import StageFields from '../gates/StageFields'
+import TemplatePicker, { missingAgents, GATE_HINT } from '../gates/TemplatePicker'
+import ImportWorkflow from '../gates/ImportWorkflow'
 import { formStage, stageLabel, stagePayload } from '../gates/gates'
 
 const RUN_COLOR = {
@@ -35,7 +39,7 @@ const RUN_COLOR = {
 }
 
 // ---- Builder modal ---------------------------------------------------------
-function WorkflowModal({ open, workflow, agents, onClose, onSaved }) {
+function WorkflowModal({ open, workflow, prefill, hint, missing = [], agents, onClose, onSaved }) {
   const [form] = Form.useForm()
   const [saving, setSaving] = useState(false)
   const [projects, setProjects] = useState([])
@@ -47,11 +51,18 @@ function WorkflowModal({ open, workflow, agents, onClose, onSaved }) {
     setError('')
     if (workflow) {
       form.setFieldsValue({ ...workflow, stages: (workflow.stages || []).map(formStage) })
+    } else if (prefill) {
+      form.resetFields()
+      form.setFieldsValue({
+        name: prefill.name,
+        description: prefill.description,
+        stages: (prefill.stages || []).map(formStage),
+      })
     } else {
       form.resetFields()
       form.setFieldsValue({ stages: [{ name: 'Develop', kind: 'agent', items: [{}] }] })
     }
-  }, [open, workflow])
+  }, [open, workflow, prefill])
 
   useEffect(() => {
     if (!open) return
@@ -104,6 +115,16 @@ function WorkflowModal({ open, workflow, agents, onClose, onSaved }) {
           <b>Tech Lead “Plan”</b> stage first and feed its plan to the dev stages with{' '}
           <code>{'{{prev}}'}</code> — or skip it and control each stage yourself.
         </Typography.Text>
+        {hint && <Alert data-testid="template-hint" type="info" showIcon message={hint} style={{ marginTop: 10 }} />}
+        {missing.length > 0 && (
+          <Alert
+            data-testid="missing-agents"
+            type="warning"
+            showIcon
+            message={`Add these helpers from Agents → presets first: ${missing.join(', ')}`}
+            style={{ marginTop: 10 }}
+          />
+        )}
         <Form.List name="stages">
           {(stages, { add: addStage, remove: removeStage }) => (
             <div style={{ marginTop: 10 }}>
@@ -218,6 +239,11 @@ export default function WorkflowsView({ agents = [], isAdmin = false, runWorkflo
   const [loading, setLoading] = useState(false)
   const [modalOpen, setModalOpen] = useState(false)
   const [editing, setEditing] = useState(null)
+  const [prefill, setPrefill] = useState(null)
+  const [hint, setHint] = useState(null)
+  const [missing, setMissing] = useState([])
+  const [pickerOpen, setPickerOpen] = useState(false)
+  const [importOpen, setImportOpen] = useState(false)
   const [runWf, setRunWf] = useState(null)
   const [, navigate] = useRoute()
   const [loaded, setLoaded] = useState(false)
@@ -275,6 +301,49 @@ export default function WorkflowsView({ agents = [], isAdmin = false, runWorkflo
     }
   }
 
+  const openNew = () => {
+    setEditing(null); setPrefill(null); setHint(null); setMissing([]); setModalOpen(true)
+  }
+
+  const fromTemplate = async (t) => {
+    let known = agents
+    try {
+      known = (await api.listAgents?.()) || agents
+    } catch (_) {}
+    const hasGate = (t.stages || []).some((s) => s.kind === 'gate')
+    setEditing(null)
+    setPrefill({ name: t.name, description: t.description, stages: t.stages })
+    setHint(t.hint || (hasGate ? GATE_HINT : null))
+    setMissing(missingAgents(t.stages, known))
+    setPickerOpen(false)
+    setModalOpen(true)
+  }
+
+  // The server creates the workflow on import; open it for review and refresh.
+  const imported = (wf) => {
+    setImportOpen(false)
+    setPrefill(null); setHint(null); setMissing([])
+    setEditing(wf)
+    setModalOpen(true)
+    refresh()
+  }
+
+  const exportWf = async (w) => {
+    try {
+      const text = await api.exportWorkflow(w.id)
+      const url = URL.createObjectURL(new Blob([text], { type: 'text/markdown' }))
+      const a = document.createElement('a')
+      a.href = url
+      a.download = `${w.name}.md`
+      document.body.appendChild(a)
+      a.click()
+      a.remove()
+      URL.revokeObjectURL(url)
+    } catch (e) {
+      message.error(e.message)
+    }
+  }
+
   const remove = async (id) => {
     try {
       await api.deleteWorkflow(id)
@@ -288,10 +357,12 @@ export default function WorkflowsView({ agents = [], isAdmin = false, runWorkflo
     <>
       <Space style={{ marginBottom: 12 }} wrap>
         {isAdmin && (
-          <Button type="primary" icon={<PlusOutlined />} onClick={() => { setEditing(null); setModalOpen(true) }}>
+          <Button type="primary" icon={<PlusOutlined />} onClick={openNew}>
             New Workflow
           </Button>
         )}
+        {isAdmin && <Button onClick={() => setPickerOpen(true)}>New from template</Button>}
+        {isAdmin && <Button icon={<ImportOutlined />} onClick={() => setImportOpen(true)}>Import</Button>}
         <Button icon={<ReloadOutlined />} onClick={refresh}>Refresh</Button>
         <Typography.Text type="secondary">
           Saved pipelines — ordered stages of agents. Auto-advances on success, halts on failure, pauses at gated stages.
@@ -319,7 +390,8 @@ export default function WorkflowsView({ agents = [], isAdmin = false, runWorkflo
             extra={
               <Space size={4}>
                 <Button size="small" type="primary" icon={<PlayCircleOutlined />} onClick={() => setRunWf(w)}>Run</Button>
-                {isAdmin && <Button size="small" onClick={() => { setEditing(w); setModalOpen(true) }}>Edit</Button>}
+                {isAdmin && <Button size="small" onClick={() => { setEditing(w); setPrefill(null); setHint(null); setMissing([]); setModalOpen(true) }}>Edit</Button>}
+                <Button size="small" icon={<DownloadOutlined />} onClick={() => exportWf(w)}>Export</Button>
                 {isAdmin && (
                   <Popconfirm title="Delete workflow?" onConfirm={() => remove(w.id)}>
                     <Button size="small" danger icon={<DeleteOutlined />} />
@@ -369,7 +441,9 @@ export default function WorkflowsView({ agents = [], isAdmin = false, runWorkflo
         </>
       )}
 
-      <WorkflowModal open={modalOpen} workflow={editing} agents={agents} onClose={() => setModalOpen(false)} onSaved={refresh} />
+      <TemplatePicker open={pickerOpen} onClose={() => setPickerOpen(false)} onPick={fromTemplate} />
+      <ImportWorkflow open={importOpen} onClose={() => setImportOpen(false)} onImported={imported} />
+      <WorkflowModal open={modalOpen} workflow={editing} prefill={prefill} hint={hint} missing={missing} agents={agents} onClose={() => setModalOpen(false)} onSaved={refresh} />
       {runWf && <RunDialog workflow={runWf} onClose={() => setRunWf(null)} onRan={(id) => navigate({ page: 'runs', id })} />}
     </>
   )
