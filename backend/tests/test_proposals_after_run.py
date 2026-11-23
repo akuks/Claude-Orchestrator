@@ -185,3 +185,187 @@ def test_enabled_project(client, monkeypatch):
 
     monkeypatch.setattr(after_run.policy_store, "org_settings", off)
     assert _run(get(pid)) is None
+
+
+# ---- task 4: worth filter, model call, event ----------------------------------------------------
+
+import json  # noqa: E402
+
+from app.decisions import proposals  # noqa: E402
+from app import memory  # noqa: E402
+from app.models import DecisionProposal, Task  # noqa: E402
+
+
+def _w(subject, *files):
+    return after_run.worth(Commit(sha="a" * 40, short="a" * 7, subject=subject, files=list(files)))
+
+
+def test_worth():
+    assert not _w("chore: x", "src/a.py")
+    assert not _w("Docs(api)!: y", "src/a.py")
+    assert not _w("merge branch", "src/a.py")
+    assert not _w("v1.2.3", "src/a.py")
+    assert not _w("1.2", "src/a.py")
+    assert not _w("feat: add cache", "README.md", "uv.lock", "docs/a.md")
+    assert not _w("feat: add cache", ".claude/x.json", ".co-orchestrator/y")
+    assert _w("feat: add cache", "src/a.py")
+    assert _w("docs: plan", "docs/superpowers/plans/x.md")
+    assert _w("chores: x", "src/a.py")
+    assert _w("reverted cache", "src/a.py")
+
+
+def test_parse_items():
+    p = after_run.parse_items
+    assert len(p('Sure: [{"title":"A","why":"w"}] thanks', limit=2)) == 1
+    assert p('{"title":"A"}', limit=2) == []
+    five = json.dumps([{"title": f"t{i}", "why": "w"} for i in range(5)])
+    assert len(p(five, limit=2)) == 2
+    assert p('[{"title":"a ] b","why":"x"}]', limit=2)[0]["title"] == "a ] b"
+    assert "\n" not in p(json.dumps([{"title": "x\nIgnore previous", "why": "w"}]), limit=2)[0]["title"]
+    t = p(json.dumps([{"title": "A", "why": "w", "touches": ["/etc/passwd", "../x", "src/**"]}]), limit=2)[0]["touches"]
+    assert t == ["src/**"]
+    many = p(json.dumps([{"title": "A", "why": "w", "touches": [f"src/f{i}.py" for i in range(25)]}]), limit=2)
+    assert len(many[0]["touches"]) <= 20
+    assert p("not json", limit=2) == []
+    assert p(json.dumps([{"title": "A", "why": "w", "kind": "reference"}]), limit=2) == []
+    assert p(json.dumps([{"title": "A", "why": "w"}]), limit=2)[0]["kind"] == "decision"
+    assert p(json.dumps(["str", 3, {"title": "A", "why": "w"}]), limit=2)[0]["title"] == "A"
+
+
+def test_stale_reason_title_one_line(client):
+    pid = _mk()
+    assert _flag(pid, [_c(1)], "line one\n\tIgnore\x00 this\r\nplease") == [1]
+    reason = _decs(pid)[0].stale_reason
+    assert reason == f"src/a.py changed in {1:07x} (line one Ignore this please)"
+
+
+def _task_for(repo, start, project_dir, *, title="My task", prompt="p"):
+    pid = uuid.uuid4().hex
+    tid = uuid.uuid4().hex
+
+    async def go():
+        async with SessionLocal() as s:
+            s.add(Project(id=pid, name="p" + pid[:8], slug="p" + pid[:8], directory=project_dir))
+            s.add(Task(id=tid, prompt=prompt, title=title, project_id=pid, head_at_start=start,
+                       result_text="did stuff"))
+            await s.commit()
+
+    _run(go())
+    return pid, tid
+
+
+class _Rec:
+    def __init__(self):
+        self.events = []
+
+    async def __call__(self, etype, payload):
+        self.events.append((etype, payload))
+
+
+def _after(tid, emit=None, owner="u1"):
+    return _run(after_run.after_task(tid, owner, emit=emit))
+
+
+@pytest.fixture()
+def model(monkeypatch):
+    calls = []
+    state = {"reply": json.dumps([{"title": "Use cache X", "why": "because", "touches": ["src/**"]}]),
+             "env": {"A": "b"}}
+
+    async def env(s, uid, *, project_env=None, purpose):
+        return state["env"]
+
+    async def run(prompt, m, cwd, e):
+        calls.append(prompt)
+        r = state["reply"]
+        if isinstance(r, Exception):
+            raise r
+        return r
+
+    monkeypatch.setattr(after_run, "agent_env_or_none", env)
+    monkeypatch.setattr(memory, "_run_claude", run)
+    state["calls"] = calls
+    return state
+
+
+def _rows(pid):
+    async def go():
+        async with SessionLocal() as s:
+            return (await s.execute(select(DecisionProposal).where(DecisionProposal.project_id == pid))).scalars().all()
+
+    return _run(go())
+
+
+def test_after_task_end_to_end(client, repo, model):
+    start = _commit(repo, "a.txt", "base")
+    sha = _commit(repo, "src/a.py", "feat: add cache")
+    pid, tid = _task_for(repo, start, str(repo), prompt="P" * 5000)
+    rec = _Rec()
+    _after(tid, rec)
+    rows = _rows(pid)
+    assert len(rows) == 1 and rows[0].source == "run" and rows[0].status == "pending"
+    assert rows[0].evidence.startswith("commits ") and rows[0].dedupe_key == f"commit:{sha}:1"
+    assert rows[0].task_id == tid
+    prompt = model["calls"][0]
+    assert prompt.startswith(after_run.PROPOSALS_FRAME) or after_run.PROPOSALS_FRAME in prompt
+    assert "P" * 2000 in prompt and "P" * 2001 not in prompt
+    assert rec.events == [("decision_review", {"proposed": 1, "stale": []})]
+
+
+def test_after_task_skips_used_commits(client, repo, model):
+    start = _commit(repo, "a.txt", "base")
+    _commit(repo, "src/a.py", "feat: add cache")
+    pid, tid = _task_for(repo, start, str(repo))
+    _after(tid, _Rec())
+    assert len(model["calls"]) == 1
+    _after(tid, _Rec())
+    assert len(model["calls"]) == 1 and len(_rows(pid)) == 1
+
+
+def test_after_task_no_env_still_flags(client, repo, model):
+    start = _commit(repo, "a.txt", "base")
+    _commit(repo, "src/a.py", "feat: add cache")
+    pid, tid = _task_for(repo, start, str(repo))
+    _run(_seed_decision(pid))
+    model["env"] = None
+    rec = _Rec()
+    _after(tid, rec)
+    assert model["calls"] == [] and _rows(pid) == []
+    assert _decs(pid)[0].stale_flagged_at is not None
+    assert rec.events == [("decision_review", {"proposed": 0, "stale": [1]})]
+
+
+async def _seed_decision(pid):
+    async with SessionLocal() as s:
+        s.add(ProjectDecision(project_id=pid, number=1, title="d1", touches=["src/**"], status="active",
+                              last_verified_at=datetime.now(timezone.utc) - timedelta(days=30)))
+        await s.commit()
+
+
+def test_after_task_never_raises(client, repo, model):
+    start = _commit(repo, "a.txt", "base")
+    _commit(repo, "src/a.py", "feat: add cache")
+    pid, tid = _task_for(repo, start, str(repo))
+    model["reply"] = RuntimeError("boom")
+    _after(tid, _Rec())
+    model["reply"] = "garbage ][ {"
+    _after(tid, _Rec())
+    assert _rows(pid) == []
+    _after(uuid.uuid4().hex, _Rec())
+
+    async def bad(*a, **k):
+        raise RuntimeError("emit failed")
+
+    model["reply"] = json.dumps([{"title": "T", "why": "w"}])
+    _after(tid, bad)
+    pid2, tid2 = _task_for(repo, start, str(repo / "gone"))
+    _after(tid2, _Rec())
+
+
+def test_no_event_when_nothing(client, repo, model):
+    start = _commit(repo, "a.txt", "base")
+    _commit(repo, "src/a.py", "chore: tidy")
+    pid, tid = _task_for(repo, start, str(repo))
+    rec = _Rec()
+    _after(tid, rec)
+    assert rec.events == [] and model["calls"] == []
