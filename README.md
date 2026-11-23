@@ -1043,8 +1043,11 @@ character (newline, NUL ...). One command is one program call, such as
 stdin `/dev/null`. The environment is built from scratch: the server's allowlisted
 slice, the project's env (blocked keys removed, `PATH_PREPEND` honoured), then
 `CI=1`. It never holds an agent or user credential, an org key, `CO_*`, a task
-token or an ssh agent. `HOME` and git config are private to the gates, so a
-command cannot read the server user's dotfiles. Exit 0 passes. Anything else, a
+token or an ssh agent socket. `HOME`, `XDG_CONFIG_HOME` and `XDG_CACHE_HOME` point to
+a private folder under `_gates`, and the global and system git config are
+skipped. **A gate is not a sandbox.** It runs as the server's OS user, so
+absolute paths are readable and a program that looks up the user's home itself
+can still find it. Exit 0 passes. Anything else, a
 timeout or a kill does not. Past `timeout_min` the process group gets SIGTERM,
 then SIGKILL after 5 seconds. Cancelling the run kills it the same way.
 
@@ -1060,6 +1063,8 @@ watches a gate.
   (`POST /workflows/runs/{id}/stages/{i}/allow`). The allowance covers this
   hand-out only; a rerun asks again.
 - If the guard gives no verdict, the gate fails closed.
+
+The guard judges the command line only, not what the program then does.
 
 ### Approval stages
 
@@ -1170,8 +1175,9 @@ more than 50 drivers, or a driver name that is not printable ASCII, refuses the
 command. **Submodules** are never entered: `status` and `diff` use
 `--ignore-submodules=dirty` and short submodule diffs, so a submodule's own
 config cannot run anything (a dirty submodule is not reported, only a changed
-gitlink). Gate git also has no ssh keys, no agent and an empty git config. The
-diff is hashed, never stored or shown.
+gitlink). Git run by a gate command has `GIT_SSH` and `GIT_SSH_COMMAND` set to `false`
+and skips the global and system config; the repo's own `.git/config` still
+applies. The diff is hashed, never stored or shown.
 
 ### Not covered
 
@@ -1180,8 +1186,14 @@ diff is hashed, never stored or shown.
 - **A fix-it loop.** A failed gate fails the run, and **Retry** runs it again; it
   does not hand the failure back to an agent stage.
 - **Windows.** The shell rule is POSIX only.
-- **A plain `ssh` in a gate.** There are no keys, no agent and no `known_hosts`,
-  so it cannot log in. Use an agent stage or Remote Ops.
+- **A plain `ssh` in a gate.** Only git over ssh is blocked. A plain `ssh`
+  runs as the server's OS user, and OpenSSH finds keys through the user database
+  rather than `HOME`, so it can use that user's `~/.ssh` keys. No ssh agent socket
+  is passed. Gate commands are written by an admin and checked by the guard, but
+  they are not sandboxed.
+- **Code the gate runs.** A gate runs repository code (`conftest.py`, `package.json`
+  scripts, a `Makefile`) that an earlier agent stage may have written. The guard
+  checks the command line, not what that code does.
 - **Background commands** an agent starts get no live progress.
 - **`{{prev}}`.** A gate or approval stage's summary (counts, failing and flaky
   names, who approved) is what the next stage's `{{prev}}` holds, so it flows
