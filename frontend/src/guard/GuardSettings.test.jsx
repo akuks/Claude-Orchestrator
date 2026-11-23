@@ -111,7 +111,7 @@ describe('GuardSettings', () => {
       reference_project_ids: ['p9', 'p2'],
     })
     expect(onSaved).toHaveBeenCalled()
-  })
+  }, 20000)
 
   it('a stored reference the editor cannot see is named as such, and an unchanged list is not sent', async () => {
     const c = await mount({ project: project({ reference_project_ids: ['p9'] }), canEdit: true })

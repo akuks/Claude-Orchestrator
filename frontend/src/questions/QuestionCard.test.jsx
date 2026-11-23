@@ -144,12 +144,11 @@ describe('QuestionCard', () => {
     expect(api.answerQuestion).toHaveBeenLastCalledWith('q1', { answer: 'x', suggest_decision: true })
   })
 
-  it('unchecked sends no suggest_decision; a skipped result shows a warning line', async () => {
-    api.answerQuestion.mockResolvedValue({ question: base, task: { id: 'c' }, suggestion: 'skipped: the suggestion queue is full' })
+  it('unchecked sends no suggest_decision', async () => {
+    api.answerQuestion.mockResolvedValue({ question: base, task: { id: 'c' }, suggestion: null })
     const c = await mount({ question: { ...base, project_id: 'p1' } })
     await click(c.querySelectorAll('[data-testid="question-option"]')[1])
     await flush()
     expect(api.answerQuestion).toHaveBeenLastCalledWith('q1', { answer: 'no' })
-    expect($(c, 'question-suggestion-skipped').textContent).toContain('skipped: the suggestion queue is full')
   })
 })

@@ -86,9 +86,10 @@ function Row({ pid, d, canEdit, busy, act, onEdit, onRule, active }) {
       {canEdit && d.status === 'active' && (
         <Space wrap size={4} style={{ display: 'flex', marginTop: 4 }}>
           <Button size="small" onClick={() => onEdit(d)}>Edit</Button>
-          <Button size="small" disabled={busy} onClick={() => act(() => api.verifyDecision(pid, d.number))} data-testid={`verify-${d.number}`}>Still true</Button>
-          {d.stale_flagged_at && (
+          {d.stale_flagged_at ? (
             <Button size="small" disabled={busy} onClick={() => act(() => api.verifyDecision(pid, d.number))} data-testid={`stillvalid-${d.number}`}>Still valid</Button>
+          ) : (
+            <Button size="small" disabled={busy} onClick={() => act(() => api.verifyDecision(pid, d.number))} data-testid={`verify-${d.number}`}>Still true</Button>
           )}
           <Popconfirm title={`Retire ${d.display_id}?`} okText="Retire" onConfirm={() => act(() => api.retireDecision(pid, d.number))}>
             <Button size="small" disabled={busy} data-testid={`retire-${d.number}`}>Retire</Button>

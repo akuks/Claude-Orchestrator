@@ -1,3 +1,4 @@
+import { act } from 'react'
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
 import { flush, render } from '../home/testRender'
 
@@ -5,6 +6,7 @@ vi.mock('../api', () => ({
   api: { taskQuestions: vi.fn(), answerQuestion: vi.fn(), dismissQuestion: vi.fn() },
 }))
 import { api } from '../api'
+import { useState } from 'react'
 import QuestionsSection, { ThreadQuestions } from './QuestionsSection'
 
 const q = (id, over = {}) => ({
@@ -67,5 +69,22 @@ describe('ThreadQuestions (TaskDetail)', () => {
     await flush()
     expect(api.taskQuestions).not.toHaveBeenCalled()
     expect(view.container.querySelector('[data-testid="thread-questions"]')).toBeNull()
+  })
+})
+
+describe('suggestion outcome survives the card', () => {
+  it('shows the skipped warning after the parent removes the answered card', async () => {
+    api.answerQuestion.mockResolvedValue({ question: q('a'), task: { id: 'c' }, suggestion: 'skipped: the suggestion queue is full' })
+    function Parent() {
+      const [rows, setRows] = useState([q('a', { project_id: 'p1', options: ['yes'] })])
+      return <QuestionsSection questions={rows} onChanged={() => setRows([])} />
+    }
+    view = await render(<Parent />)
+    const c = view.container
+    const btn = c.querySelector('[data-testid="question-option"]')
+    await act(async () => btn.dispatchEvent(new MouseEvent('click', { bubbles: true })))
+    await flush()
+    expect(c.querySelector('[data-testid="question-a"]')).toBeNull()
+    expect(document.body.textContent).toContain('the decision suggestion was skipped: the suggestion queue is full')
   })
 })
