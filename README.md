@@ -806,7 +806,8 @@ your recommendation and end the turn. Each showing is logged on the run as
 *Showed D-012, D-015 before editing path*.
 
 **The run-start index.** The same runs also get a short index (the header, then
-`D-n title` lines, about 150 words, with "and N more" when cut) added to the
+one-line `D-n title` lines, at most 150 words and 1500 characters, with "and N
+more" when cut) added to the
 system prompt after the ground rules and again after a context compaction. At
 most the 200 newest active decisions are considered.
 
@@ -814,7 +815,9 @@ most the 200 newest active decisions are considered.
 with two read-only git calls: a touches entry that matches no file, a missing
 *see* path, files a decision covers that were changed in commits after it was
 last verified (count and up to 3 commit subjects), and a decision with no
-touches not verified for 30 days. **Verify** clears it. The panel is hidden
+touches not verified for 30 days. **Verify** clears the "changed since" and
+"not verified" flags; an unmatched touches entry or a missing see path needs an
+edit. The panel is hidden
 when all is well. It shows a note instead when the folder is missing, git
 fails, or the project has more than 200 000 files; a project with no folder has
 no health.
