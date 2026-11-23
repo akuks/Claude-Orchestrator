@@ -48,6 +48,14 @@ def test_touches_validation():
     assert len(clean_fields({"title": "t", "touches": [f"f{i}" for i in range(20)]}, partial=False)["touches"]) == 20
 
 
+def test_touches_redacted_but_globs_survive():
+    tok = "ghp_" + "a" * 36
+    d = clean_fields({"title": "t", "touches": [f"src/{tok}/*", "src/**/*.py", "**/*.{ts,tsx}", "docs/[a-z]*/x?.md"]},
+                     partial=False)
+    assert tok not in d["touches"][0] and "***" in d["touches"][0]
+    assert d["touches"][1:] == ["src/**/*.py", "**/*.{ts,tsx}", "docs/[a-z]*/x?.md"]
+
+
 def test_limits_and_kind():
     for f, n in (("title", 201), ("why", 2001), ("source", 301)):
         with pytest.raises(ValueError):
