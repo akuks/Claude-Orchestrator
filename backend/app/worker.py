@@ -29,6 +29,8 @@ from .constants import Priority, Status
 from .decisions import after_run
 from .database import SessionLocal
 from .events import broker
+from .gates import test_results
+from .gates.testcmd import looks_like_test
 from .guard import co_hook as guard_co_hook
 from .guard import grants as guard_grants
 from .guard import policy_inputs
@@ -1464,6 +1466,7 @@ class WorkerManager:
                     name = block.get("name")
                     if usage is not None and not obj.get("parent_tool_use_id") and block.get("id"):
                         usage.on_tool_use_main(str(block["id"]), str(name or ""), block.get("input") or {})
+                    self._remember_test_call(ctx, name, block)
                     await emit("tool_use", {"name": name, "input": block.get("input"),
                                             "id": block.get("id"), "parent": obj.get("parent_tool_use_id") or None})
                     if name and name.startswith("mcp__"):
@@ -1483,6 +1486,7 @@ class WorkerManager:
                              "is_error": bool(block.get("is_error")),
                              "parent": obj.get("parent_tool_use_id") or None},
                         )
+                        await self._emit_test_result(ctx, emit, block, flat)
                         if block.get("is_error"):
                             call_id = ctx["mcp_ids"].get(block.get("tool_use_id"))
                             if call_id is not None:
@@ -1503,6 +1507,44 @@ class WorkerManager:
             result["output_tokens"] = usage.get("output_tokens")
         if etype in ("assistant", "user") and ctx.get("usage") is not None:
             await self._usage_tick(ctx)
+
+    # ---- test-result chip (F116b) ------------------------------------------------
+
+    TEST_CALLS_MAX = 200
+
+    @staticmethod
+    def _remember_test_call(ctx, name, block) -> None:
+        """Remember the Bash calls whose command looks like a test run (<= 200)."""
+        try:
+            cmd = (block.get("input") or {}).get("command")
+            tid = block.get("id")
+            if name != "Bash" or not tid or not isinstance(cmd, str) or not looks_like_test(cmd):
+                return
+            calls = ctx.setdefault("test_calls", {})
+            calls[str(tid)] = cmd
+            while len(calls) > WorkerManager.TEST_CALLS_MAX:
+                calls.pop(next(iter(calls)))
+        except Exception:  # noqa: BLE001 - never break the stream
+            log.debug("test call tracking failed", exc_info=True)
+
+    @staticmethod
+    async def _emit_test_result(ctx, emit, block, flat: str) -> None:
+        calls = ctx.get("test_calls")
+        cmd = calls.pop(str(block.get("tool_use_id") or ""), None) if calls else None
+        if cmd is None:
+            return
+        try:
+            res = await asyncio.to_thread(test_results.parse, flat)
+            if res.runner is None:
+                return
+            secrets = ctx.get("secrets") or []
+            await emit("test_result", {
+                "runner": res.runner, "passed": res.passed, "failed": res.failed, "skipped": res.skipped,
+                "failing": [redact(n, secrets) for n in res.failing[:10]],
+                "command": redact(cmd, secrets)[:200],
+            })
+        except Exception:  # noqa: BLE001 - a parser error must not break the stream
+            log.debug("test result parse failed", exc_info=True)
 
     # ---- token care (phase 3b): usage.json and the TaskUsage row ---------------
 
