@@ -14,7 +14,9 @@ describe('launch helpers', () => {
     expect(['open', 'started', 'done', 'dropped'].map((status) => isOpen({ status }))).toEqual([true, true, false, false])
   })
   it('contributors get no Reopen, Edit, Move or Delete', () => {
-    expect(rowActions({ status: 'open' }, false)).toEqual(['start', 'done', 'drop'])
+    expect(rowActions({ status: 'open' }, false)).toEqual(['start', 'drop'])
+    expect(rowActions({ status: 'started' }, false)).toEqual(['done', 'drop'])
+    expect(rowActions({ status: 'open' }, true)).toEqual(['start', 'done', 'drop', 'edit', 'move', 'delete'])
     expect(rowActions({ status: 'done' }, false)).toEqual(['drop'])
     expect(rowActions({ status: 'done' }, true)).toEqual(['drop', 'reopen', 'edit', 'move', 'delete'])
   })

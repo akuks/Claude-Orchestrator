@@ -28,7 +28,7 @@ import { useRoute } from '../shell/router'
 import StageFields from '../gates/StageFields'
 import TemplatePicker, { missingAgents, GATE_HINT } from '../gates/TemplatePicker'
 import ImportWorkflow from '../gates/ImportWorkflow'
-import { formStage, stageLabel, stagePayload } from '../gates/gates'
+import { exportFileName, formStage, stageLabel, stagePayload } from '../gates/gates'
 
 const RUN_COLOR = {
   pending: 'default',
@@ -334,7 +334,7 @@ export default function WorkflowsView({ agents = [], isAdmin = false, runWorkflo
       const url = URL.createObjectURL(new Blob([text], { type: 'text/markdown' }))
       const a = document.createElement('a')
       a.href = url
-      a.download = `${w.name}.md`
+      a.download = exportFileName(w.name)
       document.body.appendChild(a)
       a.click()
       a.remove()

@@ -10,7 +10,7 @@ export const bySection = (items, section) => (Array.isArray(items) ? items : [])
 export function rowActions(item, canEdit) {
   const out = []
   if (item.status === 'open') out.push('start')
-  if (item.status === 'open' || item.status === 'started') out.push('done')
+  if (item.status === 'started' || (canEdit && item.status === 'open')) out.push('done')
   if (item.status !== 'dropped') out.push('drop')
   if (canEdit) {
     if (item.status === 'done' || item.status === 'dropped') out.push('reopen')
