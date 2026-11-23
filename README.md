@@ -941,8 +941,10 @@ shown, none with a fixed model):
 | Checker | light | yes | runs the named checks and reports facts only, "not run" for anything it could not run |
 
 All four end their report with *Outputs* and the evidence. These are prompts, not
-guarantees; what co-guard enforces is below. Follow-ups of a read-only agent's
-task stay read-only, and so do the workflow steps and dispatched children it starts.
+guarantees; what co-guard enforces is below. A read-only agent stays
+read-only when run as a workflow step or a dispatched child, and follow-ups,
+Continue and Duplicate of a read-only task stay read-only. A writable child agent
+dispatched by a read-only coordinator is writable (its own setting).
 
 **Lint (warnings only).** Agent responses carry `lint`, shown under the form. A
 save is never refused for it. It warns when: the agent's own model is not one of
@@ -969,11 +971,13 @@ and shown on the task page as **Brief**.
 
 **Where to give one.** The collapsible **Brief** section of the New task form and
 of the agent *Run* form (single run), or `brief` in `POST /tasks`,
-`POST /agents/{id}/run` (and its batch items).
+`POST /agents/{id}/run` and the items of `POST /agents/dispatch` (not
+`/agents/{id}/bulk`).
 
-**Inheritance.** Follow-up steps of a thread keep the thread's brief. A task
-started under a parent with a brief (a dispatched child, a workflow step) inherits
-it when given none. When given its own, the parent's CAN/CANNOT stay as a **bound**
+**Inheritance.** Steps of a thread (follow-up, Continue, answer follow-up, a
+guard deny-and-resume, Duplicate) keep the thread's brief. A dispatched child
+started under a parent with a brief inherits it when given none. Workflow steps
+do not inherit a brief. When given its own, the parent's CAN/CANNOT stay as a **bound**
 the child cannot widen: a path must be inside every non-empty CAN and outside every
 CANNOT of the brief and its bounds. Briefs nest at most **5 levels**.
 
@@ -1051,7 +1055,7 @@ Full interactive docs at `/docs`. Highlights:
 **Scheduling / templates / approvals** — `/schedules` CRUD + `/run` + `/runs` +
 `/preview` · `/templates` + `/presets` + `/run` · `/approvals` + `/{id}/approve|reject`
 
-**Agents** — `/agents` CRUD (`tier`; responses carry `lint`) · `/agents/presets` · `/agents/{id}/run` (with optional project/prompt override and `brief`)
+**Agents** — `/agents` CRUD (`tier`; responses carry `lint`) · `/agents/presets` · `/agents/{id}/run` and `/agents/dispatch` (with optional project/prompt override and `brief`)
 
 **Security & usage** — `/findings` + `/summary` + `PATCH /{id}` · `/usage/summary`
 · `/usage/timeseries` · `/usage/by-project` · `/usage/by-model`
