@@ -212,6 +212,7 @@ def world(client, tmp_path_factory):
         "grant_id": grant_id,
         "root_id": running_id,
         "question_id": question_id,
+        "number": "1",
     }
     # Strings that must never appear in a list the outsider gets back. Agents,
     # templates and workflows are global by spec, so their ids aren't secret.
@@ -256,6 +257,9 @@ def _bodies(world) -> dict:
         ("POST", "/schedules"): {"name": "x", "cron": "0 3 * * *", "prompt": "x",
                                  "project_id": i["project_id"]},
         ("PATCH", "/schedules/{schedule_id}"): {"name": "hijack"},
+        ("POST", "/projects/{project_id}/decisions"): {"title": "hijack"},
+        ("PATCH", "/projects/{project_id}/decisions/{number}"): {"version": 1, "title": "hijack"},
+        ("POST", "/projects/{project_id}/decisions/{number}/supersede"): {"by": 2},
         ("POST", "/approvals/{task_id}/reject"): {},
         # co-guard: filing/reporting name P's task in the body (agent tokens only).
         ("POST", "/guard/approvals"): {"task_id": i["task_id"], "rule_ids": ["git-reset-hard"], "tool": "Bash"},

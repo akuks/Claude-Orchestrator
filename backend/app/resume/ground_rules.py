@@ -1,7 +1,11 @@
 """Ground rules: the short rules every agent is given (Phase 3a, forge F21/F93/F98).
 
 Org settings (``GuardOrgSettings.ground_rules``, admin-only to change):
-``{"grounding": bool, "short_answers": bool, "usage_care": bool, "notes": bool, "questions": bool, "extra": str}``.
+``{"grounding": bool, "short_answers": bool, "usage_care": bool, "notes": bool, "questions": bool, "decisions": bool,
+"extra": str}``.
+
+``decisions`` (phase 4a) adds no text here: when on, an own project's decisions go into the policy and the run's
+system prompt gets their index (``policy_inputs.gather``); ``included`` leaves it out.
 
 * ``main_text(cfg)`` goes to the main session's ``--append-system-prompt`` (the system prompt survives
   compaction, so it is never re-sent there).
@@ -21,9 +25,10 @@ from ..guard.co_hook import DATA_LINE, NOTES_LINE
 from ..redaction import clean_text
 
 GROUND_EXTRA_MAX = 2000
-SWITCHES = ("grounding", "short_answers", "usage_care", "notes", "questions")
+SWITCHES = ("grounding", "short_answers", "usage_care", "notes", "questions", "decisions")
 DEFAULTS = {"grounding": True, "short_answers": True, "usage_care": True, "notes": True, "questions": True,
-            "extra": ""}
+            "decisions": True, "extra": ""}
+TEXT_SWITCHES = ("grounding", "short_answers", "usage_care", "notes", "questions")  # the switches with a rule text
 
 GROUNDING = (
     "co-orchestrator grounding rule:\n"
@@ -130,9 +135,10 @@ def validate(value) -> dict:
 
 
 def included(cfg: dict) -> list[str]:
-    """The names of the rules that are on (``extra`` when it holds text)."""
+    """The names of the rules that are on (``extra`` when it holds text); the worker adds ``decisions`` when it
+    appends the index."""
     cfg = normalized(cfg)
-    return [k for k in SWITCHES if cfg[k]] + (["extra"] if cfg["extra"].strip() else [])
+    return [k for k in TEXT_SWITCHES if cfg[k]] + (["extra"] if cfg["extra"].strip() else [])
 
 
 def main_text(cfg: dict) -> str:

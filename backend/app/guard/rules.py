@@ -96,6 +96,13 @@ Policy (a dict, as written by the worker into ``policy.json``)::
                                            #   missing: the data line unless trust is own)
       "compact": true,                     #   false: no handoff re-injection after a compaction
                                            #   (missing or malformed means true)
+      "decisions": [{"n": 12, "kind": "decision", "title": str, "why": str, "see": str,
+                     "touches": [str], "decided_at": "YYYY-MM-DD"}],
+                                           #   an own project's active decisions (phase 4a):
+                                           #   the hook shows the ones covering the file an
+                                           #   allowed Edit/Write is about to change, as
+                                           #   context only; never read here
+      "decisions_index": "...",            #   their short index, re-added after a compaction
       "env_paths": {"CO_POLICY_FILE": "/abs/...", "CO_TASK_DIR": "/abs/...",
                     "CLAUDE_CONFIG_DIR": "/abs/...", "CLAUDE_PLUGIN_ROOT": "/abs/..."}
                                            #   values of the agent's env vars that

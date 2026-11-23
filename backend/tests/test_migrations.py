@@ -12,7 +12,7 @@ from sqlalchemy.orm import Session
 from app import models
 from app.database import _alembic_cfg, _baseline_metadata, run_migrations
 
-HEAD = "0010"  # the latest revision
+HEAD = "0011"  # the latest revision
 
 
 def _tables(db) -> set[str]:

@@ -209,6 +209,8 @@ class Project(Base):
     # Token care (phase 3b): context size (tokens) at which a step is handed to a
     # fresh session; null = off. Allowed 50000-900000.
     fresh_session_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    # High-water mark of recorded decision numbers (phase 4a); never decreases.
+    decision_seq: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
 
 
@@ -391,6 +393,36 @@ class RunAsk(Base):
     model: Mapped[str | None] = mapped_column(String(64), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
     answered_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class ProjectDecision(Base):
+    """A recorded project decision (phase 4a): D-<number>, naming the files it touches.
+    kind decision | rule | lesson | reference; status active | retired | superseded.
+    `version` is an optimistic lock."""
+
+    __tablename__ = "project_decisions"
+    __table_args__ = (
+        UniqueConstraint("project_id", "number", name="uq_project_decisions_project_number"),
+        Index("ix_project_decisions_project_id_status", "project_id", "status"),
+    )
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=_uuid)
+    project_id: Mapped[str] = mapped_column(ForeignKey("projects.id", ondelete="CASCADE"), index=True)
+    number: Mapped[int] = mapped_column(Integer)
+    kind: Mapped[str] = mapped_column(String(12), default="decision", server_default="decision")
+    title: Mapped[str] = mapped_column(String(200))
+    why: Mapped[str] = mapped_column(Text, default="", server_default="")
+    see: Mapped[str | None] = mapped_column(String(300), nullable=True)
+    touches: Mapped[list] = mapped_column(JSON, default=list, server_default="[]")
+    decided_by: Mapped[str | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
+    decided_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+    last_verified_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+    source: Mapped[str] = mapped_column(String(300), default="", server_default="")
+    status: Mapped[str] = mapped_column(String(12), default="active", server_default="active")
+    superseded_by: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    version: Mapped[int] = mapped_column(Integer, default=1, server_default="1")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now, onupdate=_now)
 
 
 class ActionGrant(Base):

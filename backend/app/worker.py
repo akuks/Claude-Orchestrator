@@ -549,6 +549,9 @@ class WorkerManager:
         if superpowers:
             main_text = "\n\n".join(filter(None, [main_text, ground_rules.PRECEDENCE_LINE]))
             included.append("precedence")
+        if guard_inputs.decisions_index:  # phase 4a: the project's decision index, after the ground rules
+            main_text = "\n\n".join(filter(None, [main_text, guard_inputs.decisions_index]))
+            included.append("decisions")
         system_prompt = "\n\n".join(filter(None, [system_prompt, guard_inputs.data_line, main_text]))
         await emit("ground_rules", {"included": included})
 
@@ -1543,23 +1546,30 @@ class WorkerManager:
 
     @staticmethod
     def _new_usage_spool() -> dict:
-        return {"offset": 0, "pending": [], "lock": asyncio.Lock()}
+        return {"offset": 0, "pending": [], "notes": [], "lock": asyncio.Lock()}
 
     async def _ingest_usage_spool(self, task_id: str, emit) -> None:
         """co-guard's token-care spool lines since the last read (by byte offset, so each complete line once,
         whether read live by the heartbeat or at the final ingest): ``injected`` chars -> the live tracker,
         each ``band`` -> a ``usage_band`` event {band, value} and a TaskUsage.bands entry {band, ts}, at most
         once per band name (the row decides). With no live state (a crashed run's recovery) the whole spool
-        is read and only bands are recorded. Never raises."""
+        is read and only bands are recorded. Each ``decisions`` nudge -> a ``decision_note`` event {ids, path}
+        (live state only: a recovery's re-read would repeat the ones already shown). Never raises."""
+        live = task_id in self._usage_spool
         state = self._usage_spool.get(task_id) or self._new_usage_spool()
         async with state["lock"]:
             try:
                 self._read_usage_lines(task_id, state, self._usage.get(task_id))
+                if not live:
+                    state["notes"].clear()
                 while state["pending"]:
                     band, value, ts = state["pending"][0]
                     if await self._record_band(task_id, band, ts):
                         await emit("usage_band", {"band": band, "value": value})
                     state["pending"].pop(0)
+                while state["notes"]:  # phase 4a: decisions co-guard showed before an edit
+                    await emit("decision_note", state["notes"][0])
+                    state["notes"].pop(0)
             except Exception as e:  # noqa: BLE001 - usage bookkeeping never stops a run
                 log.warning("usage: band ingest failed for %s: %s", task_id, e)
 
@@ -1570,6 +1580,10 @@ class WorkerManager:
     @classmethod
     def _read_usage_lines(cls, task_id: str, state: dict, tracker) -> None:
         for rec in cls._spool_new_lines(guard_runtime.task_dir(task_id) / guard_runtime.SPOOL_NAME, state):
+            if rec.get("nudge") == "decisions":
+                note = cls._decision_note(rec)
+                if note is not None:
+                    state.setdefault("notes", []).append(note)
             band = rec.get("band")
             if band is not None and band not in cls.USAGE_BANDS:
                 continue  # not a record co-guard writes
@@ -1579,6 +1593,19 @@ class WorkerManager:
                 value, ts = rec.get("value"), rec.get("ts")
                 state["pending"].append((band, value if cls._finite(value) else None,
                                          float(ts) if cls._finite(ts) else None))
+
+    @staticmethod
+    def _decision_note(rec: dict) -> dict | None:
+        """co-guard's ``decisions`` nudge line -> the ``decision_note`` payload ``{ids, path}`` (None when it is
+        not one co-guard writes)."""
+        ids = rec.get("ids")
+        if not isinstance(ids, list):
+            return None
+        ids = [i for i in ids if isinstance(i, int) and not isinstance(i, bool) and i > 0][:3]
+        path = rec.get("path")
+        if not ids or not isinstance(path, str):
+            return None
+        return {"ids": ids, "path": path[:300]}
 
     @staticmethod
     async def _record_band(task_id: str, band: str, ts) -> bool:

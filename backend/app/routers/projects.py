@@ -26,7 +26,7 @@ from ..guard import custom as guard_custom
 from ..guard import policy_store
 from ..guard import trust as guard_trust
 from ..resume import gitfacts
-from ..models import ActionRule, McpServer, Project, ProjectMember, Task, TaskSummary, Team, User, UserCredential
+from ..models import ActionRule, McpServer, Project, ProjectDecision, ProjectMember, Task, TaskSummary, Team, User, UserCredential
 from ..schemas import (
     MemberIn,
     MemberOut,
@@ -538,6 +538,7 @@ async def delete_project(project_id: str, request: Request):
         project = await _get_or_404(s, project_id)
         await s.execute(delete(ProjectMember).where(ProjectMember.project_id == project_id))
         await s.execute(delete(ActionRule).where(ActionRule.project_id == project_id))
+        await s.execute(delete(ProjectDecision).where(ProjectDecision.project_id == project_id))
         await s.delete(project)
         await s.commit()
 

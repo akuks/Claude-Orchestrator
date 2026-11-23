@@ -32,7 +32,10 @@ remote's lazy fetch of a missing object), so every such call goes through
   ``--porcelain=v1 -z --untracked-files=all --no-renames`` (any order, nothing
   else), ``merge-base --is-ancestor <hex> <hex>``, ``symbolic-ref -q --short
   HEAD``, and for ``log``/``rev-list`` positional revisions that are ``HEAD``,
-  a hex sha or ``<hex>..<hex>`` (hex is 7-40 lowercase digits).
+  a hex sha or ``<hex>..<hex>`` (hex is 7-40 lowercase digits);
+* the decision health check's two reads: ``ls-files`` with exactly ``-co
+  --exclude-standard -z`` (any order, nothing else), and ``log`` with
+  ``--name-only`` and ``--since=<date>`` (both in ``ALLOWED_LOG_OPTIONS``).
 
 It only reads metadata. Commands that need the network or write (clone,
 fetch, push, checkout ...) are refused; they are out of scope here.
@@ -92,8 +95,9 @@ class GitResult:
 
 # log / rev-list options a caller may pass (exact, or a prefix ending in "=").
 ALLOWED_LOG_OPTIONS = ("--all", "-i", "--fixed-strings", "--no-merges", "--count", "--max-count=", "--format=",
-                       "--author=")
+                       "--author=", "--name-only", "--since=")
 
+LS_FILES_OPTIONS = ("-co", "--exclude-standard", "-z")
 STATUS_OPTIONS = ("--porcelain=v1", "-z", "--untracked-files=all", "--no-renames")
 _HEX = r"[0-9a-f]{7,40}"
 _REV_RE = re.compile(rf"^(HEAD|{_HEX}(\.\.{_HEX})?)$")
@@ -114,6 +118,8 @@ def check_args(args) -> None:
     if cmd == "for-each-ref" and all(a.startswith(("--count=", "--format=", "refs/")) for a in rest):
         return
     if cmd == "status" and sorted(rest) == sorted(STATUS_OPTIONS):
+        return
+    if cmd == "ls-files" and sorted(rest) == sorted(LS_FILES_OPTIONS):
         return
     if cmd == "merge-base" and len(rest) == 3 and rest[0] == "--is-ancestor" and all(_SHA_RE.match(a) for a in rest[1:]):
         return

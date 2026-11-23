@@ -768,6 +768,79 @@ Live steering of a running session is not part of this phase.
 
 ---
 
+## Decision memory
+
+Phase 4a of the forge port. A project can keep a short list of decisions its
+agents should respect: *we use X, never touch Y, here is why*. Each gets a
+number (`D-001`, `D-002`, … never reused) and can name the files it covers.
+Open it in a project's drawer, on the **Decisions** tab.
+
+**What an entry holds.** A kind (`decision`, `rule`, `lesson` or `reference`),
+a title (200 characters), a *why* (2 000), up to 20 *touches* (file paths or
+globs such as `src/billing/**`, relative to the project, 300 characters each),
+a *source* (300) and, for a `reference`, a *see* path in the project (a
+reference must have one; the other kinds must not). Texts are cleaned and
+redacted when saved (common secret shapes only, see
+[Seatbelt limits](#seatbelt-limits)).
+
+**Who can read and edit.** Anyone who can see the project reads; project
+maintainers (and admins) add, edit, verify, retire and supersede. Agent tokens
+have no access. Verify, retire, supersede and edit only work on an *active*
+decision (409 otherwise); an edit made on a stale copy is refused with 409
+*changed by someone else, reload*. A decision is retired or superseded, never
+deleted. Adding a decision counts as verifying it.
+
+**When agents see notes.** Only on an *own* project, only when the
+`decisions` ground-rules switch is on, and only for the project's active
+decisions as they were when the run started (a decision added mid-run is not
+seen by that run). co-guard shows notes right before an agent edits a file with
+`Edit`, `Write`, `MultiEdit` or `NotebookEdit`, when the file matches a
+decision's touches (an exact path, a folder, or a glob). Edits made through the
+shell (`sed`, `echo >`, and so on) get **no** notes. Each note is the title, the
+kind and date, the why, and the see path. At most 3 notes per edit, most
+specific match first (exact, then folder, then glob), then newest, and a
+decision is shown **once per conversation and per helper**; after a context
+compaction they can be shown again. The notes are data, not orders, and tell the
+agent: if the change would contradict one, do not make it, file a question with
+your recommendation and end the turn. Each showing is logged on the run as
+*Showed D-012, D-015 before editing path*.
+
+**The run-start index.** The same runs also get a short index (the header, then
+one-line `D-n title` lines, at most 150 words and 1500 characters, with "and N
+more" when cut) added to the
+system prompt after the ground rules and again after a context compaction. At
+most the 200 newest active decisions are considered.
+
+**Health.** The tab checks the active decisions against the project folder
+with two read-only git calls: a touches entry that matches no file, a missing
+*see* path, files a decision covers that were changed in commits after it was
+last verified (count and up to 3 commit subjects), and a decision with no
+touches not verified for 30 days. **Verify** clears the "changed since" and
+"not verified" flags; an unmatched touches entry or a missing see path needs an
+edit. The panel is hidden
+when all is well. It shows a note instead when the folder is missing, git
+fails, or the project has more than 200 000 files; a project with no folder has
+no health.
+
+**Make this a rule.** For a decision, this opens the project's guard rule
+editor pre-filled with a *never* rule that matches a path (a plain text match;
+the editor offers text or regex), the first touches entry without wildcards
+(a trailing `/**` or `/*` dropped), and the reason `D-012 title`. If no entry
+qualifies the pattern is blank. Nothing is saved until a maintainer reviews it.
+
+**The `decisions` switch.** **Agent guard → Ground rules** has a *Decisions*
+switch, on by default. Off, runs get no notes and no index. It adds no rule
+text of its own.
+
+**Limits.** 200 active decisions are used per run; 20 touches per decision; a
+glob pattern may be 300 characters with at most 30 `*` or `?`; notes are
+capped at 2 000 characters in all.
+
+**Not for external projects.** On a project whose trust is not *own*, agents
+get no notes and no index (the people on it can still keep the list).
+
+---
+
 ## REST API
 
 Full interactive docs at `/docs`. Highlights:
@@ -787,6 +860,10 @@ Full interactive docs at `/docs`. Highlights:
 | `GET` | `/questions` | Questions you can see (`?status=open\|answered\|dismissed\|all`, default `open`) |
 | `POST` | `/questions/{id}/answer` · `/dismiss` | Answer (`{"answer": …}` or `{"accept": true}`) and continue the thread / close it |
 | `GET` · `POST` | `/tasks/{id}/asks` | Your private asks on a step (newest 20) / ask a question about the run (202; 409, 422, 429 limits) |
+| `GET` · `POST` | `/projects/{id}/decisions` | Decisions (`?status=active\|all`, `?kind=`) / add one (maintainer) |
+| `GET` · `PATCH` | `/projects/{id}/decisions/{n}` | One decision / edit it (send its `version`; 409 when stale or not active) |
+| `POST` | `/projects/{id}/decisions/{n}/verify` · `/retire` · `/supersede` | Mark checked / retire / supersede (`{"by": n}`) |
+| `GET` | `/projects/{id}/decisions/health` | Which active decisions may be out of date |
 | `GET` | `/handoffs/open` | Threads to pick up again (Home) |
 | `DELETE` | `/tasks/{id}` | Delete a task (or thread); cleans sandbox workspace |
 | `GET` | `/tasks/{id}/report?format=pdf\|docx` | Download the result as PDF / DOCX |
