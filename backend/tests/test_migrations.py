@@ -12,7 +12,7 @@ from sqlalchemy.orm import Session
 from app import models
 from app.database import _alembic_cfg, _baseline_metadata, run_migrations
 
-HEAD = "0015"  # the latest revision
+HEAD = "0016"  # the latest revision
 
 
 def _tables(db) -> set[str]:
@@ -511,3 +511,51 @@ def test_migration_0015_upgrade_downgrade(scratch_url):
         return sc.exec_driver_sql("SELECT version_num FROM alembic_version").scalar()
 
     assert _inspect(url, check_down) == "0014"
+
+
+def test_migration_0016_upgrade_downgrade(scratch_url):
+    from alembic import command
+
+    url = scratch_url
+    command.upgrade(_alembic_cfg(url), "0015")
+
+    def old_rows(sc, insp):  # rows from before 0016
+        sc.exec_driver_sql(
+            "INSERT INTO projects (id, name, slug, directory, default_model, env, memory, memory_enabled,"
+            " archived, auto_review_prs, created_at, launch_seq) VALUES ('p16', 'old', 'old', '/x', 'sonnet', '{}', '',"
+            " true, false, false, CURRENT_TIMESTAMP, 0)")
+        sc.exec_driver_sql(
+            "INSERT INTO tasks (id, title, prompt, status, priority, tags, model, max_turns, attempt, allow_remote,"
+            " read_only, requires_approval, risk, created_at) VALUES ('t16', 't', 'p', 'completed', 'normal', '[]',"
+            " '', 25, 0, true, false, false, 'info', CURRENT_TIMESTAMP)")
+        sc.exec_driver_sql(
+            "INSERT INTO project_launches (project_id, critical_paths, version, updated_at)"
+            " VALUES ('p16', '[]', 1, CURRENT_TIMESTAMP)")
+
+    _inspect(url, old_rows)
+    command.upgrade(_alembic_cfg(url), "0016")
+
+    def check(sc, insp):
+        assert "outputs" in {c["name"] for c in insp.get_columns("tasks")}
+        assert "budget_usd" in {c["name"] for c in insp.get_columns("workflows")}
+        assert "budget_usd" in {c["name"] for c in insp.get_columns("workflow_runs")}
+        assert "raise_risk" in {c["name"] for c in insp.get_columns("project_launches")}
+        return sc.exec_driver_sql("SELECT version_num FROM alembic_version").scalar()
+
+    assert _inspect(url, check) == "0016"
+
+    def old_read(sc, insp):
+        return (sc.exec_driver_sql("SELECT outputs FROM tasks WHERE id='t16'").scalar(),
+                bool(sc.exec_driver_sql("SELECT raise_risk FROM project_launches WHERE project_id='p16'").scalar()))
+
+    assert _inspect(url, old_read) == (None, False)
+    command.downgrade(_alembic_cfg(url), "0015")
+
+    def check_down(sc, insp):
+        assert "outputs" not in {c["name"] for c in insp.get_columns("tasks")}
+        assert "budget_usd" not in {c["name"] for c in insp.get_columns("workflows")}
+        assert "budget_usd" not in {c["name"] for c in insp.get_columns("workflow_runs")}
+        assert "raise_risk" not in {c["name"] for c in insp.get_columns("project_launches")}
+        return sc.exec_driver_sql("SELECT version_num FROM alembic_version").scalar()
+
+    assert _inspect(url, check_down) == "0015"

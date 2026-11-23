@@ -1,6 +1,10 @@
 """Stage kinds and save-time validation for gate and approval stages."""
 
-from ..models import Project
+import re
+
+from sqlalchemy import select
+
+from ..models import Agent, Project
 from ..redaction import clean_text
 from . import preflight
 
@@ -30,6 +34,53 @@ def check_command(cmd: str) -> str:
         if tok in out:
             raise ValueError(f"a command cannot contain {label}")
     return out
+
+
+_OUTPUT_NAME = re.compile(r"^[a-z][a-z0-9_]{0,39}$")
+
+
+def _outputs(item: dict, name: str) -> list[str] | None:
+    outs = item.get("outputs")
+    if outs is None or outs == []:
+        return None
+    if not isinstance(outs, list) or len(outs) > 10:
+        raise ValueError(f"Step '{name}': an item declares at most 10 outputs")
+    seen = set()
+    for o in outs:
+        if not isinstance(o, str) or not _OUTPUT_NAME.match(o):
+            raise ValueError(
+                f"Step '{name}': output name {o!r} must be 1 to 40 characters: a lowercase letter, "
+                "then lowercase letters, digits or _")
+        if o in seen:
+            raise ValueError(f"Step '{name}': output name '{o}' is repeated")
+        seen.add(o)
+    return list(outs)
+
+
+async def _fix(s, st: dict, name: str) -> dict | None:
+    fix = st.get("fix")
+    if fix is None:
+        return None
+    if not isinstance(fix, dict):
+        raise ValueError(f"Step '{name}': fix must be an agent and a number of rounds")
+    ref = fix.get("agent")
+    if not isinstance(ref, str) or not ref.strip():
+        raise ValueError(f"Step '{name}': fix needs an agent")
+    rounds = fix.get("rounds", 1)
+    if isinstance(rounds, bool) or not isinstance(rounds, int) or not 1 <= rounds <= 3:
+        raise ValueError(f"Step '{name}': fix rounds must be a whole number from 1 to 3")
+    agents = (await s.execute(select(Agent).where((Agent.id == ref) | (Agent.name == ref)))).scalars().all()
+    if not agents:
+        raise ValueError(f"Step '{name}': unknown fix agent {ref}")
+    by_id = [a for a in agents if a.id == ref]
+    agent = by_id[0] if by_id else (agents[0] if len(agents) == 1 else None)
+    if agent is None:
+        raise ValueError(f"Step '{name}': fix agent name {ref} is ambiguous, use its id")
+    if not agent.project_id:
+        raise ValueError(f"Step '{name}': fix agent {ref} has no project")
+    if agent.project_id != st.get("project"):
+        raise ValueError(f"Step '{name}': fix agent {ref} belongs to another project")
+    return {"agent": ref, "rounds": rounds}
 
 
 def _before(st: dict, name: str) -> list[str]:
@@ -73,6 +124,21 @@ async def validate_stages(s, stages: list[dict]) -> list[dict]:
                 raise ValueError(f"Step '{name}': an agent step needs at least one item")
             if st.get("before") is not None:
                 st["before"] = _before(st, name)
+            ar = st.pop("auto_retry", None)
+            if ar is not None and not isinstance(ar, bool):
+                raise ValueError(f"Step '{name}': auto_retry must be true or false")
+            if ar:
+                st["auto_retry"] = True
+            items = []
+            for item in st["items"]:
+                item = dict(item)
+                outs = _outputs(item, name)
+                item.pop("outputs", None)
+                if outs:
+                    item["outputs"] = outs
+                items.append(item)
+            st["items"] = items
+            st.pop("fix", None)
             out.append(st)
             continue
         st["kind"] = kind
@@ -101,6 +167,10 @@ async def validate_stages(s, stages: list[dict]) -> list[dict]:
                 project=await _project(s, st, name, True),
             )
             st.pop("message", None)
+            fix = await _fix(s, st, name)
+            st.pop("fix", None)
+            if fix:
+                st["fix"] = fix
         else:
             msg = st.get("message")
             msg = "" if msg is None else clean_text(msg)
@@ -111,5 +181,8 @@ async def validate_stages(s, stages: list[dict]) -> list[dict]:
             for k in ("run", "retry", "timeout_min"):
                 st.pop(k, None)
         st.pop("items", None)
+        st.pop("auto_retry", None)
+        if kind != "gate":
+            st.pop("fix", None)
         out.append(st)
     return out

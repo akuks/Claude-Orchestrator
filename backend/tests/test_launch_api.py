@@ -138,7 +138,7 @@ def test_version_conflict(world):
     assert r.status_code == 409 and r.json()["detail"] == STALE
     # PUT: first write creates, later ones need the version
     d = m.put(w["base"], json={"launch_date": "2027-03-01", "critical_paths": ["a/**", "./b//c.py"]}).json()
-    assert d["launch"] == {"launch_date": "2027-03-01", "critical_paths": ["a/**", "b/c.py"], "version": 1}
+    assert d["launch"] == {"launch_date": "2027-03-01", "critical_paths": ["a/**", "b/c.py"], "raise_risk": False, "version": 1}
     r = m.put(w["base"], json={"critical_paths": [], "version": 5})
     assert r.status_code == 409 and r.json()["detail"] == STALE
     assert m.put(w["base"], json={"critical_paths": []}).status_code == 409  # version required now

@@ -237,7 +237,8 @@ async def create_workflow(payload: WorkflowCreate, request: Request):
     async with SessionLocal() as s:
         stages = await _normalize(s, stages)
         await _validate_agents(s, stages)
-        wf = Workflow(name=payload.name, description=payload.description, stages=stages, created_by=request.state.principal.user.id)
+        wf = Workflow(name=payload.name, description=payload.description, stages=stages, budget_usd=payload.budget_usd,
+                      created_by=request.state.principal.user.id)
         s.add(wf)
         await s.commit()
         await s.refresh(wf)
@@ -295,6 +296,7 @@ async def run_workflow(workflow_id: str, payload: WorkflowRunCreate, request: Re
             name=wf.name,
             input=payload.input,
             stages=wf.stages,
+            budget_usd=wf.budget_usd,
             status="pending",
             current_stage=0,
             created_by=request.state.principal.user.id,

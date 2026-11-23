@@ -75,6 +75,7 @@ class Task(Base):
     stage_index: Mapped[int | None] = mapped_column(Integer, nullable=True)
     # Which attempt of the stage this task belongs to (gate retries, phase 5a).
     stage_attempt: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
+    outputs: Mapped[dict | None] = mapped_column(JSON(none_as_null=True), nullable=True)  # typed outputs (phase 5c)
     # The launch-list item this task is linked to (phase 5b); same project as the task.
     launch_item_id: Mapped[str | None] = mapped_column(
         ForeignKey("launch_items.id", ondelete="SET NULL"), nullable=True, index=True)
@@ -447,6 +448,7 @@ class ProjectLaunch(Base):
     project_id: Mapped[str] = mapped_column(ForeignKey("projects.id", ondelete="CASCADE"), primary_key=True)
     launch_date: Mapped[date | None] = mapped_column(Date, nullable=True)
     critical_paths: Mapped[list] = mapped_column(JSON, default=list, server_default="[]")
+    raise_risk: Mapped[bool] = mapped_column(Boolean, default=False, server_default=false())
     version: Mapped[int] = mapped_column(Integer, default=1, server_default="1")
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now, onupdate=_now)
 
@@ -734,6 +736,7 @@ class Workflow(Base):
     name: Mapped[str] = mapped_column(String(200))
     description: Mapped[str | None] = mapped_column(String(500), nullable=True)
     stages: Mapped[list] = mapped_column(JSON, default=list)
+    budget_usd: Mapped[float | None] = mapped_column(Float, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
 
 
@@ -751,6 +754,7 @@ class WorkflowRun(Base):
     status: Mapped[str] = mapped_column(String(16), default="pending")
     current_stage: Mapped[int] = mapped_column(Integer, default=0)
     stages: Mapped[list] = mapped_column(JSON, default=list)  # snapshot at run time
+    budget_usd: Mapped[float | None] = mapped_column(Float, nullable=True)  # snapshot of the workflow budget
     # Projects the run's stages target (snapshot at run time), used for visibility.
     project_ids: Mapped[list] = mapped_column(JSON, default=list)
     # Per-stage timing, keyed by str(stage_index): {"started_at", "finished_at"} iso strings (phase 5a).
