@@ -227,6 +227,10 @@ def test_parse_items():
     many = p(json.dumps([{"title": "A", "why": "w", "touches": [f"src/f{i}.py" for i in range(25)]}]), limit=2)
     assert len(many[0]["touches"]) <= 20
     assert p("not json", limit=2) == []
+    raw = p('[{"title":"t\nx","why":"w"}]', limit=2)
+    assert len(raw) == 1 and "\n" not in raw[0]["title"]
+    pro = p('Here: [{"title":"t\nx","why":"w"}] ok', limit=2)
+    assert len(pro) == 1 and "\n" not in pro[0]["title"]
     assert p('see [1] and [{"title":"A","why":"w"}]', limit=2)[0]["title"] == "A"
     assert p("[1, 2] only", limit=2) == []
     assert p("[" * 50000 + '[{"title":"A","why":"w"}]', limit=2) == []

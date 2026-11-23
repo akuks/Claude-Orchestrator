@@ -540,3 +540,19 @@ def test_answer_without_flag_has_null_suggestion(client, admin_id, submitted):
     r = client.post(f"/questions/{qid}/answer", json={"answer": "yes"})
     assert r.status_code == 201 and r.json()["suggestion"] is None
     assert _proposals(proj["id"]) == []
+
+
+def test_answer_suggestion_unexpected_error_is_logged(client, admin_id, submitted, monkeypatch, caplog):
+    from app.decisions import proposals as proposals_mod
+
+    async def boom(*a, **k):
+        raise RuntimeError("db exploded")
+
+    monkeypatch.setattr(proposals_mod, "add", boom)
+    proj, tid = _project_task(client, admin_id)
+    qid = client.post(f"/tasks/{tid}/questions", json=Q).json()["id"]
+    with caplog.at_level("WARNING", logger="app.routers.questions"):
+        r = client.post(f"/questions/{qid}/answer", json={"answer": "secret-ish", "suggest_decision": True})
+    assert r.status_code == 201 and r.json()["suggestion"] == "skipped: could not add the suggestion"
+    assert any(qid in m and "db exploded" in m for m in caplog.messages)
+    assert not any("secret-ish" in m for m in caplog.messages)

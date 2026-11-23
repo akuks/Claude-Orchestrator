@@ -139,3 +139,26 @@ def test_close_route_starts_lessons(client, monkeypatch):
     while not calls and time.time() < end:
         time.sleep(0.05)
     assert calls == [(tid, me)]
+
+
+def test_close_already_closed_does_not_start_lessons(client, monkeypatch):
+    calls = []
+
+    async def rec(root_id, closer_id):
+        calls.append((root_id, closer_id))
+
+    monkeypatch.setattr(after_run, "lessons_after_close", rec)
+    me = client.get("/auth/me").json()["id"]
+    tid = uuid.uuid4().hex
+
+    async def go():
+        async with SessionLocal() as s:
+            s.add(Task(id=tid, prompt="p", title="t", root_id=tid, created_by=me, status="completed"))
+            s.add(TaskHandoff(root_id=tid, text="h", status="closed"))
+            await s.commit()
+
+    _run(go())
+    assert client.post(f"/tasks/{tid}/handoff/close").status_code == 200
+    import time
+    time.sleep(0.5)
+    assert calls == []

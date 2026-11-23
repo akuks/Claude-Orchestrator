@@ -37,6 +37,25 @@ def test_worker_starts_after_task(client, monkeypatch):
     assert done["created_by"] and calls[0][1] == done["created_by"]
 
 
+def test_after_task_job_is_held_while_running(client, monkeypatch):
+    from app import worker as worker_mod
+    seen = []
+
+    async def rec(task_id, owner_id, emit=None):
+        seen.append(any(not j.done() for j in worker_mod._AFTER_JOBS))
+
+    monkeypatch.setattr(after_run, "after_task", rec)
+    p = _project(client)
+    r = client.post("/tasks", json={"prompt": "go", "project_id": p["id"]})
+    wait_task(client, r.json()["id"])
+    _wait_calls(seen, 1)
+    assert seen == [True]
+    end = time.time() + 3
+    while worker_mod._AFTER_JOBS and time.time() < end:
+        time.sleep(0.05)
+    assert not worker_mod._AFTER_JOBS
+
+
 def test_worker_skips_after_task_on_failure(client, monkeypatch):
     calls = []
 

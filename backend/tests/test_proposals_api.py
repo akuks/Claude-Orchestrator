@@ -117,6 +117,21 @@ def test_person_proposal_roles(world):
     assert w["contrib"].post(f"{w['base']}/proposals", json={"title": "  "}).status_code == 422
 
 
+def test_accept_empty_evidence_source(world):
+    w = world
+    pid_ = _seed(w["pid"], 1, evidence="")[0]
+    r = w["maint"].post(f"{w['base']}/proposals/{pid_}/accept", json=_body())
+    assert r.status_code == 201, r.text
+    assert r.json()["source"] == "suggestion"
+
+
+def test_person_route_needs_project_role(world):
+    w = world
+    t = _task(w["out"].user_id, w["pid"])  # the creator sees it but has no project role
+    r = w["out"].post(f"/tasks/{t}/decision-proposals", json={"title": "x"})
+    assert r.status_code == 403, r.text
+
+
 def test_accept_creates_decision(world):
     w = world
     pid_ = _seed(w["pid"], 1, evidence="commits a1b2c3d")[0]
