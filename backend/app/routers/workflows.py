@@ -11,6 +11,7 @@ from ..access import (
 from ..auth import ensure_admin
 from ..database import SessionLocal
 from ..constants import Status
+from ..gates import spec
 from ..models import Agent, Task, Workflow, WorkflowRun
 from ..schemas import (
     LiveItemOut,
@@ -103,7 +104,9 @@ async def _validate_agents(s, stages: list) -> None:
     agents = (await s.execute(select(Agent))).scalars().all()
     known = {a.id for a in agents} | {a.name for a in agents}
     for st in stages:
-        for item in st.get("items", []):
+        if spec.stage_kind(st) != "agent":
+            continue
+        for item in st.get("items") or []:
             if item.get("agent") not in known:
                 raise HTTPException(400, f"Unknown agent in stage '{st.get('name')}': {item.get('agent')}")
 
@@ -111,14 +114,27 @@ async def _validate_agents(s, stages: list) -> None:
 async def workflow_projects(s, wf: Workflow) -> list[str]:
     """Distinct non-null project ids of the agents its stages reference
     (each stage item's `agent` is an agent id or exact name)."""
-    refs = {item.get("agent") for st in (wf.stages or []) for item in st.get("items", [])}
+    stages = wf.stages or []
+    refs = {
+        item.get("agent")
+        for st in stages if spec.stage_kind(st) == "agent"
+        for item in st.get("items") or []
+    }
     refs.discard(None)
-    if not refs:
-        return []
-    rows = await s.execute(
-        select(Agent.id, Agent.name, Agent.project_id).where(Agent.project_id.is_not(None))
-    )
-    return sorted({r.project_id for r in rows if r.id in refs or r.name in refs})
+    ids = {st.get("project") for st in stages if spec.stage_kind(st) != "agent" and st.get("project")}
+    if refs:
+        rows = await s.execute(
+            select(Agent.id, Agent.name, Agent.project_id).where(Agent.project_id.is_not(None))
+        )
+        ids |= {r.project_id for r in rows if r.id in refs or r.name in refs}
+    return sorted(ids)
+
+
+async def _normalize(s, stages: list[dict]) -> list[dict]:
+    try:
+        return await spec.validate_stages(s, stages)
+    except ValueError as e:
+        raise HTTPException(422, str(e))
 
 
 def _run_visible(p, run: WorkflowRun, visible) -> bool:
@@ -143,8 +159,9 @@ async def _require_run(s, p, run_id: str, manage: bool = False) -> WorkflowRun:
 @router.post("", response_model=WorkflowOut, status_code=201)
 async def create_workflow(payload: WorkflowCreate, request: Request):
     ensure_admin(request.state.principal)
-    stages = [st.model_dump() for st in payload.stages]
+    stages = [st.model_dump(exclude_unset=True) for st in payload.stages]
     async with SessionLocal() as s:
+        stages = await _normalize(s, stages)
         await _validate_agents(s, stages)
         wf = Workflow(name=payload.name, description=payload.description, stages=stages, created_by=request.state.principal.user.id)
         s.add(wf)
@@ -164,13 +181,12 @@ async def list_workflows():
 async def update_workflow(workflow_id: str, payload: WorkflowUpdate, request: Request):
     ensure_admin(request.state.principal)
     data = payload.model_dump(exclude_unset=True)
-    if "stages" in data:
-        data["stages"] = [st for st in data["stages"]]  # already dicts via model_dump
     async with SessionLocal() as s:
         wf = await s.get(Workflow, workflow_id)
         if wf is None:
             raise HTTPException(404, "Workflow not found")
         if "stages" in data:
+            data["stages"] = await _normalize(s, data["stages"])
             await _validate_agents(s, data["stages"])
         for k, v in data.items():
             setattr(wf, k, v)

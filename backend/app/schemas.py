@@ -594,7 +594,16 @@ class WorkflowStageItem(BaseModel):
 
 class WorkflowStage(BaseModel):
     name: str = Field(min_length=1, max_length=120)
-    items: list[WorkflowStageItem] = Field(min_length=1)
+    # Gate/approval fields are optional here; gates.spec.validate_stages is the
+    # authoritative check (agent stages need items, and so on).
+    items: Optional[list[WorkflowStageItem]] = None
+    kind: Optional[str] = None
+    project: Optional[str] = None
+    run: Optional[list[str]] = None
+    retry: Optional[str] = None
+    before: Optional[list[str]] = None
+    timeout_min: Optional[int] = None
+    message: Optional[str] = None
 
 
 class WorkflowCreate(BaseModel):
