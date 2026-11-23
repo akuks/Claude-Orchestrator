@@ -1011,6 +1011,182 @@ PreToolUse deny reason reaches the model as worded (so it stops and reports rath
 than retrying), and that agents follow the brief text, are unverified until a real
 `claude` run. Run a brief with a CANNOT folder and read the log before relying on it.
 
+## Command gates
+
+Phase 5a of the forge port. A workflow stage can now be a **gate** (the server
+runs commands itself and the real exit code decides) or an **approval** (a person
+clicks). An agent can no longer say "the tests pass" and be believed: a gate has
+no agent in it.
+
+### Gate and approval stages
+
+A stage has an optional `kind`: `agent` (the default, as before), `gate` or
+`approval`. Only admins create or edit workflows, so an admin's save is the step
+where a person approved the exact commands. Starting a run needs contributor on
+the gate's and approval's projects, as for any stage.
+
+| Kind | Fields |
+|---|---|
+| `gate` | `name`, `project` (an existing project with a directory), `run` (1 to 10 commands), `retry` (one command or null), `before` (at most 5 lines), `timeout_min` (1 to 720, default 60, per command) |
+| `approval` | `name`, `message` (at most 2000 characters), optional `project`, `before` |
+
+Agent stages may carry `before` too.
+
+**Command rules** (a 422 on save, with a reason that names the character): 1 to
+500 characters, none of `;` `&` `|` `>` `<` a backtick or `$(`, and no control
+character (newline, NUL ...). One command is one program call, such as
+`pytest -q` or `npm test -- --runInBand`. A shell is only the way to start it:
+`/bin/bash` if it exists, else `/bin/sh`, as `[shell, "-c", cmd]`, never
+`$SHELL` or a PATH lookup.
+
+**How a command runs.** In the project directory, in its own process group,
+stdin `/dev/null`. The environment is built from scratch: the server's allowlisted
+slice, the project's env (blocked keys removed, `PATH_PREPEND` honoured), then
+`CI=1`. It never holds an agent or user credential, an org key, `CO_*`, a task
+token or an ssh agent. `HOME` and git config are private to the gates, so a
+command cannot read the server user's dotfiles. Exit 0 passes. Anything else, a
+timeout or a kill does not. Past `timeout_min` the process group gets SIGTERM,
+then SIGKILL after 5 seconds. Cancelling the run kills it the same way.
+
+### The guard check and Allow and run
+
+Just before each command starts, the gate project's guard policy judges it as a
+`Bash` call. This happens **even if the project's guard is off**, because no one
+watches a gate.
+
+- **Deny:** the gate fails without running: "blocked by the guard: <reason>".
+- **Approve:** the stage waits in `needs_approval` and lists the reasons. A
+  maintainer of the gate's project, or an admin, clicks **Allow and run**
+  (`POST /workflows/runs/{id}/stages/{i}/allow`). The allowance covers this
+  hand-out only; a rerun asks again.
+- If the guard gives no verdict, the gate fails closed.
+
+### Approval stages
+
+The stage starts and the run goes `paused`. Whoever may manage the run (its
+creator, an admin, a maintainer of a touched project) can
+`POST …/stages/{i}/approve`, or `POST …/stages/{i}/reject` with a `reason` of 1 to
+500 characters, which fails the run with that reason. The approver and the time
+are recorded and logged.
+
+### The retry round
+
+A gate with one `run` command may have a different `retry` command (for example
+the failing files only). The round is: run the full command; if it fails, run the
+retry; if the retry fails, the gate fails; if the retry passes, run the full
+command **once more**, and only that full run can pass the gate. One round per
+hand-out, and a retry never completes a gate alone. Commands in `run` run in
+order and the first failure stops the round.
+
+### Pre-flight
+
+`before` lines hold a stage until the machine is ready, instead of failing it.
+Three forms (keywords case-insensitive):
+
+- `free memory <n> GB` or `MB` (GB allows one decimal);
+- `port <n> open` or `free` (1 to 65535);
+- `container <name> running`.
+
+They are checked when the runner would start the stage, and again just before a
+gate's first command. When one is not met, the stage is `held`, not started and
+not failed, with the reason in plain words ("free memory is 2.1 GB, needs 4 GB").
+The run stays `running`, the runner checks again on every tick, and the run log
+says "Step {name} held: waiting for pre-flight". A check that cannot answer
+(memory on a system other than Linux or macOS, no `docker`) counts as not met.
+Checks look at the **whole server**, so the held reason also names other runs
+using the same project that you may see.
+
+### Results, flaky tests and progress
+
+Each command's output goes to `workspaces/_gates/<run id>/<stage>-<n>.log`
+(directories 0700, files 0600, 20 MB cap: past it writing stops and the command
+keeps running). The last 5 logs per stage are kept, and agents cannot read the
+folder (it is a guard protected path). The parser (`app/gates/test_results.py`)
+understands pytest, jest, vitest, mocha, node:test, TAP, Playwright and
+`go test`. The final summary line wins; with none, it counts per-test lines.
+An unknown runner gives no counts and the exit code still decides. One row per
+command goes in `workflow_gate_runs` (outcome, exit code, counts, failing names,
+log name; the last 50 per stage are kept).
+
+**Flaky, never "fixed".** Before each command the server hashes the code state
+(`HEAD`, the diff against it, and the untracked files' names, sizes and times).
+If a full run passes and an earlier full run of the same stage in this run
+failed with a real exit code at the **same** code state, the earlier failing
+names are marked flaky: "flaky (a flaky test is not a fixed test): a, b", or
+"failed then passed unchanged" when the names were unreadable. A changed code
+state, or a run with no exit code, never counts.
+
+**Progress.** While a command runs, the run detail shows "31 of 63 tests done, 0
+failed" (or "31 tests done") from the last 256 KB of the log, refreshed at most
+once per 2 seconds per run. The log tail is at
+`GET /workflows/runs/{id}/gate-runs/{rid}/log` (the last 200 lines, up to 64 KB,
+project env values redacted).
+
+### The cost line and the test chip
+
+When a stage finishes, the run log line ends "So far: 3 of 6 steps done, 41 min,
+$2.10, 1.2M tokens (last: Develop, 18 min, $1.40)". The same line is in the run
+view header. Cost and tokens count every task of the run, every attempt.
+
+**Test chip on agent tasks.** When an agent's `Bash` command looks like a test run
+(`pytest`, `python -m pytest`, `npm test`, `npm run test…`, `yarn test`, `pnpm
+test`, `npx vitest|jest|playwright test`, `vitest`, `jest`, `mocha`, `node
+--test`, `go test`, after any leading `VAR=value` words), the worker parses the
+full result with the same parser. If it finds a runner, the run log shows a line
+such as "Tests: 61 passed, 2 failed (test_a, test_b)", from a `test_result`
+event (counts, at most 10 failing names, the command cut to 200 characters,
+all redacted with the task's secrets). `echo npm test` or `cat pytest.ini` do not
+count. It is a convenience, not a gate: the agent still ran the command.
+
+### Restarts, attempts and visibility
+
+- **Restart.** Live process handles live in the one server process. If the
+  server dies mid-command, nothing is recorded for that command. On the next
+  tick the runner starts again at that command (those that already passed in this
+  hand-out are not rerun) and the run log notes the resume. A result is recorded
+  only if the run is active, the stage is current and the **hand-out** (a new id
+  for each stage start and each retry of the run) is unchanged, so cancel or retry
+  drops a late result.
+- **Attempts.** Retrying a run no longer deletes the failed stage's tasks. They
+  keep their `stage_attempt`, the board shows earlier attempts collapsed, and
+  `{{prev}}`/`{{stageN}}` use the current attempt only.
+- **Honest words.** A gate reads "running `pytest -q` (1 of 3 commands passed)" only
+  while the server has a live child; otherwise "not yet passed (k of n commands
+  passed, none running)".
+- **Hidden from other projects' viewers.** A viewer who cannot see a gate's
+  project still sees the run and that the step exists, but not its commands'
+  records, summary, failing names, hold reasons, flaky names, who allowed it or
+  progress; its log is a 404. A held reason never counts runs the viewer cannot
+  see.
+
+### Hardened git
+
+The code-state hash reads a user's repo, so `gitsafe` gets exactly two new
+entries (`diff --no-ext-diff --no-textconv --binary HEAD` and `ls-files --others
+--exclude-standard -z`) and was hardened for them. Repo-defined **filter
+drivers** (`filter.<name>.clean|smudge|process`) are switched off with `-c`
+before every command, so a `.gitattributes` `filter=` line cannot run a program;
+more than 50 drivers, or a driver name that is not printable ASCII, refuses the
+command. **Submodules** are never entered: `status` and `diff` use
+`--ignore-submodules=dirty` and short submodule diffs, so a submodule's own
+config cannot run anything (a dirty submodule is not reported, only a changed
+gitlink). Gate git also has no ssh keys, no agent and an empty git config. The
+diff is hashed, never stored or shown.
+
+### Not covered
+
+- **Typed stage outputs, automatic retry-once of agent stages and a per-run
+  budget cap** come in phase 5b.
+- **A fix-it loop.** A failed gate fails the run, and **Retry** runs it again; it
+  does not hand the failure back to an agent stage.
+- **Windows.** The shell rule is POSIX only.
+- **A plain `ssh` in a gate.** There are no keys, no agent and no `known_hosts`,
+  so it cannot log in. Use an agent stage or Remote Ops.
+- **Background commands** an agent starts get no live progress.
+- **`{{prev}}`.** A gate or approval stage's summary (counts, failing and flaky
+  names, who approved) is what the next stage's `{{prev}}` holds, so it flows
+  into later agent prompts as text. Treat failing names as untrusted output.
+
 ---
 
 ## REST API
