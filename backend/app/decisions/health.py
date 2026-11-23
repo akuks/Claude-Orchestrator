@@ -18,6 +18,7 @@ MAX_FILES = 200_000
 TOO_LARGE = "repository too large for the health check"
 GIT_TIMEOUT = 10.0
 _QUOTED = re.compile(r'^"(.*)"$')
+_NO_COMMITS = "does not have any commits"  # git log's message (LC_ALL=C) in a repository with no commits yet
 
 
 def _utc(dt: datetime) -> datetime:
@@ -110,6 +111,7 @@ def _compute(project, decisions) -> dict:
         return out
     files = None
     commits: list = []
+    no_commits = False
     ls = gitsafe.run_git(root, "ls-files", "-co", "--exclude-standard", "-z", timeout=GIT_TIMEOUT)
     if not ls.ok:
         out["git_error"] = "git unavailable" if ls.missing else (ls.err or "git failed")[:200]
@@ -125,7 +127,9 @@ def _compute(project, decisions) -> dict:
             since = min(verified).isoformat()
             lg = gitsafe.run_git(root, "log", "--name-only", "--format=%x1e%H%x1f%cI%x1f%s", f"--since={since}",
                                  timeout=GIT_TIMEOUT)
-            if not lg.ok:
+            if not lg.ok and not lg.missing and _NO_COMMITS in (lg.err or ""):
+                no_commits = True  # a fresh repository: the ls-files checks still run, there is no history
+            elif not lg.ok:
                 out["git_error"] = "git unavailable" if lg.missing else (lg.err or "git failed")[:200]
                 files = None
             else:
@@ -162,7 +166,7 @@ def _compute(project, decisions) -> dict:
         see_missing = bool(d.kind == "reference" and d.see and _see_missing(root, d.see))
         changed = None
         unverified = None
-        if touches and git_ok:
+        if touches and git_ok and not no_commits:
             lv = _utc(d.last_verified_at)
             idx = sorted({n for g in set(touches) for n in touching(g) if commits[n][0] > lv})
             subjects = [_subject(commits[n][1]) for n in idx[:MAX_SUBJECTS]]

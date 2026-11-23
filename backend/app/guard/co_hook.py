@@ -258,7 +258,8 @@ CASE_INSENSITIVE = sys.platform in ("darwin", "win32")
 
 
 def _name_match(pat, name):
-    """One name against one pattern segment: ``*`` any run, ``?`` one char. Linear-ish, no backtracking blowup."""
+    """One name against one pattern segment: ``*`` any run, ``?`` one char. No backtracking blowup: at worst
+    O(len(pat) x len(name)), patterns are capped at GLOB_PATTERN_MAX chars (``**`` counts as two wildcards)."""
     p = n = 0
     star = -1
     mark = 0
@@ -933,15 +934,26 @@ def _clear_shown(session_id):
                     pass
 
 
+def _one_line(value):
+    """Cleaned text on one line: every whitespace run (newlines included) becomes one space."""
+    words = (HIDDEN_CHARS.sub("", w) for w in (value if isinstance(value, str) else str(value)).split())
+    return " ".join(w for w in words if w)
+
+
 def _note_block(d):
-    head = f"D-{d['n']:03d} ({d.get('kind') or 'decision'}, {d.get('decided_at') or '?'}): {d.get('title') or ''}"
-    lines = [redact(HIDDEN_CHARS.sub("", head), None)]
+    """One decision under DECISIONS_FRAME. The head and See are one line; Why keeps its non-blank lines, each
+    continuation indented under "  Why:", so no stored text can start a line at column 0."""
+    head = (f"D-{d['n']:03d} ({_one_line(d.get('kind') or 'decision')}, {_one_line(d.get('decided_at') or '?')}): "
+            f"{_one_line(d.get('title') or '')}")
+    lines = [redact(head, None)]
     why = d.get("why")
     if isinstance(why, str) and why.strip():
-        lines.append("  Why: " + redact(HIDDEN_CHARS.sub("", why.strip()), None))
+        why_lines = [x for x in (_one_line(ln) for ln in why.splitlines()) if x]
+        if why_lines:
+            lines.append("  Why: " + "\n    ".join(redact(x, None) for x in why_lines))
     see = d.get("see")
     if d.get("kind") == "reference" and isinstance(see, str) and see.strip():
-        lines.append("  See: " + redact(HIDDEN_CHARS.sub("", see.strip()), None))
+        lines.append("  See: " + redact(_one_line(see), None))
     return "\n".join(lines)
 
 

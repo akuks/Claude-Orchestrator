@@ -70,8 +70,14 @@ def _clean(data: dict, *, partial: bool) -> dict:
 
 
 async def _bump(s, d: ProjectDecision, **values) -> None:
-    await s.execute(update(ProjectDecision).where(ProjectDecision.id == d.id).values(
+    """A lifecycle write that re-checks, in the same UPDATE, that the decision is still active; a concurrent
+    retire/supersede in between leaves no row to update -> 409 INACTIVE."""
+    res = await s.execute(update(ProjectDecision).where(
+        ProjectDecision.id == d.id, ProjectDecision.status == "active").values(
         version=ProjectDecision.version + 1, updated_at=_now(), **values))
+    if res.rowcount != 1:
+        await s.rollback()
+        raise HTTPException(409, INACTIVE)
     await s.commit()
     await s.refresh(d)
 
@@ -119,7 +125,8 @@ async def decisions_health_route(project_id: str, request: Request):
         rows = (await s.execute(select(ProjectDecision).where(
             ProjectDecision.project_id == project_id, ProjectDecision.status == "active")
             .order_by(ProjectDecision.number))).scalars().all()
-        return await decisions_health(project, list(rows))
+        s.expunge_all()  # plain objects from here on: git runs after the session (and its transaction) is closed
+    return await decisions_health(project, list(rows))
 
 
 @router.get("/{number}", response_model=DecisionOut)
@@ -146,11 +153,15 @@ async def patch_decision(project_id: str, number: int, payload: DecisionPatch, r
         if version != d.version:
             raise HTTPException(409, STALE)
         res = await s.execute(update(ProjectDecision).where(
-            ProjectDecision.id == d.id, ProjectDecision.version == version).values(
+            ProjectDecision.id == d.id, ProjectDecision.version == version,
+            ProjectDecision.status == "active").values(
             version=ProjectDecision.version + 1, updated_at=_now(), **data))
         if res.rowcount != 1:
+            did = d.id
             await s.rollback()
-            raise HTTPException(409, STALE)
+            fresh = (await s.execute(select(ProjectDecision.status).where(
+                ProjectDecision.id == did))).scalar_one_or_none()
+            raise HTTPException(409, INACTIVE if fresh != "active" else STALE)
         await s.commit()
         await s.refresh(d)
         return _out(d, await _names(s, [d]))
@@ -189,6 +200,16 @@ async def supersede_decision(project_id: str, number: int, payload: DecisionSupe
         if by is None:
             raise HTTPException(422, f"{display_id(payload.by)} does not exist in this project")
         if by.status != "active":
+            raise HTTPException(422, f"{display_id(payload.by)} is not active")
+        # lock both rows (in number order, so two opposite supersedes cannot deadlock) and re-check them: of
+        # "A by B" and "B by A" running together, the second sees the first's result and is refused
+        locked = (await s.execute(select(ProjectDecision).where(ProjectDecision.id.in_([d.id, by.id]))
+                                  .order_by(ProjectDecision.number).with_for_update()
+                                  .execution_options(populate_existing=True))).scalars().all()
+        status = {x.id: x.status for x in locked}
+        if status.get(d.id) != "active":
+            raise HTTPException(409, INACTIVE)
+        if status.get(by.id) != "active":
             raise HTTPException(422, f"{display_id(payload.by)} is not active")
         await _bump(s, d, status="superseded", superseded_by=by.number)
         return _out(d, await _names(s, [d]))

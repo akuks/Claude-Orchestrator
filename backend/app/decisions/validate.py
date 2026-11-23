@@ -13,6 +13,12 @@ MAX_TITLE, MAX_WHY, MAX_SEE, MAX_SOURCE = 200, 2000, 300, 300
 MAX_TOUCHES, MAX_TOUCH = 20, 300
 _LIMITS = {"title": MAX_TITLE, "why": MAX_WHY, "see": MAX_SEE, "source": MAX_SOURCE}
 _TEXT = ("title", "why", "see", "source")
+_ONE_LINE = ("title", "see", "source")  # one line: every whitespace run (newlines included) becomes one space
+
+
+def one_line(text: str) -> str:
+    """Collapse all whitespace (CR, LF, U+2028/2029, ...) to single spaces, so the text is one line."""
+    return " ".join(text.split())
 
 
 def display_id(number: int) -> str:
@@ -70,7 +76,12 @@ def clean_fields(data: dict, *, partial: bool) -> dict:
     out: dict = {}
     for f in _TEXT:
         if f in data:
-            out[f] = _clean(data[f], f)
+            raw = data[f]
+            if isinstance(raw, str):  # line breaks first: CR and U+2028/2029 are hidden characters to clean_text
+                raw = one_line(raw) if f in _ONE_LINE else "\n".join(raw.splitlines())
+            out[f] = _clean(raw, f)
+            if f in _ONE_LINE:
+                out[f] = one_line(out[f])
             if len(out[f]) > _LIMITS[f]:
                 raise ValueError(f"{f} may be at most {_LIMITS[f]} characters")
     if "title" in out and not out["title"]:

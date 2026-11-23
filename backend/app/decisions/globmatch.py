@@ -11,7 +11,8 @@ CASE_INSENSITIVE = sys.platform in ("darwin", "win32")
 
 
 def _name_match(pat, name):
-    """One name against one pattern segment: ``*`` any run, ``?`` one char. Linear-ish, no backtracking blowup."""
+    """One name against one pattern segment: ``*`` any run, ``?`` one char. No backtracking blowup: at worst
+    O(len(pat) x len(name)), patterns are capped at GLOB_PATTERN_MAX chars (``**`` counts as two wildcards)."""
     p = n = 0
     star = -1
     mark = 0
