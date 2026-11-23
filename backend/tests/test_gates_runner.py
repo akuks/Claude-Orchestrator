@@ -435,7 +435,7 @@ def test_preflight_holds_then_starts(fakes):
         await settle(r)
         run = await _run(rid)
         assert run.status == "running" and run.stage_state["0"]["status"] == "held"
-        assert has(run, "Step Test held: free memory is 1.0 GB, needs 4 GB")
+        assert has(run, "Step Test held: waiting for pre-flight") and not has(run, "1.0 GB")
         await r._advance(rid)  # still not met: one log line, not one per tick
         run = await _run(rid)
         assert sum("held:" in t for t in texts(run)) == 1 and fakes.calls == []
@@ -463,7 +463,7 @@ def test_preflight_holds_agent_stage(fakes, agents):
         await r.start_run(rid)
         assert await _tasks(rid) == []
         run = await _run(rid)
-        assert run.status == "running" and has(run, "Step Dev held: port 5432 is not open")
+        assert run.status == "running" and has(run, "Step Dev held: waiting for pre-flight") and not has(run, "5432")
         fakes.pre = [None]
         await r._advance(rid)
         assert len(await _tasks(rid)) == 1

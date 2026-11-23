@@ -552,7 +552,7 @@ async def get_run(run_id: str, request: Request):
                 lv = live if live and live.get("stage_index") == i else None
                 entry["status_text"] = gate_status_text(st, entry, lv)
             if i in hidden:
-                for k in ("summary", "hits", "reason", "others", "others_more", "flaky"):
+                for k in ("summary", "hits", "reason", "others", "others_more", "flaky", "decided_by"):
                     entry.pop(k, None)
                 entry["hidden"] = True
             elif entry.get("status") == "held" and others is not None:

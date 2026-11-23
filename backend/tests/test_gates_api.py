@@ -168,16 +168,26 @@ def test_held_others_only_visible(client, monkeypatch):
 def test_held_others_more_counts_only_visible(client, monkeypatch):
     pa, pb = _project(client), _project(client)
     rid = _run(pa, state={"0": {"status": "held"}})
+
+    async def both():
+        async with SessionLocal() as s:
+            run = await s.get(WorkflowRun, rid)
+            run.project_ids = [pa, pb]
+            await s.commit()
+
+    asyncio.run(both())
     for i in range(6):
         _run(pa, name=f"vis-{i}")
-    _add(WorkflowRun(workflow_id=uuid.uuid4().hex, name="invisible", status="running",
-                     current_stage=0, project_ids=[pa], stages=[], created_by=None))
+    # shares only pb with the held run: the viewer (member of pa only) cannot see it
+    _run(pb, name="invisible")
     u = _user(client, pa, "contributor")
     _patch(monkeypatch)
     s0 = u.get(f"/workflows/runs/{rid}").json()["stage_state"]["0"]
-    # the viewer sees every run sharing pa, so all 7 are visible: 5 named, 2 more
-    assert len(s0["others"]) == 5 and s0["others_more"] == 2
-    assert pb
+    assert len(s0["others"]) == 5 and s0["others_more"] == 1
+    assert "invisible" not in s0["others"]
+    # an admin sees all 7
+    a = client.get(f"/workflows/runs/{rid}").json()["stage_state"]["0"]
+    assert len(a["others"]) == 5 and a["others_more"] == 2
 
 
 def test_gate_output_hidden_for_other_project(client, monkeypatch):

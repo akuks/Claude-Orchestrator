@@ -194,27 +194,11 @@ async def _preflight(lines) -> str | None:
         return "the pre-flight check could not answer"
 
 
-async def _others_using(s, run) -> int:
-    """How many other active runs touch one of this run's projects (pre-flight is host-wide)."""
-    mine = set(run.project_ids or [])
-    if not mine:
-        return 0
-    others = (
-        await s.execute(
-            select(WorkflowRun.project_ids).where(
-                WorkflowRun.status.in_(list(ACTIVE_RUN)), WorkflowRun.id != run.id
-            )
-        )
-    ).scalars().all()
-    return sum(1 for pids in others if mine & set(pids or []))
-
-
 async def _hold(s, run, i: int, st: dict, reason: str) -> None:
-    others = await _others_using(s, run)
-    if others:
-        reason += f" ({others} other active run{'s use' if others != 1 else ' uses'} the same project)"
+    # The run log is visible to everyone who sees the run: fixed words only. The detail
+    # stays in stage_state.reason (filtered per viewer).
     if st.get("status") != "held" or st.get("reason") != reason:
-        runlog.append(run, f"Step {_stage_name(run, i)} held: {reason}")
+        runlog.append(run, f"Step {_stage_name(run, i)} held: waiting for pre-flight")
     st.update(status="held", reason=reason)
     _put_state(run, i, st)
     if run.status == RUN_PAUSED:
