@@ -3,7 +3,9 @@ pre-flight and names flaky tests. Most tests fake the executor; one runs `true`/
 
 import asyncio
 import dataclasses
+import logging
 import tempfile
+import threading
 import uuid
 from datetime import datetime, timezone
 from types import SimpleNamespace
@@ -13,7 +15,7 @@ from sqlalchemy import select
 
 from app.constants import Status
 from app.database import SessionLocal
-from app.gates import codestate, executor, preflight
+from app.gates import codestate, executor, preflight, totals
 from app.gates.test_results import TestResult
 from app.main import app
 from app.models import Project, Task, WorkflowGateRun, WorkflowRun
@@ -60,6 +62,8 @@ class Fakes:
         item = queue.pop(0) if len(queue) > 1 else queue[0]
         if item == "block":
             await asyncio.Event().wait()
+        if isinstance(item, Exception):
+            raise item
         now = datetime.now(timezone.utc)
         return dataclasses.replace(item, started_at=now, finished_at=now)
 
@@ -602,5 +606,146 @@ def test_real_true_and_false_gate(client, monkeypatch):
         rows = await _rows(bad)
         assert rows[0].outcome == "failed" and rows[0].exit_code == 1 and rows[0].code_state is None
         assert (executor.log_file(bad, 0, 1)).exists()
+
+    asyncio.run(go())
+
+
+# ---------------------------------------------------------------------------
+# Fix round 1: per-run serialization, tick isolation, gate coroutine errors.
+
+
+def test_approve_vs_cancel_cancel_wins(fakes, agents, monkeypatch):
+    real = totals.compute
+    entered, release = None, None
+
+    async def slow(s, run):
+        if not entered.is_set():
+            entered.set()
+            await release.wait()
+        return await real(s, run)
+
+    monkeypatch.setattr(totals, "compute", slow)
+
+    async def go():
+        nonlocal entered, release
+        entered, release = asyncio.Event(), asyncio.Event()
+        rid = await _make_run([{"name": "Sign", "kind": "approval", "message": "", "before": []},
+                               {"name": "After", "items": [{"agent": agents[0], "prompt": "x"}]}])
+        r = WorkflowRunner(FakeWorker(), 999)
+        await r.start_run(rid)
+        approve = asyncio.create_task(r.approve_stage(rid, 0, ANN))
+        await wait_for(entered.is_set)
+        cancel = asyncio.create_task(r.cancel_run(rid))
+        await asyncio.sleep(0.05)
+        assert not cancel.done()  # waits for the run lock
+        release.set()
+        await asyncio.gather(approve, cancel)
+        run = await _run(rid)
+        assert run.status == "failed" and run.current_stage == 0
+        assert await _tasks(rid, 1) == []
+
+    asyncio.run(go())
+
+
+def test_held_tick_vs_cancel_creates_no_tasks(fakes, agents, monkeypatch):
+    fakes.pre = ["port 5432 is not open"]
+
+    async def go():
+        rid = await _make_run([{"name": "Dev", "before": ["port 5432 open"],
+                                "items": [{"agent": agents[0], "prompt": "x"}]}])
+        w = FakeWorker()
+        r = WorkflowRunner(w, 999)
+        await r.start_run(rid)
+        assert (await _run(rid)).stage_state["0"]["status"] == "held"
+        entered, release = asyncio.Event(), asyncio.Event()
+
+        async def slow(lines):
+            entered.set()
+            await release.wait()
+            return None  # now met
+
+        monkeypatch.setattr(preflight, "check", slow)
+        adv = asyncio.create_task(r._advance(rid))
+        await wait_for(entered.is_set)
+        assert await r.cancel_run(rid)  # not blocked: pre-flight runs outside the lock
+        release.set()
+        await adv
+        run = await _run(rid)
+        assert run.status == "failed"
+        assert await _tasks(rid) == [] and w.submitted == []
+
+    asyncio.run(go())
+
+
+def test_gate_record_vs_cancel_is_marked_cancelled(fakes, monkeypatch):
+    started, go_on = threading.Event(), threading.Event()
+
+    def slow_prune(*a, **k):
+        started.set()
+        go_on.wait(5)
+
+    monkeypatch.setattr(executor, "prune_logs", slow_prune)
+
+    async def go():
+        pid = await _project()
+        rid = await _make_run([gate(pid)], [pid])
+        r = WorkflowRunner(FakeWorker(), 999)
+        await r.start_run(rid)
+        await wait_for(started.is_set)  # the command finished; its result is not recorded yet
+        assert await r.cancel_run(rid)
+        go_on.set()
+        await settle(r)
+        rows = await _rows(rid)
+        assert [x.outcome for x in rows] == ["cancelled"]
+        run = await _run(rid)
+        assert run.status == "failed"
+        assert run.stage_state["0"]["status"] == "failed" and run.stage_state["0"]["reason"] == "cancelled"
+        assert has(run, "Step Test (gate) still needs: pytest -q")
+
+    try:
+        asyncio.run(go())
+    finally:
+        go_on.set()
+
+
+def test_tick_isolates_run_errors(fakes, agents, caplog):
+    async def go():
+        bad = await _make_run([{"name": "Dev", "items": [{"agent": agents[0], "prompt": "x"}]}])
+        good = await _make_run([{"name": "Dev", "items": [{"agent": agents[0], "prompt": "x"}]}])
+        r = WorkflowRunner(FakeWorker(), 999)
+        orig = r._advance
+
+        async def adv(rid, first=False):
+            if rid == bad:
+                raise RuntimeError("boom")
+            if rid == good:
+                return await orig(rid, first)
+
+        r._advance = adv
+        with caplog.at_level(logging.ERROR, logger="app.workflow_runner"):
+            await r._tick()
+        assert len(await _tasks(good)) == 1 and (await _run(good)).status == "running"
+        assert any(bad in rec.getMessage() for rec in caplog.records)
+
+    asyncio.run(go())
+
+
+def test_gate_coroutine_error_fails_stage(fakes):
+    fakes.script["explode"] = [RuntimeError("boom")]
+
+    async def go():
+        pid = await _project()
+        rid = await _make_run([gate(pid, run=("explode",))], [pid])
+        r = WorkflowRunner(FakeWorker(), 999)
+        await r.start_run(rid)
+        await settle(r)
+        assert r._gates == {} and r._procs == {}
+        run = await _run(rid)
+        assert run.status == "failed"
+        assert run.stage_state["0"]["status"] == "failed"
+        assert run.stage_state["0"]["reason"] == "the gate could not run: RuntimeError: boom"
+        assert has(run, "Step Test (gate) failed: the gate could not run: RuntimeError: boom")
+        await r._advance(rid)  # nothing is resumed
+        assert fakes.calls == ["explode"]
 
     asyncio.run(go())
