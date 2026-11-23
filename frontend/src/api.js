@@ -35,6 +35,21 @@ async function req(method, path, body) {
   return res.json()
 }
 
+async function reqText(path) {
+  const res = await fetch(path, { headers: { 'X-Requested-With': 'co' }, credentials: 'same-origin' })
+  if (res.status === 401) unauthorizedHandler?.()
+  if (!res.ok) {
+    let detail = res.statusText
+    try {
+      detail = (await res.json()).detail || detail
+    } catch (_) {}
+    const err = new Error(typeof detail === 'string' ? detail : JSON.stringify(detail))
+    err.status = res.status
+    throw err
+  }
+  return res.text()
+}
+
 function qs(params = {}) {
   const s = new URLSearchParams(
     Object.entries(params).filter(([, v]) => v != null && v !== '')
@@ -150,6 +165,12 @@ export const api = {
   acceptProposal: (id, pid, body) => req('POST', `/projects/${id}/decisions/proposals/${pid}/accept`, body),
   rejectProposal: (id, pid) => req('POST', `/projects/${id}/decisions/proposals/${pid}/reject`),
   supersedeDecision: (id, n, by) => req('POST', `/projects/${id}/decisions/${n}/supersede`, { by }),
+  getLaunch: (id) => req('GET', `/projects/${id}/launch`),
+  saveLaunch: (id, body) => req('PUT', `/projects/${id}/launch`, body),
+  addLaunchItem: (id, body) => req('POST', `/projects/${id}/launch/items`, body),
+  updateLaunchItem: (id, n, body) => req('PATCH', `/projects/${id}/launch/items/${n}`, body),
+  deleteLaunchItem: (id, n) => req('DELETE', `/projects/${id}/launch/items/${n}`),
+  scopeCheck: (id, prompt) => req('POST', `/projects/${id}/launch/scope-check`, { prompt }),
   getMemory: (id) => req('GET', `/projects/${id}/memory`),
   regenerateMemory: (id) => req('POST', `/projects/${id}/memory/regenerate`),
   listSummaries: (id) => req('GET', `/projects/${id}/summaries`),
@@ -195,6 +216,10 @@ export const api = {
   // ---- Workflows (saved stage pipelines) ----
   listWorkflows: () => req('GET', '/workflows'),
   workflowPresets: () => req('GET', '/workflows/presets'),
+  workflowTemplates: () => req('GET', '/workflows/templates'),
+  exportWorkflow: (id) => reqText(`/workflows/${id}/export`),
+  importWorkflow: (payload) => req('POST', '/workflows/import', payload),
+  workflowRepoFiles: (projectId) => req('GET', `/workflows/repo-files${qs({ project_id: projectId })}`),
   createWorkflow: (payload) => req('POST', '/workflows', payload),
   updateWorkflow: (id, payload) => req('PATCH', `/workflows/${id}`, payload),
   deleteWorkflow: (id) => req('DELETE', `/workflows/${id}`),
@@ -216,6 +241,9 @@ export const api = {
   installSkill: (payload) => req('POST', '/skills', payload),
   updateSkill: (id, payload) => req('PATCH', `/skills/${id}`, payload),
   deleteSkill: (id) => req('DELETE', `/skills/${id}`),
+  skillTemplate: () => req('GET', '/skills/template'),
+  lintSkillText: (text) => req('POST', '/skills/lint', { text }),
+  lintSkillPack: (id) => req('GET', `/skills/${id}/lint`),
   // ---- Context Store (curated knowledge docs, tiered) ----
   listContextDocs: (params = {}) => req('GET', `/context-docs${qs(params)}`),
   previewContext: (projectId) => req('GET', `/context-docs/preview${qs({ project_id: projectId })}`),

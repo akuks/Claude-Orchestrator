@@ -3,15 +3,18 @@ import os
 import json
 import re
 import shutil
+import stat
 from pathlib import Path
 
 from fastapi import APIRouter, Depends, HTTPException, Request
+from pydantic import BaseModel
 from sqlalchemy import or_, select
 
 from ..access import ALL, visible_project_ids
 from ..auth import require_admin
 from ..config import settings
 from ..database import SessionLocal
+from .. import skills_lint
 from ..models import SkillPack
 from ..schemas import SkillPackCreate, SkillPackOut, SkillPackUpdate
 
@@ -42,6 +45,98 @@ PRESETS = [
 @router.get("/presets")
 async def list_presets():
     return PRESETS
+
+
+class LintIn(BaseModel):
+    text: str
+
+
+MAX_PACK_FILES = 200
+MAX_PACK_ENTRIES = 20000
+
+
+@router.post("/lint")
+async def lint_text(payload: LintIn):
+    if len(payload.text) > skills_lint.MAX_BYTES or len(payload.text.encode("utf-8", "replace")) > skills_lint.MAX_BYTES:
+        raise HTTPException(422, "text is over 256 KB")
+    problems = await asyncio.to_thread(skills_lint.lint, payload.text)
+    return {"ok": not problems, "problems": problems}
+
+
+@router.get("/template")
+async def skill_template():
+    return {"text": skills_lint.TEMPLATE}
+
+
+_TOO_BIG = object()
+
+
+def _read_capped(path: str):
+    """Read a regular, non-symlink file; None if it is over the cap or not a file."""
+    try:
+        if not stat.S_ISREG(os.lstat(path).st_mode):
+            return None
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    except OSError:
+        return None
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            return None
+        with os.fdopen(fd, "rb", closefd=False) as f:
+            data = f.read(skills_lint.MAX_BYTES + 1)
+    finally:
+        os.close(fd)
+    if len(data) > skills_lint.MAX_BYTES:
+        return _TOO_BIG
+    return data.decode("utf-8", errors="replace")
+
+
+def _lint_pack_dir(root: str) -> list[dict]:
+    out: list[dict] = []
+    seen = 0
+    trunc = {"file": ".", "problems": [{"line": 1, "message": "pack too large: not every file was checked"}]}
+    for dirpath, dirnames, filenames in os.walk(root, followlinks=False):
+        seen += len(dirnames) + len(filenames)
+        if seen > MAX_PACK_ENTRIES:
+            out.append(trunc)
+            return out
+        dirnames[:] = sorted(d for d in dirnames if d != ".git" and not os.path.islink(os.path.join(dirpath, d)))
+        for fn in sorted(filenames):
+            if fn != "SKILL.md":
+                continue
+            full = os.path.join(dirpath, fn)
+            try:
+                if not stat.S_ISREG(os.lstat(full).st_mode):
+                    continue
+            except OSError:
+                continue
+            if len(out) >= MAX_PACK_FILES:
+                out.append(trunc)
+                return out
+            rel = os.path.relpath(full, root)
+            text = _read_capped(full)
+            if text is None:
+                continue
+            problems = (
+                [{"line": 1, "message": "file too large"}] if text is _TOO_BIG else skills_lint.lint(text)
+            )
+            out.append({"file": rel, "problems": problems})
+    return out
+
+
+@router.get("/{pack_id}/lint")
+async def lint_pack(pack_id: str, request: Request):
+    async with SessionLocal() as s:
+        pack = await s.get(SkillPack, pack_id)
+        if pack is not None and pack.scope == "project":
+            visible = await visible_project_ids(s, request.state.principal)
+            if visible is not ALL and pack.project_id not in visible:
+                pack = None  # never reveal existence
+    if pack is None:
+        raise HTTPException(404, "Skill pack not found")
+    if not pack.local_path or not os.path.isdir(pack.local_path):
+        raise HTTPException(404, "Skill pack directory not found")
+    return await asyncio.to_thread(_lint_pack_dir, pack.local_path)
 
 
 def _slug(name: str) -> str:

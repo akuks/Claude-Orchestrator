@@ -57,6 +57,15 @@ describe('QuestionCard', () => {
     expect($(c, 'question-answer-input')).not.toBeNull()
   })
 
+  it('shows which launch item the question blocks', async () => {
+    const c = await mount({ question: { ...base, launch_item: { number: 3, title: 'Billing page' } } })
+    expect($(c, 'question-launch-item').textContent).toBe('blocks launch item #3: Billing page')
+  })
+  it('shows no launch line without a link', async () => {
+    const c = await mount({ question: { ...base, launch_item: null } })
+    expect($(c, 'question-launch-item')).toBeNull()
+  })
+
   it('reveals hidden characters and says so', async () => {
     const c = await mount({ question: { ...base, question: 'ok‮?' } })
     expect($(c, 'question-text').textContent).toContain('⟦U+202E⟧')

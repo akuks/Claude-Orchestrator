@@ -2,7 +2,10 @@ import asyncio
 import re
 import time
 
-from fastapi import APIRouter, HTTPException, Query, Request
+from typing import Optional
+
+from fastapi import APIRouter, HTTPException, Query, Request, Response
+from pydantic import BaseModel, ValidationError
 from sqlalchemy import and_, or_, select
 
 from ..access import (
@@ -18,6 +21,7 @@ from ..constants import Status
 from ..gates import executor, spec, test_results, totals
 from ..models import Agent, Project, Task, Workflow, WorkflowGateRun, WorkflowRun
 from ..redaction import clean_text
+from .. import workflow_templates as wft
 from ..workflow_runner import ACTIVE_RUN, gate_status_text
 from ..schemas import (
     LiveItemOut,
@@ -106,6 +110,68 @@ PRESETS = [
 @router.get("/presets")
 async def list_presets():
     return PRESETS
+
+
+@router.get("/templates")
+async def list_templates():
+    return wft.templates_out()
+
+
+@router.get("/repo-files")
+async def repo_files(request: Request, project_id: str = Query(...)):
+    async with SessionLocal() as s:
+        p = request.state.principal
+        if not p.user.active:
+            raise HTTPException(404, "Project not found")
+        visible = await visible_project_ids(s, p)
+        project = await s.get(Project, project_id)
+        if project is None or (visible is not ALL and project_id not in visible):
+            raise HTTPException(404, "Project not found")
+    return await wft.list_repo_files(project)
+
+
+class ImportBody(BaseModel):
+    text: Optional[str] = None
+    project_id: Optional[str] = None
+    file: Optional[str] = None
+
+
+@router.post("/import", response_model=WorkflowOut, status_code=201)
+async def import_workflow(payload: ImportBody, request: Request):
+    ensure_admin(request.state.principal)
+    try:
+        if payload.text is not None:
+            text = payload.text
+        elif payload.project_id and payload.file:
+            async with SessionLocal() as s:
+                project = await s.get(Project, payload.project_id)
+            if project is None:
+                raise ValueError("Project not found")
+            text = await wft.read_repo_file(project, payload.file)
+        else:
+            raise ValueError("Send text, or project_id and file")
+        try:
+            data = WorkflowCreate.model_validate(wft.parse_import(text))
+        except ValidationError as e:
+            err = e.errors()[0]
+            raise ValueError(f"{'.'.join(str(x) for x in err['loc'])}: {err['msg']}") from None
+    except ValueError as e:
+        raise HTTPException(422, str(e))
+    try:
+        return await create_workflow(data, request)
+    except HTTPException as e:
+        if e.status_code == 400:
+            raise HTTPException(422, e.detail)
+        raise
+
+
+@router.get("/{workflow_id}/export")
+async def export_workflow(workflow_id: str):
+    async with SessionLocal() as s:
+        wf = await s.get(Workflow, workflow_id)
+    if wf is None:
+        raise HTTPException(404, "Workflow not found")
+    return Response(wft.export_markdown(wf), media_type="text/markdown; charset=utf-8")
 
 
 async def _validate_agents(s, stages: list) -> None:

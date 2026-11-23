@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { checkCommand, formStage, stageLabel, stagePayload } from './gates'
+import { checkCommand, exportFileName, formStage, stageLabel, stagePayload } from './gates'
 
 describe('checkCommand', () => {
   it('accepts a plain command', () => expect(checkCommand('pytest -q')).toBeNull())
@@ -27,5 +27,15 @@ describe('stage helpers', () => {
     expect(stageLabel({ name: 'T', kind: 'gate' })).toBe('⚙ T')
     expect(stageLabel({ name: 'OK', kind: 'approval' })).toBe('✋ OK')
     expect(stageLabel({ name: 'Dev' })).toBe('Dev')
+  })
+})
+
+describe('exportFileName', () => {
+  it('replaces unsafe characters and falls back when empty', () => {
+    expect(exportFileName('My flow v1.2')).toBe('My flow v1.2.md')
+    expect(exportFileName('../a/b:c"d')).toBe('.._a_b_c_d.md')
+    expect(exportFileName('')).toBe('workflow.md')
+    expect(exportFileName('   ')).toBe('workflow.md')
+    expect(exportFileName(null)).toBe('workflow.md')
   })
 })

@@ -16,11 +16,12 @@ from sqlalchemy.exc import InvalidRequestError
 from ..access import require_task, task_visibility_clause
 from ..constants import Status
 from ..database import SessionLocal
+from ..launch import store as launch_store
 from ..decisions import proposals, validate as decision_validate
 from ..models import Task, TaskQuestion
 from ..questions import service as questions
 from ..resume.texts import ACCEPT_ANSWER, ANSWER_PROMPT
-from ..schemas import QuestionAnswer, QuestionOut, TaskOut
+from ..schemas import QuestionAnswer, QuestionLaunchItem, QuestionOut, TaskOut
 from .tasks import _manage_allowed, _require_manage, _step_from
 
 log = logging.getLogger(__name__)
@@ -44,11 +45,14 @@ async def list_questions(request: Request, status: str = Query("open")):
             q = q.where(TaskQuestion.status == status)
         rows = (await s.execute(q.order_by(TaskQuestion.created_at.desc()).limit(LIST_MAX))).all()
         allowed: dict[str, bool] = {}
+        linked = await launch_store.blocked_items(s, [row for row, _t in rows])
         out = []
         for row, task in rows:
             if row.status == "open" and task.id not in allowed:
                 allowed[task.id] = (await _manage_allowed(s, p, task, need_contributor=True))[0]
-            out.append(questions.out(row, task_title=task.title, can_answer=allowed.get(task.id, False)))
+            o = questions.out(row, task_title=task.title, can_answer=allowed.get(task.id, False))
+            o.launch_item = QuestionLaunchItem(**linked[row.id]) if row.id in linked else None
+            out.append(o)
         return out
 
 

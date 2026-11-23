@@ -1,0 +1,281 @@
+"""Phase 5b Task 3: critical-path warning event."""
+
+import asyncio
+import os
+import uuid
+
+import pytest
+
+from app.database import SessionLocal
+from app.launch import critical
+from app.models import Project, ProjectLaunch, Task
+from app.worker import WorkerManager
+
+pytestmark = pytest.mark.usefixtures("client")
+
+
+def _use(tid, name, **inp):
+    return {"type": "assistant", "message": {"content": [{"type": "tool_use", "id": tid, "name": name, "input": inp}]}}
+
+
+def test_changed_paths(tmp_path):
+    d = str(tmp_path)
+    ev = [
+        {"name": "Edit", "input": {"file_path": os.path.join(d, "src/a.py")}},
+        {"name": "Write", "input": {"file_path": "src/b.py"}},
+        {"name": "MultiEdit", "input": {"file_path": "./src/a.py"}},
+        {"name": "NotebookEdit", "input": {"notebook_path": os.path.join(d, "nb/x.ipynb")}},
+        {"name": "Edit", "input": {"file_path": "/etc/passwd"}},
+        {"name": "Edit", "input": {"file_path": "../outside.py"}},
+        {"name": "Edit", "input": {"file_path": "src/../../up.py"}},
+        {"name": "Bash", "input": {"file_path": "src/c.py"}},
+        {"name": "Edit", "input": {}},
+        {"name": "Edit", "input": {"file_path": d}},
+    ]
+    assert critical.changed_paths(ev, d) == ["src/a.py", "src/b.py", "nb/x.ipynb"]
+    assert critical.changed_paths(ev, "") == []
+
+
+def test_symlink_escape_ignored(tmp_path):
+    out = tmp_path / "out"
+    out.mkdir()
+    proj = tmp_path / "proj"
+    proj.mkdir()
+    (proj / "link").symlink_to(out)
+    assert critical.changed_paths([{"name": "Edit", "input": {"file_path": "link/f.py"}}], str(proj)) == []
+
+
+def test_hits():
+    p, g = critical.hits(["src/billing/x.py", "README.md"], ["src/billing/**", "db/*.sql"])
+    assert p == ["src/billing/x.py"] and g == ["src/billing/**"]
+    assert critical.hits([], ["a"]) == ([], [])
+
+
+def _setup(tmp_path, globs):
+    pid, tid = uuid.uuid4().hex, uuid.uuid4().hex
+
+    async def go():
+        async with SessionLocal() as s:
+            s.add(Project(id=pid, slug=f"s-{pid[:10]}", name=f"cp-{pid[:6]}", directory=str(tmp_path)))
+            await s.flush()
+            if globs is not None:
+                s.add(ProjectLaunch(project_id=pid, critical_paths=globs))
+            s.add(Task(id=tid, title="t", prompt="p", root_id=tid, status="running", project_id=pid))
+            await s.commit()
+
+    asyncio.run(go())
+    return tid
+
+
+def _drive(tid, events):
+    w = WorkerManager()
+    got = []
+
+    async def emit(t, p):
+        got.append((t, p))
+
+    ctx = {"task_id": tid, "mcp_ids": {}, "secrets": [], "model_stored": True}
+
+    async def go():
+        for ev in events:
+            await w._handle_stream_event(ev, emit, {}, ctx)
+        await w._emit_critical_paths(tid, ctx, emit)
+
+    asyncio.run(go())
+    return got
+
+
+def test_event_emitted_after_tool_uses(tmp_path):
+    tid = _setup(tmp_path, ["src/billing/**"])
+    got = _drive(tid, [_use("1", "Edit", file_path=str(tmp_path / "src/billing/a.py")),
+                       _use("2", "Write", file_path="README.md"),
+                       _use("3", "Edit", file_path="/etc/hosts")])
+    crit = [p for t, p in got if t == "critical_paths"]
+    assert crit == [{"paths": ["src/billing/a.py"], "globs": ["src/billing/**"]}]
+    assert got[-1][0] == "critical_paths"
+
+
+def test_no_event_without_globs_or_hits(tmp_path):
+    ev = [_use("1", "Edit", file_path="a.py")]
+    for globs in (None, [], ["src/**"]):
+        tid = _setup(tmp_path, globs)
+        assert not [1 for t, _p in _drive(tid, ev) if t == "critical_paths"]
+
+
+def test_paths_capped_at_ten(tmp_path):
+    tid = _setup(tmp_path, ["src/**"])
+    got = _drive(tid, [_use(str(i), "Write", file_path=f"src/f{i}.py") for i in range(15)])
+    assert len([p for t, p in got if t == "critical_paths"][0]["paths"]) == 10
+
+
+def test_error_never_raises(tmp_path):
+    w = WorkerManager()
+
+    async def emit(t, p):
+        raise RuntimeError("boom")
+
+    ctx = {"edit_calls": [{"name": "Edit", "input": {"file_path": "src/a.py"}}]}
+    tid = _setup(tmp_path, ["src/**"])
+    asyncio.run(w._emit_critical_paths(tid, ctx, emit))
+    asyncio.run(w._emit_critical_paths("missing", ctx, emit))
+
+
+def test_finish_emits_on_failure_end_once(tmp_path):
+    from sqlalchemy import select
+    from app.models import TaskEvent
+
+    tid = _setup(tmp_path, ["src/**"])
+    w = WorkerManager()
+    got = []
+
+    async def emit(t, p):
+        got.append((t, p))
+
+    ctx = {"task_id": tid, "mcp_ids": {}, "secrets": [], "model_stored": True}
+
+    async def go():
+        await w._handle_stream_event(_use("1", "Edit", file_path="src/a.py"), emit, {}, ctx)
+        w._run_ctx[tid] = ctx
+        await w._finish(tid, "failed", error="Task exceeded time limit")  # timeout-style end
+        await w._finish(tid, "failed", error="again")  # second finish adds nothing
+        async with SessionLocal() as s:
+            return (await s.execute(select(TaskEvent).where(TaskEvent.task_id == tid,
+                                                            TaskEvent.type == "critical_paths"))).scalars().all()
+
+    rows = asyncio.run(go())
+    assert len(rows) == 1 and rows[0].payload == {"paths": ["src/a.py"], "globs": ["src/**"]}
+    assert not w._run_ctx
+
+
+def test_normal_path_then_finish_emits_once(tmp_path):
+    tid = _setup(tmp_path, ["src/**"])
+    w = WorkerManager()
+    got = []
+
+    async def emit(t, p):
+        got.append(t)
+
+    ctx = {"task_id": tid, "mcp_ids": {}, "secrets": [], "model_stored": True}
+
+    async def go():
+        await w._handle_stream_event(_use("1", "Edit", file_path="src/a.py"), emit, {}, ctx)
+        await w._emit_critical_paths(tid, ctx, emit)
+        w._run_ctx[tid] = ctx
+        await w._finish(tid, "completed")
+
+    asyncio.run(go())
+    assert got.count("critical_paths") == 1
+
+
+def test_crash_path_live_emit_and_spool_seqs_distinct(tmp_path):
+    """_finish emits through the registered live emitter, so a following live event gets the next seq."""
+    tid = _setup(tmp_path, ["src/**"])
+    w = WorkerManager()
+    seqs = []
+    n = {"seq": 0}
+
+    async def live_emit(t, p):
+        n["seq"] += 1
+        seqs.append((n["seq"], t))
+
+    ctx = {"task_id": tid, "mcp_ids": {}, "secrets": [], "model_stored": True,
+           "edit_calls": w._run_edits.setdefault(tid, [])}
+
+    async def go():
+        await w._handle_stream_event(_use("1", "Edit", file_path="src/a.py"), live_emit, {}, ctx)
+        w._run_ctx[tid] = ctx
+        w._guard_live[tid] = {"emit": live_emit, "reported": {}}
+        await w._finish(tid, "failed", error="crash")
+        await live_emit("usage_band", {})  # a spool event after it
+
+    asyncio.run(go())
+    assert [t for _s, t in seqs] == ["tool_use", "critical_paths", "usage_band"]
+    assert len({s for s, _t in seqs}) == 3
+
+
+def test_edits_survive_a_retry_until_finish(tmp_path):
+    tid = _setup(tmp_path, ["src/**"])
+    w = WorkerManager()
+    got = []
+
+    async def emit(t, p):
+        got.append((t, p))
+
+    def new_ctx():
+        c = {"task_id": tid, "mcp_ids": {}, "secrets": [], "model_stored": True,
+             "edit_calls": w._run_edits.setdefault(tid, [])}
+        w._run_ctx[tid] = c
+        return c
+
+    async def go():
+        c1 = new_ctx()
+        await w._handle_stream_event(_use("1", "Edit", file_path="src/a.py"), emit, {}, c1)
+        w._run_ctx.pop(tid, None)  # the retry path drops the ctx
+        c2 = new_ctx()
+        await w._handle_stream_event(_use("2", "Edit", file_path="README.md"), emit, {}, c2)
+        await w._finish(tid, "completed")
+        from sqlalchemy import select
+        from app.models import TaskEvent
+
+        async with SessionLocal() as s:
+            return [r.payload for r in (await s.execute(select(TaskEvent).where(
+                TaskEvent.task_id == tid, TaskEvent.type == "critical_paths"))).scalars()]
+
+    rows = asyncio.run(go())
+    assert rows == [{"paths": ["src/a.py"], "globs": ["src/**"]}]
+    assert tid not in w._run_edits
+
+
+def _status(tid):
+    async def go():
+        async with SessionLocal() as s:
+            return (await s.get(Task, tid)).status
+
+    return asyncio.run(go())
+
+
+def _crit_rows(tid):
+    from sqlalchemy import select
+    from app.models import TaskEvent
+
+    async def go():
+        async with SessionLocal() as s:
+            return [r.payload for r in (await s.execute(select(TaskEvent).where(
+                TaskEvent.task_id == tid, TaskEvent.type == "critical_paths"))).scalars()]
+
+    return asyncio.run(go())
+
+
+def _queued_with_edits(tmp_path, edits):
+    tid = _setup(tmp_path, ["src/**"])
+    w = WorkerManager()
+    w._run_edits[tid] = list(edits)
+    w._cancelled.add(tid)
+    return tid, w
+
+
+def test_cancel_during_retry_backoff_ends_task(tmp_path):
+    tid, w = _queued_with_edits(tmp_path, [{"name": "Edit", "input": {"file_path": "src/a.py"}}])
+    asyncio.run(w._retry_after(tid, 0, "normal", None))
+    assert _status(tid) == "cancelled"
+    assert tid not in w._cancelled and tid not in w._run_edits
+    assert _crit_rows(tid) == [{"paths": ["src/a.py"], "globs": ["src/**"]}]
+
+
+def test_cancel_while_requeued_reports_and_cleans(tmp_path):
+    tid, w = _queued_with_edits(tmp_path, [{"name": "Edit", "input": {"file_path": "src/a.py"}}])
+
+    async def go():
+        async with SessionLocal() as s:
+            await w._end_cancelled_queued(s, await s.get(Task, tid))
+
+    asyncio.run(go())
+    assert _status(tid) == "cancelled"
+    assert tid not in w._cancelled and tid not in w._run_edits
+    assert len(_crit_rows(tid)) == 1
+
+
+def test_cancel_without_edits_emits_nothing(tmp_path):
+    tid, w = _queued_with_edits(tmp_path, [])
+    asyncio.run(w._retry_after(tid, 0, "normal", None))
+    assert _status(tid) == "cancelled" and not _crit_rows(tid) and tid not in w._run_edits

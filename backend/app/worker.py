@@ -31,6 +31,7 @@ from .database import SessionLocal
 from .events import broker
 from .gates import test_results
 from .gates.testcmd import looks_like_test
+from .launch import critical, store as launch_store
 from .guard import co_hook as guard_co_hook
 from .guard import grants as guard_grants
 from .guard import policy_inputs
@@ -228,6 +229,10 @@ class WorkerManager:
         # task_id -> the run's outside-commit base, fixed at spawn (F9); the
         # finish snapshot uses it too.
         self._run_since: dict[str, str | None] = {}
+        # task_id -> the live run's ctx, until _finish (critical-path warning on every end state)
+        self._run_ctx: dict[str, dict] = {}
+        # task_id -> the edit calls of every attempt so far (kept across auto-retries, dropped by _finish)
+        self._run_edits: dict[str, list] = {}
         # task_id -> the live run's UsageTracker (phase 3b); _finish stores its last figures.
         self._usage: dict[str, usage_tracker.UsageTracker] = {}
         # task_id -> the live run's read state of co-guard's token-care spool lines (_new_usage_spool)
@@ -296,9 +301,40 @@ class WorkerManager:
         if proc:
             self._signal_group(proc, signal.SIGTERM)
 
+    async def _end_cancelled_queued(self, s, task: Task) -> None:
+        """A cancelled step that never runs again (cancelled while queued or in a retry backoff): CANCELLED,
+        the `completed` event, the critical-path warning for the edits of its earlier attempts, and its
+        cancel / edit bookkeeping dropped."""
+        task_id = task.id
+        self._cancelled.discard(task_id)
+        edits = self._run_edits.pop(task_id, None)
+        self._run_ctx.pop(task_id, None)
+        if edits:
+            await self._emit_critical_paths(task_id, {"edit_calls": edits}, self._emit_offline_for(task_id))
+        task.status = Status.CANCELLED
+        task.completed_at = _now()
+        await s.commit()
+        await broker.publish(
+            task_id, {"seq": 0, "type": "completed", "payload": {"status": Status.CANCELLED}}
+        )
+        try:  # co-guard: drop follow-ups deferred on this step
+            await guard_grants.after_task_finished(task_id, submit=self.submit)
+        except Exception:  # noqa: BLE001
+            pass
+
     async def _retry_after(self, task_id, delay, priority, created_at) -> None:
         await asyncio.sleep(delay)
         if task_id in self._cancelled:
+            try:  # cancelled during the backoff: it ends here, not stuck QUEUED
+                async with SessionLocal() as s:
+                    task = await s.get(Task, task_id)
+                    if task is not None:
+                        await self._end_cancelled_queued(s, task)
+                    else:
+                        self._cancelled.discard(task_id)
+                        self._run_edits.pop(task_id, None)
+            except Exception:  # noqa: BLE001
+                log.exception("cancel during retry backoff failed for %s", task_id)
             return
         await self.submit(task_id, priority, created_at)
 
@@ -329,6 +365,7 @@ class WorkerManager:
         finally:
             self._run_secrets.pop(task_id, None)
             self._guard_live.pop(task_id, None)
+            self._run_ctx.pop(task_id, None)
             self._run_since.pop(task_id, None)
             self._active.discard(task_id)
             self._sem.release()
@@ -382,21 +419,16 @@ class WorkerManager:
             if task is None:
                 return
             if task_id in self._cancelled:
-                self._cancelled.discard(task_id)
-                task.status = Status.CANCELLED
-                task.completed_at = _now()
-                await s.commit()
-                await broker.publish(
-                    task_id, {"seq": 0, "type": "completed", "payload": {"status": Status.CANCELLED}}
-                )
-                try:  # co-guard: drop follow-ups deferred on this step
-                    await guard_grants.after_task_finished(task_id, submit=self.submit)
-                except Exception:  # noqa: BLE001
-                    pass
+                await self._end_cancelled_queued(s, task)
                 return
             task.status = Status.RUNNING
             task.started_at = _now()
             task.run_pgid = task.run_proc_start = None  # this run's are recorded at spawn
+            try:  # launch list: a linked open item becomes started; never fails the task
+                async with s.begin_nested():
+                    await launch_store.mark_started_for_task(s, task)
+            except Exception:  # noqa: BLE001
+                log.warning("launch auto-start failed for task %s", task_id, exc_info=True)
             prompt = task.prompt
             model = task.model
             max_turns = task.max_turns
@@ -761,6 +793,8 @@ class WorkerManager:
                       "proc": proc, "emit": emit,
                       "spool": guard_runtime.task_dir(task_id) / guard_runtime.SPOOL_NAME},
         }
+        ctx["edit_calls"] = self._run_edits.setdefault(task_id, [])  # shared with the earlier attempts
+        self._run_ctx[task_id] = ctx  # _finish reads its edit calls (critical-path warning)
         watch = asyncio.create_task(self._guard_watch(ctx))
         beat = asyncio.create_task(self._heartbeat_loop(task_id, ctx))
         try:
@@ -799,6 +833,7 @@ class WorkerManager:
 
         if task_id in self._cancelled:
             self._cancelled.discard(task_id)
+            await self._emit_critical_paths(task_id, ctx, emit)
             await emit("completed", {"status": Status.CANCELLED})
             await self._finish(task_id, Status.CANCELLED, exit_code=exit_code)
             return
@@ -827,6 +862,7 @@ class WorkerManager:
                 await auth.revoke_task_tokens(s, task_id)
                 await s.commit()
             self._usage.pop(task_id, None)  # the next attempt counts afresh
+            self._run_ctx.pop(task_id, None)
             self._usage_spool.pop(task_id, None)  # (its spool was wiped by the ingest)
             asyncio.create_task(
                 self._retry_after(task_id, backoff, task_priority, task_created_at)
@@ -834,6 +870,7 @@ class WorkerManager:
             return
 
         status = Status.FAILED if failed else Status.COMPLETED
+        await self._emit_critical_paths(task_id, ctx, emit)
         await emit(
             "completed",
             {
@@ -1467,6 +1504,7 @@ class WorkerManager:
                     if usage is not None and not obj.get("parent_tool_use_id") and block.get("id"):
                         usage.on_tool_use_main(str(block["id"]), str(name or ""), block.get("input") or {})
                     self._remember_test_call(ctx, name, block)
+                    self._remember_edit(ctx, name, block, obj)
                     await emit("tool_use", {"name": name, "input": block.get("input"),
                                             "id": block.get("id"), "parent": obj.get("parent_tool_use_id") or None})
                     if name and name.startswith("mcp__"):
@@ -1507,6 +1545,50 @@ class WorkerManager:
             result["output_tokens"] = usage.get("output_tokens")
         if etype in ("assistant", "user") and ctx.get("usage") is not None:
             await self._usage_tick(ctx)
+
+    # ---- critical-path warning (phase 5b, F64) -----------------------------------
+
+    EDIT_CALLS_MAX = 500
+
+    @staticmethod
+    def _remember_edit(ctx, name, block, obj) -> None:
+        """Remember the file-edit tool calls (<= 500; only name and the target paths are kept)."""
+        try:
+            if name not in critical.EDIT_TOOLS or not isinstance(block.get("input"), dict):
+                return
+            calls = ctx.setdefault("edit_calls", [])
+            if len(calls) < WorkerManager.EDIT_CALLS_MAX:
+                inp = block["input"]
+                calls.append({"name": name, "input": {k: inp[k] for k in ("file_path", "notebook_path") if k in inp}})
+        except Exception:  # noqa: BLE001
+            log.debug("edit call note failed", exc_info=True)
+
+    @staticmethod
+    async def _emit_critical_paths(task_id: str, ctx, emit) -> None:
+        """One ``critical_paths`` event when the run changed files matching its project's critical globs.
+        Called before the final ``completed`` event. Never raises, never fails the task."""
+        try:
+            if ctx.get("critical_done"):
+                return
+            ctx["critical_done"] = True  # at most one event per attempt
+            calls = ctx.get("edit_calls")
+            if not calls:
+                return
+            async with SessionLocal() as s:
+                task = await s.get(Task, task_id)
+                pid = await effective_project_id(s, task) if task is not None else None
+                project = await s.get(Project, pid) if pid else None
+                row = await launch_store.get_or_none(s, pid) if project is not None else None
+                globs = list(row.critical_paths or []) if row is not None else []
+                directory = project.directory if project is not None else None
+            if not globs or not directory:
+                return
+            paths, hit_globs = critical.hits(
+                await asyncio.to_thread(critical.changed_paths, calls, directory), globs)
+            if paths:
+                await emit("critical_paths", {"paths": paths[:critical.MAX_PATHS], "globs": hit_globs})
+        except Exception:  # noqa: BLE001 - a warning chip never breaks a run
+            log.debug("critical path check failed", exc_info=True)
 
     # ---- test-result chip (F116b) ------------------------------------------------
 
@@ -1747,6 +1829,16 @@ class WorkerManager:
         artifacts: list[dict] | None = None,
         secrets: list[str] | None = None,
     ) -> None:
+        # every end state (timeout, guard stop, failure, crash): the critical-path warning, once; the normal
+        # and cancelled paths already emitted it before their `completed` event
+        run_ctx = self._run_ctx.pop(task_id, None)
+        self._run_edits.pop(task_id, None)
+        if run_ctx is not None:
+            # the live run's emitter keeps its own seq counter: use it while the run is registered, so a
+            # later spool event cannot reuse this seq
+            live_run = self._guard_live.get(task_id)
+            await self._emit_critical_paths(
+                task_id, run_ctx, live_run["emit"] if live_run else self._emit_offline_for(task_id))
         # Agent output (and stderr) can carry the run's credentials: redact
         # before saving (error before its cut). Known token shapes are always
         # scrubbed, even without the run's secret list.

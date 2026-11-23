@@ -36,10 +36,13 @@ NOT_PROJECT_BOUND = {
     ("GET", "/agents"): "global agent catalog, visible to everyone by spec",
     ("GET", "/templates"): "global template catalog, visible to everyone by spec",
     ("GET", "/workflows"): "global workflow catalog, visible to everyone by spec",
+    ("GET", "/workflows/{workflow_id}/export"): "export of a global workflow catalog entry; same visibility as GET /workflows",
     ("GET", "/agents/presets"): "built-in static presets, no stored data",
     ("GET", "/templates/presets"): "built-in static presets, no stored data",
     ("GET", "/workflows/presets"): "built-in static presets, no stored data",
     ("GET", "/skills/presets"): "built-in static presets, no stored data",
+    ("POST", "/skills/lint"): "pure text lint of the posted body, reads and stores nothing",
+    ("GET", "/skills/template"): "built-in static skill template, no stored data",
     # Directory-style reads that never carry project data.
     ("GET", "/teams"): "team names/members are visible to everyone by spec; teams hold no project data",
     ("GET", "/users/directory"): "id/name/email of active users for the Members picker, by spec",
@@ -348,12 +351,14 @@ def test_every_project_bound_route_enforces_membership(client, world):
             kw["json"] = bodies[key]
         elif method in ("POST", "PUT", "PATCH"):
             kw["json"] = {}
+        if key == ("GET", "/workflows/repo-files"):
+            kw["params"] = {"project_id": ids["project_id"]}
         r = out.request(method, url, **kw)
         if key in ADMIN_ONLY:
             ok = r.status_code == 403
         elif key in SILENT_SKIP:
             ok = r.status_code == 200 and r.json() == []
-        elif "{" in path or method != "GET":
+        elif "{" in path or method != "GET" or key == ("GET", "/workflows/repo-files"):
             ok = r.status_code in (403, 404)
         else:
             # A list: the plain call and one filtered to P must both come

@@ -12,6 +12,7 @@ person it is done for — never the server's own environment or login.
 """
 
 import asyncio
+import logging
 import re
 from datetime import datetime, timezone
 
@@ -23,6 +24,8 @@ from .database import SessionLocal
 from .events import broker
 from .models import Project, Task, TaskSummary
 from .redaction import redact, secrets_from_env
+
+log = logging.getLogger(__name__)
 
 _WORD = re.compile(r"[a-z0-9]+")
 
@@ -88,6 +91,22 @@ async def _relevant_summaries(project_id: str, prompt: str, limit: int = 10) -> 
     return [text for _, text in scored[:limit]]
 
 
+async def _launch_block(project) -> str | None:
+    """The launch list block for an own-trust project; None when there is nothing (or on any error)."""
+    if project.trust != "own":
+        return None
+    try:
+        from .launch import context as launch_context, store as launch_store
+
+        async with SessionLocal() as s:
+            row = await launch_store.get_or_none(s, project.id)
+            items = await launch_store.launch_items_for(s, project.id)
+        return launch_context.block(row, items)
+    except Exception:  # noqa: BLE001 - never breaks a run
+        log.debug("launch context failed", exc_info=True)
+        return None
+
+
 async def assemble_context(project_id: str, prompt: str) -> tuple[str | None, dict]:
     """Return (preamble, log). preamble is None if there's nothing to inject."""
     async with SessionLocal() as s:
@@ -116,6 +135,12 @@ async def assemble_context(project_id: str, prompt: str) -> tuple[str | None, di
             parts.append(block)
             used += len(block)
             log["included"].append("memory")
+
+    launch_block = await _launch_block(project)
+    if launch_block and _fits(launch_block):
+        parts.append(launch_block)
+        used += len(launch_block)
+        log["included"].append("launch")
 
     summaries = await _relevant_summaries(project_id, prompt)
     included = 0

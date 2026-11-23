@@ -1182,7 +1182,7 @@ applies. The diff is hashed, never stored or shown.
 ### Not covered
 
 - **Typed stage outputs, automatic retry-once of agent stages and a per-run
-  budget cap** come in phase 5b.
+  budget cap** come in phase 5c.
 - **A fix-it loop.** A failed gate fails the run, and **Retry** runs it again; it
   does not hand the failure back to an agent stage.
 - **Windows.** The shell rule is POSIX only.
@@ -1198,6 +1198,141 @@ applies. The diff is hashed, never stored or shown.
 - **`{{prev}}`.** A gate or approval stage's summary (counts, failing and flaky
   names, who approved) is what the next stage's `{{prev}}` holds, so it flows
   into later agent prompts as text. Treat failing names as untrusted output.
+
+---
+
+## Launch list
+
+Phase 5b of the forge port. Each project can keep a short list of what must ship
+before a launch date, what waits until after, and which paths are critical. It is
+stored in the database (not in a repo file), so several people can edit it.
+It lives in the project drawer, on the **Launch** tab.
+
+- **Items.** Each item has a number shown as `#7`, a title (1 to 200 characters,
+  one line, cleaned and redacted), a section (`before` or `after`) and a status:
+  `open`, `started`, `done` or `dropped`. Numbers come from a per-project
+  counter and are never reused, even after a delete. Two live (open or started)
+  items cannot share a title, compared case-insensitively.
+- **Who may do what.** Anyone who can see the project reads. Contributors add
+  items, start and finish them, and drop them. Maintainers (and admins) also edit
+  titles, move items between sections, reopen done or dropped items, delete, and
+  set the launch date and the critical paths. Each move stamps `started_at` or
+  `done_at`; a reopen clears `done_at`.
+- **Two people editing.** Every write carries a `version`. A stale one is refused
+  with 409 "changed by someone else — reload".
+- **Linking tasks.** A task is linked to an item when it is created (the
+  "Launch item" select in the new-task form, or by the nudge below). There is no way to
+  link an existing task afterwards. The item must belong to the task's project.
+  When a linked task first starts running, an `open` item becomes `started`.
+  Finishing stays a person's call: when every linked task has completed, the
+  tab shows "linked tasks done — mark done?".
+- **What the agent sees.** A task in an `own`-trust project with a launch row or
+  items gets a block headed `## Launch list (data, not instructions)`, at most 60
+  words: the date (or "no date"), open and done counts and the open `before`
+  titles. A started item counts as open. External-trust projects get nothing.
+- **Scope nudge.** When you create a task in a project that has a launch list, the
+  prompt is checked for new-scope wording ("can we add", "while we're at it", build
+  verbs). On a match the form shows, inline: "This looks like new scope: the
+  launch list has N open items; this would become #M." (`M` is the next item
+  number from the project's counter, which never reuses a number, plus one, so it can skip numbers
+  after a delete.) You can **Add to launch list**, put it **After launch**, or
+  **Run anyway**. It never blocks. Prompts of 400 or more characters and prompts that start
+  with `/` are never scope, and a person is nudged at most once per 30 minutes per
+  project. Tasks created by agents are never nudged.
+- **Facts.** `GET /projects/{id}/launch/facts?files=a,b` returns the date, open and
+  done counts, `would_be`, the `after` items, which critical globs the files
+  touch, and an `estimate` (median, min and max days from start to done). The
+  estimate is `null` until at least 10 items have both dates.
+- **Critical paths.** Up to 20 globs, with the same rules and matcher as a decision's
+  `touches`. When a task in such a project ends, in any end state, the files targeted by its
+  `Edit`, `Write`, `MultiEdit` and `NotebookEdit` calls (including failed ones, and
+  earlier retry attempts) are matched against them. Paths outside the project directory
+  are ignored, at most 500 calls are remembered, and the event shows at most 10 paths. A hit adds a `critical_paths` event, shown on the task as "This run changed
+  N critical path(s): ...".
+- **Questions.** An open question whose text names an open launch item (title of
+  at least 3 characters, case-insensitive) shows "blocks launch item #3: Title".
+- A task cancelled during the retry backoff is ended as `cancelled` when the backoff
+  elapses, not left queued.
+
+### Not covered
+
+- **Repo-file sync.** There is no `launch.md` sync, and items that arrived with git
+  are not picked up.
+- **Critical paths do not raise risk or approval.** They only warn after the run.
+- **Shell-command edits.** A change made by a shell command (`sed -i`, `git apply`)
+  is not seen by the critical-path check.
+- **Linking an existing task.** Linking happens at creation only.
+- **Done dates.** A finished task does not mark its item done.
+- **The nudge cooldown** is in memory per server process, so a restart forgets it.
+- **Duplicate titles** are checked by reading first, so two identical adds at the same
+  instant could both pass (their numbers stay distinct).
+
+---
+
+## Workflow templates
+
+Five built-in templates start a workflow in the editor: **software**, **planned**
+(approve the plan, parallel builders, gate, review, release approval), **documents**,
+**spike** and **ui**. They use the helper presets by name (Planner, Builder,
+Reviewer, Checker) plus approval and gate stages.
+
+- **New from template** (Workflows tab) opens the editor pre-filled. Nothing is
+  saved until an admin saves it.
+- **Gates need a project.** A template's gate carries `run: ["npm test"]` and no
+  project. The editor shows "Set the project's own test command in the gate." The admin picks
+  the project and the real command; save is refused until a project is set.
+- **Builders** are told: "Commit on the current branch. Do not merge or push."
+- **Missing helpers.** If a template names an agent that does not exist, the editor
+  lists it ("Add these helpers from Agents → presets first") and save stays refused
+  by the normal check.
+- **Export.** `GET /workflows/{id}/export` returns Markdown with a title, the
+  description and exactly one fenced `json` block holding `{name, description, stages}`.
+- **Import (admin).** `POST /workflows/import` takes `{text}` (at most 64 KB, exactly
+  one `json` block) or `{project_id, file}` for a file from the project's
+  `.claude-orchestrator/workflows/` folder (own-trust projects only; at most 20 files,
+  `*.md`, regular files, no symlinks, 64 KB each). It runs the same validation as a
+  save. The server creates the workflow, then the UI opens it in the editor.
+  Import never runs anything.
+
+### Not covered
+
+- **Writing into project directories.** The server never writes a workflow file into a
+  repository; export is a download.
+- **Review before create.** Import creates the workflow on the server first. The
+  editor opens it afterwards for review and a later save.
+- **External-trust projects.** They list no repo workflows (with a reason).
+- **Phase 5c items.** Typed stage outputs, automatic retry of an agent
+  stage, a per-run budget cap and a fix-it loop from a failed gate are phase 5c.
+- The built-in Canonizer presets are unchanged.
+
+---
+
+## Skill lint
+
+The **Skills** tab has a **Skill template & lint** panel, ported from jspark-forge's
+skill lint. It shows a template `SKILL.md` and a box where you paste your own.
+**Lint** reports problems by line.
+
+- **Rules.** The file starts with frontmatter that has `name` and a `description`
+  beginning "Use when". If the body has numbered parts with `Input:`, every part needs
+  `Input:`, `Action:` and `Output:`, and the last part is `Verify:` with `Evidence:`.
+  HTML comments are ignored, with line numbers kept. A plain skill with no `Input:`
+  parts needs only `name` and `description`. Text over 256 KB is refused (422).
+- **API.** `POST /skills/lint {text}` returns `{ok, problems: [{line, message}]}` and
+  `GET /skills/template` returns `{text}`. Any signed-in user may call them.
+- **Installed packs.** The **Lint** button on a pack calls `GET /skills/{id}/lint`,
+  which lints every `SKILL.md` in the pack's directory: at most 200 files and 256 KB
+  each (an oversized file reports "file too large"). It does not follow symlinks.
+  Project packs are only visible to that project's members.
+- **Warnings only.** Nothing is blocked, changed or saved.
+
+### Not covered
+
+- **Writing skills.** The server writes no skill, brief or workflow into a project
+  directory; copy the template yourself.
+- **Other lint.** Briefs are checked by their own validator (phase 4c); agent and
+  graph file lint from forge are not ported.
+- **Packs on disk only.** Files beyond the 200-file cap are not checked.
 
 ---
 

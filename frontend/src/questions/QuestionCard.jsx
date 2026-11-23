@@ -6,6 +6,8 @@ import relativeTime from 'dayjs/plugin/relativeTime'
 import { api } from '../api'
 import { parseTime } from '../time'
 import { questionView } from './questions'
+import { questionLaunchLine } from '../launch/launch'
+import { revealHidden } from '../guard/guard'
 import './questions.css'
 
 dayjs.extend(relativeTime)
@@ -67,6 +69,11 @@ export default function QuestionCard({ question: q, onDone, showTask = false }) 
       {v.blocks && (
         <div className="co-q-line" data-testid="question-blocks">
           <span className="co-q-label">Waiting on it:</span> {v.blocks}
+        </div>
+      )}
+      {q.launch_item && (
+        <div className="co-q-line" data-testid="question-launch-item">
+          {questionLaunchLine({ number: q.launch_item.number, title: revealHidden(q.launch_item.title || '').text })}
         </div>
       )}
       {v.recommendation && !v.recInOptions && (

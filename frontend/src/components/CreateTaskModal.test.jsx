@@ -2,7 +2,14 @@ import { act } from 'react'
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
 import { flush, render } from '../home/testRender'
 
-vi.mock('../api', () => ({ api: { createTask: vi.fn(async (b) => b) } }))
+vi.mock('../api', () => ({
+  api: {
+    createTask: vi.fn(async (b) => b),
+    scopeCheck: vi.fn(),
+    addLaunchItem: vi.fn(),
+    getLaunch: vi.fn(),
+  },
+}))
 vi.mock('antd', async (orig) => {
   const a = await orig()
   return { ...a, message: { ...a.message, error: vi.fn(), success: vi.fn() } }
@@ -35,7 +42,11 @@ let view
 beforeAll(() => {
   window.matchMedia ||= () => ({ matches: false, addListener() {}, removeListener() {}, addEventListener() {}, removeEventListener() {} })
 })
-beforeEach(() => vi.clearAllMocks())
+beforeEach(() => {
+  vi.clearAllMocks()
+  api.scopeCheck.mockResolvedValue({ new_scope: false, open: 0, would_be: 1, launch_date: null })
+  api.getLaunch.mockResolvedValue({ launch: null, items: [], all_linked_done: {} })
+})
 afterEach(async () => {
   await view?.unmount()
   view = null
@@ -110,5 +121,127 @@ describe('CreateTaskModal brief', () => {
     await submit()
     expect(message.error).toHaveBeenCalledWith('boom')
     expect(document.querySelector('[data-testid="brief-error"]')).toBeNull()
+  })
+})
+
+describe('CreateTaskModal launch nudge', () => {
+  const q = (id) => document.querySelector(`[data-testid="${id}"]`)
+  const openP = async () => {
+    view = await render(<CreateTaskModal open onClose={() => {}} onCreated={() => {}} projects={[{ id: 'p1', name: 'P' }]} activeProjectId="p1" />)
+    await flush()
+    await type(document.querySelector('#prompt'), 'Add a billing page\nwith more detail')
+  }
+  const nudgeIt = () => api.scopeCheck.mockResolvedValue({ new_scope: true, open: 4, would_be: 7, launch_date: null })
+
+  it('shows the exact nudge copy and does not create the task yet', async () => {
+    nudgeIt()
+    await openP()
+    await submit()
+    expect(api.scopeCheck).toHaveBeenCalledWith('p1', 'Add a billing page\nwith more detail')
+    expect(q('scope-nudge-text').textContent).toBe('This looks like new scope: the launch list has 4 open items; this would become #7.')
+    expect(api.createTask).not.toHaveBeenCalled()
+  })
+  it('Add to launch list creates the item first, then the linked task', async () => {
+    nudgeIt()
+    api.addLaunchItem.mockResolvedValue({ id: 'li9', number: 7 })
+    await openP()
+    await submit()
+    await act(async () => q('nudge-add').click())
+    await flush()
+    expect(api.addLaunchItem).toHaveBeenCalledWith('p1', { title: 'Add a billing page', section: 'before' })
+    expect(api.createTask).toHaveBeenCalledTimes(1)
+    expect(api.createTask.mock.calls[0][0].launch_item_id).toBe('li9')
+    expect(api.addLaunchItem.mock.invocationCallOrder[0]).toBeLessThan(api.createTask.mock.invocationCallOrder[0])
+  })
+  it('After launch adds an after item', async () => {
+    nudgeIt()
+    api.addLaunchItem.mockResolvedValue({ id: 'li9', number: 7 })
+    await openP()
+    await submit()
+    await act(async () => q('nudge-after').click())
+    await flush()
+    expect(api.addLaunchItem).toHaveBeenCalledWith('p1', { title: 'Add a billing page', section: 'after' })
+    expect(api.createTask.mock.calls[0][0].launch_item_id).toBe('li9')
+  })
+  it('Run anyway creates only the task', async () => {
+    nudgeIt()
+    await openP()
+    await submit()
+    await act(async () => q('nudge-run').click())
+    await flush()
+    expect(api.addLaunchItem).not.toHaveBeenCalled()
+    expect(api.createTask).toHaveBeenCalledTimes(1)
+    expect(api.createTask.mock.calls[0][0].launch_item_id).toBeUndefined()
+  })
+  it('no nudge when scope-check says false', async () => {
+    await openP()
+    await submit()
+    expect(q('scope-nudge')).toBeNull()
+    expect(api.createTask).toHaveBeenCalledTimes(1)
+  })
+  it('a scope-check error never blocks the submit', async () => {
+    api.scopeCheck.mockRejectedValue(new Error('down'))
+    await openP()
+    await submit()
+    expect(q('scope-nudge')).toBeNull()
+    expect(api.createTask).toHaveBeenCalledTimes(1)
+  })
+  it('no scope-check without a project', async () => {
+    await open()
+    await submit()
+    expect(api.scopeCheck).not.toHaveBeenCalled()
+    expect(api.createTask).toHaveBeenCalledTimes(1)
+  })
+  it('editing the prompt clears the nudge, so nothing runs from a stale snapshot', async () => {
+    nudgeIt()
+    await openP()
+    await submit()
+    expect(q('scope-nudge')).not.toBeNull()
+    await type(document.querySelector('#prompt'), 'something else')
+    expect(q('scope-nudge')).toBeNull()
+    expect(api.createTask).not.toHaveBeenCalled()
+  })
+  it('a retry after a failed create reuses the item already made', async () => {
+    nudgeIt()
+    api.addLaunchItem.mockResolvedValue({ id: 'li9', number: 7 })
+    api.createTask.mockRejectedValueOnce(new Error('boom'))
+    await openP()
+    await submit()
+    await act(async () => q('nudge-add').click())
+    await flush()
+    expect(q('scope-nudge')).not.toBeNull()
+    await act(async () => q('nudge-add').click())
+    await flush()
+    expect(api.addLaunchItem).toHaveBeenCalledTimes(1)
+    expect(api.createTask).toHaveBeenCalledTimes(2)
+    expect(api.createTask.mock.calls[1][0].launch_item_id).toBe('li9')
+  })
+  it('a double click on Run Task submits once', async () => {
+    await open()
+    const b = [...document.querySelectorAll('.ant-modal button')].find((x) => x.textContent.includes('Run Task'))
+    await act(async () => {
+      b.click()
+      b.click()
+    })
+    await flush()
+    expect(api.createTask).toHaveBeenCalledTimes(1)
+  })
+  it('lists open and started items in a Launch item select', async () => {
+    api.getLaunch.mockResolvedValue({
+      launch: null,
+      items: [
+        { id: 'a', number: 1, title: 'one', status: 'open', section: 'before' },
+        { id: 'b', number: 2, title: 'two', status: 'done', section: 'before' },
+      ],
+      all_linked_done: {},
+    })
+    await openP()
+    await flush()
+    expect(document.querySelector('#launch_item_id')).not.toBeNull()
+    await act(async () => {
+      document.querySelector('#launch_item_id').dispatchEvent(new MouseEvent('mousedown', { bubbles: true }))
+    })
+    const opts = [...document.querySelectorAll('.ant-select-item-option')].map((o) => o.textContent)
+    expect(opts).toEqual(['#1 one'])
   })
 })

@@ -28,6 +28,12 @@ export function checkCommand(cmd) {
   return null
 }
 
+// A safe download name: anything outside letters, digits, space, dot, dash and underscore becomes "_".
+export function exportFileName(name) {
+  const base = String(name ?? '').replace(/[^A-Za-z0-9 _.-]/g, '_').trim()
+  return base ? `${base}.md` : 'workflow.md'
+}
+
 export const KIND_OPTIONS = [
   { value: 'agent', label: 'Agents' },
   { value: 'gate', label: 'Command gate' },

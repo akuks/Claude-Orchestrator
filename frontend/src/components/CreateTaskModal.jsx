@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import {
   Button,
   Form,
@@ -13,6 +13,9 @@ import {
 import { UploadOutlined } from '@ant-design/icons'
 import { api } from '../api'
 import BriefFields from '../briefs/BriefFields'
+import { revealHidden } from '../guard/guard'
+import ScopeNudge from '../launch/ScopeNudge'
+import { isOpen, titleFromPrompt } from '../launch/launch'
 import { BRIEF_LABELS, briefMissing, briefPayload } from '../briefs/brief'
 
 // Read a File into base64 (strips the data: URL prefix).
@@ -36,18 +39,61 @@ export default function CreateTaskModal({
   const [submitting, setSubmitting] = useState(false)
   const [fileList, setFileList] = useState([])
   const [briefError, setBriefError] = useState('')
+  const [nudge, setNudge] = useState(null) // {open, would_be, values, brief}: waiting for a choice
+  const [items, setItems] = useState([])
+  const lock = useRef(false) // double-submit guard
+  const made = useRef(null) // {key, id}: the launch item already created for this nudge
+  const projectId = Form.useWatch('project_id', form)
+
+  // Open and started items of the chosen project, for the "Launch item" select. Errors: no list.
+  useEffect(() => {
+    let live = true
+    setItems([])
+    if (open && projectId) {
+      Promise.resolve()
+        .then(() => api.getLaunch(projectId))
+        .then((d) => live && setItems((d?.items || []).filter(isOpen)))
+        .catch(() => {})
+    }
+    return () => {
+      live = false
+    }
+  }, [open, projectId])
+
+  const resetNudge = () => {
+    setNudge(null)
+    made.current = null
+  }
+  useEffect(() => {
+    if (!open) resetNudge()
+  }, [open])
+  const close = () => {
+    resetNudge()
+    onClose()
+  }
 
   useEffect(() => {
     if (open) form.setFieldsValue({ project_id: activeProjectId || undefined })
   }, [open, activeProjectId])
 
   const submit = async () => {
+    if (lock.current) return
+    lock.current = true
+    try {
+      await submitInner()
+    } finally {
+      lock.current = false
+    }
+  }
+
+  const submitInner = async () => {
     let values
     try {
       values = await form.validateFields()
     } catch {
       return
     }
+    if (!items.some((i) => i.id === values.launch_item_id)) values = { ...values, launch_item_id: undefined }
     const brief = briefPayload(values.brief)
     const missing = briefMissing(values.brief)
     if (missing.length) {
@@ -55,6 +101,27 @@ export default function CreateTaskModal({
       return
     }
     setBriefError('')
+    setNudge(null)
+    if (values.project_id) {
+      // Never blocks: an error from the check means no nudge.
+      let check = null
+      setSubmitting(true)
+      try {
+        check = await api.scopeCheck(values.project_id, values.prompt)
+      } catch {
+        check = null
+      }
+      if (check?.new_scope) {
+        setSubmitting(false)
+        setNudge({ open: check.open, would_be: check.would_be, values, brief })
+        return
+      }
+      setSubmitting(false)
+    }
+    await create(values, brief, values.launch_item_id)
+  }
+
+  const create = async (values, brief, launchItemId) => {
     setSubmitting(true)
     try {
       const input_files = await Promise.all(
@@ -76,10 +143,12 @@ export default function CreateTaskModal({
         requires_approval: !!values.requires_approval,
         input_files,
         ...(brief ? { brief } : {}),
+        ...(launchItemId ? { launch_item_id: launchItemId } : {}),
       })
       message.success('Task created')
       form.resetFields()
       setBriefError('')
+      resetNudge()
       setFileList([])
       onCreated?.()
       onClose()
@@ -91,14 +160,36 @@ export default function CreateTaskModal({
     }
   }
 
+  // "Add to launch list" / "After launch": make the item from the prompt, then the task linked to it.
+  const addAndCreate = async (section) => {
+    const { values, brief } = nudge
+    setSubmitting(true)
+    const title = titleFromPrompt(values.prompt)
+    const key = `${values.project_id}|${section}|${title}`
+    let id = made.current?.key === key ? made.current.id : null
+    if (!id) {
+      try {
+        const item = await api.addLaunchItem(values.project_id, { title, section })
+        id = item?.id
+        made.current = { key, id }
+      } catch (e) {
+        message.error(e.message)
+        setSubmitting(false)
+        return
+      }
+    }
+    setSubmitting(false)
+    await create(values, brief, id)
+  }
+
   return (
     <Modal
       title="New Task"
       open={open}
-      onCancel={onClose}
+      onCancel={close}
       width={640}
       footer={[
-        <Button key="cancel" onClick={onClose}>
+        <Button key="cancel" onClick={close}>
           Cancel
         </Button>,
         <Button key="run" type="primary" loading={submitting} onClick={submit}>
@@ -106,9 +197,20 @@ export default function CreateTaskModal({
         </Button>,
       ]}
     >
+      {nudge && (
+        <ScopeNudge
+          open={nudge.open}
+          wouldBe={nudge.would_be}
+          busy={submitting}
+          onAdd={() => addAndCreate('before')}
+          onAfter={() => addAndCreate('after')}
+          onRunAnyway={() => create(nudge.values, nudge.brief, nudge.values.launch_item_id)}
+        />
+      )}
       <Form
         form={form}
         layout="vertical"
+        onValuesChange={() => setNudge(null)}
         initialValues={{ priority: 'normal', max_turns: 25 }}
       >
         <Form.Item
@@ -137,6 +239,15 @@ export default function CreateTaskModal({
             />
           </Form.Item>
         </div>
+        {projectId && items.length > 0 && (
+          <Form.Item name="launch_item_id" label="Launch item (optional)">
+            <Select
+              allowClear
+              placeholder="Not linked"
+              options={items.map((i) => ({ value: i.id, label: `#${i.number} ${revealHidden(i.title).text}` }))}
+            />
+          </Form.Item>
+        )}
         <div style={{ display: 'flex', gap: 12 }}>
           <Form.Item
             name="model"
