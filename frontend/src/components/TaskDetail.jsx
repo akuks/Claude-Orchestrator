@@ -116,6 +116,19 @@ const EVENT_STYLE = {
   completed: { color: 'var(--co-terminal-success)', prefix: '✔' },
   decision_note: { color: 'var(--co-terminal-muted)', prefix: '·' },
   decision_review: { color: 'var(--co-terminal-muted)', prefix: '·' },
+  test_result: { color: 'var(--co-terminal-muted)', prefix: '·' },
+}
+
+// "Tests: 61 passed, 2 failed (a, b)": zero and missing parts are left out.
+// Text only: the names come from the agent's test output.
+export function testResultLine(p) {
+  const parts = [['passed', p.passed], ['failed', p.failed], ['skipped', p.skipped]]
+    .filter(([, n]) => Number.isInteger(n) && n > 0)
+    .map(([w, n]) => `${n} ${w}`)
+  let text = `Tests: ${parts.length ? parts.join(', ') : 'none ran'}`
+  const names = Array.isArray(p.failing) ? p.failing.filter((n) => typeof n === 'string' && n) : []
+  if (names.length) text += ` (${names.join(', ')})`
+  return text
 }
 
 export function renderLine(ev) {
@@ -154,6 +167,9 @@ export function renderLine(ev) {
       break
     case 'decision_review':
       text = decisionReviewLine(p)
+      break
+    case 'test_result':
+      text = testResultLine(p)
       break
     default:
       text = JSON.stringify(p)

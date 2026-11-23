@@ -1,0 +1,7 @@
+collected 13 items
+tests/test_a.py ..F.s    [ 45%]
+=========================== short test summary info ===========================
+FAILED tests/test_a.py::test_div - AssertionError: assert 1 == 2
+ERROR tests/test_b.py::test_x - RuntimeError: boom
+FAILED tests/test_c.py::test_plain
+=========== 1 failed, 10 passed, 2 skipped, 1 error in 3.21s ===========

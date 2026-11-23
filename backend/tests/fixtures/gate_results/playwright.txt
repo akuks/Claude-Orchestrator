@@ -1,0 +1,10 @@
+Running 63 tests using 4 workers
+  ✓  1 [chromium] › tests/a.spec.ts:3:5 › home › loads (1.2s)
+  ✘  2 [chromium] › tests/login.spec.ts:12:5 › login › shows an error (2.1s)
+
+  5 failed
+    [chromium] › tests/login.spec.ts:12:5 › login › shows an error
+    [chromium] › tests/login.spec.ts:20:5 › login › locks out
+  3 skipped
+  1 did not run
+  52 passed (1.2m)

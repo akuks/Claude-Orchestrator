@@ -40,6 +40,7 @@ class TaskOut(BaseModel):
     max_turns: int
     max_budget_usd: Optional[float] = None
     attempt: int = 0
+    stage_attempt: int = 0
     exit_code: Optional[int]
     error: Optional[str]
     result_text: Optional[str]
@@ -594,7 +595,16 @@ class WorkflowStageItem(BaseModel):
 
 class WorkflowStage(BaseModel):
     name: str = Field(min_length=1, max_length=120)
-    items: list[WorkflowStageItem] = Field(min_length=1)
+    # Gate/approval fields are optional here; gates.spec.validate_stages is the
+    # authoritative check (agent stages need items, and so on).
+    items: Optional[list[WorkflowStageItem]] = None
+    kind: Optional[str] = None
+    project: Optional[str] = None
+    run: Optional[list[str]] = None
+    retry: Optional[str] = None
+    before: Optional[list[str]] = None
+    timeout_min: Optional[int] = None
+    message: Optional[str] = None
 
 
 class WorkflowCreate(BaseModel):
@@ -623,7 +633,9 @@ class WorkflowRunCreate(BaseModel):
     input: str = ""  # the PR/issue/description this run acts on
 
 
-class WorkflowRunOut(BaseModel):
+class WorkflowRunSummaryOut(BaseModel):
+    """A run without its log and per-stage state: list and action responses."""
+
     id: str
     workflow_id: str
     name: str
@@ -637,6 +649,29 @@ class WorkflowRunOut(BaseModel):
     updated_at: datetime
 
     model_config = {"from_attributes": True}
+
+
+class WorkflowRunOut(WorkflowRunSummaryOut):
+    # Per-stage state keyed by str(index) and the run log [{at, text}] (phase 5a).
+    stage_state: dict = {}
+    log: list = []
+
+    @field_validator("stage_state", "log", mode="before")
+    @classmethod
+    def _none_empty(cls, v, info):
+        return ({} if info.field_name == "stage_state" else []) if v is None else v
+
+
+class StageReject(BaseModel):
+    reason: str
+
+    @field_validator("reason")
+    @classmethod
+    def _reason_len(cls, v):
+        v = (v or "").strip()
+        if not 1 <= len(v) <= 500:
+            raise ValueError("a reason of 1 to 500 characters is required")
+        return v
 
 
 class LiveStageOut(BaseModel):

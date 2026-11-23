@@ -1,0 +1,14 @@
+TAP version 13
+ok 1 - adds
+not ok 2 - divides
+  ---
+  error: boom
+  ...
+    not ok 1 - inner is ignored
+not ok 3 - orders
+ok 4 - last
+1..4
+# tests 4
+# pass 2
+# fail 2
+# skipped 0

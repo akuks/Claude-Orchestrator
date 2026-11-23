@@ -191,3 +191,23 @@ def test_live_caps_runs_and_batches_task_queries(client, monkeypatch):
     # Stage tasks for all runs in one query, thread roots in one, their
     # children in one — not one query per run / per thread.
     assert 1 <= len(seen) <= 3, seen  # (the counter does see the endpoint)
+
+
+def test_live_retried_agent_stage_counts_only_current_attempt(client):
+    pid = _project(client)
+    rid = _run(pid, current=0, n_stages=1)
+
+    async def go():
+        async with SessionLocal() as s:
+            run = await s.get(WorkflowRun, rid)
+            run.stage_state = {"0": {"attempt": 1}}
+            await s.commit()
+
+    asyncio.run(go())
+    _add(
+        Task(title="old", prompt="p", project_id=pid, status="failed", workflow_run_id=rid, stage_index=0, stage_attempt=0),
+        Task(title="new1", prompt="p", project_id=pid, status="running", workflow_run_id=rid, stage_index=0, stage_attempt=1),
+        Task(title="new2", prompt="p", project_id=pid, status="completed", workflow_run_id=rid, stage_index=0, stage_attempt=1),
+    )
+    st = _find(_live(client), rid)["stages"][0]
+    assert st["state"] == "current" and st["task_count"] == 2

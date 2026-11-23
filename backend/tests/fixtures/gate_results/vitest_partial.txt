@@ -1,0 +1,5 @@
+ ✓ src/a.test.ts (3 tests) 5ms
+   ✓ adds 2ms
+   ✓ more 1ms
+   × divides 12ms
+   ↓ later

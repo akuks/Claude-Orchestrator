@@ -1,0 +1,6 @@
+--- FAIL: TestA (0.01s)
+    --- FAIL: TestA/sub (0.00s)
+        a_test.go:10: wrong
+--- PASS: TestC (0.01s)
+FAIL
+FAIL	example.com/pkg	0.5s

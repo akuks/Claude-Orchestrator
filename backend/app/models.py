@@ -72,6 +72,8 @@ class Task(Base):
     # Workflow linkage: set when this task belongs to a workflow run's stage.
     workflow_run_id: Mapped[str | None] = mapped_column(String(32), nullable=True, index=True)
     stage_index: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    # Which attempt of the stage this task belongs to (gate retries, phase 5a).
+    stage_attempt: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
     # Whether this task may open outbound SSH/SCP/SFTP. False → ssh/scp/sftp are
     # added to --disallowedTools (deny wins even under bypassPermissions). Ad-hoc
     # tasks default True; agent tasks inherit the agent's allow_remote flag.
@@ -710,8 +712,41 @@ class WorkflowRun(Base):
     stages: Mapped[list] = mapped_column(JSON, default=list)  # snapshot at run time
     # Projects the run's stages target (snapshot at run time), used for visibility.
     project_ids: Mapped[list] = mapped_column(JSON, default=list)
+    # Per-stage timing, keyed by str(stage_index): {"started_at", "finished_at"} iso strings (phase 5a).
+    stage_state: Mapped[dict] = mapped_column(JSON, default=dict, server_default="{}")
+    # Run log: [{"at": iso, "text": str}], newest 200 (see gates/runlog.py).
+    log: Mapped[list] = mapped_column(JSON, default=list, server_default="[]")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now, index=True)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+
+
+class WorkflowGateRun(Base):
+    """One execution of one gate command (phase 5a)."""
+
+    __tablename__ = "workflow_gate_runs"
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=_uuid)
+    run_id: Mapped[str] = mapped_column(
+        String(32), ForeignKey("workflow_runs.id", ondelete="CASCADE"), index=True
+    )
+    stage_index: Mapped[int] = mapped_column(Integer)
+    attempt: Mapped[int] = mapped_column(Integer)
+    handout: Mapped[str] = mapped_column(String(32))
+    command: Mapped[str] = mapped_column(Text)
+    kind: Mapped[str] = mapped_column(String(8))
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    duration_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    exit_code: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    outcome: Mapped[str] = mapped_column(String(16))
+    runner: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    passed: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    failed: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    skipped: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    failing: Mapped[list] = mapped_column(JSON, default=list, server_default="[]")
+    flaky: Mapped[list | None] = mapped_column(JSON(none_as_null=True), nullable=True)
+    code_state: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    log_name: Mapped[str | None] = mapped_column(String(200), nullable=True)
 
 
 class SkillPack(Base):

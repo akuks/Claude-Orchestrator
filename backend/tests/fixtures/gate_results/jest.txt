@@ -1,0 +1,13 @@
+FAIL src/a.test.js
+  ● Console
+    console.log hi
+  ● suite › divides
+    expect(received)
+  ● suite › orders
+
+FAIL src/broken.test.js
+  ● Test suite failed to run
+
+  ● suite › divides
+
+Tests:       2 failed, 1 todo, 10 passed, 13 total

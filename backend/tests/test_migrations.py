@@ -12,7 +12,7 @@ from sqlalchemy.orm import Session
 from app import models
 from app.database import _alembic_cfg, _baseline_metadata, run_migrations
 
-HEAD = "0013"  # the latest revision
+HEAD = "0014"  # the latest revision
 
 
 def _tables(db) -> set[str]:
@@ -414,7 +414,7 @@ def test_migration_0013_upgrade_downgrade(scratch_url):
 
     url = scratch_url
     command.upgrade(_alembic_cfg(url), "0012")
-    command.upgrade(_alembic_cfg(url), "head")
+    command.upgrade(_alembic_cfg(url), "0013")
 
     def check(sc, insp):
         assert "model_tiers" in {c["name"] for c in insp.get_columns("guard_org_settings")}
@@ -432,3 +432,32 @@ def test_migration_0013_upgrade_downgrade(scratch_url):
         return sc.exec_driver_sql("SELECT version_num FROM alembic_version").scalar()
 
     assert _inspect(url, check_down) == "0012"
+
+
+def test_migration_0014_upgrade_downgrade(scratch_url):
+    from alembic import command
+
+    url = scratch_url
+    command.upgrade(_alembic_cfg(url), "0013")
+    command.upgrade(_alembic_cfg(url), "0014")
+
+    def check(sc, insp):
+        assert {"stage_state", "log"} <= {c["name"] for c in insp.get_columns("workflow_runs")}
+        assert "stage_attempt" in {c["name"] for c in insp.get_columns("tasks")}
+        assert {"id", "run_id", "stage_index", "attempt", "handout", "command", "kind", "started_at",
+                "finished_at", "duration_ms", "exit_code", "outcome", "runner", "passed", "failed",
+                "skipped", "failing", "flaky", "code_state", "log_name"} <= {
+            c["name"] for c in insp.get_columns("workflow_gate_runs")}
+        assert ("run_id",) in {tuple(i["column_names"]) for i in insp.get_indexes("workflow_gate_runs")}
+        return sc.exec_driver_sql("SELECT version_num FROM alembic_version").scalar()
+
+    assert _inspect(url, check) == "0014"
+    command.downgrade(_alembic_cfg(url), "0013")
+
+    def check_down(sc, insp):
+        assert "workflow_gate_runs" not in insp.get_table_names()
+        assert not ({"stage_state", "log"} & {c["name"] for c in insp.get_columns("workflow_runs")})
+        assert "stage_attempt" not in {c["name"] for c in insp.get_columns("tasks")}
+        return sc.exec_driver_sql("SELECT version_num FROM alembic_version").scalar()
+
+    assert _inspect(url, check_down) == "0013"

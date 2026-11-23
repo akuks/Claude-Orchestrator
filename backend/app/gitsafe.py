@@ -35,7 +35,23 @@ remote's lazy fetch of a missing object), so every such call goes through
   a hex sha or ``<hex>..<hex>`` (hex is 7-40 lowercase digits);
 * the decision health check's two reads: ``ls-files`` with exactly ``-co
   --exclude-standard -z`` (any order, nothing else), and ``log`` with
-  ``--name-only`` and ``--since=<date>`` (both in ``ALLOWED_LOG_OPTIONS``).
+  ``--name-only`` and ``--since=<date>`` (both in ``ALLOWED_LOG_OPTIONS``);
+* repo-defined filter drivers off: before every command the repo's
+  ``filter.<name>.*`` config is listed (one internal read, ``config
+  --get-regexp -z ^filter\\.``) and each driver's ``clean``, ``smudge``,
+  ``process`` is set empty and ``required=false`` with ``-c``, so a
+  ``.gitattributes`` ``filter=`` line cannot make git run a program; more
+  than 50 drivers, or a listing that fails, refuses the command;
+* submodule internals are never entered: ``status`` and ``diff`` get
+  ``--ignore-submodules=dirty`` from ``run_git`` itself (a submodule's own
+  config could define filter drivers), so dirty submodule content is not
+  reported, only a changed gitlink; submodule diffs are pinned to the short
+  form (``-c diff.submodule=short``, ``-c status.submoduleSummary=false`` and
+  ``diff --submodule=short``), so no child ``git diff`` runs inside one; a driver name that is not printable ASCII
+  (or holds ``=``) refuses the command ("unusual filter driver name");
+* the gate code-state hash's two reads: ``diff`` with exactly
+  ``--no-ext-diff --no-textconv --binary HEAD`` and ``ls-files`` with exactly
+  ``--others --exclude-standard -z`` (each any order, nothing else).
 
 It only reads metadata. Commands that need the network or write (clone,
 fetch, push, checkout ...) are refused; they are out of scope here.
@@ -64,6 +80,8 @@ SAFE_ARGS = (
     "-c", "gpg.x509.program=false",
     "-c", "diff.external=",
     "-c", "core.attributesFile=/dev/null",
+    "-c", "diff.submodule=short",
+    "-c", "status.submoduleSummary=false",
     "--no-pager",
     "--no-optional-locks",
 )
@@ -98,6 +116,8 @@ ALLOWED_LOG_OPTIONS = ("--all", "-i", "--fixed-strings", "--no-merges", "--count
                        "--author=", "--name-only", "--since=")
 
 LS_FILES_OPTIONS = ("-co", "--exclude-standard", "-z")
+LS_FILES_OTHERS_OPTIONS = ("--others", "--exclude-standard", "-z")
+DIFF_OPTIONS = ("--no-ext-diff", "--no-textconv", "--binary", "HEAD")
 STATUS_OPTIONS = ("--porcelain=v1", "-z", "--untracked-files=all", "--no-renames")
 _HEX = r"[0-9a-f]{7,40}"
 _REV_RE = re.compile(rf"^(HEAD|{_HEX}(\.\.{_HEX})?)$")
@@ -120,6 +140,10 @@ def check_args(args) -> None:
     if cmd == "status" and sorted(rest) == sorted(STATUS_OPTIONS):
         return
     if cmd == "ls-files" and sorted(rest) == sorted(LS_FILES_OPTIONS):
+        return
+    if cmd == "ls-files" and sorted(rest) == sorted(LS_FILES_OTHERS_OPTIONS):
+        return
+    if cmd == "diff" and sorted(rest) == sorted(DIFF_OPTIONS):
         return
     if cmd == "merge-base" and len(rest) == 3 and rest[0] == "--is-ancestor" and all(_SHA_RE.match(a) for a in rest[1:]):
         return
@@ -152,6 +176,45 @@ def git_available() -> bool:
     return shutil.which("git") is not None
 
 
+MAX_FILTER_DRIVERS = 50
+_DRIVER_NAME_RE = re.compile(r"^[\x21-\x3c\x3e-\x7e]+$")  # printable ASCII, no space, no "="
+
+
+def _filter_overrides(exe: str, directory, timeout: float) -> list[str] | GitResult:
+    """``-c`` arguments that disable every filter driver the repo defines, or a failing GitResult."""
+    try:
+        r = subprocess.run(
+            [exe, *SAFE_ARGS, "config", "--get-regexp", "-z", r"^filter\."], cwd=str(Path(directory)),
+            stdin=subprocess.DEVNULL, capture_output=True, timeout=max(0.01, timeout), env=git_env(directory),
+        )
+    except subprocess.TimeoutExpired:
+        return GitResult(False, "", True, "filter driver listing timed out")
+    except (OSError, ValueError) as e:
+        return GitResult(False, "", True, str(e))
+    out = r.stdout.decode("latin-1")  # byte-for-byte: a name is checked, never mangled
+    if r.returncode == 1 and not out:
+        return []  # no matches
+    if r.returncode != 0:
+        return GitResult(False, "", r.returncode < 0, r.stderr.decode("utf-8", "replace").strip(), r.returncode)
+    names: list[str] = []
+    for entry in out.split("\0"):
+        key = entry.split("\n", 1)[0]
+        if not key.startswith("filter.") or "." not in key[7:]:
+            continue
+        name = key[7:key.rindex(".")]
+        if name not in names:
+            names.append(name)
+    if len(names) > MAX_FILTER_DRIVERS:
+        return GitResult(False, "", True, "too many filter drivers")
+    if any(not _DRIVER_NAME_RE.match(n) for n in names):
+        return GitResult(False, "", True, "unusual filter driver name")
+    over: list[str] = []
+    for n in names:
+        for k, v in (("clean", ""), ("smudge", ""), ("process", ""), ("required", "false")):
+            over += ["-c", f"filter.{n}.{k}={v}"]
+    return over
+
+
 def run_git(directory, *args: str, timeout: float) -> GitResult:
     """Run ``git <SAFE_ARGS> <args>`` in ``directory`` (see the module doc);
     ValueError for a command outside the allowlist."""
@@ -159,10 +222,17 @@ def run_git(directory, *args: str, timeout: float) -> GitResult:
     exe = shutil.which("git")
     if exe is None:
         return GitResult(False, "", True, "git not found", missing=True)
+    over = _filter_overrides(exe, directory, timeout)
+    if isinstance(over, GitResult):
+        return over
+    if args[0] in ("status", "diff"):
+        # a submodule's own config could define filter or diff drivers that git's child processes would run
+        extra = ("--ignore-submodules=dirty", "--submodule=short") if args[0] == "diff" else ("--ignore-submodules=dirty",)
+        args = (args[0], *extra, *args[1:])
     try:
         r = subprocess.run(
-            [exe, *SAFE_ARGS, *args], cwd=str(Path(directory)), stdin=subprocess.DEVNULL, capture_output=True,
-            timeout=max(0.01, timeout), env=git_env(directory),
+            [exe, *SAFE_ARGS, *over, *args], cwd=str(Path(directory)), stdin=subprocess.DEVNULL,
+            capture_output=True, timeout=max(0.01, timeout), env=git_env(directory),
         )
     except subprocess.TimeoutExpired:
         return GitResult(False, "", True, "timed out")
