@@ -88,7 +88,7 @@ def test_fail_interrupted_asks(client, admin_id):
 def test_migration_0010_upgrade_downgrade(scratch_url):  # noqa: F811
     url = scratch_url
     command.upgrade(_alembic_cfg(url), "0009")
-    command.upgrade(_alembic_cfg(url), "head")
+    command.upgrade(_alembic_cfg(url), "0010")
 
     def check(sc, insp):
         assert {"id", "task_id", "user_id", "question", "answer", "status", "error", "cost_usd", "model",
