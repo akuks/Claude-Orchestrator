@@ -1,3 +1,4 @@
+import asyncio
 import base64
 import json
 import logging
@@ -24,6 +25,7 @@ from ..access import (
 from ..config import settings
 from ..constants import VALID_MODELS, Priority, Status
 from ..database import SessionLocal
+from ..decisions import after_run
 from ..guard import runtime as guard_runtime
 from .. import reports
 from ..models import ActionGrant, Artifact, DecisionProposal, Project, RunAsk, Task, TaskEvent, TaskHandoff, TaskQuestion, TaskUsage
@@ -44,6 +46,8 @@ from ..schemas import (
     TaskCreate,
     TaskOut,
 )
+
+_LESSON_JOBS: set = set()
 
 router = APIRouter(prefix="/tasks", tags=["tasks"])
 
@@ -832,8 +836,14 @@ async def close_handoff(task_id: str, request: Request):
         row.status = "closed"
         row.closed_at = datetime.now(timezone.utc)
         row.closed_by = p.user.id
+        root = task.root_id or task.id
         await s.commit()
-        return _handoff_out(row)
+        out = _handoff_out(row)
+    # a background job (never raises); keep a reference so it is not collected mid-run
+    job = asyncio.create_task(after_run.lessons_after_close(root, p.user.id))
+    _LESSON_JOBS.add(job)
+    job.add_done_callback(_LESSON_JOBS.discard)
+    return out
 
 
 def _safe_filename(task: Task, ext: str) -> str:

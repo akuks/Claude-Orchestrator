@@ -15,6 +15,7 @@ from sqlalchemy.exc import InvalidRequestError
 from ..access import require_task, task_visibility_clause
 from ..constants import Status
 from ..database import SessionLocal
+from ..decisions import proposals, validate as decision_validate
 from ..models import Task, TaskQuestion
 from ..questions import service as questions
 from ..resume.texts import ACCEPT_ANSWER, ANSWER_PROMPT
@@ -122,13 +123,37 @@ async def answer_question(question_id: str, payload: QuestionAnswer, request: Re
             q.answered_by = sender
             q.answered_at = datetime.now(timezone.utc)
             q.followup_task_id = child.id
+            suggestion = None
+            if payload.suggest_decision:
+                suggestion = await _suggest(s, q, answer, sender)
             await s.commit()
             await s.refresh(child)
             await s.refresh(q)
         task_out = TaskOut.model_validate(child)
         q_out = questions.out(q, task_title=parent.title)
     await request.app.state.worker.submit(task_out.id, task_out.priority, task_out.created_at)
-    return {"question": q_out, "task": task_out}
+    return {"question": q_out, "task": task_out, "suggestion": suggestion}
+
+
+async def _suggest(s, q, answer: str, sender: str) -> str:
+    """The answer as a suggested decision; never raises (the answer must not fail because of it)."""
+    if not q.project_id:
+        return "skipped: the task has no project"
+    try:
+        async with s.begin_nested():
+            fields = proposals.clean_proposal(
+                {"title": decision_validate.one_line(q.question)[:200], "why": ("Answer: " + answer)[:2000],
+                 "kind": "decision"}, strict_touches=True)
+            row = await proposals.add(s, project_id=q.project_id, fields=fields, source="answer",
+                                      evidence=f"question {q.id}", dedupe_key=f"answer:{q.id}",
+                                      proposed_by=sender, task_id=q.task_id, on_full="raise")
+    except ValueError as e:
+        return f"skipped: {e}"
+    except proposals.QueueFull:
+        return "skipped: the suggestion queue is full"
+    except Exception:  # noqa: BLE001
+        return "skipped: could not add the suggestion"
+    return "skipped: already suggested" if row is None else "added"
 
 
 @router.post("/{question_id}/dismiss", response_model=QuestionOut)
