@@ -857,13 +857,13 @@ def request_approval(policy, payload, verdict, summary, deadline, info=None):
 
 
 # -- events -----------------------------------------------------------------
-def _rel_target(policy, payload):
-    """The edited file relative to the policy's ``cwd`` (both real paths, ``/``-separated), or None when it is
+def _rel_target(policy, payload, root_key="cwd"):
+    """The edited file relative to the policy's ``root_key`` (default ``cwd``; both real paths, ``/``-separated), or None when it is
     outside it (``..``, a symlink out, another root) or there is no usable path."""
     ti = payload.get("tool_input")
     ti = ti if isinstance(ti, dict) else {}
     target = ti.get("file_path") or ti.get("notebook_path")
-    root = policy.get("cwd")
+    root = policy.get(root_key)
     if not isinstance(target, str) or not target or "\0" in target or not isinstance(root, str) or not root:
         return None
     root = os.path.realpath(root)
@@ -877,6 +877,70 @@ def _rel_target(policy, payload):
         return None
     rel = real[len(prefix):].replace(os.sep, "/")
     return rel if rel and ".." not in rel.split("/") else None
+
+
+BRIEF_RULE = "brief-scope"
+BRIEF_TOOLS = ("Write", "Edit", "MultiEdit", "NotebookEdit")
+BRIEF_MALFORMED = "the task's brief could not be read, so file changes are blocked"
+BRIEF_DENY_TAIL = "Stay inside the brief; if the change is needed, stop and report why."
+BRIEF_CAN_MAX = 200
+
+
+def _brief_rel(policy, payload):
+    """(real-path form, as-given normalised form) of the edited file relative to ``project_dir``; each None
+    when it is outside it. The as-given form folds ``..`` without following symlinks, so a symlink or a
+    ``..`` cannot hide a path from CANNOT."""
+    real = _rel_target(policy, payload, "project_dir")
+    ti = payload.get("tool_input")
+    ti = ti if isinstance(ti, dict) else {}
+    target = ti.get("file_path") or ti.get("notebook_path")
+    root = policy.get("project_dir")
+    given = None
+    if isinstance(target, str) and target and "\0" not in target and isinstance(root, str) and root:
+        base = payload.get("cwd") if isinstance(payload.get("cwd"), str) and payload.get("cwd") else root
+        full = os.path.normpath(os.path.join(base, target))
+        for r in {os.path.normpath(root), os.path.realpath(root)}:
+            prefix = r.rstrip(os.sep) + os.sep
+            a, b = (full.lower(), prefix.lower()) if CASE_INSENSITIVE else (full, prefix)
+            if a.startswith(b) and len(full) > len(prefix):
+                given = full[len(prefix):].replace(os.sep, "/")
+                break
+    return real, given
+
+
+def _brief_layers(brief):
+    """The validated layers, or None when the key is not the shape the server writes."""
+    if not isinstance(brief, dict) or not isinstance(brief.get("layers"), list) or not brief["layers"]:
+        return None
+    for layer in brief["layers"]:
+        if not isinstance(layer, dict) or not isinstance(layer.get("task"), str):
+            return None
+        for k in ("can", "cannot"):
+            v = layer.get(k)
+            if not isinstance(v, list) or not all(isinstance(g, str) for g in v):
+                return None
+    return brief["layers"]
+
+
+def brief_denial(policy, payload, tool):
+    """Why a file tool's change breaks the task's brief, or None. A path must be inside every layer's
+    non-empty CAN and outside every layer's CANNOT."""
+    if tool not in BRIEF_TOOLS or "brief" not in policy:
+        return None
+    layers = _brief_layers(policy["brief"])
+    if layers is None:
+        return BRIEF_MALFORMED
+    forms = [r for r in dict.fromkeys(_brief_rel(policy, payload)) if r]
+    for rel in forms:
+        for i, layer in enumerate(layers):
+            who = "the task's brief" if i == 0 else f"an enclosing brief (task {layer['task']})"
+            for g in layer["cannot"]:
+                if matches(g, rel):
+                    return f"this changes {rel}, which {who} says CANNOT change ({g})"
+            if layer["can"] and not any(matches(g, rel) for g in layer["can"]):
+                globs = cut(", ".join(layer["can"]), BRIEF_CAN_MAX)
+                return f"this changes {rel}, which is outside what {who} says CAN change ({globs})"
+    return None
 
 
 def _session_key(session_id):
@@ -1014,6 +1078,15 @@ def pre_tool_use(payload, policy, started):
     tool = payload.get("tool_name")
     if not isinstance(tool, str) or not tool:
         raise ValueError("no tool_name")
+    why = brief_denial(policy, payload, tool)
+    if why:
+        rec = {"event": "PreToolUse", "tool": tool, "rule_ids": [BRIEF_RULE],
+               "summary": what_of(tool, payload.get("tool_input")),
+               "tool_use_id": payload.get("tool_use_id"), "agent_id": payload.get("agent_id"),
+               "decision": "deny", "reason": redact(why)}
+        _spool(rec)
+        deny(f"CO-GUARD: blocked — {redact(why, 1000)} ({BRIEF_RULE}). {BRIEF_DENY_TAIL}")
+        return post_report(policy, rec)
     cwd = payload.get("cwd") or policy.get("cwd")
     verdict = rules.evaluate(tool, payload.get("tool_input"), policy, cwd)
     if verdict.decision == "allow":
