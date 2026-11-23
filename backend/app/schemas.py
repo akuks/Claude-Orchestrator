@@ -1049,6 +1049,34 @@ class LaunchPut(BaseModel):
     version: Optional[int] = None  # required once the launch row exists
 
 
+class ScopeCheckIn(BaseModel):
+    prompt: str = Field(default="", max_length=20000)
+
+
+class ScopeCheckOut(BaseModel):
+    new_scope: bool
+    open: int
+    would_be: int
+    launch_date: Optional[date] = None
+
+
+class LaunchEstimateOut(BaseModel):
+    median_days: float
+    min_days: int
+    max_days: int
+    n: int
+
+
+class LaunchFactsOut(BaseModel):
+    launch_date: Optional[date] = None
+    open: int
+    done: int
+    would_be: int
+    after: list[str] = []
+    critical_touched: list[str] = []
+    estimate: Optional[LaunchEstimateOut] = None
+
+
 class LaunchItemIn(BaseModel):
     title: str
     section: str = "before"

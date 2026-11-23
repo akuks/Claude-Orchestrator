@@ -10,10 +10,11 @@ from sqlalchemy.exc import IntegrityError
 
 from ..access import require_project_role
 from ..database import SessionLocal
-from ..launch import store
+from ..launch import facts as launch_facts
+from ..launch import scope, store
 from ..launch.validate import SECTIONS, STATUSES, clean_paths, clean_title, title_key
 from ..models import LaunchItem, ProjectLaunch, Task, User
-from ..schemas import LaunchItemIn, LaunchItemOut, LaunchItemPatch, LaunchOut, LaunchPut, LaunchSettingsOut
+from ..schemas import LaunchFactsOut, ScopeCheckIn, ScopeCheckOut, LaunchItemIn, LaunchItemOut, LaunchItemPatch, LaunchOut, LaunchPut, LaunchSettingsOut
 
 router = APIRouter(prefix="/projects/{project_id}/launch", tags=["launch"])
 
@@ -210,3 +211,31 @@ async def delete_item(project_id: str, number: int, request: Request):
         await s.execute(update(Task).where(Task.launch_item_id == item.id).values(launch_item_id=None))
         await s.delete(item)
         await s.commit()
+
+
+@router.get("/facts", response_model=LaunchFactsOut)
+async def get_facts(project_id: str, request: Request, files: str = ""):
+    async with SessionLocal() as s:
+        await require_project_role(s, request.state.principal, project_id)
+        try:
+            names = launch_facts.clean_files(files.split(",") if files else [])
+        except ValueError as e:
+            raise HTTPException(422, str(e))
+        return await launch_facts.compute(s, project_id, names)
+
+
+@router.post("/scope-check", response_model=ScopeCheckOut)
+async def scope_check(project_id: str, payload: ScopeCheckIn, request: Request):
+    principal = request.state.principal
+    async with SessionLocal() as s:
+        await require_project_role(s, principal, project_id)
+        f = await launch_facts.compute(s, project_id, [])
+        has_data = await store.get_or_none(s, project_id) is not None or f["would_be"] > 1
+    out = {"new_scope": False, "open": f["open"], "would_be": f["would_be"], "launch_date": f["launch_date"]}
+    uid = principal.user.id
+    if (principal.is_agent or not has_data or not scope.looks_like_new_scope(payload.prompt)
+            or scope.COOLDOWN.active(uid, project_id)):
+        return out
+    scope.COOLDOWN.mark(uid, project_id)
+    out["new_scope"] = True
+    return out
