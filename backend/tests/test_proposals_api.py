@@ -127,8 +127,17 @@ def test_accept_empty_evidence_source(world):
 
 def test_person_route_needs_project_role(world):
     w = world
-    t = _task(w["out"].user_id, w["pid"])  # the creator sees it but has no project role
-    r = w["out"].post(f"/tasks/{t}/decision-proposals", json={"title": "x"})
+    root = _task(w["maint"].user_id, w["pid"])
+    tid = uuid.uuid4().hex
+
+    async def go():  # an ad-hoc step the outsider created in a thread rooted in the project
+        async with SessionLocal() as s:
+            s.add(Task(id=tid, title="adhoc", prompt="p", root_id=root, status="completed",
+                       created_by=w["out"].user_id, project_id=None))
+            await s.commit()
+
+    _run(go())
+    r = w["out"].post(f"/tasks/{tid}/decision-proposals", json={"title": "x"})
     assert r.status_code == 403, r.text
 
 
