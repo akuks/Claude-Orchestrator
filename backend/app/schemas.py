@@ -642,10 +642,22 @@ class WorkflowRunOut(BaseModel):
     stages: list
     project_ids: list[str] = []
     created_by: Optional[str] = None  # who started the run (run page header)
+    # Per-stage state keyed by str(index) and the run log [{at, text}] (phase 5a).
+    stage_state: dict = {}
+    log: list = []
     created_at: datetime
     updated_at: datetime
 
     model_config = {"from_attributes": True}
+
+    @field_validator("stage_state", "log", mode="before")
+    @classmethod
+    def _none_empty(cls, v, info):
+        return ({} if info.field_name == "stage_state" else []) if v is None else v
+
+
+class StageReject(BaseModel):
+    reason: str = Field(..., max_length=2000)
 
 
 class LiveStageOut(BaseModel):
