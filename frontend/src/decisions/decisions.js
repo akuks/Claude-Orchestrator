@@ -4,6 +4,7 @@ export const KINDS = ['decision', 'rule', 'lesson', 'reference']
 export const KIND_COLORS = { decision: 'blue', rule: 'red', lesson: 'gold', reference: 'purple' }
 export const LIMITS = { title: 200, why: 2000, see: 300, source: 300, touches: 20, touch: 300 }
 export const CHANGED_MSG = 'changed by someone else — reload'
+export const INACTIVE_MSG = 'this decision is no longer active'
 
 export const displayId = (n) => `D-${String(n).padStart(3, '0')}`
 

@@ -3,7 +3,7 @@ import { Alert, Button, Empty, Modal, Popconfirm, Radio, Select, Space, Tag, Typ
 import { PlusOutlined } from '@ant-design/icons'
 import { api } from '../api'
 import DecisionForm from './DecisionForm'
-import { KINDS, KIND_COLORS, makeRuleDraft } from './decisions'
+import { INACTIVE_MSG, KINDS, KIND_COLORS, makeRuleDraft } from './decisions'
 
 const day = (s) => (s ? String(s).slice(0, 10) : '')
 
@@ -113,6 +113,7 @@ export default function DecisionsPane({ project, canEdit, onMakeRule }) {
   const [status, setStatus] = useState('active')
   const [kind, setKind] = useState('')
   const [rows, setRows] = useState([])
+  const [pickable, setPickable] = useState([]) // every active decision, whatever the filter (the Supersede picker)
   const [health, setHealth] = useState(null)
   const [error, setError] = useState(null)
   const [notice, setNotice] = useState(null)
@@ -135,11 +136,26 @@ export default function DecisionsPane({ project, canEdit, onMakeRule }) {
     if (!alive.current) return null
     const mine = ++seq.current
     let list = null
+    // a filtered view still offers every active decision as a successor: fetch them unfiltered
+    const filtered = status !== 'active' || kind !== ''
+    const allActive = filtered ? api.listDecisions(pid, { status: 'active', kind: '' }) : null
+    allActive?.catch(() => {})
     try {
       const r = await api.listDecisions(pid, { status, kind })
       if (mine !== seq.current) return null
       list = Array.isArray(r) ? r : []
+      let pick = list.filter((x) => x.status === 'active')
+      if (allActive) {
+        try {
+          const a = await allActive
+          if (Array.isArray(a)) pick = a.filter((x) => x.status === 'active')
+        } catch (_) {
+          // keep the filtered list's active entries
+        }
+        if (mine !== seq.current) return null
+      }
       setRows(list)
+      setPickable(pick)
       setError(null)
     } catch (e) {
       if (mine !== seq.current) return null
@@ -161,6 +177,7 @@ export default function DecisionsPane({ project, canEdit, onMakeRule }) {
     // new project: drop the old project's rows, health, notice and open form
     seq.current++
     setRows([])
+    setPickable([])
     setHealth(null)
     setHealthError(false)
     setNotice(null)
@@ -191,7 +208,6 @@ export default function DecisionsPane({ project, canEdit, onMakeRule }) {
       if (alive.current) setBusy(false)
     }
   }
-  const activeAll = rows.filter((r) => r.status === 'active')
 
   return (
     <div data-testid="decisions-pane">
@@ -231,7 +247,7 @@ export default function DecisionsPane({ project, canEdit, onMakeRule }) {
           d={d}
           canEdit={canEdit}
           busy={busy}
-          active={activeAll}
+          active={pickable}
           act={act}
           onEdit={(x) => setModal({ decision: rows.find((r) => r.number === x.number) })}
           onRule={(x) => onMakeRule?.(makeRuleDraft(x))}
@@ -246,13 +262,15 @@ export default function DecisionsPane({ project, canEdit, onMakeRule }) {
         onConflict={async (m) => {
           if (!alive.current) return
           setNotice(m)
+          const gone = m === INACTIVE_MSG
+          if (gone) setModal(null) // retired or superseded meanwhile: nothing left to edit
           const list = await load()
-          if (!alive.current) return
-          // show the fresh entry (new version and fields) in the open form
+          if (!alive.current || gone) return
+          // show the fresh entry (new version and fields) in the open form; close it if the entry is gone
           setModal((cur) => {
-            if (!cur?.decision) return cur
-            const fresh = (list || []).find((r) => r.number === cur.decision.number)
-            return fresh ? { decision: fresh } : cur
+            if (!cur?.decision || !list) return cur
+            const fresh = list.find((r) => r.number === cur.decision.number)
+            return fresh && fresh.status === 'active' ? { decision: fresh } : null
           })
         }}
       />

@@ -195,6 +195,40 @@ describe('races and fixes', () => {
     await click(document.querySelector('[data-testid="decision-save"]'))
     expect(api.updateDecision.mock.calls[1][2].version).toBe(4)
   })
+
+  it('an edit save refused because the decision is no longer active closes the form', async () => {
+    const c = await mount()
+    await click([...q(c, 'decision-12').querySelectorAll('button')].find((b) => b.textContent === 'Edit'))
+    const calls = api.listDecisions.mock.calls.length
+    api.listDecisions.mockResolvedValue([dec(15)])
+    api.updateDecision.mockRejectedValueOnce(Object.assign(new Error('this decision is no longer active'), { status: 409 }))
+    await click(document.querySelector('[data-testid="decision-save"]'))
+    await flush()
+    expect(api.listDecisions.mock.calls.length).toBeGreaterThan(calls)
+    expect(q(c, 'decisions-notice').textContent).toContain('this decision is no longer active')
+    expect(document.querySelector('[data-testid="decision-form"]')).toBeNull()
+    expect(q(c, 'decision-12')).toBeNull()
+  })
+
+  it('the Supersede picker lists every active decision whatever the kind filter', async () => {
+    api.listDecisions.mockImplementation(async (_pid, f) =>
+      f.kind === 'rule' ? [dec(12, { kind: 'rule' })] : [dec(12, { kind: 'rule' }), dec(15)])
+    const c = await mount()
+    await act(async () => {
+      q(c, 'decisions-kind').querySelector('.ant-select-selector').dispatchEvent(new MouseEvent('mousedown', { bubbles: true }))
+    })
+    await flush()
+    await click([...document.querySelectorAll('.ant-select-item-option')].find((o) => o.textContent === 'rule'))
+    await flush()
+    expect(api.listDecisions).toHaveBeenCalledWith('p1', { status: 'active', kind: '' })
+    expect(api.listDecisions).toHaveBeenLastCalledWith('p1', { status: 'active', kind: 'rule' })
+    expect(q(c, 'decision-15')).toBeNull()
+    await act(async () => {
+      q(c, 'supersede-12').querySelector('.ant-select-selector').dispatchEvent(new MouseEvent('mousedown', { bubbles: true }))
+    })
+    await flush()
+    expect([...document.querySelectorAll('.ant-select-item-option')].some((o) => o.textContent.includes('D-015'))).toBe(true)
+  })
 })
 
 describe('project switch with actions in flight', () => {
