@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from 'react'
 import {
   Alert,
+  Badge,
   Button,
   Drawer,
   Empty,
@@ -391,6 +392,20 @@ export function GitStateWarning({ projectId }) {
 
 export function ProjectDrawer({ project, tab, onTab, currentUser, onClose, onSaved }) {
   const canEdit = project?.my_role === 'maintainer'
+  const [pendingProposals, setPendingProposals] = useState(0)
+  const projectId = project?.id
+  useEffect(() => {
+    let live = true
+    setPendingProposals(0)
+    if (projectId) {
+      Promise.resolve(api.listProposals?.(projectId, 'pending'))
+        .then((r) => live && setPendingProposals(Number(r?.pending) || 0))
+        .catch(() => {})
+    }
+    return () => {
+      live = false
+    }
+  }, [projectId])
   const [ruleDraft, setRuleDraft] = useState(null) // "Make this a rule": opens the project rule editor pre-filled
 
   return (
@@ -424,6 +439,7 @@ export function ProjectDrawer({ project, tab, onTab, currentUser, onClose, onSav
               label: (
                 <span>
                   <FileTextOutlined /> Decisions
+                  {pendingProposals > 0 && <Badge count={pendingProposals} size="small" offset={[6, -2]} data-testid="decisions-badge" />}
                 </span>
               ),
               children: (
@@ -431,6 +447,7 @@ export function ProjectDrawer({ project, tab, onTab, currentUser, onClose, onSav
                   key={project.id}
                   project={project}
                   canEdit={canEditGuard(project, currentUser)}
+                  onCount={setPendingProposals}
                   onMakeRule={(d) => {
                     setRuleDraft(d)
                     onTab('guard')

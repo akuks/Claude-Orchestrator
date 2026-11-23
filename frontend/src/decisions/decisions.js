@@ -45,3 +45,36 @@ export function makeRuleDraft(d) {
   }
   return { kind: 'never', match: 'path', pattern, reason: `${d.display_id || displayId(d.number)} ${d.title}` }
 }
+
+export const LONG_ENTRY_WORDS = 80
+
+export function entryWords(title, why) {
+  return `${title ?? ''} ${why ?? ''}`.split(/\s+/).filter(Boolean).length
+}
+
+export function longEntryHint(title, why) {
+  const n = entryWords(title, why)
+  return n > LONG_ENTRY_WORDS ? `${n} words — shorter entries are read more reliably` : null
+}
+
+// Where a suggestion came from (plain text).
+export function proposalOrigin(p = {}) {
+  switch (p.source) {
+    case 'run': return `from run ${p.task_title ?? ''}`.trim()
+    case 'answer': return 'from an answer'
+    case 'agent': return 'suggested by an agent'
+    case 'lesson': return `lesson from ${p.thread_title ?? ''}`.trim()
+    case 'person': return `suggested by ${p.proposed_by_name ?? 'someone'}`
+    default: return String(p.source ?? '')
+  }
+}
+
+// Run-log line for a `decision_review` event: payload {proposed: n, stale: [numbers]}.
+export function decisionReviewLine(p = {}) {
+  const parts = []
+  const n = Number(p.proposed) || 0
+  if (n > 0) parts.push(`Suggested ${n} decision${n === 1 ? '' : 's'} for review`)
+  const stale = Array.isArray(p.stale) ? p.stale : []
+  if (stale.length) parts.push(`flagged ${stale.map(displayId).join(', ')} as maybe out of date`)
+  return parts.join(' · ')
+}

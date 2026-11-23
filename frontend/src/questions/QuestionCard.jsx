@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import { Button, Input, Tooltip } from 'antd'
+import { Button, Checkbox, Input, Tooltip } from 'antd'
 import { CheckOutlined, CloseOutlined, SendOutlined } from '@ant-design/icons'
 import dayjs from 'dayjs'
 import relativeTime from 'dayjs/plugin/relativeTime'
@@ -18,6 +18,7 @@ export default function QuestionCard({ question: q, onDone, showTask = false }) 
   const [busy, setBusy] = useState(null)
   const [error, setError] = useState(null)
   const [text, setText] = useState('')
+  const [suggest, setSuggest] = useState(false)
   const v = questionView(q)
   const open = q.status === 'open'
   const can = open && q.can_answer === true
@@ -34,7 +35,7 @@ export default function QuestionCard({ question: q, onDone, showTask = false }) 
       setBusy(null)
     }
   }
-  const answer = (key, body) => run(key, () => api.answerQuestion(q.id, body), 'answered')
+  const answer = (key, body) => run(key, () => api.answerQuestion(q.id, suggest && q.project_id ? { ...body, suggest_decision: true } : body), 'answered')
   const free = text.trim()
 
   return (
@@ -120,6 +121,11 @@ export default function QuestionCard({ question: q, onDone, showTask = false }) 
               Answer
             </Button>
           </div>
+          {q.project_id && (
+            <Checkbox checked={suggest} onChange={(e) => setSuggest(e.target.checked)} data-testid="question-suggest" disabled={busy != null}>
+              Also suggest this as a project decision
+            </Checkbox>
+          )}
           <div className="co-q-buttons">
             {q.recommendation && (
               <Button

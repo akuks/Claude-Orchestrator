@@ -841,6 +841,78 @@ get no notes and no index (the people on it can still keep the list).
 
 ---
 
+## Suggested decisions
+
+Phase 4b of the forge port. Instead of waiting for someone to write every
+decision, the server and the agents can *suggest* them. Suggestions wait in a
+queue on the project's **Decisions** tab; **nothing becomes a decision until a
+person accepts it.** Accepting makes a normal decision (next `D-` number, source
+`suggestion: …`, you may edit the fields first); rejecting only closes the
+suggestion.
+
+**Who reviews.** Anyone who can work on the project (contributor and up) sees
+the queue and can add a suggestion; project maintainers (and admins) accept or
+reject. Two people racing on one suggestion: the first wins, the other gets 409.
+The tab lists the newest 100.
+
+**Where suggestions come from.**
+
+- **After a run.** When a step on an own project finishes without failing, the
+  server reads the commits it made (since the step started). Commits that are
+  only housekeeping (`chore`, `docs`, `style`, `bump`, `release`, `merge`,
+  `revert` or a version number as the subject) or touch only docs, text files
+  and lockfiles are skipped; plans and specs under `docs/superpowers/` still
+  count. If anything is left, **one** cheap model call (`CO_PROPOSALS_MODEL`) is
+  asked for at most 2 entries. A commit already looked at is not asked about again.
+- **Thread close.** Closing a thread's handoff asks **one** call for at most 3
+  *lessons* (once per thread).
+- **Answers.** A question's answer form has a checkbox that also suggests the
+  question and answer as a decision (the answer never fails because of it; the
+  reply says `added` or why it was skipped).
+- **Agents.** The run's agent is told, in the decision index, how to file a
+  suggestion (`POST /tasks/{id}/decision-proposals` with its own token); at most
+  **3 per task**.
+- **People.** `POST /projects/{id}/decisions/proposals` (there is no button on the Decisions tab yet), or
+  the task route above as a task manager.
+
+A suggestion is a `decision`, `rule` or `lesson` (not `reference`) with the same
+text rules as a decision; a person or agent filing one with invalid touches
+gets 422. Texts are redacted like decisions. Model replies are parsed
+defensively; a reply that is not the expected shape adds nothing.
+
+**Maybe out of date.** After the same run, active decisions whose *touches*
+match a file the commits changed are flagged with a reason (*path changed in
+abc123 (task title)*), shown as a "May be out of date" tag with the reason on the decision's row. Rules: only a
+decision last verified more than **14 days** ago; not re-flagged within **1 day**;
+at most **2 per commit** and **6 per run**. **Still valid** (verify) clears the
+flag. Flagging changes neither the version nor the edited time.
+
+**Conditions.** The automatic parts (run, close) need all of: an *own*
+project, the `decisions` ground-rules switch on, `CO_PROPOSALS_ENABLED`, and a
+Claude credential for the run's owner (or, at close, the person closing). A missing
+credential skips only the model call (stale flags still run); missing own trust, the
+`decisions` switch or `CO_PROPOSALS_ENABLED` skips the automatic parts entirely. They
+run in the background and never fail the run or the close.
+
+**Caps.** At most **50 pending** suggestions per project
+(`CO_PROPOSALS_PENDING_CAP`): automatic ones are dropped when full, a person or
+agent gets 429. A run's commits, a thread's lessons and an answer are each suggested
+once (people's and agents' suggestions are not de-duplicated).
+
+| Setting | Default |
+|---|---|
+| `CO_PROPOSALS_ENABLED` | `true` (off: no automatic suggestions or flags) |
+| `CO_PROPOSALS_PENDING_CAP` | `50` per project |
+| `CO_PROPOSALS_MODEL` | `haiku` |
+
+**Not yet checked against the real CLI.** The tests use a mock. That `claude`
+answers these two prompts in the format the parser expects (and what it costs),
+and that agents really follow the index line and file suggestions, are checked
+on the first live use. Run a task that commits to an own project and look at the
+queue before you rely on it.
+
+---
+
 ## REST API
 
 Full interactive docs at `/docs`. Highlights:
@@ -864,6 +936,9 @@ Full interactive docs at `/docs`. Highlights:
 | `GET` · `PATCH` | `/projects/{id}/decisions/{n}` | One decision / edit it (send its `version`; 409 when stale or not active) |
 | `POST` | `/projects/{id}/decisions/{n}/verify` · `/retire` · `/supersede` | Mark checked / retire / supersede (`{"by": n}`) |
 | `GET` | `/projects/{id}/decisions/health` | Which active decisions may be out of date |
+| `GET` · `POST` | `/projects/{id}/decisions/proposals` | Suggested decisions (`?status=pending\|all`, newest 100) / add one (contributor; 429 when 50 are pending) |
+| `POST` | `/projects/{id}/decisions/proposals/{pid}/accept` · `/reject` | Accept (send the final fields; makes a decision) / reject (maintainer; 409 when already reviewed) |
+| `POST` | `/tasks/{id}/decision-proposals` | Suggest a decision (also open to the run's own agent token; 3 per task) |
 | `GET` | `/handoffs/open` | Threads to pick up again (Home) |
 | `DELETE` | `/tasks/{id}` | Delete a task (or thread); cleans sandbox workspace |
 | `GET` | `/tasks/{id}/report?format=pdf\|docx` | Download the result as PDF / DOCX |

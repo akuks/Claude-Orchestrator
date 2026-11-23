@@ -12,7 +12,7 @@ from sqlalchemy.orm import Session
 from app import models
 from app.database import _alembic_cfg, _baseline_metadata, run_migrations
 
-HEAD = "0011"  # the latest revision
+HEAD = "0012"  # the latest revision
 
 
 def _tables(db) -> set[str]:
@@ -383,3 +383,27 @@ def test_migration_0008(scratch_url):
         return sc.exec_driver_sql("SELECT version_num FROM alembic_version").scalar()
 
     assert _inspect(url, check_down) == "0007"
+
+
+def test_migration_0012_upgrade_downgrade(scratch_url):
+    from alembic import command
+
+    url = scratch_url
+    command.upgrade(_alembic_cfg(url), "0011")
+    command.upgrade(_alembic_cfg(url), "head")
+
+    def check(sc, insp):
+        assert {"stale_flagged_at", "stale_reason"} <= {c["name"] for c in insp.get_columns("project_decisions")}
+        assert {"id", "project_id", "task_id", "source", "kind", "title", "why", "touches", "evidence",
+                "dedupe_key", "status", "proposed_by", "reviewed_by", "reviewed_at", "decision_number",
+                "created_at"} <= {c["name"] for c in insp.get_columns("decision_proposals")}
+        uq = {tuple(u["column_names"]) for u in insp.get_unique_constraints("decision_proposals")}
+        assert ("project_id", "dedupe_key") in uq
+        idx = {tuple(i["column_names"]) for i in insp.get_indexes("decision_proposals")}
+        assert {("project_id",), ("project_id", "status")} <= idx
+        return sc.exec_driver_sql("SELECT version_num FROM alembic_version").scalar()
+
+    assert _inspect(url, check) == "0012"
+    command.downgrade(_alembic_cfg(url), "0011")
+    assert _inspect(url, lambda sc, insp: "decision_proposals" in insp.get_table_names()) is False
+    assert _inspect(url, lambda sc, insp: "stale_reason" in {c["name"] for c in insp.get_columns("project_decisions")}) is False

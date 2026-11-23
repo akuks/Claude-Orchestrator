@@ -26,6 +26,7 @@ from .access import effective_project_id
 from .agent_env import PROJECT_ENV_BLOCKED, MissingCredential, build_agent_env, credential_ref
 from .config import settings
 from .constants import Priority, Status
+from .decisions import after_run
 from .database import SessionLocal
 from .events import broker
 from .guard import co_hook as guard_co_hook
@@ -41,6 +42,9 @@ from .resume.texts import CRED_NOTE, RECOVERED_CONTINUE
 from .usage import tracker as usage_tracker
 
 log = logging.getLogger(__name__)
+
+# background after-run jobs; held so they are not garbage-collected mid-run
+_AFTER_JOBS: set = set()
 
 _MAX_TOOL_RESULT_CHARS = 2000
 
@@ -849,6 +853,10 @@ class WorkerManager:
             asyncio.create_task(memory.update_after_task(task_id, task_owner))
             # Security review → extract structured findings into the tracker.
             asyncio.create_task(security.extract_findings(task_id, task_owner))
+            # Suggested decisions and "maybe out of date" flags from the commits it made.
+            job = asyncio.create_task(after_run.after_task(task_id, task_owner, emit=self._emit_offline_for(task_id)))
+            _AFTER_JOBS.add(job)
+            job.add_done_callback(_AFTER_JOBS.discard)
 
         # Notify if this run came from a schedule (honors its notify policy).
         asyncio.create_task(notifications.notify_task_finished(task_id))

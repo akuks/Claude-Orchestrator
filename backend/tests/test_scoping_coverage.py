@@ -18,7 +18,7 @@ from starlette.websockets import WebSocketDisconnect
 
 from app.database import SessionLocal
 from app.main import app
-from app.models import ActionApproval, ActionGrant, Finding, McpCall, Task, TaskHandoff, TaskQuestion
+from app.models import ActionApproval, ActionGrant, DecisionProposal, Finding, McpCall, Task, TaskHandoff, TaskQuestion
 from conftest import login_as
 from test_lockdown import OPEN_ROUTES, _all_http_routes, _all_ws_routes
 
@@ -184,6 +184,8 @@ def world(client, tmp_path_factory):
         root_id=running_id, task_id=running_id, approval_id=approval_id, scope="run", rule_id="git-reset-hard",
         key_kind="command", key="a" * 64, created_at=now, expires_at=now + timedelta(hours=1),
     ))
+    (proposal_id,) = _add(DecisionProposal(
+        project_id=pid, source="person", title=f"cov-proposal-{tag}", evidence="", status="pending"))
     team = _ok(client.post("/teams", json={"name": f"cov-team-{tag}"}))
     # A P custom rule: GET /guard/rules (org list, or ?project_id=P) must not leak it.
     rule = _ok(client.post("/guard/rules", json={
@@ -212,6 +214,7 @@ def world(client, tmp_path_factory):
         "grant_id": grant_id,
         "root_id": running_id,
         "question_id": question_id,
+        "proposal_id": proposal_id,
         "number": "1",
     }
     # Strings that must never appear in a list the outsider gets back. Agents,
@@ -223,7 +226,7 @@ def world(client, tmp_path_factory):
         done_id, f"cov-done-{tag}", f"cov-model-{tag}",
         running_id, f"cov-running-{tag}", approval_id, f"cov-action-{tag}",
         rule["id"], f"cov-pattern-{tag}", f"cov-reason-{tag}", grant_id, question_id, f"cov-question-{tag}?",
-        f"cov-step-{tag}",
+        f"cov-step-{tag}", proposal_id, f"cov-proposal-{tag}",
     }
     return {
         "done_id": done_id,
@@ -260,6 +263,10 @@ def _bodies(world) -> dict:
         ("POST", "/projects/{project_id}/decisions"): {"title": "hijack"},
         ("PATCH", "/projects/{project_id}/decisions/{number}"): {"version": 1, "title": "hijack"},
         ("POST", "/projects/{project_id}/decisions/{number}/supersede"): {"by": 2},
+        ("POST", "/projects/{project_id}/decisions/proposals"): {"title": "hijack"},
+        ("POST", "/projects/{project_id}/decisions/proposals/{proposal_id}/accept"): {"kind": "decision",
+                                                                                      "title": "hijack"},
+        ("POST", "/tasks/{task_id}/decision-proposals"): {"title": "hijack"},
         ("POST", "/approvals/{task_id}/reject"): {},
         # co-guard: filing/reporting name P's task in the body (agent tokens only).
         ("POST", "/guard/approvals"): {"task_id": i["task_id"], "rule_ids": ["git-reset-hard"], "tool": "Bash"},

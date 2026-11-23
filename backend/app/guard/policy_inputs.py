@@ -50,6 +50,7 @@ from datetime import datetime, timezone
 from ..access import project_role
 from ..auth import Principal
 from ..decisions import snapshot as decisions_snapshot
+from ..decisions.texts import SUGGEST_LINE
 from ..models import Project, User
 from ..resume import ground_rules
 from . import custom, policy_store
@@ -195,6 +196,8 @@ async def gather(s, *, task, project, owner_id: str | None, mcp: dict | None) ->
     if trust == "own" and project is not None and ground.get("decisions") is True:
         snap = await decisions_snapshot.snapshot(s, project)
         index = decisions_snapshot.index_text(snap)
+        if index:
+            index = index + "\n" + SUGGEST_LINE
         if snap and index:
             policy["decisions"] = snap
             policy["decisions_index"] = index

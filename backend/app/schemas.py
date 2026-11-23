@@ -100,6 +100,7 @@ class QuestionAnswer(BaseModel):
     # exactly one of: a free answer, or accept=true (checked by the route: 422)
     answer: Optional[str] = Field(default=None, max_length=10000)
     accept: Optional[bool] = None
+    suggest_decision: bool = False
 
 
 class QuestionOut(BaseModel):
@@ -944,3 +945,45 @@ class DecisionOut(BaseModel):
     version: int
     created_at: datetime
     updated_at: datetime
+    stale_flagged_at: Optional[datetime] = None
+    stale_reason: Optional[str] = None
+
+
+class ProposalIn(BaseModel):
+    title: str
+    why: str = ""
+    touches: list[str] = Field(default_factory=list)
+    kind: str = "decision"
+
+
+class ProposalAccept(BaseModel):
+    kind: str
+    title: str
+    why: str = ""
+    see: Optional[str] = None
+    touches: list[str] = Field(default_factory=list)
+
+
+class ProposalOut(BaseModel):
+    id: str
+    source: str
+    kind: str
+    title: str
+    why: str
+    touches: list[str]
+    evidence: str
+    status: str
+    task_id: Optional[str] = None
+    task_title: Optional[str] = None
+    thread_title: Optional[str] = None
+    proposed_by: Optional[str] = None
+    proposed_by_name: Optional[str] = None
+    reviewed_by: Optional[str] = None
+    reviewed_at: Optional[datetime] = None
+    decision_number: Optional[int] = None
+    created_at: datetime
+
+
+class ProposalList(BaseModel):
+    items: list[ProposalOut]
+    pending: int

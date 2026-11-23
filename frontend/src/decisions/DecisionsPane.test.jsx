@@ -11,6 +11,9 @@ vi.mock('../api', () => ({
     verifyDecision: vi.fn(),
     retireDecision: vi.fn(),
     supersedeDecision: vi.fn(),
+    listProposals: vi.fn(),
+    acceptProposal: vi.fn(),
+    rejectProposal: vi.fn(),
   },
 }))
 import { api } from '../api'
@@ -46,6 +49,7 @@ beforeEach(() => {
   vi.clearAllMocks()
   api.listDecisions.mockResolvedValue([dec(12, { kind: 'rule' }), dec(15)])
   api.decisionsHealth.mockResolvedValue({ available: true, git_error: null, ok: true, items: [] })
+  api.listProposals.mockResolvedValue({ items: [], pending: 0 })
   for (const k of ['verifyDecision', 'retireDecision', 'supersedeDecision', 'createDecision', 'updateDecision']) api[k].mockResolvedValue({})
 })
 afterEach(async () => {
@@ -256,6 +260,36 @@ describe('project switch with actions in flight', () => {
     expect(q(c, 'decision-12')).toBeNull()
     expect(q(c, 'decisions-notice')).toBeNull()
     expect(document.querySelector('[data-testid="decision-form"]')).toBeNull()
+  })
+})
+
+describe('stale flag and queue in the pane', () => {
+  it('shows May be out of date with the reason and Still valid for maintainers', async () => {
+    api.listDecisions.mockResolvedValue([dec(12, { stale_flagged_at: '2026-11-22T10:00:00Z', stale_reason: 'src/a.js changed in abc123 (T)' }), dec(15)])
+    const c = await mount()
+    expect(q(c, 'decision-12').textContent).toContain('May be out of date')
+    expect(q(c, 'decision-12').textContent).toContain('src/a.js changed in abc123 (T)')
+    expect(q(c, 'decision-15').textContent).not.toContain('May be out of date')
+    await click(q(c, 'stillvalid-12'))
+    await flush()
+    expect(api.verifyDecision).toHaveBeenCalledWith('p1', 12)
+  })
+  it('viewers see the tag but no Still valid', async () => {
+    api.listDecisions.mockResolvedValue([dec(12, { stale_flagged_at: '2026-11-22T10:00:00Z', stale_reason: 'r' })])
+    const c = await mount({ canEdit: false })
+    expect(q(c, 'decision-12').textContent).toContain('May be out of date')
+    expect(q(c, 'stillvalid-12')).toBeNull()
+  })
+  it('accepting a suggestion reloads the decision list', async () => {
+    api.listProposals.mockResolvedValue({ items: [{ id: 'x1', source: 'agent', kind: 'decision', title: 'S', why: 'w', touches: ['a/**'], evidence: '', status: 'pending' }], pending: 1 })
+    api.acceptProposal.mockResolvedValue({})
+    const c = await mount()
+    expect(api.listDecisions).toHaveBeenCalledTimes(1)
+    await click(q(c, 'proposal-accept-x1'))
+    await click(q(document.body, 'decision-save'))
+    await flush()
+    expect(api.acceptProposal).toHaveBeenCalled()
+    expect(api.listDecisions.mock.calls.length).toBeGreaterThan(1)
   })
 })
 
