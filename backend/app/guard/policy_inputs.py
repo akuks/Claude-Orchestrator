@@ -6,11 +6,14 @@ docstring) and says what the worker must add to the ``claude`` command:
 
 * ``policy`` - ``trust``, ``quarantine``, ``on_no_answer``,
   ``readonly_paths``, ``custom_rules``, ``disabled_rules``, ``db_dev``,
-  ``mcp_servers``, ``mcp_defaults``, ``grants`` and ``regex_budget_ms``. The
+  ``mcp_servers``, ``mcp_defaults``, ``grants`` and ``regex_budget_ms``; ``decisions`` (the project's active
+  decisions, ``decisions.snapshot``) and ``decisions_index`` only when trust is ``own``, the ground-rules
+  switch ``decisions`` is on and the project has active decisions (phase 4a). The
   lists are always lists (Rulings P10/P20: a null fails closed in the hook).
   ``trust`` other than ``own`` means ``external`` and ``on_no_answer`` other
   than ``deny_and_resume`` means ``deny``.
 * ``add_dirs`` - the reference projects' folders, for ``--add-dir``.
+* ``decisions_index`` - the same index, for the worker to append after the ground rules, or None.
 * ``data_line`` - ``co_hook.DATA_LINE`` for an external project (the worker
   appends it to ``--append-system-prompt``), else None.
 * ``events`` - ``guard`` events about what was left out (a reference project
@@ -46,6 +49,7 @@ from datetime import datetime, timezone
 
 from ..access import project_role
 from ..auth import Principal
+from ..decisions import snapshot as decisions_snapshot
 from ..models import Project, User
 from ..resume import ground_rules
 from . import custom, policy_store
@@ -63,6 +67,7 @@ class PolicyInputs:
     events: list[dict] = field(default_factory=list)
     main_text: str = ""  # the enabled ground rules, for the main session's --append-system-prompt
     ground_included: list[str] = field(default_factory=list)  # which rules those are
+    decisions_index: str | None = None  # the project's decision index (phase 4a), after the ground rules
 
 
 def _epoch(dt: datetime) -> float:
@@ -186,6 +191,13 @@ async def gather(s, *, task, project, owner_id: str | None, mcp: dict | None) ->
         "helper_context": ground_rules.helper_text(ground, trust == "external"),
         "compact": True,
     }
+    index = None
+    if trust == "own" and project is not None and ground.get("decisions") is True:
+        snap = await decisions_snapshot.snapshot(s, project)
+        index = decisions_snapshot.index_text(snap)
+        if snap and index:
+            policy["decisions"] = snap
+            policy["decisions_index"] = index
     return PolicyInputs(policy=policy, add_dirs=refs, data_line=DATA_LINE if trust == "external" else None,
                         events=events, main_text=ground_rules.main_text(ground),
-                        ground_included=ground_rules.included(ground))
+                        ground_included=ground_rules.included(ground), decisions_index=index)
