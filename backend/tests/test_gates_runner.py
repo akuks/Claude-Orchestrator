@@ -240,7 +240,8 @@ def test_failing_gate_fails_run(fakes):
         await settle(r)
         run = await _run(rid)
         assert run.status == "failed"
-        assert has(run, "Step Test (gate) failed: pytest -q, exit 1, 2 failed: test_a, test_b")
+        assert has(run, "Step Test (gate) failed: pytest -q, exit 1, 2 failed")
+        assert not has(run, "test_a")
         st = run.stage_state["0"]
         assert st["status"] == "failed" and "exit 1" in st["summary"]
         rows = await _rows(rid)
@@ -372,7 +373,7 @@ def test_guard_deny_fails_stage(fakes):
         run = await _run(rid)
         assert run.status == "failed"
         assert run.stage_state["0"]["reason"] == "blocked by the guard: deletes files"
-        assert has(run, "blocked by the guard: deletes files")
+        assert has(run, "Step Test (gate) failed: ") and not has(run, "deletes files")
         assert [x.outcome for x in await _rows(rid)] == ["refused"]
 
     asyncio.run(go())
@@ -743,8 +744,8 @@ def test_gate_coroutine_error_fails_stage(fakes):
         run = await _run(rid)
         assert run.status == "failed"
         assert run.stage_state["0"]["status"] == "failed"
-        assert run.stage_state["0"]["reason"] == "the gate could not run: RuntimeError: boom"
-        assert has(run, "Step Test (gate) failed: the gate could not run: RuntimeError: boom")
+        assert run.stage_state["0"]["reason"] == "the gate could not run (internal error)"
+        assert has(run, "Step Test (gate) failed: the gate could not run (internal error)")
         await r._advance(rid)  # nothing is resumed
         assert fakes.calls == ["explode"]
 

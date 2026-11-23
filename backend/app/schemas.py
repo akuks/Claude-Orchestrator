@@ -632,7 +632,9 @@ class WorkflowRunCreate(BaseModel):
     input: str = ""  # the PR/issue/description this run acts on
 
 
-class WorkflowRunOut(BaseModel):
+class WorkflowRunSummaryOut(BaseModel):
+    """A run without its log and per-stage state: list and action responses."""
+
     id: str
     workflow_id: str
     name: str
@@ -642,13 +644,16 @@ class WorkflowRunOut(BaseModel):
     stages: list
     project_ids: list[str] = []
     created_by: Optional[str] = None  # who started the run (run page header)
-    # Per-stage state keyed by str(index) and the run log [{at, text}] (phase 5a).
-    stage_state: dict = {}
-    log: list = []
     created_at: datetime
     updated_at: datetime
 
     model_config = {"from_attributes": True}
+
+
+class WorkflowRunOut(WorkflowRunSummaryOut):
+    # Per-stage state keyed by str(index) and the run log [{at, text}] (phase 5a).
+    stage_state: dict = {}
+    log: list = []
 
     @field_validator("stage_state", "log", mode="before")
     @classmethod

@@ -54,6 +54,7 @@ ROWS_KEEP = 50  # gate-run rows kept per run stage
 LOGS_KEEP = 5  # gate log files kept per run stage
 SUMMARY_NAMES = 10  # failing / flaky names in a gate summary
 FLAKY_WORDS = "a flaky test is not a fixed test"
+GATE_ERROR_WORDS = "the gate could not run (internal error)"
 UNCHANGED_WORDS = "failed then passed unchanged"
 GATE_LIVE = ("waiting", "running")  # gate states that want a live process
 
@@ -320,7 +321,7 @@ def _user_name(user) -> str:
     return "someone"
 
 
-def _gate_detail(cmd: str, out, res, timeout_min) -> str:
+def _gate_detail(cmd: str, out, res, timeout_min, names: bool = True) -> str:
     if out.exit_code is not None:
         d = f"{cmd}, exit {out.exit_code}"
     elif out.outcome == "timed_out":
@@ -329,7 +330,7 @@ def _gate_detail(cmd: str, out, res, timeout_min) -> str:
         d = f"{cmd}, {out.outcome}"
     if res.failed:
         d += f", {res.failed} failed"
-        if res.failing:
+        if res.failing and names:
             d += f": {_names(res.failing)}"
     return d
 
@@ -916,7 +917,9 @@ class WorkflowRunner:
                 if st.get("handout") != handout or st.get("status") not in GATE_LIVE:
                     return
                 name = _stage_name(run, i)
-                reason = f"the gate could not run: {type(err).__name__}: {err}"[:500]
+                log.error("gate %s stage %s: %s: %s", run_id, i, type(err).__name__, err,
+                          exc_info=(type(err), err, err.__traceback__))
+                reason = GATE_ERROR_WORDS
                 st.update(status="failed", reason=reason, summary=f"Gate {name} failed: {reason}.")
                 _put_state(run, i, st)
                 run.status = RUN_FAILED
@@ -1008,7 +1011,7 @@ class WorkflowRunner:
                     await self._prune_rows(s, run_id, i)
                     reason = f"blocked by the guard: {why}"
                     st["hits"] = reasons
-                    await fail(reason, f"Step {name} (gate) failed: {cmd}, {reason}",
+                    await fail(reason, f"Step {name} (gate) failed: {cmd}, blocked by the guard",
                                f"Gate {name} failed: {cmd} was {reason}.")
                     return None
                 if decision == "approve" and not st.get("allowed"):
@@ -1106,7 +1109,7 @@ class WorkflowRunner:
             await s.flush()
             await self._prune_rows(s, run_id, i)
             if out.log_error:
-                runlog.append(run, f"Step {name} (gate): the log of `{cmd}` could not be written: {out.log_error}")
+                runlog.append(run, f"Step {name} (gate): the log of `{cmd}` could not be written")
 
             rnd = st.get("round") or "full"
             passed = list(st.get("passed_cmds") or [])
@@ -1133,7 +1136,7 @@ class WorkflowRunner:
                 if flaky is not None:
                     st["flaky"] = flaky
                     text += f" {_flaky_text(flaky)}."
-                    line += f", {_flaky_text(flaky)}"
+                    line += f", flaky ({FLAKY_WORDS})"
                 st.update(status="passed", finished_at=_iso(), reason=None, summary=text)
                 _put_state(run, i, st)
                 t = await totals.compute(s, run)
@@ -1143,7 +1146,8 @@ class WorkflowRunner:
                 st.update(status="failed", reason=detail, summary=f"Gate {name} failed: {detail}.")
                 _put_state(run, i, st)
                 run.status = RUN_FAILED
-                runlog.append(run, f"Step {name} (gate) failed: {detail}")
+                runlog.append(run, f"Step {name} (gate) failed: "
+                              f"{_gate_detail(cmd, out, res, step.get('timeout_min'), names=False)}")
             else:
                 _put_state(run, i, st)
             await s.commit()

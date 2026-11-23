@@ -28,6 +28,7 @@ from ..schemas import (
     WorkflowOut,
     WorkflowRunCreate,
     WorkflowRunOut,
+    WorkflowRunSummaryOut,
     WorkflowUpdate,
 )
 
@@ -213,7 +214,7 @@ async def delete_workflow(workflow_id: str, request: Request):
         await s.commit()
 
 
-@router.post("/{workflow_id}/run", response_model=WorkflowRunOut, status_code=201)
+@router.post("/{workflow_id}/run", response_model=WorkflowRunSummaryOut, status_code=201)
 async def run_workflow(workflow_id: str, payload: WorkflowRunCreate, request: Request):
     async with SessionLocal() as s:
         wf = await s.get(Workflow, workflow_id)
@@ -237,15 +238,15 @@ async def run_workflow(workflow_id: str, payload: WorkflowRunCreate, request: Re
         await s.commit()
         await s.refresh(run)
         run_id = run.id
-        out = WorkflowRunOut.model_validate(run)
+        out = WorkflowRunSummaryOut.model_validate(run)
     # Start stage 0 immediately via the runner.
     await request.app.state.workflow_runner.start_run(run_id)
     async with SessionLocal() as s:
         run = await s.get(WorkflowRun, run_id)
-        return WorkflowRunOut.model_validate(run)
+        return WorkflowRunSummaryOut.model_validate(run)
 
 
-@router.get("/runs", response_model=list[WorkflowRunOut])
+@router.get("/runs", response_model=list[WorkflowRunSummaryOut])
 async def list_runs(request: Request, limit: int = Query(50, ge=1, le=500)):
     p = request.state.principal
     query = select(WorkflowRun).order_by(WorkflowRun.created_at.desc(), WorkflowRun.id.desc())
@@ -253,7 +254,7 @@ async def list_runs(request: Request, limit: int = Query(50, ge=1, le=500)):
         visible = await visible_project_ids(s, p)
         if visible is ALL:
             rows = (await s.execute(query.limit(limit))).scalars().all()
-            return [WorkflowRunOut.model_validate(r) for r in rows]
+            return [WorkflowRunSummaryOut.model_validate(r) for r in rows]
         # Visibility is an overlap test on the JSON `project_ids` column, which
         # has no portable SQL form (SQLite vs Postgres JSON). So walk the runs
         # newest-first in keyset batches on (created_at, id) and keep visible
@@ -272,7 +273,7 @@ async def list_runs(request: Request, limit: int = Query(50, ge=1, le=500)):
                     and_(WorkflowRun.created_at == last.created_at, WorkflowRun.id < last.id),
                 )
             )
-    return [WorkflowRunOut.model_validate(r) for r in out[:limit]]
+    return [WorkflowRunSummaryOut.model_validate(r) for r in out[:limit]]
 
 
 LIVE_MAX = 50
@@ -495,9 +496,8 @@ async def _held_others(s, p, run: WorkflowRun, visible) -> tuple[list[str], int]
             .order_by(WorkflowRun.created_at.desc(), WorkflowRun.id.desc())
         )
     ).scalars().all()
-    sharing = [r for r in rows if mine & set(r.project_ids or [])]
-    named = [r.name for r in sharing if _run_visible(p, r, visible)][:_OTHERS_MAX]
-    return named, len(sharing) - len(named)
+    seen = [r.name for r in rows if mine & set(r.project_ids or []) and _run_visible(p, r, visible)]
+    return seen[:_OTHERS_MAX], max(0, len(seen) - _OTHERS_MAX)
 
 
 @router.get("/runs/{run_id}")
@@ -527,8 +527,14 @@ async def get_run(run_id: str, request: Request):
                 .limit(200)
             )
         ).scalars().all()
-        gate_runs = [_gate_run_out(g) for g in grows]
+        hidden = {
+            i for i, st in enumerate(run.stages or [])
+            if spec.stage_kind(st) == "gate" and _gate_hidden(st, visible)
+        }
+        gate_runs = [_gate_run_out(g) for g in grows if g.stage_index not in hidden]
         live = await _live_with_progress(runner, run.id)
+        if live and live.get("stage_index") in hidden:
+            live = None
         stage_state = {k: dict(v) if isinstance(v, dict) else {} for k, v in (run.stage_state or {}).items()}
         held = [
             k for k, v in stage_state.items()
@@ -545,7 +551,11 @@ async def get_run(run_id: str, request: Request):
             if kind == "gate":
                 lv = live if live and live.get("stage_index") == i else None
                 entry["status_text"] = gate_status_text(st, entry, lv)
-            if entry.get("status") == "held" and others is not None:
+            if i in hidden:
+                for k in ("summary", "hits", "reason", "others", "others_more", "flaky"):
+                    entry.pop(k, None)
+                entry["hidden"] = True
+            elif entry.get("status") == "held" and others is not None:
                 entry["others"], entry["others_more"] = others
         tot = await totals.compute(s, run)
         tot["line"] = totals.line(tot)
@@ -560,6 +570,12 @@ async def get_run(run_id: str, request: Request):
         "totals": tot,
         "log": out["log"],
     }
+
+
+def _gate_hidden(stage: dict, visible) -> bool:
+    """True when the gate's project is one the viewer cannot see."""
+    pid = stage.get("project") if isinstance(stage, dict) else None
+    return bool(pid) and visible is not ALL and pid not in visible
 
 
 def _iso(v):
@@ -625,9 +641,9 @@ async def allow_gate(run_id: str, i: int, request: Request):
     return await _run_after(run_id)
 
 
-async def _run_after(run_id: str) -> WorkflowRunOut:
+async def _run_after(run_id: str) -> WorkflowRunSummaryOut:
     async with SessionLocal() as s:
-        return WorkflowRunOut.model_validate(await s.get(WorkflowRun, run_id))
+        return WorkflowRunSummaryOut.model_validate(await s.get(WorkflowRun, run_id))
 
 
 @router.get("/runs/{run_id}/gate-runs/{rid}/log")
@@ -637,6 +653,9 @@ async def gate_run_log(run_id: str, rid: str, request: Request):
         run = await _require_run(s, request.state.principal, run_id)
         g = await s.get(WorkflowGateRun, rid)
         if g is None or g.run_id != run.id:
+            raise HTTPException(404, "Gate run not found")
+        stages = run.stages or []
+        if 0 <= g.stage_index < len(stages) and _gate_hidden(stages[g.stage_index], await visible_project_ids(s, request.state.principal)):
             raise HTTPException(404, "Gate run not found")
         pids = {
             st.get("project") for st in (run.stages or [])
@@ -670,17 +689,17 @@ async def gate_run_log(run_id: str, rid: str, request: Request):
     return await asyncio.to_thread(work)
 
 
-@router.post("/runs/{run_id}/cancel", response_model=WorkflowRunOut)
+@router.post("/runs/{run_id}/cancel", response_model=WorkflowRunSummaryOut)
 async def cancel_run(run_id: str, request: Request):
     async with SessionLocal() as s:
         await _require_run(s, request.state.principal, run_id, manage=True)
     # Halt the run AND stop its in-flight stage tasks.
     await request.app.state.workflow_runner.cancel_run(run_id)
     async with SessionLocal() as s:
-        return WorkflowRunOut.model_validate(await s.get(WorkflowRun, run_id))
+        return WorkflowRunSummaryOut.model_validate(await s.get(WorkflowRun, run_id))
 
 
-@router.post("/runs/{run_id}/retry", response_model=WorkflowRunOut)
+@router.post("/runs/{run_id}/retry", response_model=WorkflowRunSummaryOut)
 async def retry_run(run_id: str, request: Request):
     """Re-run the failed stage and continue the pipeline."""
     async with SessionLocal() as s:
@@ -689,4 +708,4 @@ async def retry_run(run_id: str, request: Request):
             raise HTTPException(400, "Only a failed run can be retried")
     await request.app.state.workflow_runner.retry_run(run_id)
     async with SessionLocal() as s:
-        return WorkflowRunOut.model_validate(await s.get(WorkflowRun, run_id))
+        return WorkflowRunSummaryOut.model_validate(await s.get(WorkflowRun, run_id))

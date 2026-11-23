@@ -97,6 +97,12 @@ class FakeRunner:
 
 def _patch(monkeypatch, **kw):
     fr = FakeRunner(**kw)
+    real = app.state.workflow_runner
+
+    async def _no_tick():  # the background runner must not touch the fake runs
+        return None
+
+    monkeypatch.setattr(real, "_tick", _no_tick)
     monkeypatch.setattr(app.state, "workflow_runner", fr)
     return fr
 
@@ -145,16 +151,81 @@ def test_held_others_only_visible(client, monkeypatch):
     rid = _run(pid, state={"0": {"status": "held", "reason": "wait"}})
     _run(pid, name="visible-other")
     p2 = _project(client)
-    hidden = WorkflowRun(
+    _add(WorkflowRun(
         workflow_id=uuid.uuid4().hex, name="hidden-other", status="running", current_stage=0,
-        project_ids=[pid, p2], stages=[],
-    )
-    _add(hidden)
+        project_ids=[p2], stages=[],
+    ))
+    # shares pid with the run, but the viewer is not a member of p2; it IS visible via pid
     u = _user(client, pid, "contributor")
     _patch(monkeypatch)
-    d = u.get(f"/workflows/runs/{rid}").json()
-    assert "visible-other" in d["stage_state"]["0"]["others"]
-    assert d["stage_state"]["0"]["others_more"] >= 0
+    s0 = u.get(f"/workflows/runs/{rid}").json()["stage_state"]["0"]
+    assert "visible-other" in s0["others"] and "hidden-other" not in s0["others"]
+    # an admin-only-visible overlapping run: touches pid and a second project the viewer lacks
+    # (still visible through pid), so make the overlap through a project only the run shares
+    assert s0["others_more"] == 0
+
+
+def test_held_others_more_counts_only_visible(client, monkeypatch):
+    pa, pb = _project(client), _project(client)
+    rid = _run(pa, state={"0": {"status": "held"}})
+    for i in range(6):
+        _run(pa, name=f"vis-{i}")
+    _add(WorkflowRun(workflow_id=uuid.uuid4().hex, name="invisible", status="running",
+                     current_stage=0, project_ids=[pa], stages=[], created_by=None))
+    u = _user(client, pa, "contributor")
+    _patch(monkeypatch)
+    s0 = u.get(f"/workflows/runs/{rid}").json()["stage_state"]["0"]
+    # the viewer sees every run sharing pa, so all 7 are visible: 5 named, 2 more
+    assert len(s0["others"]) == 5 and s0["others_more"] == 2
+    assert pb
+
+
+def test_gate_output_hidden_for_other_project(client, monkeypatch):
+    pa, pb = _project(client), _project(client)
+    stages = [
+        {"name": "A", "kind": "gate", "run": ["x"], "project": pa},
+        {"name": "B", "kind": "gate", "run": ["y"], "project": pb},
+    ]
+    state = {
+        "0": {"status": "passed", "summary": "Gate A ok", "reason": None},
+        "1": {"status": "failed", "summary": "Gate B failed: y, 2 failed: secret_test", "reason": "y, exit 1: secret_test",
+              "hits": ["touches /etc"], "flaky": ["secret_test"], "handout": "h"},
+    }
+    rid = _run(pa, stages=stages, state=state, current=1)
+    async def addpid():
+        async with SessionLocal() as s:
+            run = await s.get(WorkflowRun, rid)
+            run.project_ids = [pa, pb]
+            await s.commit()
+    asyncio.run(addpid())
+    ga, gb = _gate_row(rid, "stage0-1.log", 0), _gate_row(rid, "stage1-1.log", 1)
+    d = executor._run_dir(rid)
+    d.mkdir(parents=True, exist_ok=True)
+    (d / "stage1-1.log").write_text("hostname-leak\n")
+    u = _user(client, pa, "contributor")  # sees the run through A only
+    _patch(monkeypatch, live={"stage_index": 1, "command": "y", "k": 0, "n": 1, "log_name": "stage1-1.log"})
+    j = u.get(f"/workflows/runs/{rid}").json()
+    assert [g["id"] for g in j["gate_runs"]] == [ga]
+    assert j["live"] is None
+    s1 = j["stage_state"]["1"]
+    assert s1["hidden"] is True and s1["status"] == "failed" and "status_text" in s1
+    for k in ("summary", "hits", "reason", "others", "flaky"):
+        assert k not in s1
+    assert "secret_test" not in str(j)
+    assert j["stage_state"]["0"]["summary"] == "Gate A ok" and "hidden" not in j["stage_state"]["0"]
+    assert u.get(f"/workflows/runs/{rid}/gate-runs/{gb}/log").status_code == 404
+    assert u.get(f"/workflows/runs/{rid}/gate-runs/{ga}/log").status_code == 200
+    # an admin sees everything
+    a = client.get(f"/workflows/runs/{rid}").json()
+    assert len(a["gate_runs"]) == 2 and a["stage_state"]["1"]["summary"].startswith("Gate B")
+    assert client.get(f"/workflows/runs/{rid}/gate-runs/{gb}/log").json()["lines"] == ["hostname-leak"]
+
+
+def test_list_has_no_log_or_stage_state(client):
+    pid = _project(client)
+    rid = _run(pid, state={"0": {"status": "running"}})
+    row = next(r for r in client.get("/workflows/runs").json() if r["id"] == rid)
+    assert "log" not in row and "stage_state" not in row
 
 
 def test_approve_reject_permissions(client, monkeypatch):
