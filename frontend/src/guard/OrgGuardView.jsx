@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useState } from 'react'
 import { Alert, Button, Card, Checkbox, Input, Select, Space, Switch, Tag, Tooltip, Typography, message } from 'antd'
 import { LockOutlined, SafetyOutlined } from '@ant-design/icons'
 import { api } from '../api'
+import { DEFAULT_TIERS, TIER_OPTIONS, isModelId } from '../agents/tiers'
 import RuleTable from './RuleTable'
 import { DEV_DB_HELP, LOCKED_HELP, RM_RF_DISABLE_HELP, hookErrorsLine, ruleName } from './guard'
 import './guard.css'
@@ -162,6 +163,79 @@ export function GroundRulesCard({ canEdit, initial, onSaved }) {
   )
 }
 
+// Model tiers: which model each tier stands for. Always saved whole (three keys).
+export function ModelTiersCard({ canEdit, initial, onSaved }) {
+  const norm = (v) => ({ ...DEFAULT_TIERS, ...(v || {}) })
+  const [saved, setSaved] = useState(norm(initial))
+  const [cfg, setCfg] = useState(saved)
+  const [saving, setSaving] = useState(false)
+  const [error, setError] = useState(null)
+  const initialKey = JSON.stringify(initial || {})
+  useEffect(() => {
+    const v = norm(JSON.parse(initialKey))
+    setSaved(v)
+    setCfg(v)
+  }, [initialKey])
+  const dirty = TIER_OPTIONS.some((t) => cfg[t.value] !== saved[t.value])
+  const bad = TIER_OPTIONS.some((t) => !isModelId(cfg[t.value]))
+  const save = async () => {
+    setSaving(true)
+    setError(null)
+    try {
+      const body = Object.fromEntries(TIER_OPTIONS.map((t) => [t.value, (cfg[t.value] || '').trim()]))
+      const out = await api.saveGuardOrgSettings({ model_tiers: body })
+      const v = norm({ ...body, ...(out?.model_tiers || {}) })
+      setSaved(v)
+      setCfg(v)
+      onSaved?.(v)
+      message.success('Model tiers saved')
+    } catch (e) {
+      setError(e.message)
+    } finally {
+      setSaving(false)
+    }
+  }
+  return (
+    <Card
+      className="co-guard-panel"
+      title="Model tiers"
+      size="small"
+      data-testid="model-tiers"
+      extra={
+        canEdit && (
+          <Button type="primary" size="small" loading={saving} disabled={!dirty || bad} onClick={save} data-testid="model-tiers-save">
+            Save
+          </Button>
+        )
+      }
+    >
+      <Typography.Paragraph type="secondary" className="co-guard-help">
+        The model each tier stands for: opus, sonnet, haiku or a claude-… model id. An agent on a tier follows this map;
+        an agent's own model wins. Only admins can change it.
+      </Typography.Paragraph>
+      <Space direction="vertical" style={{ width: '100%' }}>
+        {TIER_OPTIONS.map((t) => (
+          <div key={t.value} data-testid={`tier-${t.value}`} style={{ display: 'flex', gap: 12, alignItems: 'center' }}>
+            <strong style={{ width: 90 }}>{t.label}</strong>
+            {canEdit ? (
+              <Input
+                value={cfg[t.value]}
+                status={isModelId(cfg[t.value]) ? undefined : 'error'}
+                aria-label={`${t.label} model`}
+                style={{ maxWidth: 320 }}
+                onChange={(e) => setCfg((c) => ({ ...c, [t.value]: e.target.value }))}
+              />
+            ) : (
+              <span className="co-guard-mono">{cfg[t.value]}</span>
+            )}
+          </div>
+        ))}
+      </Space>
+      {error && <Alert type="error" showIcon message={error} data-testid="model-tiers-error" style={{ marginTop: 12 }} />}
+    </Card>
+  )
+}
+
 // Settings → Agent guard (admins edit; the server refuses everyone else).
 export default function OrgGuardView({ isAdmin = false }) {
   const [builtins, setBuiltins] = useState([])
@@ -172,6 +246,7 @@ export default function OrgGuardView({ isAdmin = false }) {
   const [saving, setSaving] = useState(false)
   const [health, setHealth] = useState(null)
   const [ground, setGround] = useState(null)
+  const [tierMap, setTierMap] = useState(null)
 
   const load = useCallback(async () => {
     try {
@@ -182,6 +257,7 @@ export default function OrgGuardView({ isAdmin = false }) {
       setDisabled(cur.disabled_rules)
       setPatterns(cur.dev_db_patterns)
       setGround(s?.ground_rules || {})
+      setTierMap(s?.model_tiers || {})
     } catch (e) {
       setError(e.message)
     }
@@ -306,6 +382,7 @@ export default function OrgGuardView({ isAdmin = false }) {
         </Space>
       </Card>
       {ground && <GroundRulesCard canEdit={isAdmin} initial={ground} onSaved={setGround} />}
+      {tierMap && <ModelTiersCard canEdit={isAdmin} initial={tierMap} onSaved={setTierMap} />}
       {error && <Alert type="error" showIcon message={error} data-testid="org-guard-error" style={{ marginTop: 12 }} />}
     </div>
   )
