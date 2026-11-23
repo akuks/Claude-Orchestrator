@@ -97,6 +97,7 @@ async def build_task(
     created_by: str | None = None,
     brief: dict | None = None,
     launch_item_id: str | None = None,
+    risk_text: str | None = None,
 ) -> Task:
     """Create a Task row (flushed, not committed) in the given session.
 
@@ -121,7 +122,9 @@ async def build_task(
         bounds = []
     resolved_model = model or (project_obj.default_model if project_obj else "")
 
-    risk = classify_risk(prompt, project_id, tags)
+    # risk_text: the part of the prompt to classify when the rest is fixed server text whose
+    # own prohibitions ("do not merge or push") must not gate it (the gate fix prompt).
+    risk = classify_risk(prompt if risk_text is None else risk_text, project_id, tags)
     # Auto-gate critical-risk work so it can't run unattended (config-controlled).
     gated = requires_approval or (settings.gate_critical_approval and risk == "critical")
 

@@ -127,6 +127,27 @@ def redact(text: str, secrets: list[str]) -> str:
     return text
 
 
+ENV_VALUE_MIN = 6  # project env values at least this long are scrubbed from gate output
+ENV_MASK = "[redacted]"
+
+
+def env_values(envs) -> list[str]:
+    """Every string value (>= ENV_VALUE_MIN chars) of the given env dicts, longest first.
+    Gate output is scrubbed of ALL project env values, not only sensitive-looking names."""
+    vals: set[str] = set()
+    for env in envs or []:
+        if isinstance(env, dict):
+            vals.update(v for v in env.values() if isinstance(v, str) and len(v) >= ENV_VALUE_MIN)
+    return sorted(vals, key=len, reverse=True)
+
+
+def mask_values(text: str, values: list[str]) -> str:
+    """Replace each value (longest first) with ENV_MASK."""
+    for v in sorted((x for x in values if x), key=len, reverse=True):
+        text = text.replace(v, ENV_MASK)
+    return text
+
+
 def redact_obj(obj: Any, secrets: list[str]) -> Any:
     """A copy of obj with every string leaf (dict keys/values, list items)
     redacted; other leaves unchanged."""

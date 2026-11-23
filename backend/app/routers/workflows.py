@@ -20,7 +20,7 @@ from ..database import SessionLocal
 from ..constants import Status
 from ..gates import executor, spec, test_results, totals
 from ..models import Agent, Project, Task, Workflow, WorkflowGateRun, WorkflowRun
-from ..redaction import clean_text
+from ..redaction import clean_text, env_values, mask_values
 from .. import workflow_templates as wft
 from ..workflow_runner import ACTIVE_RUN, gate_status_text
 from ..schemas import (
@@ -753,25 +753,17 @@ async def gate_run_log(run_id: str, rid: str, request: Request):
             st.get("project") for st in (run.stages or [])
             if isinstance(st, dict) and spec.stage_kind(st) == "gate" and st.get("project")
         }
-        secrets: set[str] = set()
-        if pids:
-            envs = (await s.execute(select(Project.env).where(Project.id.in_(pids)))).scalars().all()
-            for env in envs:
-                for v in (env or {}).values() if isinstance(env, dict) else []:
-                    if isinstance(v, str) and len(v) >= 6:
-                        secrets.add(v)
+        envs = (await s.execute(select(Project.env).where(Project.id.in_(pids)))).scalars().all() if pids else []
+        ordered = env_values(envs)
         path = _log_path(run.id, g.log_name)
     if path is None:
         return {"lines": [], "truncated": False}
-    ordered = sorted(secrets, key=len, reverse=True)
 
     def work():
         text, cut = _read_tail(path, _LOG_TAIL)
         if not text:
             return {"lines": [], "truncated": False}
-        for v in ordered:
-            text = text.replace(v, "[redacted]")
-        text = clean_text(text)
+        text = clean_text(mask_values(text, ordered))
         lines = text.splitlines()
         if cut and lines:
             lines = lines[1:]  # the first line is probably cut mid-way
