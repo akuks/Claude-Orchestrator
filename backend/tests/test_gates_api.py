@@ -114,7 +114,9 @@ def _patch(monkeypatch, **kw):
         return None
 
     monkeypatch.setattr(real, "_tick", _no_tick)
-    monkeypatch.setattr(app.state, "workflow_runner", fr)
+    # setitem on the backing dict: newer Starlette State hides attributes from monkeypatch.setattr,
+    # whose undo would then delete the real runner for every later test
+    monkeypatch.setitem(app.state._state, "workflow_runner", fr)
     return fr
 
 
