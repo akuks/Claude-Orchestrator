@@ -64,11 +64,8 @@ def _env(allow_protocols) -> dict[str, str]:
 # it must be ones a plain clone writes; anything else (filter drivers,
 # core.sshCommand, url.*.insteadOf, remote.<n>.vcs, include.path ...) refuses.
 _ALLOWED_KEY = re.compile(
-    r"^(core\.[a-z0-9]+|remote\.origin\.(url|fetch)|branch\..+|user\.[a-z]+)$", re.I)
-_DENIED_CORE = {
-    "core.sshcommand", "core.fsmonitor", "core.hookspath", "core.askpass", "core.pager",
-    "core.editor", "core.gitproxy", "core.attributesfile", "core.worktree",
-}
+    r"^(core\.(repositoryformatversion|filemode|bare|logallrefupdates|ignorecase|precomposeunicode|symlinks)"
+    r"|remote\.origin\.(url|fetch)|branch\..+\.(remote|merge))$", re.I)
 _DRIVER_NAME_RE = re.compile(r"^[A-Za-z0-9._-]{1,64}$")
 MAX_FILTER_DRIVERS = 50
 MERGE_TIMEOUT = 120  # local checkout: never kill it half way for the network budget
@@ -83,6 +80,7 @@ def _argv(args, allow_protocols, overrides=()) -> list[str]:
         "-c", "core.hooksPath=/dev/null",
         "-c", "core.fsmonitor=false",
         "-c", "core.attributesFile=/dev/null",
+        "-c", "core.alternateRefsCommand=",
         "-c", "http.followRedirects=false",
         "-c", "submodule.recurse=false",
         "-c", f"protocol.file.allow={'always' if file_ok else 'never'}",
@@ -152,8 +150,20 @@ async def _git(args, cwd, allow_protocols=DEFAULT_PROTOCOLS, timeout: float = TI
     return out
 
 
+def _clean_tmp_packs(path) -> None:
+    """A killed fetch leaves tmp_pack_* files behind; remove them."""
+    for f in Path(str(path), ".git", "objects", "pack").glob("tmp_pack_*"):
+        try:
+            f.unlink()
+        except OSError:
+            pass
+
+
 async def check_config(path, allow_protocols=DEFAULT_PROTOCOLS) -> None:
     """Refuse a pack whose local .git/config holds keys a clone would not write."""
+    for alt in ("alternates", "http-alternates"):
+        if os.path.lexists(os.path.join(str(path), ".git", "objects", "info", alt)):
+            raise ValueError("This skill pack's git settings were changed by hand.")
     rc, out, _ = await _run(
         _argv(["config", "--local", "--list", "-z"], allow_protocols), path, allow_protocols, TIMEOUT)
     if rc != 0:
@@ -162,17 +172,22 @@ async def check_config(path, allow_protocols=DEFAULT_PROTOCOLS) -> None:
         key = entry.split("\n", 1)[0]
         if not key:
             continue
-        if not _ALLOWED_KEY.match(key) or key.lower() in _DENIED_CORE:
+        if not _ALLOWED_KEY.match(key):
             raise ValueError("This skill pack's git settings were changed by hand.")
 
 
 async def pin(path, url: str, sha: str, allow_protocols=DEFAULT_PROTOCOLS) -> None:
     """Leave a fresh clone at exactly ``sha`` (detached)."""
-    if not re.fullmatch(r"[0-9a-f]{40}", sha or ""):
+    sha = (sha or "").lower()
+    if not re.fullmatch(r"[0-9a-f]{40}", sha):
         raise ValueError("The pinned commit is not valid.")
     check_url(url, allow_protocols)
-    await _git(["fetch", "--depth", "1", "--no-tags", "--no-recurse-submodules", "--", url, sha], path,
-               allow_protocols, what="fetch the pinned commit")
+    try:
+        await _git(["fetch", "--depth", "1", "--no-tags", "--no-recurse-submodules", "--", url, sha], path,
+                   allow_protocols, what="fetch the pinned commit")
+    except ValueError:
+        _clean_tmp_packs(path)
+        raise
     await _git(["checkout", "-q", "--detach", sha], path, allow_protocols, MERGE_TIMEOUT,
                what="check out the pinned commit")
     if (await current_sha(SimpleNamespace(local_path=str(path)), allow_protocols)) != sha:
@@ -229,8 +244,12 @@ async def apply(pack, allow_protocols=DEFAULT_PROTOCOLS) -> dict:
         # A shallow pack (installs are --depth 1, a pin adds a second boundary)
         # needs its real history to know the remote continues from it.
         shallow = (await _git(["rev-parse", "--is-shallow-repository"], path, allow_protocols)).strip() == "true"
-        await _git(["fetch", "--no-tags", "--no-recurse-submodules", *(["--unshallow"] if shallow else []),
-                    "--", url, "HEAD"], path, allow_protocols, what="fetch from the remote repository")
+        try:
+            await _git(["fetch", "--no-tags", "--no-recurse-submodules", *(["--unshallow"] if shallow else []),
+                        "--", url, "HEAD"], path, allow_protocols, what="fetch from the remote repository")
+        except ValueError:
+            _clean_tmp_packs(path)
+            raise
         target = (await _git(["rev-parse", "FETCH_HEAD"], path, allow_protocols)).strip()
         if not _HEX.match(target):
             raise ValueError("The remote returned something unexpected.")

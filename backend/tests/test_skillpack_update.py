@@ -256,3 +256,58 @@ def test_hooks_path_in_pack_config_is_refused(rig):
     git(rig.dir, "config", "core.hooksPath", str(rig.dir / ".git" / "hooks"))
     with pytest.raises(ValueError, match="changed by hand"):
         run(update.apply(rig.pack, FILE))
+
+
+def test_alternate_refs_command_never_runs(rig):
+    marker = rig.tmp / "alt"
+    other = rig.tmp / "other.git"
+    git(rig.tmp, "init", "-q", "--bare", str(other))
+    info = rig.dir / ".git" / "objects" / "info"
+    info.mkdir(exist_ok=True)
+    (info / "alternates").write_text(str(other / "objects") + "\n")
+    git(rig.dir, "config", "core.alternateRefsCommand", f"touch {marker}; true")
+    commit(rig.work, "new.txt")
+    for fn in (update.check, update.apply):
+        with pytest.raises(ValueError, match="changed by hand"):
+            run(fn(rig.pack, FILE))
+    # even past the allowlist, the argument blanks it on a direct call
+    run(update._git(["fetch", "--no-tags", "--", rig.pack.source_url, "HEAD"], rig.dir, FILE))
+    assert not marker.exists()
+    assert "core.alternateRefsCommand=" in update._argv(["fetch"], FILE)
+
+
+def test_alternates_alone_refused(rig):
+    info = rig.dir / ".git" / "objects" / "info"
+    info.mkdir(exist_ok=True)
+    (info / "http-alternates").write_text("https://x/\n")
+    with pytest.raises(ValueError, match="changed by hand"):
+        run(update.check_config(rig.dir, FILE))
+
+
+def test_strict_core_keys_and_clone_keys_pass(rig):
+    git(rig.dir, "config", "core.autocrlf", "true")
+    with pytest.raises(ValueError, match="changed by hand"):
+        run(update.check_config(rig.dir, FILE))
+    git(rig.dir, "config", "--unset", "core.autocrlf")
+    run(update.check_config(rig.dir, FILE))
+
+
+def test_pin_accepts_uppercase_hex(rig):
+    sha = git(rig.work, "rev-parse", "HEAD")
+    run(update.pin(rig.dir, rig.pack.source_url, sha.upper(), FILE))
+    assert git(rig.dir, "rev-parse", "HEAD") == sha
+
+
+def test_tmp_packs_removed_after_failed_fetch(rig):
+    packdir = rig.dir / ".git" / "objects" / "pack"
+    (packdir / "tmp_pack_abc").write_text("x")
+    rig.pack.source_url = f"file://{rig.tmp}/nope.git"
+    with pytest.raises(ValueError):
+        run(update.apply(rig.pack, FILE))
+    assert not list(packdir.glob("tmp_pack_*"))
+
+
+def test_install_with_local_path_and_pin_is_400(client, tmp_path):
+    r = client.post("/skills", json={"name": f"lp-{uuid.uuid4().hex[:6]}", "local_path": str(tmp_path),
+                                    "pinned_sha": "a" * 40})
+    assert r.status_code == 400 and "needs a repository address" in r.json()["detail"]

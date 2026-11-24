@@ -259,6 +259,8 @@ async def install_skillpack(payload: SkillPackCreate):
     if payload.scope not in ("global", "project"):
         raise HTTPException(400, "scope must be 'global' or 'project'")
 
+    if payload.pinned_sha and payload.local_path:
+        raise HTTPException(400, "A pinned commit needs a repository address")
     if payload.local_path:
         path = Path(payload.local_path).expanduser().resolve()
         if not path.exists():
