@@ -219,3 +219,26 @@ def test_total_limit_holds_when_files_grow_after_listing(tmp_path, monkeypatch):
     monkeypatch.setattr(files, "_after_list", grow)
     c = files.collect(str(tmp_path))
     assert sum(len(t) for r in c.roots for _, t in r.files) <= 5000 and files.LIMIT_BYTES in c.limits
+
+
+def test_total_counts_bytes_actually_read(tmp_path, monkeypatch):
+    """A file that grows right after fstat: the bytes read are counted, not the size fstat saw."""
+    monkeypatch.setattr(files, "MAX_BYTES", 5000)
+    paths = {}
+    for i in range(10):
+        p = _w(tmp_path, f"migrations/{i}.sql", "select 1;\n")
+        paths[os.stat(p).st_ino] = p
+    real = os.fstat
+
+    def fstat(fd):
+        st = real(fd)
+        p = paths.get(st.st_ino)
+        if p and os.path.getsize(p) < 100:
+            with open(p, "a") as f:
+                f.write("-- x\n" * 300)  # +1500 bytes after the size was taken
+        return st
+
+    monkeypatch.setattr(files.os, "fstat", fstat)
+    c = files.collect(str(tmp_path))
+    total = sum(len(t) for r in c.roots for _, t in r.files)
+    assert total <= 5000 and files.LIMIT_BYTES in c.limits

@@ -295,3 +295,10 @@ def test_task_token_own_project_only(client, tmp_path):
     r = a.get(f"/projects/{other['id']}/schema")
     assert r.status_code == 403
     assert a.get(f"/projects/{p['id']}/code-map").status_code == 403  # nothing else opened up
+
+
+def test_pool_survives_shutdown_and_restart(client, tmp_path):
+    p, d = _project(client, tmp_path)
+    _sql(d, "1.sql", "CREATE TABLE a (id int);")
+    schema_router.shutdown()  # what the app's shutdown does; a later start must still work
+    assert client.get(f"/projects/{p['id']}/schema").json()["roots"][0]["tables"][0]["name"] == "a"

@@ -39,13 +39,28 @@ _CACHE_MAX = 32
 _CACHE_BYTES = 16 * 1024 * 1024
 _TIMEOUT_MEMORY = 60.0
 
-_pool = ThreadPoolExecutor(max_workers=WORKERS, thread_name_prefix="schema")
+_pool: ThreadPoolExecutor | None = None  # made on first use; shutdown() drops it, the next use makes a new one
 _lock = threading.Lock()  # guards everything below
 _slots = threading.Semaphore(WORKERS)
 _inflight: dict = {}  # real folder path -> the running job's future (shared by overlapping requests)
 _cache: "OrderedDict[tuple, tuple[list, int]]" = OrderedDict()
 _cache_bytes = 0
 _timed_out: dict[tuple, float] = {}  # (folder, signature) -> remembered until (monotonic)
+
+
+def _get_pool() -> ThreadPoolExecutor:
+    global _pool
+    if _pool is None:
+        _pool = ThreadPoolExecutor(max_workers=WORKERS, thread_name_prefix="schema")
+    return _pool
+
+
+def shutdown() -> None:
+    """App shutdown: stop the dedicated pool without waiting (running jobs stop at their own deadline)."""
+    global _pool
+    pool, _pool = _pool, None
+    if pool is not None:
+        pool.shutdown(wait=False, cancel_futures=True)
 
 
 def _empty(note: str, limits: list[str] | None = None, found: bool = False) -> dict:
@@ -139,7 +154,7 @@ async def _submit(directory: str, deadline: float):
                 return fut
             if _slots.acquire(blocking=False):
                 try:
-                    fut = _pool.submit(_job, key, key, deadline)
+                    fut = _get_pool().submit(_job, key, key, deadline)
                 except BaseException:
                     _slots.release()
                     raise

@@ -175,8 +175,8 @@ def scan(project_dir: str, deadline: float | None = None) -> Scan:
 
 
 def _read_one(base_fd: int, rel: str, cap: int):
-    """(text, size) of a regular file below ``base_fd`` (size from fstat); (None, size) when over the cap;
-    None when it cannot be opened as a regular file."""
+    """(text, st_size, bytes_read) of a regular file below ``base_fd``; text None when it is over the cap;
+    None when it cannot be opened as a regular file. At most cap + 1 bytes are ever read."""
     parts = rel.split("/")
     try:
         parent = _open_chain(base_fd, parts[:-1])
@@ -193,7 +193,7 @@ def _read_one(base_fd: int, rel: str, cap: int):
         if not stat.S_ISREG(st.st_mode):
             return None
         if st.st_size > cap:
-            return (None, st.st_size)
+            return (None, st.st_size, 0)
         with os.fdopen(fd, "rb", closefd=False) as f:
             data = f.read(cap + 1)
     except OSError:
@@ -201,8 +201,8 @@ def _read_one(base_fd: int, rel: str, cap: int):
     finally:
         os.close(fd)
     if len(data) > cap:
-        return (None, len(data))
-    return (data.decode("utf-8", errors="replace"), st.st_size)
+        return (None, st.st_size, len(data))
+    return (data.decode("utf-8", errors="replace"), st.st_size, len(data))
 
 
 def read(sc: Scan, deadline: float | None = None, accept_changed: bool = False) -> Collected:
@@ -222,14 +222,14 @@ def read(sc: Scan, deadline: float | None = None, accept_changed: bool = False) 
             got = _read_one(sc.base_fd, rel, MAX_BYTES - total)
             if got is None:
                 continue
-            text, now = got
+            text, now, nread = got
             if text is None:  # over what is left of the 5 MB: stop, no gaps after it
                 if LIMIT_BYTES not in res.limits:
                     res.limits.append(LIMIT_BYTES)
                 if rf.files:
                     res.roots.append(rf)
                 return res
-            total += now
+            total += nread  # what was actually read, not what fstat said
             if now != size:
                 res.changed.append(rel)
                 if not accept_changed:
