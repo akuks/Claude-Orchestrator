@@ -1592,22 +1592,32 @@ pack that has a source address.
   confirm, and **Update** goes ahead.
 - **What Update refuses.** A pack with local changes (any uncommitted change in its
   folder); a pack with no source address, or one that is not https or ssh; a pack that
-  is not a git checkout; and anything that is not a fast-forward, meaning the remote
-  history no longer continues from the installed commit. A refusal changes nothing and
-  says why.
+  is not a git checkout; a pack whose git settings were changed by hand (its
+  `.git/config` may only hold the settings a plain clone writes, so things like a
+  custom ssh command, an address rewrite or an include are refused, and so is
+  **Check for update**); a pack that is not behind the remote; and anything that is not a
+  fast-forward, meaning the remote history no longer continues from the installed
+  commit. A refusal changes nothing and says why.
 - **Nothing from the pack is run.** Git hooks are switched off, no credential helpers
-  or prompts are used, and only fetch, status, rev-parse, ls-remote and a
-  fast-forward-only merge are issued. Only one update per pack runs at a time.
+  or prompts are used, and only fetch, status, rev-parse, config, ls-remote and a
+  fast-forward-only merge are issued (plus a checkout when a preset is installed at its
+  pinned commit). Any filter programs the pack defines are switched off, and git never
+  follows an HTTP redirect to another address. Only one update per pack runs at a time.
+- **Shallow packs.** Installs download only the latest commit. A pack in that state
+  downloads its full history on its first update, so the first update can be slower
+  and larger.
 - **After an update.** The pack's lint is run again (see Skill lint) and any warnings
   are shown; the pack's version is re-read from its plugin file and the page refreshes.
 - **API.** `POST /skills/{id}/check-update` and `POST /skills/{id}/update`. Admin only.
 - **The superpowers preset.** The preset list includes **superpowers**
-  (`https://github.com/obra/superpowers`) with a recorded commit (`22f0b463...`, the
+  (`https://github.com/obra/superpowers`) with a pinned commit (`22f0b463...`, the
   superpowers 7.0.2 plugin). An admin chooses to install it; nothing is installed
-  automatically. The recorded commit is information only. It is returned by
-  `GET /skills/presets`, but installing clones the repository's current main branch and
-  the page does not use or check it, so a fresh install can be on a newer commit.
-  Update then moves a pack to the remote's latest commit, not back to the recorded one.
+  automatically. Installing from the preset checks out exactly that commit (the
+  Skills page sends it with the install request; if it cannot be fetched or checked
+  out, the install fails and the folder is removed). **Check for update** then reports
+  any newer commits, and **Update** moves the pack to the remote's newest commit, only
+  when the admin chooses. Installing a pack by URL without a pinned commit still takes
+  the repository's current latest commit.
 
 ### Not covered
 
@@ -1615,6 +1625,10 @@ pack that has a source address.
 - **Rollback.** There is no undo to an earlier commit.
 - **Pack code is not reviewed.** The lint checks the shape of skill files only.
 - **Update uses the stored source address.** It does not read the pack's own git remote.
+- **SSH uses the server's own keys.** A pack whose address is an ssh address is
+  fetched with the SSH keys and agent of the account the server runs as (host keys must
+  already be trusted; there are no prompts). Anyone who can add such a pack makes the
+  server use those keys.
 
 ---
 
