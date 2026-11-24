@@ -1,5 +1,7 @@
 """Code map routes (phase 6b): status, refresh (maintainers) and the log tail."""
 
+import os
+
 from fastapi import APIRouter, HTTPException, Request
 
 from ..access import require_project_role
@@ -40,9 +42,27 @@ async def refresh_code_map(project_id: str, request: Request):
         return await status.for_project(s, project)
 
 
+def _hide_folder(lines: list[str], directory: str | None) -> list[str]:
+    """Replace the project's real folder (and the way it was typed) with `<project folder>`."""
+    spellings = set()
+    if directory:
+        spellings.add(directory.rstrip("/") or directory)
+        try:
+            spellings.add(os.path.realpath(directory))
+        except OSError:
+            pass
+    spellings = sorted((x for x in spellings if len(x) > 1), key=len, reverse=True)
+    out = []
+    for ln in lines:
+        for sp in spellings:
+            ln = ln.replace(sp, "<project folder>")
+        out.append(ln)
+    return out
+
+
 @router.get("/log", response_model=CodeMapLogOut)
 async def get_log(project_id: str, request: Request):
     async with SessionLocal() as s:
         await require_project_role(s, request.state.principal, project_id)
         project = await _project(s, project_id)
-    return {"lines": await status.log_lines(project)}
+    return {"lines": _hide_folder(await status.log_lines(project), project.directory)}
