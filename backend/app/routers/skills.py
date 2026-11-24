@@ -4,6 +4,7 @@ import json
 import re
 import shutil
 import stat
+from datetime import datetime, timezone
 from pathlib import Path
 
 from fastapi import APIRouter, Depends, HTTPException, Request
@@ -15,6 +16,7 @@ from ..auth import require_admin
 from ..config import settings
 from ..database import SessionLocal
 from .. import skills_lint
+from ..skillpacks import update as pack_update
 from ..models import SkillPack
 from ..schemas import SkillPackCreate, SkillPackOut, SkillPackUpdate
 
@@ -24,6 +26,15 @@ _admin = [Depends(require_admin)]  # writes are admin-only; reads are open
 
 # Curated skill packs (Claude Code plugins). One-click install from the UI.
 PRESETS = [
+    {
+        "name": "superpowers",
+        "source_url": "https://github.com/obra/superpowers",
+        # Commit of the superpowers 7.0.2 plugin installed on this machine
+        # (from ~/.claude/plugins/installed_plugins.json). Recorded, not
+        # enforced: installing clones the repo's current HEAD.
+        "pinned_sha": "22f0b463e7a5e579904dd6211a520321035526f7",
+        "description": "Skills for planning, test-first work, debugging and code review.",
+    },
     {
         "name": "cybersecurity-skills",
         "source_url": "https://github.com/mukul975/Anthropic-Cybersecurity-Skills",
@@ -186,7 +197,59 @@ async def list_skillpacks(request: Request):
                 or_(SkillPack.scope != "project", SkillPack.project_id.in_(visible))
             )
         rows = (await s.execute(stmt)).scalars().all()
-    return [SkillPackOut.model_validate(r) for r in rows]
+    return list(await asyncio.gather(*(_out(r) for r in rows)))
+
+
+async def _out(pack: SkillPack) -> SkillPackOut:
+    out = SkillPackOut.model_validate(pack)
+    out.current_sha = await pack_update.current_sha(pack)
+    out.update_available = bool(
+        out.current_sha and out.latest_sha and out.current_sha != out.latest_sha
+    )
+    return out
+
+
+async def _get_pack(pack_id: str) -> SkillPack:
+    async with SessionLocal() as s:
+        pack = await s.get(SkillPack, pack_id)
+    if pack is None:
+        raise HTTPException(404, "Skill pack not found")
+    return pack
+
+
+@router.post("/{pack_id}/check-update", dependencies=_admin)
+async def check_update(pack_id: str):
+    pack = await _get_pack(pack_id)
+    try:
+        res = await pack_update.check(pack)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    async with SessionLocal() as s:
+        row = await s.get(SkillPack, pack_id)
+        if row is not None:
+            row.latest_sha = res["latest"]
+            row.checked_at = datetime.now(timezone.utc)
+            await s.commit()
+    return res
+
+
+@router.post("/{pack_id}/update", dependencies=_admin)
+async def update_pack(pack_id: str):
+    pack = await _get_pack(pack_id)
+    try:
+        res = await pack_update.apply(pack)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    _, version = _plugin_meta(Path(pack.local_path))
+    async with SessionLocal() as s:
+        row = await s.get(SkillPack, pack_id)
+        if row is not None:
+            row.latest_sha = res["to"]
+            row.checked_at = datetime.now(timezone.utc)
+            if version:
+                row.version = version
+            await s.commit()
+    return res
 
 
 @router.post("", response_model=SkillPackOut, status_code=201, dependencies=_admin)
@@ -227,7 +290,7 @@ async def install_skillpack(payload: SkillPackCreate):
         s.add(pack)
         await s.commit()
         await s.refresh(pack)
-        return SkillPackOut.model_validate(pack)
+        return await _out(pack)
 
 
 @router.patch("/{pack_id}", response_model=SkillPackOut, dependencies=_admin)
@@ -243,7 +306,7 @@ async def update_skillpack(pack_id: str, payload: SkillPackUpdate):
             setattr(pack, k, v)
         await s.commit()
         await s.refresh(pack)
-        return SkillPackOut.model_validate(pack)
+        return await _out(pack)
 
 
 @router.delete("/{pack_id}", status_code=204, dependencies=_admin)

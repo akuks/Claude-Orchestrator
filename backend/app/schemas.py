@@ -750,6 +750,10 @@ class SkillPackOut(BaseModel):
     scope: str
     project_id: Optional[str]
     created_at: datetime
+    current_sha: Optional[str] = None
+    latest_sha: Optional[str] = None
+    checked_at: Optional[datetime] = None
+    update_available: bool = False
 
     model_config = {"from_attributes": True}
 
