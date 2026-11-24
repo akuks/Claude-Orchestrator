@@ -731,6 +731,7 @@ class SkillPackCreate(BaseModel):
     description: Optional[str] = None
     scope: str = "global"  # global | project
     project_id: Optional[str] = None
+    pinned_sha: Optional[str] = None  # install at exactly this commit (40 hex)
 
 
 class SkillPackUpdate(BaseModel):

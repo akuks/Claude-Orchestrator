@@ -11,10 +11,12 @@ rev-parse, ls-remote and ``merge --ff-only`` are issued.
 from __future__ import annotations
 
 import asyncio
+import logging
 import os
 import re
 import signal
 from pathlib import Path
+from types import SimpleNamespace
 
 DEFAULT_PROTOCOLS = ("https", "ssh")
 TIMEOUT = 20
@@ -58,19 +60,40 @@ def _env(allow_protocols) -> dict[str, str]:
     return env
 
 
-async def _git(args, cwd, allow_protocols=DEFAULT_PROTOCOLS, timeout: float = TIMEOUT) -> str:
-    """Run one hardened git command; stdout on success, ValueError otherwise."""
+# A pack's own .git/config is not trusted. Before any network call the keys in
+# it must be ones a plain clone writes; anything else (filter drivers,
+# core.sshCommand, url.*.insteadOf, remote.<n>.vcs, include.path ...) refuses.
+_ALLOWED_KEY = re.compile(
+    r"^(core\.[a-z0-9]+|remote\.origin\.(url|fetch)|branch\..+|user\.[a-z]+)$", re.I)
+_DENIED_CORE = {
+    "core.sshcommand", "core.fsmonitor", "core.hookspath", "core.askpass", "core.pager",
+    "core.editor", "core.gitproxy", "core.attributesfile", "core.worktree",
+}
+_DRIVER_NAME_RE = re.compile(r"^[A-Za-z0-9._-]{1,64}$")
+MAX_FILTER_DRIVERS = 50
+MERGE_TIMEOUT = 120  # local checkout: never kill it half way for the network budget
+log = logging.getLogger(__name__)
+
+
+def _argv(args, allow_protocols, overrides=()) -> list[str]:
     file_ok = "file" in allow_protocols
-    argv = [
+    return [
         "git", "--no-pager", "--no-optional-locks",
         "-c", "credential.helper=",
         "-c", "core.hooksPath=/dev/null",
         "-c", "core.fsmonitor=false",
+        "-c", "core.attributesFile=/dev/null",
+        "-c", "http.followRedirects=false",
+        "-c", "submodule.recurse=false",
         "-c", f"protocol.file.allow={'always' if file_ok else 'never'}",
         "-c", "protocol.ext.allow=never",
         "-c", "core.pager=cat",
+        *overrides,
         *args,
     ]
+
+
+async def _run(argv, cwd, allow_protocols, timeout) -> tuple[int, str, str]:
     cwd = str(cwd)
     env = _env(allow_protocols)
     env["GIT_CEILING_DIRECTORIES"] = str(Path(cwd).parent)
@@ -88,9 +111,72 @@ async def _git(args, cwd, allow_protocols=DEFAULT_PROTOCOLS, timeout: float = TI
             pass
         await proc.wait()
         raise ValueError("The remote did not answer in time.") from None
-    if proc.returncode != 0:
-        raise ValueError("git failed: " + (_scrub(err.decode(errors="replace").strip()) or "no details"))
-    return out.decode(errors="replace")
+    return proc.returncode, out.decode(errors="replace"), err.decode(errors="replace")
+
+
+async def _filter_overrides(cwd, allow_protocols) -> list[str]:
+    """``-c`` switches blanking every filter driver the repo defines (as
+    gitsafe._filter_overrides does; copied because gitsafe is network-free
+    and its allowlist would refuse these commands)."""
+    rc, out, err = await _run(
+        _argv(["config", "--get-regexp", "-z", r"^filter\."], allow_protocols), cwd, allow_protocols, TIMEOUT)
+    if rc == 1 and not out:
+        return []
+    if rc != 0:
+        log.warning("skill pack filter listing failed: %s", _scrub(err))
+        raise ValueError("This skill pack's git settings could not be read.")
+    names: list[str] = []
+    for entry in out.split("\0"):
+        key = entry.split("\n", 1)[0]
+        if not key.startswith("filter.") or "." not in key[7:]:
+            continue
+        name = key[7:key.rindex(".")]
+        if name not in names:
+            names.append(name)
+    if len(names) > MAX_FILTER_DRIVERS or any(not _DRIVER_NAME_RE.match(n) for n in names):
+        raise ValueError("This skill pack's git settings were changed by hand.")
+    over: list[str] = []
+    for n in names:
+        for k, v in (("clean", ""), ("smudge", ""), ("process", ""), ("required", "false")):
+            over += ["-c", f"filter.{n}.{k}={v}"]
+    return over
+
+
+async def _git(args, cwd, allow_protocols=DEFAULT_PROTOCOLS, timeout: float = TIMEOUT, what: str = "git") -> str:
+    """Run one hardened git command; stdout on success, ValueError otherwise."""
+    over = await _filter_overrides(cwd, allow_protocols) if os.path.exists(os.path.join(str(cwd), ".git")) else []
+    rc, out, err = await _run(_argv(args, allow_protocols, over), cwd, allow_protocols, timeout)
+    if rc != 0:
+        log.warning("skill pack git %s failed: %s", args[0], _scrub(err.strip()))
+        raise ValueError(f"Could not {what}.")
+    return out
+
+
+async def check_config(path, allow_protocols=DEFAULT_PROTOCOLS) -> None:
+    """Refuse a pack whose local .git/config holds keys a clone would not write."""
+    rc, out, _ = await _run(
+        _argv(["config", "--local", "--list", "-z"], allow_protocols), path, allow_protocols, TIMEOUT)
+    if rc != 0:
+        raise ValueError("This skill pack's git settings could not be read.")
+    for entry in out.split("\0"):
+        key = entry.split("\n", 1)[0]
+        if not key:
+            continue
+        if not _ALLOWED_KEY.match(key) or key.lower() in _DENIED_CORE:
+            raise ValueError("This skill pack's git settings were changed by hand.")
+
+
+async def pin(path, url: str, sha: str, allow_protocols=DEFAULT_PROTOCOLS) -> None:
+    """Leave a fresh clone at exactly ``sha`` (detached)."""
+    if not re.fullmatch(r"[0-9a-f]{40}", sha or ""):
+        raise ValueError("The pinned commit is not valid.")
+    check_url(url, allow_protocols)
+    await _git(["fetch", "--depth", "1", "--no-tags", "--no-recurse-submodules", "--", url, sha], path,
+               allow_protocols, what="fetch the pinned commit")
+    await _git(["checkout", "-q", "--detach", sha], path, allow_protocols, MERGE_TIMEOUT,
+               what="check out the pinned commit")
+    if (await current_sha(SimpleNamespace(local_path=str(path)), allow_protocols)) != sha:
+        raise ValueError("The pinned commit could not be checked out.")
 
 
 def _pack_dir(pack) -> str:
@@ -112,7 +198,7 @@ async def current_sha(pack, allow_protocols=DEFAULT_PROTOCOLS) -> str | None:
 
 
 async def _remote_head(url: str, cwd, allow_protocols) -> str:
-    out = await _git(["ls-remote", "--", url, "HEAD"], cwd, allow_protocols)
+    out = await _git(["ls-remote", "--", url, "HEAD"], cwd, allow_protocols, what="reach the remote repository")
     for line in out.splitlines():
         sha, _, ref = line.partition("\t")
         if ref.strip() == "HEAD" and _HEX.match(sha):
@@ -123,6 +209,7 @@ async def _remote_head(url: str, cwd, allow_protocols) -> str:
 async def check(pack, allow_protocols=DEFAULT_PROTOCOLS) -> dict:
     url = check_url(pack.source_url, allow_protocols)
     path = _pack_dir(pack)
+    await check_config(path, allow_protocols)
     cur = await current_sha(pack, allow_protocols)
     latest = await _remote_head(url, path, allow_protocols)
     return {"current": cur, "latest": latest, "update_available": cur is not None and cur != latest}
@@ -131,25 +218,33 @@ async def check(pack, allow_protocols=DEFAULT_PROTOCOLS) -> dict:
 async def apply(pack, allow_protocols=DEFAULT_PROTOCOLS) -> dict:
     url = check_url(pack.source_url, allow_protocols)
     path = _pack_dir(pack)
+    await check_config(path, allow_protocols)
     lock = _locks.setdefault(pack.id, asyncio.Lock())
     async with lock:
         before = await current_sha(pack, allow_protocols)
         if before is None:
             raise ValueError("This skill pack is not a git checkout, so it cannot be updated.")
-        if (await _git(["status", "--porcelain"], path, allow_protocols)).strip():
+        if (await _git(["status", "--porcelain"], path, allow_protocols, what="read the pack's state")).strip():
             raise ValueError("This skill pack has local changes. Remove them before updating.")
-        await _git(["fetch", "--no-tags", "--", url, "HEAD"], path, allow_protocols)
+        # A shallow pack (installs are --depth 1, a pin adds a second boundary)
+        # needs its real history to know the remote continues from it.
+        shallow = (await _git(["rev-parse", "--is-shallow-repository"], path, allow_protocols)).strip() == "true"
+        await _git(["fetch", "--no-tags", "--no-recurse-submodules", *(["--unshallow"] if shallow else []),
+                    "--", url, "HEAD"], path, allow_protocols, what="fetch from the remote repository")
         target = (await _git(["rev-parse", "FETCH_HEAD"], path, allow_protocols)).strip()
         if not _HEX.match(target):
             raise ValueError("The remote returned something unexpected.")
         if target != before:
             try:
-                await _git(["merge", "--ff-only", target], path, allow_protocols)
+                await _git(["merge", "--ff-only", target], path, allow_protocols,
+                           MERGE_TIMEOUT)
             except ValueError:
                 raise ValueError(
                     "The remote history no longer continues from this copy, so it cannot be updated automatically."
                 ) from None
-    from ..routers.skills import _lint_pack_dir  # late: the router imports this module
+            if await current_sha(pack, allow_protocols) != target:
+                raise ValueError("This copy is not behind the remote, so there is nothing to update.")
+        from ..routers.skills import _lint_pack_dir  # late: the router imports this module
 
-    results = await asyncio.to_thread(_lint_pack_dir, path)
+        results = await asyncio.to_thread(_lint_pack_dir, path)
     return {"from": before, "to": target, "lint": [r for r in results if r["problems"]]}

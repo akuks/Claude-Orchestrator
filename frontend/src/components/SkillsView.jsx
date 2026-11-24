@@ -113,7 +113,7 @@ export default function SkillsView({ projects = [], isAdmin = false }) {
   const installPreset = async (pr) => {
     setInstalling(pr.name)
     try {
-      await api.installSkill({ source_url: pr.source_url, description: pr.description, scope: 'global' })
+      await api.installSkill({ source_url: pr.source_url, description: pr.description, scope: 'global', pinned_sha: pr.pinned_sha })
       message.success(`Installed “${pr.name}”`)
       refresh()
     } catch (e) {

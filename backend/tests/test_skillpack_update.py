@@ -117,7 +117,6 @@ def test_hooks_do_not_run(rig):
         h = d / "post-merge"
         h.write_text(f"#!/bin/sh\ntouch {marker}\n")
         h.chmod(0o755)
-    git(rig.dir, "config", "core.hooksPath", str(rig.dir / ".git" / "hooks"))
     commit(rig.work, "new.txt")
     run(update.apply(rig.pack, FILE))
     assert (rig.dir / "new.txt").exists() and not marker.exists()
@@ -158,3 +157,102 @@ def test_routes_admin_only_and_file_url_refused(client, rig):
     assert client.post("/skills/nope/check-update").status_code == 404
     row = next(x for x in client.get("/skills").json() if x["id"] == pid)
     assert row["latest_sha"] is None and row["update_available"] is False and len(row["current_sha"]) == 40
+
+
+def shallow_pack(rig):
+    d = rig.tmp / "packs" / "shallow"
+    git(rig.tmp, "clone", "-q", "--depth", "1", f"file://{rig.bare}", str(d))
+    return SimpleNamespace(id=uuid.uuid4().hex, source_url=rig.pack.source_url, local_path=str(d)), d
+
+
+def test_shallow_pack_fast_forwards(rig):
+    pack, d = shallow_pack(rig)
+    commit(rig.work, "new.txt")
+    run(update.apply(pack, FILE))
+    assert git(d, "rev-parse", "HEAD") == git(rig.work, "rev-parse", "HEAD")
+
+
+def evil_remote(rig):
+    (rig.work / ".gitattributes").write_text("*.txt filter=evil\n")
+    commit(rig.work, "a.txt", "hello")
+
+
+def plant_filter(d, marker):
+    git(d, "config", "filter.evil.smudge", f"sh -c 'touch {marker}; cat'")
+    git(d, "config", "filter.evil.clean", f"sh -c 'touch {marker}; cat'")
+
+
+def test_filter_driver_in_pack_config_never_runs(rig):
+    marker = rig.tmp / "pwned"
+    evil_remote(rig)
+    plant_filter(rig.dir, marker)
+    with pytest.raises(ValueError, match="changed by hand"):
+        run(update.apply(rig.pack, FILE))
+    with pytest.raises(ValueError, match="changed by hand"):
+        run(update.check(rig.pack, FILE))
+    assert not marker.exists()
+
+
+def test_filter_drivers_blanked_on_every_call(rig):
+    marker = rig.tmp / "pwned"
+    evil_remote(rig)
+    git(rig.dir, "pull", "-q", "--ff-only")  # pack now tracks a.txt, with the attribute
+    plant_filter(rig.dir, marker)
+    os.utime(rig.dir / "a.txt", (1, 1))
+    assert run(update._git(["status", "--porcelain"], rig.dir, FILE)).strip() == ""
+    (rig.work / "b.txt").write_text("b")
+    commit(rig.work, "c.txt", "c")
+    run(update._git(["fetch", "--no-tags", "--", rig.pack.source_url, "HEAD"], rig.dir, FILE))
+    run(update._git(["merge", "--ff-only", git(rig.work, "rev-parse", "HEAD")], rig.dir, FILE))
+    assert (rig.dir / "c.txt").read_text() == "c" and not marker.exists()
+
+
+def test_config_allowlist_accepts_a_plain_clone(rig):
+    run(update.check_config(rig.dir, FILE))
+    pack, d = shallow_pack(rig)
+    run(update.check_config(d, FILE))
+    git(rig.dir, "config", "url.https://evil/.insteadOf", "https://x/")
+    with pytest.raises(ValueError, match="changed by hand"):
+        run(update.check_config(rig.dir, FILE))
+
+
+def test_argv_disables_redirects_and_submodules():
+    a = update._argv(["fetch"], update.DEFAULT_PROTOCOLS)
+    for want in ("http.followRedirects=false", "submodule.recurse=false", "core.attributesFile=/dev/null",
+                 "protocol.file.allow=never", "protocol.ext.allow=never", "core.hooksPath=/dev/null"):
+        assert want in a
+
+
+def test_pin_checks_out_exact_commit_then_updates_from_detached(rig):
+    pinned = git(rig.work, "rev-parse", "HEAD")
+    commit(rig.work, "new.txt")
+    d = rig.tmp / "packs" / "pinned"
+    git(rig.tmp, "clone", "-q", "--depth", "1", f"file://{rig.bare}", str(d))
+    pack = SimpleNamespace(id=uuid.uuid4().hex, source_url=rig.pack.source_url, local_path=str(d))
+    run(update.pin(d, pack.source_url, pinned, FILE))
+    assert git(d, "rev-parse", "HEAD") == pinned and not (d / "new.txt").exists()
+    r = run(update.check(pack, FILE))
+    assert r["update_available"] is True and r["current"] == pinned
+    r = run(update.apply(pack, FILE))
+    assert r["from"] == pinned and git(d, "rev-parse", "HEAD") == git(rig.work, "rev-parse", "HEAD")
+    assert (d / "new.txt").exists()
+
+
+def test_pin_unknown_sha_fails_cleanly(rig):
+    with pytest.raises(ValueError):
+        run(update.pin(rig.dir, rig.pack.source_url, "0" * 40, FILE))
+    with pytest.raises(ValueError):
+        run(update.pin(rig.dir, rig.pack.source_url, "nothex", FILE))
+
+
+def test_error_text_is_plain(rig):
+    rig.pack.source_url = f"file://{rig.tmp}/nope.git"
+    with pytest.raises(ValueError) as e:
+        run(update.check(rig.pack, FILE))
+    assert "fatal" not in str(e.value) and str(rig.tmp) not in str(e.value)
+
+
+def test_hooks_path_in_pack_config_is_refused(rig):
+    git(rig.dir, "config", "core.hooksPath", str(rig.dir / ".git" / "hooks"))
+    with pytest.raises(ValueError, match="changed by hand"):
+        run(update.apply(rig.pack, FILE))

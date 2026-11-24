@@ -30,8 +30,8 @@ PRESETS = [
         "name": "superpowers",
         "source_url": "https://github.com/obra/superpowers",
         # Commit of the superpowers 7.0.2 plugin installed on this machine
-        # (from ~/.claude/plugins/installed_plugins.json). Recorded, not
-        # enforced: installing clones the repo's current HEAD.
+        # (from ~/.claude/plugins/installed_plugins.json). Installing it
+        # checks out exactly this commit; "Update" is the admin's later move.
         "pinned_sha": "22f0b463e7a5e579904dd6211a520321035526f7",
         "description": "Skills for planning, test-first work, debugging and code review.",
     },
@@ -270,6 +270,12 @@ async def install_skillpack(payload: SkillPackCreate):
         if path.exists():
             shutil.rmtree(path)  # re-install fresh
         await _git_clone(payload.source_url, path)
+        if payload.pinned_sha:
+            try:
+                await pack_update.pin(path, payload.source_url, payload.pinned_sha)
+            except ValueError as e:
+                shutil.rmtree(path, ignore_errors=True)
+                raise HTTPException(400, str(e))
 
     pname, version = _plugin_meta(path)
     name = payload.name or pname or name
