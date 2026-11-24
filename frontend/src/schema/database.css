@@ -1,0 +1,24 @@
+/* Database tab. Colours come from the --co-* variables only, so light and dark both work. */
+.co-db-explain { color: var(--co-text-secondary); margin: 0 0 10px; }
+.co-db-search { margin-bottom: 12px; }
+.co-db-roothead { color: var(--co-text-secondary); font-size: 13px; margin: 8px 0 6px; }
+.co-db-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(250px, 1fr)); gap: 12px; }
+.co-db-card { padding: 10px 12px; transition: box-shadow 0.2s, border-color 0.2s; }
+.co-db-hit { border-color: var(--co-primary); box-shadow: 0 0 0 3px color-mix(in srgb, var(--co-primary) 35%, transparent); }
+.co-db-card-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.co-db-name { font-weight: 600; color: var(--co-text); font-size: 15px; }
+.co-db-sub { color: var(--co-text-secondary); font-size: 12px; margin: 2px 0 6px; }
+.co-db-cols { list-style: none; margin: 6px 0 0; padding: 0; }
+.co-db-col { display: flex; align-items: center; gap: 6px; padding: 3px 0; border-top: 1px solid var(--co-border); flex-wrap: wrap; }
+.co-db-col:first-child { border-top: 0; }
+.co-db-keyslot { width: 14px; flex: none; text-align: center; }
+.co-db-key { color: var(--co-warning); }
+.co-db-colname { color: var(--co-text); }
+.co-db-type { color: var(--co-text-muted); font-size: 12px; margin-left: auto; }
+.co-db-chip { font: inherit; font-size: 12px; padding: 0 8px; border-radius: 10px; border: 1px solid var(--co-primary); color: var(--co-primary); background: transparent; cursor: pointer; }
+.co-db-chip:hover { background: color-mix(in srgb, var(--co-primary) 14%, transparent); }
+.co-db-chip-off { border-color: var(--co-border); color: var(--co-text-secondary); cursor: default; }
+.co-db-note { margin-top: 12px; color: var(--co-text-secondary); font-size: 13px; }
+.co-db-details { margin-top: 12px; color: var(--co-text-secondary); font-size: 13px; }
+.co-db-detail-table { word-break: break-word; }
+.co-db-empty { color: var(--co-text-secondary); }

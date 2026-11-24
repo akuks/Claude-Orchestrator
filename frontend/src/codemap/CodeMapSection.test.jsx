@@ -123,3 +123,14 @@ describe('CodeMapSection', () => {
     expect(q('codemap-error').textContent).toBe('Only an admin can turn the code map on for outside code')
   })
 })
+
+describe('CodeMapSection times', () => {
+  it('shows readable times, never the raw ISO string', async () => {
+    api.getCodeMap.mockResolvedValue(st({ indexed_at: '2026-11-24T10:15:30', next_try_at: '2026-11-24T11:00:00+00:00' }))
+    await mount()
+    const text = q('codemap-details').textContent
+    expect(text).not.toMatch(/\d{4}-\d{2}-\d{2}T/)
+    expect(text).toMatch(/Last built: \d{1,2} \w{3} 2026, \d{2}:\d{2}/)
+    expect(text).toMatch(/Next try: \d{1,2} \w{3} 2026, \d{2}:\d{2}/)
+  })
+})

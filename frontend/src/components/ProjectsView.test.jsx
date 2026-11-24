@@ -10,10 +10,12 @@ vi.mock('../api', () => ({
     listTeams: vi.fn(async () => []),
     updateProject: vi.fn(async (id, v) => ({ id, ...v })),
     refreshLicence: vi.fn(async () => ({})),
+    getRecommended: vi.fn(),
+    listProposals: vi.fn(async () => ({ pending: 0 })),
   },
 }))
 import { api } from '../api'
-import { GitStateWarning, LicenceCheck, ProjectModal } from './ProjectsView'
+import { GitStateWarning, LicenceCheck, ProjectDrawer, ProjectModal } from './ProjectsView'
 import LicenceBadge from '../projects/LicenceBadge'
 
 let view
@@ -171,5 +173,26 @@ describe('licence badge (phase 6a)', () => {
     it('a permissive own licence shows its name', async () => {
       expect(await line({ trust: 'own', licence: { kind: 'permissive', id: 'MIT' } })).toContain('Licence: MIT')
     })
+  })
+})
+
+describe('project drawer tabs: Database and Recommended', () => {
+  const tabs = () => [...document.querySelectorAll('.ant-tabs-tab')].map((t) => t.textContent)
+  const open = async () => {
+    view = await render(<ProjectDrawer project={{ id: 'p1', name: 'Shop', my_role: 'maintainer' }} tab="members" onTab={() => {}} currentUser={{ id: 'u', role: 'admin' }} onClose={() => {}} onSaved={() => {}} />)
+    await flush()
+    await flush()
+  }
+  it('always has Database; hides Recommended when there is no user interface', async () => {
+    api.getRecommended.mockResolvedValue({ has_ui: false, items: [] })
+    await open()
+    expect(api.getRecommended).toHaveBeenCalledWith('p1')
+    expect(tabs().some((t) => t.includes('Database'))).toBe(true)
+    expect(tabs().some((t) => t.includes('Recommended'))).toBe(false)
+  })
+  it('shows Recommended when the project has a user interface', async () => {
+    api.getRecommended.mockResolvedValue({ has_ui: true, items: [] })
+    await open()
+    expect(tabs().some((t) => t.includes('Recommended'))).toBe(true)
   })
 })

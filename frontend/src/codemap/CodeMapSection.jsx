@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from 'react'
 import { Button, Space, Spin, Switch, Typography } from 'antd'
 import { api } from '../api'
+import { when } from '../time'
 import { revealHidden } from '../guard/guard'
 import { EXPLAIN, SWITCH_LABEL, sha7, statusLine, statusTone } from './codemap'
 import './codemap.css'
@@ -9,6 +10,8 @@ const NOT_ALLOWED = 'You do not have permission to do that here.'
 const plain = (e) => (/admin can turn the code map on/i.test(e?.message || '') ? e.message : e?.status === 403 || /403|forbidden/i.test(e?.message || '') ? NOT_ALLOWED : String(e?.message || 'Something went wrong'))
 
 export const POLL_MS = 5000
+
+const niceTime = (t) => (t ? when(t).format('D MMM YYYY, HH:mm') : '—')
 
 export default function CodeMapSection({ project, canEdit, active = true }) {
   const [open, setOpen] = useState(false)
@@ -99,8 +102,8 @@ export default function CodeMapSection({ project, canEdit, active = true }) {
           <details className="co-codemap-details" data-testid="codemap-details" onToggle={(e) => setOpen(e.currentTarget.open)}>
             <summary>Details</summary>
             <div>Built at: {sha7(st.sha) || '—'}</div>
-            <div>Last built: {st.indexed_at || '—'}</div>
-            {st.next_try_at && <div>Next try: {st.next_try_at}</div>}
+            <div>Last built: {niceTime(st.indexed_at)}</div>
+            {st.next_try_at && <div>Next try: {niceTime(st.next_try_at)}</div>}
             {st.status === 'failed' && st.error && <div data-testid="codemap-reason">Reason: {revealHidden(st.error).text}</div>}
             {lines.length > 0 && <pre>{lines.map((l) => revealHidden(l).text).join('\n')}</pre>}
           </details>

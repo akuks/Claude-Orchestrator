@@ -24,6 +24,8 @@ import {
 } from 'antd'
 import {
   ApiOutlined,
+  BulbOutlined,
+  DatabaseOutlined,
   DeleteOutlined,
   EditOutlined,
   PlusOutlined,
@@ -46,6 +48,8 @@ import { canEditGuard } from '../guard/guard'
 import DecisionsPane from '../decisions/DecisionsPane'
 import LaunchTab from '../launch/LaunchTab'
 import CodeMapSection from '../codemap/CodeMapSection'
+import DatabaseSection from '../schema/DatabaseSection'
+import RecommendedSection from '../recommend/RecommendedSection'
 import { FRESH_SUGGEST, freshSessionError } from '../usage/usage'
 
 dayjs.extend(relativeTime)
@@ -436,6 +440,20 @@ export function ProjectDrawer({ project, tab, onTab, currentUser, onClose, onSav
   const canEdit = project?.my_role === 'maintainer'
   const [pendingProposals, setPendingProposals] = useState(0)
   const projectId = project?.id
+  // One cheap look per project at whether it has a user interface, to know whether to show "Recommended".
+  const [rec, setRec] = useState(null)
+  const loadRec = useCallback(async () => {
+    if (!projectId) return
+    try {
+      setRec(await api.getRecommended(projectId))
+    } catch (_) {
+      setRec(null)
+    }
+  }, [projectId])
+  useEffect(() => {
+    setRec(null)
+    loadRec()
+  }, [loadRec])
   useEffect(() => {
     let live = true
     setPendingProposals(0)
@@ -523,6 +541,37 @@ export function ProjectDrawer({ project, tab, onTab, currentUser, onClose, onSav
               ),
               children: <CodeMapSection key={project.id} active={tab === 'codemap'} project={project} canEdit={canEditGuard(project, currentUser)} />,
             },
+            {
+              key: 'database',
+              label: (
+                <span>
+                  <DatabaseOutlined /> Database
+                </span>
+              ),
+              children: <DatabaseSection key={project.id} active={tab === 'database'} project={project} />,
+            },
+            ...(rec?.has_ui
+              ? [
+                  {
+                    key: 'recommended',
+                    label: (
+                      <span>
+                        <BulbOutlined /> Recommended
+                      </span>
+                    ),
+                    children: (
+                      <RecommendedSection
+                        key={project.id}
+                        project={project}
+                        data={rec}
+                        reload={loadRec}
+                        canEdit={canEditGuard(project, currentUser)}
+                        isAdmin={currentUser?.role === 'admin'}
+                      />
+                    ),
+                  },
+                ]
+              : []),
             {
               key: 'guard',
               label: (
