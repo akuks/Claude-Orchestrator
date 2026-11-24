@@ -7,6 +7,8 @@ daemons. Health checks validate connectivity on demand and periodically.
 
 import json
 import re
+import shutil
+import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -69,14 +71,69 @@ async def servers_for_task(project: str | None) -> list[McpServer]:
     return out
 
 
-def build_config(servers: list[McpServer]) -> dict:
+_LAUNCHER = Path(__file__).resolve().parent / "mcp_launch.py"
+
+
+def launcher_path() -> str:
+    """The launcher that starts a stdio tool from its neutral folder. It lives in
+    the server's own code tree (app/), which the guard protects from agents."""
+    return str(_LAUNCHER)
+
+
+def neutral_dir(task_cwd_root: Path, server, taken: set[Path] | None = None) -> Path:
+    """The private start folder of one tool in one task:
+    ``<task_cwd_root>/<server prefix>`` (the same sanitised prefix as its tool
+    names). Two tools of one task whose prefixes match get "-2", "-3", ...
+    (``taken``). Always a direct child of ``task_cwd_root``."""
+    root = Path(task_cwd_root).resolve()
+    base = mcp_server_prefix(getattr(server, "name", server) or "") or "_"
+    name, n = base, 1
+    while True:
+        d = (root / name).resolve()
+        if d.parent != root:  # the prefix has no separators or dots; check anyway
+            raise ValueError(f"unsafe folder name for connected tool {base!r}")
+        if not taken or d not in taken:
+            return d
+        n += 1
+        name = f"{base}-{n}"
+
+
+def _fresh_private_dir(d: Path) -> None:
+    if d.is_symlink() or d.is_file():
+        d.unlink()
+    elif d.exists():
+        shutil.rmtree(d)
+    d.mkdir(mode=0o700)
+    d.chmod(0o700)  # whatever the umask
+
+
+def build_config(servers: list[McpServer], *, task_cwd_root: Path | None = None,
+                 project_dir: str | None = None) -> dict:
+    """The --mcp-config for these servers. With ``task_cwd_root`` (a task's
+    run), each stdio server whose "Start in the project folder" switch is off
+    starts through the launcher from its own new, empty folder under it, and
+    gets ``CO_PROJECT_DIR`` when ``project_dir`` is given. Without it (or with
+    the switch on) the entry is exactly ``{"command", "args"[, "env"]}``."""
     cfg: dict = {}
+    taken: set[Path] = set()
     for srv in servers:
         sec = decrypt_json(srv.secrets_encrypted)
         if srv.transport == "stdio":
-            entry: dict = {"command": srv.command, "args": srv.args or []}
-            if sec.get("env"):
-                entry["env"] = sec["env"]
+            if task_cwd_root is not None and not getattr(srv, "start_in_project", False):
+                d = neutral_dir(task_cwd_root, srv, taken)
+                taken.add(d)
+                _fresh_private_dir(d)
+                env = dict(sec.get("env") or {})
+                if project_dir:
+                    env["CO_PROJECT_DIR"] = str(project_dir)
+                entry = {"command": sys.executable,
+                         "args": ["-I", launcher_path(), str(d), "--", srv.command, *(srv.args or [])]}
+                if env:
+                    entry["env"] = env
+            else:
+                entry = {"command": srv.command, "args": srv.args or []}
+                if sec.get("env"):
+                    entry["env"] = sec["env"]
         else:
             entry = {"type": "http", "url": srv.url}
             if sec.get("headers"):
@@ -85,7 +142,19 @@ def build_config(servers: list[McpServer]) -> dict:
     return {"mcpServers": cfg}
 
 
-async def prepare_for_task(project: str | None, config_dir: Path) -> dict | None:
+def task_config_dir(task_id: str) -> Path:
+    """A task's MCP config folder (its config file and its tools' start folders)."""
+    return settings.workspaces_dir / "_mcp_configs" / task_id
+
+
+def cleanup_task(task_id: str) -> None:
+    """Remove a task's MCP config folder: the config (vault secrets) and every
+    tool's start folder under ``cwd/``."""
+    shutil.rmtree(task_config_dir(task_id), ignore_errors=True)
+
+
+async def prepare_for_task(project: str | None, config_dir: Path,
+                           project_dir: str | None = None) -> dict | None:
     """Write a per-task MCP config and resolve allow/deny tool lists from policy.
 
     Also returns co-guard's policy shapes: ``servers`` ({lower-cased server
@@ -98,13 +167,19 @@ async def prepare_for_task(project: str | None, config_dir: Path) -> dict | None
     location OUTSIDE the agent's working directory (never the project repo) — so
     an agent can't read or accidentally commit it. --mcp-config takes the absolute
     path, so the file does not need to live in the cwd.
+
+    Each stdio tool (switch off) starts from ``config_dir/cwd/<prefix>/``, a
+    new, empty 0700 folder made here; ``project_dir`` reaches it as
+    ``CO_PROJECT_DIR``. All of it goes with ``cleanup_task``.
     """
     servers = await servers_for_task(project)
     if not servers:
         return None
 
-    cfg = build_config(servers)
     config_dir.mkdir(parents=True, exist_ok=True)
+    cwd_root = config_dir / "cwd"
+    _fresh_private_dir(cwd_root)
+    cfg = build_config(servers, task_cwd_root=cwd_root, project_dir=project_dir)
     path = (config_dir / ".mcp-config.json").resolve()
     path.write_text(json.dumps(cfg, indent=2))
     try:

@@ -578,8 +578,12 @@ class WorkerManager:
         # dedicated area that is NEVER any task's working directory (not the repo,
         # not the sandbox cwd), so the config's vault secrets can't be read in — or
         # committed from — the agent's cwd. --mcp-config uses the absolute path.
-        mcp_config_dir = settings.workspaces_dir / "_mcp_configs" / task_id
-        mcp = await mcp_manager.prepare_for_task(project, mcp_config_dir)
+        # Each stdio tool starts from its own empty folder under it, not from the
+        # project (whose .npmrc / node_modules could otherwise choose what runs);
+        # the folder claude starts in reaches the tool as CO_PROJECT_DIR.
+        mcp_config_dir = mcp_manager.task_config_dir(task_id)
+        mcp = await mcp_manager.prepare_for_task(
+            project, mcp_config_dir, project_dir=str(workspace) if proj is not None else None)
 
         # co-guard: per-task policy + spool dir (outside the cwd), env, and the
         # settings that could switch its hooks off (Ruling R6 follow-up).
@@ -1885,6 +1889,7 @@ class WorkerManager:
         tracker = self._usage.pop(task_id, None)  # the live run's usage (stored below)
         self._usage_spool.pop(task_id, None)
         context_store.cleanup(task_id)  # drop this task's knowledge snapshot
+        mcp_manager.cleanup_task(task_id)  # its MCP config (vault secrets) and its tools' start folders
         await self._spend_spool_grants(task_id)  # a spool not ingested (error paths): its once grants stay spent
         guard_runtime.remove_task_dir(task_id)  # co-guard policy + spool (normally gone already)
         async with SessionLocal() as s:

@@ -1,3 +1,4 @@
+import os
 from datetime import datetime, timedelta, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, Request
@@ -38,6 +39,19 @@ def _check_guard_fields(environment, default_action) -> None:
         raise HTTPException(400, f"default_action must be one of {sorted(_VALID_ACTIONS)}")
 
 
+RELATIVE_COMMAND = "A command that starts with ./ needs 'Start in the project folder'"
+
+
+def _check_command(transport, command, start_in_project) -> None:
+    """A command with a path separator that is not absolute (./bin/tool) names
+    a file in the project; it cannot work from the tool's own empty folder."""
+    if transport != "stdio" or not command or start_in_project:
+        return
+    seps = {"/", os.sep} | ({os.altsep} if os.altsep else set())
+    if any(c in command for c in seps) and not os.path.isabs(command):
+        raise HTTPException(400, RELATIVE_COMMAND)
+
+
 async def _server_visibility(s, p):
     """Project-scoped servers are visible only when their project — resolved by
     its *current* name — is visible; an unresolvable name is admin-only. Other
@@ -69,7 +83,7 @@ def _pack_secrets(env: dict | None, headers: dict | None) -> str | None:
 @router.get("/presets")
 async def list_presets():
     """Pinned presets an admin can add from (any signed-in user may read them)."""
-    return [dict(p, args=list(p["args"])) for p in PRESETS]
+    return [dict(p, args=list(p["args"]), start_in_project=False) for p in PRESETS]
 
 
 @router.post("/servers", response_model=McpServerOut, status_code=201, dependencies=_admin)
@@ -85,6 +99,7 @@ async def create_server(payload: McpServerCreate):
     if payload.scope == "project" and not payload.project:
         raise HTTPException(400, "project scope requires a project name")
     _check_guard_fields(payload.environment, payload.default_action)
+    _check_command(payload.transport, payload.command, payload.start_in_project)
 
     async with SessionLocal() as s:
         dup = (
@@ -104,6 +119,7 @@ async def create_server(payload: McpServerCreate):
             enabled=payload.enabled,
             environment=payload.environment,
             default_action=payload.default_action,
+            start_in_project=payload.start_in_project,
         )
         s.add(srv)
         await s.commit()
@@ -157,7 +173,7 @@ async def update_server(server_id: str, payload: McpServerUpdate):
     async with SessionLocal() as s:
         srv = await _get_or_404(s, server_id)
         data = payload.model_dump(exclude_unset=True)
-        for k in ("environment", "default_action"):
+        for k in ("environment", "default_action", "start_in_project"):
             if k in data and data[k] is None:
                 del data[k]  # required columns; null means "leave it"
         _check_guard_fields(data.get("environment"), data.get("default_action"))
@@ -173,6 +189,7 @@ async def update_server(server_id: str, payload: McpServerUpdate):
             setattr(srv, k, v)
         if srv.scope not in _VALID_SCOPES:
             raise HTTPException(400, "invalid scope")
+        _check_command(srv.transport, srv.command, srv.start_in_project)
         await s.commit()
         await s.refresh(srv)
         return _to_out(srv)
