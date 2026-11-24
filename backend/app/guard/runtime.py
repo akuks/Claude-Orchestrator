@@ -294,8 +294,10 @@ def launch_roots() -> list[Path]:
     map build (their per-task / per-project folders are below these)."""
     ws = settings.workspaces_dir
     roots = [ws / "_mcp_configs", ws / "_codemap" / "run"]
-    if settings.tool_run_dir is not None:
-        roots.append(Path(settings.tool_run_dir))
+    from ..config import tool_folders_root
+
+    if tool_folders_root() is not None:
+        roots.append(tool_folders_root())
     return roots
 
 
@@ -353,8 +355,10 @@ def build_policy(*, task_id: str, project, workspace: Path, cwd: Path, claude_co
         str(workspaces / "_codemap"),  # code map index logs
         str(workspaces / "_mcp_cache"),  # connected tools' own package cache and global folder
     ]
-    if settings.tool_run_dir is not None:
-        protected.append(str(Path(settings.tool_run_dir)))  # the admin's place for tool start folders
+    from ..config import tool_folders_root
+
+    if tool_folders_root() is not None:  # the admin's place for tool start folders (not the whole setting)
+        protected.append(str(tool_folders_root()))
     # npm / pnpm / uv / bun look upward from a tool's start folder (and npm puts
     # every ancestor's node_modules/.bin on PATH): their names, in every folder
     # above the tool and code map folders, except the task's own project's

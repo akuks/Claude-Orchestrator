@@ -136,6 +136,16 @@ class Settings(BaseSettings):
     ]
 
 
+# The folder made inside CO_TOOL_RUN_DIR for the tools' per-task start folders:
+# the configured folder itself is never swept or protected as a whole.
+TOOL_FOLDERS_SUBDIR = "co-tool-folders"
+
+
+def tool_folders_root() -> Path | None:
+    """CO_TOOL_RUN_DIR/co-tool-folders, or None when the setting is unset."""
+    return settings.tool_run_dir / TOOL_FOLDERS_SUBDIR if settings.tool_run_dir is not None else None
+
+
 settings = Settings()
 # Absolute paths so workspace/MCP-config paths are unambiguous regardless of cwd.
 settings.workspaces_dir = settings.workspaces_dir.resolve()

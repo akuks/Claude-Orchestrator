@@ -28,6 +28,11 @@ def _uid():
     return uuid.uuid4().hex[:8]
 
 
+def _tid():
+    """A task id as the app makes them (uuid4 hex): the only names cleanup removes."""
+    return uuid.uuid4().hex
+
+
 def _srv(name, **kw):
     kw.setdefault("transport", "stdio")
     kw.setdefault("scope", "team")
@@ -198,7 +203,7 @@ def _prepare(name, task_id, project_dir=None):
 def test_prepare_makes_a_private_empty_folder_per_task(client):
     name = f"nc-{_uid()}"
     _add(_srv(name, command="npx", args=["-y", "x@1"]))
-    t1, t2 = f"t{_uid()}", f"t{_uid()}"
+    t1, t2 = _tid(), _tid()
     try:
         cdir1, e1 = _prepare(name, t1, project_dir="/proj/one")
         cdir2, e2 = _prepare(name, t2)
@@ -531,11 +536,11 @@ def test_guard_blocks_writing_a_marker_into_workspaces(tmp_path):
 def test_boot_sweep_removes_configs_of_tasks_not_running(client):
     from app.models import Task
 
-    keep = f"k{_uid()}"
+    keep = _tid()
     _add(Task(id=keep, title="x", prompt="x", status="queued"))
-    gone_done = f"d{_uid()}"
+    gone_done = _tid()
     _add(Task(id=gone_done, title="x", prompt="x", status="completed"))
-    unknown = f"u{_uid()}"
+    unknown = _tid()
     for tid in (keep, gone_done, unknown):
         (mcp_manager.task_config_dir(tid) / "cwd").mkdir(parents=True)
     try:
@@ -563,7 +568,7 @@ def test_boot_sweep_never_raises(monkeypatch):
         raise RuntimeError("x")
 
     monkeypatch.setattr(mcp_manager, "SessionLocal", boom)
-    (mcp_manager.task_config_dir(f"z{_uid()}")).mkdir(parents=True, exist_ok=True)
+    (mcp_manager.task_config_dir(_tid())).mkdir(parents=True, exist_ok=True)
     assert asyncio.run(mcp_manager.sweep_stale_configs()) == 0
 
 
@@ -782,28 +787,99 @@ def test_global_installs_are_left_to_the_tools_own_prefix(monkeypatch):
 def test_tool_run_dir_setting(client, tmp_path, monkeypatch):
     from app.guard import runtime
 
-    runs = (tmp_path / "runs").resolve()
-    monkeypatch.setattr(settings, "tool_run_dir", runs)
+    conf = (tmp_path / "runs").resolve()
+    conf.mkdir()
+    monkeypatch.setattr(settings, "tool_run_dir", conf)
+    runs = conf / "co-tool-folders"  # a dedicated subfolder; the configured folder itself is never swept
     name = f"trd-{_uid()}"
     _add(_srv(name, command="npx", args=["-y", "x@1"]))
-    tid = f"t{_uid()}"
+    tid = _tid()
     try:
         cdir, entry = _prepare(name, tid)
         d = Path(entry["args"][2])
         assert d.parent == runs / tid and d.is_dir()
         _assert_only_stoppers(d)
         assert stat.S_IMODE((runs / tid).stat().st_mode) == 0o700
+        assert stat.S_IMODE(runs.stat().st_mode) == 0o700
         assert not (cdir / "cwd").exists()
-        w = settings.workspaces_dir / f"t{_uid()}"
+        w = settings.workspaces_dir / _tid()
         pol = runtime.build_policy(task_id="t-trd", project=None, workspace=w, cwd=w,
                                    claude_config_dir=None, mcp_tools=None)
         prot = set(pol["protected_paths"])
-        assert str(runs) in prot and str(runs.parent / "node_modules") in prot
-        (runs / "stale-task").mkdir()
+        assert str(runs) in prot and str(conf / "node_modules") in prot
+        assert str(conf) not in prot  # only the subfolder, not the admin's folder as a whole
         mcp_manager.cleanup_task(tid)
         assert not (runs / tid).exists() and not cdir.exists()
+        (runs / _tid()).mkdir()
         assert asyncio.run(mcp_manager.sweep_stale_configs()) >= 1
-        assert not (runs / "stale-task").exists()
+        assert [p.name for p in runs.iterdir()] == []
     finally:
         _drop(name)
         mcp_manager.cleanup_task(tid)
+
+
+def test_sweeps_only_remove_real_task_folders(client, tmp_path, monkeypatch):
+    """Data-loss guard: anything in the configured folder that is not a real
+    folder named like a task id survives, and a link is never followed."""
+    conf = (tmp_path / "shared").resolve()
+    conf.mkdir()
+    monkeypatch.setattr(settings, "tool_run_dir", conf)
+    runs = conf / "co-tool-folders"
+    runs.mkdir()
+    victim = tmp_path / "victim"
+    victim.mkdir()
+    (victim / "keep.txt").write_text("precious")
+    # foreign things next to and inside the tool folder root, and in _mcp_configs
+    (conf / "foreign.txt").write_text("x")
+    (conf / _tid()).mkdir()  # named like a task, but outside co-tool-folders
+    (runs / "foreign-dir").mkdir()
+    (runs / "foreign.txt").write_text("x")
+    link = runs / _tid()
+    link.symlink_to(victim)  # a link named like a task id
+    mcfg = settings.workspaces_dir / "_mcp_configs"
+    mcfg.mkdir(parents=True, exist_ok=True)
+    (mcfg / "not-a-task").mkdir(exist_ok=True)
+    mlink = mcfg / _tid()
+    mlink.symlink_to(victim)
+    try:
+        asyncio.run(mcp_manager.sweep_stale_configs())
+        mcp_manager.cleanup_task(link.name)
+        mcp_manager.cleanup_task(mlink.name)
+        mcp_manager.cleanup_task("../shared")  # not a task id: nothing happens
+        assert (victim / "keep.txt").read_text() == "precious"
+        assert link.is_symlink() and mlink.is_symlink()
+        assert (conf / "foreign.txt").exists() and len(list(conf.iterdir())) == 3
+        assert (runs / "foreign-dir").is_dir() and (runs / "foreign.txt").exists()
+        assert (mcfg / "not-a-task").is_dir()
+    finally:
+        mlink.unlink()
+        shutil.rmtree(mcfg / "not-a-task", ignore_errors=True)
+
+
+# ---- installs through runners, and init / pkg ---------------------------------
+
+RUNNER_DENIED = ["npx npm i --prefix .. ./e", "npm exec -- npm i --prefix .. ./e", "pnpm dlx npm i --prefix .. ./e",
+                 "corepack npm i --prefix .. ./e", "corepack pnpm add --dir ~ ./e",
+                 "corepack pnpm@9.1.0 add --dir ~ ./e"]
+INIT_DENIED = ["cd ~ && npm init -y", "npm init -y --prefix ~", "cd .. && npm init -y", "cd ~ && pnpm init",
+               "cd ~ && bun init -y", "cd ~ && yarn init -y", "cd ~ && npm pkg set name=x",
+               "cd ~ && npm create vite@latest app"]
+INIT_ALLOWED = ["npm init -y", "npm pkg set name=x", "npm pkg delete scripts.x", "pnpm init",
+                "npm create vite@latest my-app", "npx create-react-app app", "npx npm i", "corepack enable",
+                "npx tsc --noEmit", "cd sub && npm init -y"]
+
+
+def test_runner_and_init_writes_above_tool_folders_are_denied(tmp_path, monkeypatch):
+    ws = _prod_layout(monkeypatch)
+    adhoc = ws / "tadhoc"
+    proj = tmp_path / "proj"
+    (proj / "sub").mkdir(parents=True)
+    for pol, cwd in ((_policy(None, adhoc), adhoc), (_policy(proj, proj), proj)):
+        for cmd in RUNNER_DENIED + INIT_DENIED:
+            if cwd == proj and " .. " in f" {cmd} ".replace("..", " .. "):
+                continue  # the folder above this temp project is not above a tool folder
+            v = _bash(pol, cmd, cwd)
+            assert v.decision == "deny" and any(h.rule_id == "self-protect" for h in v.hits), (cwd, cmd)
+        for cmd in INIT_ALLOWED:
+            v = _bash(pol, cmd, cwd)
+            assert not any(h.rule_id == "self-protect" for h in v.hits), (cwd, cmd)

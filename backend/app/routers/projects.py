@@ -133,8 +133,10 @@ def _orchestrator_folders() -> set[str]:
     except OSError:
         pass
     paths += [ws / n for n in names]
-    if settings.tool_run_dir is not None:
-        paths.append(Path(settings.tool_run_dir))
+    from ..config import tool_folders_root
+
+    if tool_folders_root() is not None:
+        paths.append(tool_folders_root())
     out: set[str] = set()
     for p in paths:
         out |= {os.path.normpath(os.path.abspath(str(p))), os.path.realpath(str(p))}

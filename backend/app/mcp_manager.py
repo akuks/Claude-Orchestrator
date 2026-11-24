@@ -15,7 +15,7 @@ from pathlib import Path
 
 from sqlalchemy import select
 
-from .config import settings
+from .config import settings, tool_folders_root
 from .crypto import decrypt_json
 from .database import SessionLocal
 from .mcp_client import probe_stdio
@@ -213,26 +213,56 @@ def task_config_dir(task_id: str) -> Path:
     return settings.workspaces_dir / "_mcp_configs" / task_id
 
 
+_TASK_ID = re.compile(r"[0-9a-f]{32}")
+
+
+def _sweep_roots() -> list[Path]:
+    roots = [settings.workspaces_dir / "_mcp_configs"]
+    extra = tool_folders_root()
+    if extra is not None:
+        roots.append(extra)
+    return roots
+
+
+def _remove_task_dir(d: Path) -> bool:
+    """Remove ``d`` only when its name is a task id and it is a real folder
+    (lstat: a link, even one named like a task, is never followed or removed)."""
+    import stat as _stat
+
+    if not _TASK_ID.fullmatch(d.name):
+        return False
+    try:
+        st = os.lstat(d)
+    except OSError:
+        return False
+    if not _stat.S_ISDIR(st.st_mode):
+        return False
+    shutil.rmtree(d, ignore_errors=True)
+    return True
+
+
 def cleanup_task(task_id: str) -> None:
     """Remove a task's MCP config folder: the config (vault secrets) and every
-    tool's start folder (under ``cwd/``, or under ``CO_TOOL_RUN_DIR``)."""
-    shutil.rmtree(task_config_dir(task_id), ignore_errors=True)
-    if settings.tool_run_dir is not None and task_id:
-        shutil.rmtree(Path(settings.tool_run_dir) / task_id, ignore_errors=True)
+    tool's start folder (under ``cwd/``, or under ``CO_TOOL_RUN_DIR/co-tool-folders``).
+    Only a folder named like a task id is ever removed."""
+    if not _TASK_ID.fullmatch(str(task_id or "")):
+        return
+    for root in _sweep_roots():
+        _remove_task_dir(root / task_id)
 
 
 async def sweep_stale_configs() -> int:
-    """At boot: remove every ``_mcp_configs/<id>`` (and ``CO_TOOL_RUN_DIR/<id>``)
-    whose task is not queued or running (a crash skipped its cleanup). Returns
-    how many went; never raises."""
+    """At boot: remove every ``_mcp_configs/<id>`` (and
+    ``CO_TOOL_RUN_DIR/co-tool-folders/<id>``) whose task is not queued or running
+    (a crash skipped its cleanup). Only real folders named like a task id are
+    touched; anything else there is left alone. Returns how many went; never
+    raises."""
     from .constants import Status
     from .models import Task
 
     try:
-        roots = [settings.workspaces_dir / "_mcp_configs"]
-        if settings.tool_run_dir is not None:
-            roots.append(Path(settings.tool_run_dir))
-        entries = [e for r in roots if r.is_dir() for e in r.iterdir()]
+        roots = [r for r in _sweep_roots() if not r.is_symlink() and r.is_dir()]
+        entries = [e for r in roots for e in r.iterdir() if _TASK_ID.fullmatch(e.name)]
         if not entries:
             return 0
         async with SessionLocal() as s:
@@ -245,11 +275,7 @@ async def sweep_stale_configs() -> int:
             if e.name in live:
                 continue
             try:
-                if e.is_symlink() or not e.is_dir():
-                    e.unlink()
-                else:
-                    shutil.rmtree(e)
-                gone += 1
+                gone += _remove_task_dir(e)
             except OSError:
                 continue
         return gone
@@ -287,9 +313,10 @@ async def prepare_for_task(project: str | None, config_dir: Path,
     config_dir.mkdir(mode=0o700, exist_ok=True)
     config_dir.chmod(0o700)
     cwd_root = config_dir / "cwd"
-    if settings.tool_run_dir is not None:  # the admin's stricter place
-        run_root = Path(settings.tool_run_dir)
+    run_root = tool_folders_root()
+    if run_root is not None and _TASK_ID.fullmatch(config_dir.name):  # the admin's stricter place
         run_root.mkdir(parents=True, exist_ok=True, mode=0o700)
+        run_root.chmod(0o700)
         cwd_root = run_root / config_dir.name
     _fresh_private_dir(cwd_root)
     cfg = build_config(servers, task_cwd_root=cwd_root, project_dir=project_dir)
