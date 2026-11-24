@@ -6,8 +6,10 @@ files' path/size/mtime signature). Any project member; a task may read its own p
 
 import asyncio
 import os
+import threading
 import time
 from collections import OrderedDict
+from concurrent.futures import ThreadPoolExecutor
 
 from fastapi import APIRouter, HTTPException, Request
 
@@ -27,10 +29,20 @@ BUDGET_SECONDS = 10.0
 MAX_TABLES, MAX_COLUMNS, MAX_LINKS, MAX_DECISIONS = 60, 200, 50, 3
 NOTE_NONE = ("No SQL migration files found. Looked in migrations/, db/migrations/, "
              "supabase/migrations/ and prisma/migrations/.")
-NOTE_SLOW = "Reading the migration files took too long, so nothing is shown. Try again in a moment."
+NOTE_SLOW = "Reading the migration files took too long."
 NOTE_OK = "Worked out by reading the SQL migration files in order. Nothing was run and no database was contacted."
+WORKERS = 2
 _CACHE_MAX = 32
-_cache: "OrderedDict[tuple, list]" = OrderedDict()
+_CACHE_BYTES = 16 * 1024 * 1024
+_TIMEOUT_MEMORY = 60.0
+
+_pool = ThreadPoolExecutor(max_workers=WORKERS, thread_name_prefix="schema")
+_lock = threading.Lock()  # guards everything below
+_slots = threading.Semaphore(WORKERS)
+_inflight: set[str] = set()  # folders being read right now: one job each
+_cache: "OrderedDict[tuple, tuple[list, int]]" = OrderedDict()
+_cache_bytes = 0
+_timed_out: dict[tuple, float] = {}  # (folder, signature) -> remembered until (monotonic)
 
 
 def _empty(note: str, limits: list[str] | None = None, found: bool = False) -> dict:
@@ -38,22 +50,86 @@ def _empty(note: str, limits: list[str] | None = None, found: bool = False) -> d
             "limits": limits or [], "note": note}
 
 
-def _work(directory: str):
-    """Off the event loop: find, read and replay. Returns (collected, [(root, files, schema)]) or raises TimeoutError."""
-    deadline = time.monotonic() + BUDGET_SECONDS
-    collected = schema_files.collect(directory)
-    key = (os.path.realpath(directory), collected.signature)
-    hit = _cache.get(key)
-    if hit is not None:
-        _cache.move_to_end(key)
-        return collected, hit
-    out = []
-    for rf in collected.roots:
-        out.append((rf.root, len(rf.files), schema_replay.replay(rf.files, deadline=deadline)))
-    _cache[key] = out
-    while len(_cache) > _CACHE_MAX:
-        _cache.popitem(last=False)
-    return collected, out
+def _slow() -> dict:
+    return _empty(NOTE_SLOW, [NOTE_SLOW], found=True)
+
+
+def _cache_get(key):
+    with _lock:
+        hit = _cache.get(key)
+        if hit is not None:
+            _cache.move_to_end(key)
+            return hit[0]
+    return None
+
+
+def _cache_put(key, value, size: int):
+    global _cache_bytes
+    with _lock:
+        old = _cache.pop(key, None)
+        if old is not None:
+            _cache_bytes -= old[1]
+        _cache[key] = (value, size)
+        _cache_bytes += size
+        while _cache and (len(_cache) > _CACHE_MAX or _cache_bytes > _CACHE_BYTES):
+            _, (_, sz) = _cache.popitem(last=False)
+            _cache_bytes -= sz
+
+
+def _work(directory: str, deadline: float):
+    """In a worker: list, (maybe) read and replay. Returns (limits, [(root, files, schema)], sha) or None when
+    the budget ran out. The folder check and the sha read are in here too."""
+    if not os.path.isdir(directory):
+        return ([], [], None)
+    sc = None
+    try:
+        sc = schema_files.scan(directory, deadline)
+        key = (sc.base, sc.signature)
+        with _lock:
+            until = _timed_out.get(key)
+            if until is not None and until > time.monotonic():
+                return None
+            _timed_out.pop(key, None)
+        hit = _cache_get(key)
+        if hit is None:
+            collected = schema_files.read(sc, deadline)
+            hit = [(rf.root, len(rf.files), schema_replay.replay(rf.files, deadline=deadline))
+                   for rf in collected.roots]
+            _cache_put(key, hit, sum(f[1] for f in sc.signature) + 1024)
+    except TimeoutError:
+        if sc is not None and sc.signature:  # ran out during the listing: nothing to remember it by
+            with _lock:
+                _timed_out[(sc.base, sc.signature)] = time.monotonic() + _TIMEOUT_MEMORY
+                for k in [k for k, v in _timed_out.items() if v < time.monotonic()]:
+                    _timed_out.pop(k, None)
+        return None
+    sha = current_sha_fast(directory)
+    return (sc.limits, hit, sha[:7] if sha else None)
+
+
+def _job(directory: str, key: str, deadline: float):
+    try:
+        return _work(directory, deadline)
+    finally:
+        with _lock:
+            _inflight.discard(key)
+        _slots.release()
+
+
+def _submit(directory: str, deadline: float):
+    """Start a job, or None when this folder is already being read or both workers are busy."""
+    key = os.path.normpath(directory)
+    with _lock:
+        if key in _inflight or not _slots.acquire(blocking=False):
+            return None
+        _inflight.add(key)
+    try:
+        return _pool.submit(_job, directory, key, deadline)
+    except BaseException:
+        with _lock:
+            _inflight.discard(key)
+        _slots.release()
+        raise
 
 
 async def _check_agent(s, request: Request, project_id: str) -> None:
@@ -76,10 +152,10 @@ def _shape(root: str, n_files: int, schema, decisions: list[dict], only: str | N
     for t in tables:
         cols, links = t.columns, t.links
         if len(cols) > MAX_COLUMNS:
-            limits.append(f"{t.name}: showing {MAX_COLUMNS} of {len(cols)} columns.")
+            limits.append(f"{root}: {t.name}: showing {MAX_COLUMNS} of {len(cols)} columns.")
             cols = cols[:MAX_COLUMNS]
         if len(links) > MAX_LINKS:
-            limits.append(f"{t.name}: showing {MAX_LINKS} of {len(links)} links.")
+            limits.append(f"{root}: {t.name}: showing {MAX_LINKS} of {len(links)} links.")
             links = links[:MAX_LINKS]
         covering = [{"id": display_id(d["n"]), "title": d["title"]} for d in decisions
                     if any(matches(pat, t.file) for pat in d["touches"])][:MAX_DECISIONS]
@@ -96,6 +172,7 @@ def _shape(root: str, n_files: int, schema, decisions: list[dict], only: str | N
 
 @router.get("")
 async def get_schema(project_id: str, request: Request, table: str | None = None):
+    deadline = time.monotonic() + BUDGET_SECONDS
     async with SessionLocal() as s:
         await require_project_role(s, request.state.principal, project_id)
         await _check_agent(s, request, project_id)
@@ -103,16 +180,25 @@ async def get_schema(project_id: str, request: Request, table: str | None = None
         if project is None:
             raise HTTPException(404, "Not found")
         directory = project.directory
-        if not directory or not await asyncio.to_thread(os.path.isdir, directory):
+        if not directory:
             return _empty(NOTE_NONE)
-        decisions = await decision_snapshot.snapshot(s, project)
+        try:
+            decisions = await asyncio.wait_for(decision_snapshot.snapshot(s, project), max(0.0, deadline - time.monotonic()))
+        except (asyncio.TimeoutError, TimeoutError):
+            return _slow()
+    fut = _submit(directory, deadline)
+    if fut is None:
+        return _slow()
     try:
-        collected, results = await asyncio.wait_for(asyncio.to_thread(_work, directory), BUDGET_SECONDS)
+        got = await asyncio.wait_for(asyncio.shield(asyncio.wrap_future(fut)), max(0.0, deadline - time.monotonic()))
     except (asyncio.TimeoutError, TimeoutError):
-        return _empty(NOTE_SLOW, ["Took too long."], found=True)
+        return _slow()
+    if got is None:
+        return _slow()
+    scan_limits, results, sha = got
     if not results:
-        return _empty(NOTE_NONE, collected.limits)
-    limits = list(collected.limits)
+        return _empty(NOTE_NONE, scan_limits)
+    limits = list(scan_limits)
     roots, count, samples = [], 0, []
     for root, n_files, schema in results:
         roots.append(_shape(root, n_files, schema, decisions, table, limits))
@@ -121,6 +207,5 @@ async def get_schema(project_id: str, request: Request, table: str | None = None
     note = NOTE_OK
     if table and not any(r["tables"] for r in roots):
         note = f"No table named {table[:80]} was found in the migration files."
-    sha = await asyncio.to_thread(current_sha_fast, directory)
-    return {"found": True, "roots": roots, "as_of": sha[:7] if sha else None,
+    return {"found": True, "roots": roots, "as_of": sha,
             "not_understood": {"count": count, "samples": samples[:5]}, "limits": limits, "note": note}

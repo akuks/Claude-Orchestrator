@@ -88,35 +88,81 @@ def test_caps_named(client, tmp_path):
     _sql(d, "1.sql", sql)
     j = client.get(f"/projects/{p['id']}/schema").json()
     assert len(j["roots"][0]["tables"]) == 60
-    assert any("60 of 62 tables" in x for x in j["limits"])
+    assert any(x.startswith("migrations: ") and "60 of 62 tables" in x for x in j["limits"])
     j = client.get(f"/projects/{p['id']}/schema", params={"table": "wide"}).json()
-    assert len(j["roots"][0]["tables"][0]["columns"]) == 200 and any("200 of 201 columns" in x for x in j["limits"])
+    assert len(j["roots"][0]["tables"][0]["columns"]) == 200 and any("migrations: wide: showing 200 of 201 columns" in x for x in j["limits"])
     p2, d2 = _project(client, tmp_path)
     _sql(d2, "1.sql", "CREATE TABLE t (id int, " + ", ".join(f"r{i} int REFERENCES o{i}(id)" for i in range(51)) + ");")
     j = client.get(f"/projects/{p2['id']}/schema").json()
-    assert len(j["roots"][0]["tables"][0]["links"]) == 50 and any("50 of 51 links" in x for x in j["limits"])
+    assert len(j["roots"][0]["tables"][0]["links"]) == 50 and any("migrations: t: showing 50 of 51 links" in x for x in j["limits"])
 
 
-def test_slow_parse_gives_took_too_long(client, tmp_path, monkeypatch):
+def _wait_idle(limit=2.0):
+    t0 = time.monotonic()
+    while time.monotonic() - t0 < limit:
+        with schema_router._lock:
+            if not schema_router._inflight:
+                return time.monotonic() - t0
+        time.sleep(0.02)
+    raise AssertionError("a schema worker is still running")
+
+
+def test_real_deadline_stops_real_slow_parse(client, tmp_path, monkeypatch):
     p, d = _project(client, tmp_path)
-    _sql(d, "1.sql", "CREATE TABLE a (id int);")
-
-    def slow(files, deadline=None):
-        time.sleep(1.0)
-
-    monkeypatch.setattr(schema_router.schema_replay, "replay", slow)
-    monkeypatch.setattr(schema_router, "BUDGET_SECONDS", 0.2)
+    _sql(d, "1.sql", "".join(f"CREATE TABLE t{i} (id int PRIMARY KEY, x text, y int REFERENCES o(id));\n"
+                              for i in range(30000)))
+    monkeypatch.setattr(schema_router, "BUDGET_SECONDS", 0.3)
     t0 = time.monotonic()
     j = client.get(f"/projects/{p['id']}/schema").json()
-    assert time.monotonic() - t0 < 0.9
-    assert j["found"] is True and j["roots"] == [] and "took too long" in j["note"]
+    assert time.monotonic() - t0 < 1.0
+    assert j == {"found": True, "roots": [], "as_of": None, "not_understood": {"count": 0, "samples": []},
+                 "limits": [schema_router.NOTE_SLOW], "note": "Reading the migration files took too long."}
+    assert _wait_idle(1.0) < 1.0  # no worker still running past deadline + 1 s
+    assert schema_router._slots.acquire(blocking=False)  # and its slot came back
+    schema_router._slots.release()
+    # the timeout is remembered for this file signature: the retry answers at once, with no new work
+    assert schema_router._timed_out
+    monkeypatch.setattr(schema_router.schema_replay, "replay", lambda *a, **k: (_ for _ in ()).throw(AssertionError("ran")))
+    monkeypatch.setattr(schema_router, "BUDGET_SECONDS", 5.0)
+    assert client.get(f"/projects/{p['id']}/schema").json()["note"] == schema_router.NOTE_SLOW
 
 
-def test_big_single_file_and_garbage_answer(client, tmp_path, monkeypatch):
+def test_busy_answers_at_once(client, tmp_path, monkeypatch):
     p, d = _project(client, tmp_path)
-    _sql(d, "1.sql", "CREATE TABLE a (id int);\n" + "-- filler\n" * 400_000 + "garbage garbage;\n")
+    _sql(d, "1.sql", "CREATE TABLE a (id int);")
+    import os as _os
+    key = _os.path.normpath(str(d))
+    with schema_router._lock:
+        schema_router._inflight.add(key)  # this folder is being read already
+    try:
+        j = client.get(f"/projects/{p['id']}/schema").json()
+    finally:
+        with schema_router._lock:
+            schema_router._inflight.discard(key)
+    assert j["note"] == schema_router.NOTE_SLOW and j["found"] is True and j["roots"] == []
+    held = 0
+    try:
+        while schema_router._slots.acquire(blocking=False):  # both workers busy
+            held += 1
+        t0 = time.monotonic()
+        assert client.get(f"/projects/{p['id']}/schema").json()["note"] == schema_router.NOTE_SLOW
+        assert time.monotonic() - t0 < 0.5
+    finally:
+        for _ in range(held):
+            schema_router._slots.release()
+    assert client.get(f"/projects/{p['id']}/schema").json()["roots"][0]["tables"][0]["name"] == "a"
+
+
+def test_big_single_statement_and_garbage_answer(client, tmp_path):
+    p, d = _project(client, tmp_path)
+    big = "CREATE TABLE huge (" + ", ".join(f"c{i} int" for i in range(500_000))[:4_000_000] + ");\n"
+    assert len(big) > 3_900_000
+    _sql(d, "1.sql", "CREATE TABLE a (id int);\n" + big + "garbage garbage;\n")
+    t0 = time.monotonic()
     j = client.get(f"/projects/{p['id']}/schema").json()
-    assert j["found"] is True and j["not_understood"]["count"] == 1 and j["roots"][0]["tables"][0]["name"] == "a"
+    assert time.monotonic() - t0 < 5
+    assert j["found"] is True and [t["name"] for t in j["roots"][0]["tables"]] == ["a"]
+    assert j["not_understood"]["count"] == 2  # the 4 MB statement and the garbage one
 
 
 def test_decisions_listed(client, tmp_path):
@@ -135,9 +181,9 @@ def test_decisions_listed(client, tmp_path):
     asyncio.run(go())
     j = client.get(f"/projects/{p['id']}/schema").json()
     t = {x["name"]: x for x in j["roots"][0]["tables"]}
-    assert [x["id"] for x in t["a"]["decisions"]] == ["D-006", "D-005", "D-004"] or len(t["a"]["decisions"]) == 3
-    assert all(x["title"].startswith("Decision") for x in t["b"]["decisions"]) and len(t["b"]["decisions"]) == 3
-    assert "D-003" not in [x["id"] for x in t["a"]["decisions"]]
+    assert [x["id"] for x in t["a"]["decisions"]] == ["D-006", "D-005", "D-004"]
+    assert [x["id"] for x in t["b"]["decisions"]] == ["D-006", "D-005", "D-004"]  # D-001 touches only file 1
+    assert t["a"]["decisions"][0]["title"] == "Decision 6"
 
 
 def _task(created_by, project_id):

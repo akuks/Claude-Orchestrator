@@ -23,6 +23,9 @@ logging.getLogger("sqlglot").setLevel(logging.ERROR)
 
 NO_SCHEMA = {"public", "dbo"}
 SAMPLES = 5
+MAX_STATEMENT = 256 * 1024  # a longer statement is counted as not understood, never parsed
+CHECK_EVERY = 64 * 1024
+_GO = re.compile(r"[ \t]*GO[ \t]*(?:\r?\n|$)", re.I)
 _DOLLAR = re.compile(r"\$(?:[A-Za-z_]\w*)?\$")
 _BODY = re.compile(r"^\s*(do|create\s+(or\s+replace\s+)?(function|procedure|trigger)|begin|declare)\b", re.I)
 _BODY_TABLE = re.compile(
@@ -72,35 +75,47 @@ class RootSchema:
     not_understood_samples: list[str] = field(default_factory=list)
 
 
-def split_statements(text: str):
-    """Yield (statement_text, first_line). Comments are dropped (newlines kept); quotes and $tag$ bodies stay whole."""
+def split_statements(text: str, deadline: float | None = None):
+    """Yield (statement_text, first_line). Comments are dropped (newlines kept); quotes and $tag$ bodies stay whole.
+
+    Linear time: the last significant character is tracked, never re-joined. The deadline is checked every
+    ``CHECK_EVERY`` characters; over it, TimeoutError."""
     out: list[tuple[str, int]] = []
     buf: list[str] = []
     line = 1
     start_line = None
+    last = ""  # last non-space character of the statement so far
     i, n = 0, len(text)
     at_line_start = True
+    next_check = CHECK_EVERY
 
     def flush():
-        nonlocal buf, start_line
+        nonlocal buf, start_line, last
         s = "".join(buf).strip()
         if s and start_line is not None:
             out.append((s, start_line))
-        buf, start_line = [], None
+        buf, start_line, last = [], None, ""
 
     def put(chunk: str):
-        nonlocal start_line
-        if start_line is None and chunk.strip():
-            start_line = line
+        nonlocal start_line, last
+        t = chunk.rstrip()
+        if t:
+            if start_line is None:
+                start_line = line
+            last = t[-1]
         buf.append(chunk)
 
     while i < n:
+        if i >= next_check:
+            next_check = i + CHECK_EVERY
+            if deadline is not None and time.monotonic() > deadline:
+                raise TimeoutError("schema replay over budget")
         c = text[i]
         if at_line_start:
-            m = re.match(r"[ \t]*GO[ \t]*(?:\r?\n|$)", text[i:i + 40], re.I)
-            if m and not "".join(buf).strip().endswith(("(", ",")):
+            m = _GO.match(text, i)
+            if m and last not in ("(", ","):
                 flush()
-                i += m.end()
+                i = m.end()
                 line += 1
                 continue
             at_line_start = False
@@ -157,9 +172,11 @@ def _dialects(sql: str) -> list[str]:
     return ["postgres", "mysql", "tsql"]
 
 
-def _parse(sql: str):
+def _parse(sql: str, deadline: float | None = None):
     """(expression, dialect) from the first dialect that reads it, or None."""
     for d in _dialects(sql):
+        if deadline is not None and time.monotonic() > deadline:
+            raise TimeoutError("schema replay over budget")
         try:
             got = sqlglot.parse(sql, read=d)
         except (SqlglotError, RecursionError):
@@ -216,13 +233,18 @@ class _Replay:
     # ---- statement handlers
     def run(self, files):
         for rel, text in files:
-            for sql, line in split_statements(text):
+            if self.deadline is not None and time.monotonic() > self.deadline:
+                raise TimeoutError("schema replay over budget")
+            for sql, line in split_statements(text, self.deadline):
                 if self.deadline is not None and time.monotonic() > self.deadline:
                     raise TimeoutError("schema replay over budget")
                 self.statement(sql, rel, f"{rel}:{line}")
         return self.s
 
     def statement(self, sql: str, rel: str, at: str):
+        if len(sql) > MAX_STATEMENT:
+            self.bad(at)
+            return
         if _BODY.match(sql):
             for m in _BODY_TABLE.finditer(sql):
                 name = _raw_name(m.group(2))
@@ -233,7 +255,10 @@ class _Replay:
                 elif t is not None:
                     t.uncertain = True
             return
-        parsed = _parse(sql)
+        if len(sql) > MAX_STATEMENT:
+            self.bad(at)
+            return
+        parsed = _parse(sql, self.deadline)
         if parsed is None:
             self.bad(at)
             return
@@ -321,6 +346,10 @@ class _Replay:
             t.links.append(Link(cols, _tname(tt), tcols, at, name))
 
     def column(self, t: Table, cd: exp.ColumnDef, at: str, dialect: str):
+        col = self.build_column(t, cd, at, dialect)
+        t.columns = [c for c in t.columns if c.name.lower() != col.name.lower()] + [col]
+
+    def build_column(self, t: Table, cd: exp.ColumnDef, at: str, dialect: str) -> Column:
         name = _ident(cd.this)
         kind = cd.args.get("kind")
         typ = kind.sql(dialect=dialect).lower() if kind is not None else ""
@@ -333,19 +362,21 @@ class _Replay:
                 col.primary_key, col.nullable = True, False
             elif isinstance(k, exp.Reference):
                 self.add_link(t, [name], k, at, None)
-        t.columns = [c for c in t.columns if c.name.lower() != name.lower()] + [col]
+        return col
 
     def alter(self, node, at: str, dialect: str):
         tbl = node.this
         if not isinstance(tbl, exp.Table):
             return
-        name = _tname(tbl)
-        t = self.get(name)
+        t = self.get(_tname(tbl))
         if t is None:
+            self.bad(at)  # a change to a table we never saw: counted, not guessed
             return
         for act in node.args.get("actions") or []:
             if isinstance(act, exp.ColumnDef):
                 self.column(t, act, at, dialect)
+            elif isinstance(act, exp.ModifyColumn):
+                self.modify_column(t, act, at, dialect)
             elif isinstance(act, exp.RenameColumn):
                 self.rename_column(t, _ident(act.this), _ident(act.args.get("to")))
             elif isinstance(act, exp.AlterRename):
@@ -353,24 +384,56 @@ class _Replay:
                 if isinstance(new, exp.Table):
                     self.rename_table(t.name, _tname(new))
                     t = self.get(_tname(new)) or t
+                else:
+                    self.bad(at)
             elif isinstance(act, exp.AddConstraint):
                 for sub in act.expressions or []:
                     self.item(t, sub, at, dialect)
             elif isinstance(act, exp.Drop):
                 kind = str(act.args.get("kind") or "").upper()
+                if kind not in ("COLUMN", "CONSTRAINT"):
+                    self.bad(at)
+                    continue
                 for target in act.args.get("tables") or []:
-                    nm = _ident(target.this if isinstance(target, exp.Column) else target.this) \
-                        if not isinstance(target, exp.Identifier) else target.name
+                    nm = target.name if isinstance(target, (exp.Identifier, exp.Table, exp.Column)) else ""
                     if kind == "COLUMN":
                         self.drop_column(t, nm)
-                    elif kind == "CONSTRAINT":
+                    else:
                         self.drop_constraint(t, nm)
             elif isinstance(act, exp.AlterColumn):
-                nm = _ident(act.this).lower()
-                if act.args.get("allow_null") is not None:
-                    for c in t.columns:
-                        if c.name.lower() == nm:
-                            c.nullable = bool(act.args["allow_null"]) and not c.primary_key
+                self.alter_column(t, act, at, dialect)
+            else:
+                self.bad(at)
+
+    def alter_column(self, t: Table, act, at: str, dialect: str):
+        nm = _ident(act.this).lower()
+        col = next((c for c in t.columns if c.name.lower() == nm), None)
+        dtype, allow_null = act.args.get("dtype"), act.args.get("allow_null")
+        if dtype is None and allow_null is None:
+            self.bad(at)  # SET/DROP DEFAULT and the like
+            return
+        if col is None:
+            self.bad(at)
+            return
+        if dtype is not None:
+            col.type = dtype.sql(dialect=dialect).lower()
+        if allow_null is not None:
+            col.nullable = bool(allow_null) and not col.primary_key
+
+    def modify_column(self, t: Table, act, at: str, dialect: str):
+        """MySQL MODIFY / CHANGE: the new definition replaces the old one in place."""
+        cd = act.this
+        old_name = _ident(act.args.get("rename_from")) or _ident(cd.this)
+        idx = next((i for i, c in enumerate(t.columns) if c.name.lower() == old_name.lower()), None)
+        if idx is None:
+            self.bad(at)
+            return
+        new = self.build_column(t, cd, at, dialect)
+        if t.columns[idx].primary_key:
+            new.primary_key, new.nullable = True, False
+        if new.name.lower() != old_name.lower():
+            self.rename_column(t, old_name, new.name)
+        t.columns[idx] = new
 
     def drop_column(self, t: Table, nm: str):
         t.columns = [c for c in t.columns if c.name.lower() != nm.lower()]

@@ -1,6 +1,7 @@
 """Phase 6c Task 1: finding and safely reading SQL migration files."""
 
 import os
+import shutil
 
 from app.schema import files
 
@@ -66,6 +67,9 @@ def test_byte_limit(tmp_path, monkeypatch):
     _w(tmp_path, "migrations/2.sql", "y" * 60)
     c = files.collect(str(tmp_path))
     assert len(_names(c, "migrations")) == 1 and files.LIMIT_BYTES in c.limits
+    _w(tmp_path, "migrations/3.sql", "z")  # a small later file is not read either: no gaps in the middle
+    c = files.collect(str(tmp_path))
+    assert [f[0] for f in _names(c, "migrations")] == ["migrations/1.sql"]
     assert "5 MB" in files.LIMIT_BYTES
 
 
@@ -112,3 +116,39 @@ def test_signature_changes_with_file(tmp_path):
     s1 = files.collect(str(tmp_path)).signature
     p.write_text("abc")
     assert files.collect(str(tmp_path)).signature != s1
+
+
+def test_undo_u_is_case_sensitive(tmp_path):
+    for n in ("U1__a.sql", "u2__b.sql"):
+        _w(tmp_path, f"migrations/{n}")
+    assert [f[0] for f in _names(files.collect(str(tmp_path)), "migrations")] == ["migrations/u2__b.sql"]
+
+
+def test_folder_swapped_for_link_after_listing_is_not_followed(tmp_path, monkeypatch):
+    proj, out = tmp_path / "proj", tmp_path / "outside"
+    _w(proj, "migrations/sub/1.sql", "create table fine (id int);")
+    _w(proj, "migrations/0.sql", "create table zero (id int);")
+    _w(out, "1.sql", "create table LEAKED_SECRET (id int);")
+
+    def swap():
+        shutil.rmtree(proj / "migrations" / "sub")
+        os.symlink(out, proj / "migrations" / "sub")
+
+    monkeypatch.setattr(files, "_after_list", swap)
+    c = files.collect(str(proj))
+    got = [f for r in c.roots for f in r.files]
+    assert [g[0] for g in got] == ["migrations/0.sql"]
+    assert not any("LEAKED" in g[1] for g in got)
+
+
+def test_root_swapped_for_link_after_listing_is_not_followed(tmp_path, monkeypatch):
+    proj, out = tmp_path / "proj", tmp_path / "outside"
+    _w(proj, "migrations/1.sql", "create table fine (id int);")
+    _w(out, "1.sql", "create table LEAKED_SECRET (id int);")
+
+    def swap():
+        shutil.rmtree(proj / "migrations")
+        os.symlink(out, proj / "migrations")
+
+    monkeypatch.setattr(files, "_after_list", swap)
+    assert [f for r in files.collect(str(proj)).roots for f in r.files] == []

@@ -126,3 +126,74 @@ def test_deadline():
 
     with pytest.raises(TimeoutError):
         replay([("m/1.sql", "CREATE TABLE a (id int);")], deadline=time.monotonic() - 1)
+
+
+def test_hostile_go_input_is_fast():
+    import time
+
+    t0 = time.monotonic()
+    out = split_statements(",\nGO\n" * 70_000)  # 0.4 MB
+    assert time.monotonic() - t0 < 1.0
+    s = run(",\nGO\n" * 70_000)
+    assert s.not_understood_count == 1  # one over-long statement, never parsed
+    assert [x[1] for x in split_statements("a;\nGO\nb;")] == [1, 3] and len(out) == 1
+
+
+def test_scanner_checks_deadline():
+    import time
+
+    import pytest
+
+    with pytest.raises(TimeoutError):
+        split_statements("select 1;\n" * 200_000, deadline=time.monotonic() - 1)
+
+
+def test_long_statement_not_parsed(monkeypatch):
+    import app.schema.replay as r
+
+    monkeypatch.setattr(r, "_parse", lambda *a, **k: (_ for _ in ()).throw(AssertionError("parsed")))
+    s = run("CREATE TABLE a (" + "x int," * 60_000 + "y int);")
+    assert s.not_understood_count == 1 and s.tables == {}
+
+
+def test_parse_checks_deadline_between_dialects():
+    import time
+
+    import pytest
+
+    with pytest.raises(TimeoutError):
+        replay([("m/1.sql", "this is not sql at all")], deadline=time.monotonic() + 0.0)
+
+
+def test_mysql_change_and_modify():
+    s = run("CREATE TABLE `a` (`x` int NOT NULL, `p` int PRIMARY KEY, `z` text);",
+            "ALTER TABLE `a` CHANGE `x` `y` bigint NULL;\nALTER TABLE `a` MODIFY `z` varchar(5) NOT NULL;"
+            "ALTER TABLE `a` MODIFY `p` bigint;")
+    a = s.tables["a"]
+    assert [(c.name, c.type, c.nullable, c.primary_key) for c in a.columns] == [
+        ("y", "bigint", True, False), ("p", "bigint", False, True), ("z", "varchar(5)", False, False)]
+    assert s.not_understood_count == 0
+
+
+def test_pg_alter_column_type_and_null():
+    s = run("CREATE TABLE a (x int, y int NOT NULL, z int PRIMARY KEY);",
+            "ALTER TABLE a ALTER COLUMN x TYPE bigint, ALTER COLUMN x SET NOT NULL, ALTER COLUMN y DROP NOT NULL;\n"
+            "ALTER TABLE a ALTER COLUMN z DROP NOT NULL;")
+    a = s.tables["a"]
+    assert [(c.name, c.type, c.nullable) for c in a.columns] == [
+        ("x", "bigint", False), ("y", "int", True), ("z", "int", False)]
+    assert s.not_understood_count == 0
+
+
+def test_other_alter_actions_are_counted():
+    s = run("CREATE TABLE a (x int);",
+            "ALTER TABLE a ALTER COLUMN x SET DEFAULT 1;\n"
+            "ALTER TABLE a ENABLE ROW LEVEL SECURITY;\n"
+            "ALTER TABLE a OWNER TO bob;")
+    assert s.not_understood_count == 3
+    assert s.not_understood_samples == ["m/2.sql:1", "m/2.sql:2", "m/2.sql:3"]
+
+
+def test_alter_on_unknown_table_is_counted():
+    s = run("ALTER TABLE ghost ADD COLUMN x int;")
+    assert s.not_understood_count == 1 and s.not_understood_samples == ["m/1.sql:1"]
