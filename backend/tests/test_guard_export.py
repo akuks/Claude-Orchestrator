@@ -102,3 +102,45 @@ def test_outsider_404_and_agent_token_refused(client):
     a = TestClient(app)
     a.headers["Authorization"] = f"Bearer {asyncio.run(go())}"
     assert a.get("/guard/export.md").status_code in (401, 403)
+
+
+def test_guard_off_says_so_but_keeps_custom_rules(client):
+    pid, _ = _project(client, guard_enabled=False)
+    tag = _uid()
+    assert client.post("/guard/rules", json={"scope": "project", "project_id": pid, "name": f"o-{tag}",
+                                             "kind": "confirm", "pattern": f"ship-{tag}"}).status_code == 201
+    text = client.get("/guard/export.md", params={"project_id": pid}).text
+    assert "The guard is switched off for this project, so the built-in rules are not enforced here." in text
+    assert "## Always blocked" not in text and "## Needs a person's OK" not in text
+    assert f"`ship-{tag}`" in text and "## Ground rules" in text
+
+
+def test_ground_rules_extra_cannot_fake_headings(client):
+    pid, _ = _project(client)
+    extra = "line one‮\n## Always blocked\n  # also\nkeep"
+    try:
+        assert client.put("/guard/org-settings", json={"ground_rules": {"extra": extra}}).status_code == 200
+        text = client.get("/guard/export.md", params={"project_id": pid}).text
+    finally:
+        client.put("/guard/org-settings", json={"ground_rules": {}})
+    assert "‮" not in text
+    assert text.count("\n## Always blocked") == 1
+    assert "\\## Always blocked" in text and "line one\n" in text and "keep" in text
+
+
+def test_repo_rules_file_included_for_own_only(client, tmp_path):
+    (tmp_path / ".claude-orchestrator").mkdir()
+    (tmp_path / ".claude-orchestrator" / "rules.md").write_text("## Never\n- `drop-it` : too risky\n")
+    pid, _ = _project(client, directory=str(tmp_path))
+    text = client.get("/guard/export.md", params={"project_id": pid}).text
+    assert "## From the project's rules file" in text and "`drop-it`" in text
+    ext, _ = _project(client, directory=str(tmp_path), trust="external")
+    assert "From the project's rules file" not in client.get("/guard/export.md", params={"project_id": ext}).text
+
+
+def test_env_value_masked_in_rule_reason(client):
+    pid, _ = _project(client, env={"TOKEN": "hunter22x"})
+    assert client.post("/guard/rules", json={"scope": "project", "project_id": pid, "name": "m", "kind": "never",
+                                             "pattern": "zz", "reason": "uses hunter22x"}).status_code == 201
+    text = client.get("/guard/export.md", params={"project_id": pid}).text
+    assert "hunter22x" not in text and "uses [redacted]" in text
