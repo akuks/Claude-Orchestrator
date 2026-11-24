@@ -16,3 +16,4 @@ alembic>=1.13
 asyncpg>=0.29
 argon2-cffi>=23.1
 httpx>=0.27
+sqlglot>=25

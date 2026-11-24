@@ -1,0 +1,177 @@
+"""Phase 6c Task 1: GET /projects/{id}/schema."""
+
+import asyncio
+import shutil
+import time
+import uuid
+
+from fastapi.testclient import TestClient
+
+from app import auth
+from app.database import SessionLocal
+from app.main import app
+from app.models import ProjectDecision, Task
+from app.routers import schema as schema_router
+from conftest import login_as
+
+
+def _project(client, tmp_path):
+    d = tmp_path / f"d-{uuid.uuid4().hex[:6]}"
+    d.mkdir()
+    r = client.post("/projects", json={"name": f"sc-{uuid.uuid4().hex[:8]}", "directory": str(d)})
+    assert r.status_code == 201, r.text
+    return r.json(), d
+
+
+def _sql(d, name, text, root="migrations"):
+    p = d / root / name
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text(text)
+
+
+def test_reads_tables(client, tmp_path):
+    p, d = _project(client, tmp_path)
+    _sql(d, "1_init.sql", "CREATE TABLE users (id int PRIMARY KEY, email text NOT NULL);\n"
+                          "CREATE TABLE posts (id int PRIMARY KEY, user_id int REFERENCES users(id));")
+    j = client.get(f"/projects/{p['id']}/schema").json()
+    assert j["found"] is True and j["as_of"] is None and j["limits"] == []
+    assert j["not_understood"] == {"count": 0, "samples": []} and j["note"]
+    root = j["roots"][0]
+    assert root["root"] == "migrations" and root["files"] == 1
+    t = {x["name"]: x for x in root["tables"]}
+    assert t["users"]["defined_at"] == "migrations/1_init.sql:1" and t["users"]["uncertain"] is False
+    assert t["users"]["columns"][0] == {"name": "id", "type": "int", "nullable": False, "primary_key": True,
+                                        "defined_at": "migrations/1_init.sql:1"}
+    assert t["posts"]["links"] == [{"columns": ["user_id"], "to_table": "users", "to_columns": ["id"],
+                                    "defined_at": "migrations/1_init.sql:2"}]
+    assert t["posts"]["decisions"] == []
+
+
+def test_table_filter_and_not_understood(client, tmp_path):
+    p, d = _project(client, tmp_path)
+    _sql(d, "1.sql", "CREATE TABLE a (id int);\nnonsense words;\nCREATE TABLE b (id int);")
+    j = client.get(f"/projects/{p['id']}/schema").json()
+    assert j["not_understood"] == {"count": 1, "samples": ["migrations/1.sql:2"]}
+    j = client.get(f"/projects/{p['id']}/schema", params={"table": "B"}).json()
+    assert [t["name"] for t in j["roots"][0]["tables"]] == ["b"]
+    j = client.get(f"/projects/{p['id']}/schema", params={"table": "zzz"}).json()
+    assert j["roots"][0]["tables"] == [] and "zzz" in j["note"]
+
+
+def test_no_folder_or_no_files(client, tmp_path):
+    p, d = _project(client, tmp_path)
+    j = client.get(f"/projects/{p['id']}/schema").json()
+    assert j["found"] is False and j["roots"] == [] and j["note"].startswith("No SQL migration files found. Looked in migrations/")
+    shutil.rmtree(d)
+    assert client.get(f"/projects/{p['id']}/schema").json()["found"] is False
+    nodir = client.post("/projects", json={"name": f"nd-{uuid.uuid4().hex[:8]}"}).json()
+    r = client.get(f"/projects/{nodir['id']}/schema")
+    assert r.status_code == 200 and r.json()["found"] is False
+
+
+def test_roles(client, tmp_path):
+    p, _ = _project(client, tmp_path)
+    out = login_as(f"sc-o-{uuid.uuid4().hex[:6]}@test.local")
+    assert out.get(f"/projects/{p['id']}/schema").status_code == 404
+    reader = login_as(f"sc-r-{uuid.uuid4().hex[:6]}@test.local")
+    r = client.put(f"/projects/{p['id']}/members",
+                   json=[{"subject_type": "user", "subject_id": reader.user_id, "role": "contributor"}])
+    assert r.status_code == 200
+    assert reader.get(f"/projects/{p['id']}/schema").status_code == 200
+    assert client.get("/projects/nope/schema").status_code == 404
+
+
+def test_caps_named(client, tmp_path):
+    p, d = _project(client, tmp_path)
+    sql = "".join(f"CREATE TABLE t{i} (id int);\n" for i in range(61))
+    sql += "CREATE TABLE wide (" + ", ".join(f"c{i} int" for i in range(201)) + ");\n"
+    _sql(d, "1.sql", sql)
+    j = client.get(f"/projects/{p['id']}/schema").json()
+    assert len(j["roots"][0]["tables"]) == 60
+    assert any("60 of 62 tables" in x for x in j["limits"])
+    j = client.get(f"/projects/{p['id']}/schema", params={"table": "wide"}).json()
+    assert len(j["roots"][0]["tables"][0]["columns"]) == 200 and any("200 of 201 columns" in x for x in j["limits"])
+    p2, d2 = _project(client, tmp_path)
+    _sql(d2, "1.sql", "CREATE TABLE t (id int, " + ", ".join(f"r{i} int REFERENCES o{i}(id)" for i in range(51)) + ");")
+    j = client.get(f"/projects/{p2['id']}/schema").json()
+    assert len(j["roots"][0]["tables"][0]["links"]) == 50 and any("50 of 51 links" in x for x in j["limits"])
+
+
+def test_slow_parse_gives_took_too_long(client, tmp_path, monkeypatch):
+    p, d = _project(client, tmp_path)
+    _sql(d, "1.sql", "CREATE TABLE a (id int);")
+
+    def slow(files, deadline=None):
+        time.sleep(1.0)
+
+    monkeypatch.setattr(schema_router.schema_replay, "replay", slow)
+    monkeypatch.setattr(schema_router, "BUDGET_SECONDS", 0.2)
+    t0 = time.monotonic()
+    j = client.get(f"/projects/{p['id']}/schema").json()
+    assert time.monotonic() - t0 < 0.9
+    assert j["found"] is True and j["roots"] == [] and "took too long" in j["note"]
+
+
+def test_big_single_file_and_garbage_answer(client, tmp_path, monkeypatch):
+    p, d = _project(client, tmp_path)
+    _sql(d, "1.sql", "CREATE TABLE a (id int);\n" + "-- filler\n" * 400_000 + "garbage garbage;\n")
+    j = client.get(f"/projects/{p['id']}/schema").json()
+    assert j["found"] is True and j["not_understood"]["count"] == 1 and j["roots"][0]["tables"][0]["name"] == "a"
+
+
+def test_decisions_listed(client, tmp_path):
+    p, d = _project(client, tmp_path)
+    _sql(d, "1_init.sql", "CREATE TABLE a (id int);")
+    _sql(d, "2_more.sql", "CREATE TABLE b (id int);")
+
+    async def go():
+        async with SessionLocal() as s:
+            for n, touches in ((1, ["migrations/1_init.sql"]), (2, ["migrations/**"]), (3, ["src/**"]),
+                               (4, ["migrations/"]), (5, ["migrations/*.sql"]), (6, ["migrations/**"])):
+                s.add(ProjectDecision(project_id=p["id"], number=n, title=f"Decision {n}", touches=touches,
+                                      status="active"))
+            await s.commit()
+
+    asyncio.run(go())
+    j = client.get(f"/projects/{p['id']}/schema").json()
+    t = {x["name"]: x for x in j["roots"][0]["tables"]}
+    assert [x["id"] for x in t["a"]["decisions"]] == ["D-006", "D-005", "D-004"] or len(t["a"]["decisions"]) == 3
+    assert all(x["title"].startswith("Decision") for x in t["b"]["decisions"]) and len(t["b"]["decisions"]) == 3
+    assert "D-003" not in [x["id"] for x in t["a"]["decisions"]]
+
+
+def _task(created_by, project_id):
+    tid = uuid.uuid4().hex
+
+    async def go():
+        async with SessionLocal() as s:
+            s.add(Task(id=tid, title=f"t-{tid[:6]}", prompt="p", root_id=tid, status="running",
+                       created_by=created_by, project_id=project_id))
+            await s.commit()
+
+    asyncio.run(go())
+    return tid
+
+
+def _agent(user_id, task_id):
+    async def go():
+        async with SessionLocal() as s:
+            raw = await auth.mint_token(s, user_id, "agent-task", task_id, 3600)
+            await s.commit()
+            return raw
+
+    c = TestClient(app)
+    c.headers["Authorization"] = f"Bearer {asyncio.run(go())}"
+    return c
+
+
+def test_task_token_own_project_only(client, tmp_path):
+    me = client.get("/auth/me").json()["id"]
+    p, d = _project(client, tmp_path)
+    other, _ = _project(client, tmp_path)
+    _sql(d, "1.sql", "CREATE TABLE a (id int);")
+    a = _agent(me, _task(me, p["id"]))
+    assert a.get(f"/projects/{p['id']}/schema").status_code == 200
+    r = a.get(f"/projects/{other['id']}/schema")
+    assert r.status_code == 403
+    assert a.get(f"/projects/{p['id']}/code-map").status_code == 403  # nothing else opened up

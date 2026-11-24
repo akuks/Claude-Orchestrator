@@ -381,6 +381,7 @@ def test_agent_token_allowlist_is_exact(thread):
         ("POST", "/guard/report"),
         ("POST", "/guard/approvals"),
         ("GET", "/guard/approvals/{approval_id}"),
+        ("GET", "/projects/{project_id}/schema"),
     }
     import uuid
 

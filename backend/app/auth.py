@@ -191,6 +191,9 @@ _AGENT_NOTES = ("PUT", "/tasks/{task_id}/notes")
 _AGENT_QUESTIONS = {("POST", "/tasks/{task_id}/questions"), ("GET", "/tasks/{task_id}/questions")}
 # A suggested decision for the project's log (phase 4b): own task only (handler), a person reviews it.
 _AGENT_PROPOSALS = ("POST", "/tasks/{task_id}/decision-proposals")
+# The project's tables read from its migration files (phase 6c): the handler requires the token's task to
+# belong to that project.
+_AGENT_SCHEMA = ("GET", "/projects/{project_id}/schema")
 _AGENT_TASK_READS = {("GET", "/tasks/{task_id}"), ("GET", "/tasks/{task_id}/events")}
 # co-guard's hook (Global Constraints): file/poll its own task's approval
 # requests and report decisions. The handlers confine each call to the
@@ -275,6 +278,10 @@ async def current_principal(request: Request) -> Principal:
                     if not principal.token.task_id:
                         raise HTTPException(403, "Token not allowed for this route")
                     # own task checked by the notes / questions handlers
+                elif key == _AGENT_SCHEMA:
+                    if not principal.token.task_id:
+                        raise HTTPException(403, "Token not allowed for this route")
+                    # own project checked by the schema handler
                 elif key in _AGENT_GUARD:
                     if not principal.token.task_id:
                         raise HTTPException(403, "Token not allowed for this route")
