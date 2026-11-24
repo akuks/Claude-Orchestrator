@@ -14,7 +14,7 @@ vault secrets). The same holds for other launchers that resolve from the working
 `python -m`, a relative `./bin/tool`).
 
 ## Decision
-Every `stdio` connected tool is started through a small **launcher** that changes into a private, empty folder
+Every `stdio` connected tool is started through a small **launcher** that changes into a private folder (holding only inert marker files)
 first and then runs the tool's command unchanged. A per-tool switch restores the old behaviour for a tool that
 truly needs to start in the project folder. Applies to **all projects**.
 
@@ -30,8 +30,14 @@ truly needs to start in the project folder. Applies to **all projects**.
   "env": {…as today…, "CO_PROJECT_DIR": "<project folder>"}}`. `CO_PROJECT_DIR` lets a tool be told where the
   project is without starting there (only added when the task has a project folder).
 - **Neutral folder:** `workspaces/_mcp_configs/<task_id>/cwd/<server prefix>/` — per task and per tool, created
-  0700 and empty by `prepare_for_task`, under the per-task config folder that agents already cannot read and that
-  is removed with the task's config. Never shared between tasks or users.
+  0700 by `prepare_for_task`, under the per-task config folder that agents already cannot read and that is
+  removed with the task's config. Never shared between tasks or users. *Amended after the security review:* it is
+  not strictly empty. The server writes only inert stopper files into it when it is created — `package.json`
+  containing `{}`, an empty `node_modules/`, an empty `.npmrc` and an empty `uv.toml` (files 0600, folder 0700) —
+  because npm takes the nearest ancestor with `node_modules` or `package.json` as the project (reading its
+  `.npmrc` and preferring its `node_modules`) and uv walks up for `uv.toml`; without them the search climbed to
+  `workspaces/`, which agents can write. The code map index folder (`workspaces/_codemap/run/<project_id>/`) gets
+  the same stoppers, and the guard also protects those marker names directly under `workspaces/`.
 - A relative `command` (contains `/` but is not absolute, e.g. `./bin/tool`) cannot work from a neutral folder;
   the registry refuses to save one unless the switch is on ("A command that starts with ./ needs 'Start in the
   project folder'"). A bare name (`npx`, `uvx`, `node`) is resolved through PATH as today.

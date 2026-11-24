@@ -1643,25 +1643,27 @@ folder they start in. So a file in the project, committed or written by an agent
 earlier task, could decide what ran as the tool, before any tool call and outside the
 agent guard.
 
-- **What changed.** Every such tool now starts from a private, empty folder made for
-  that task and that tool, and then runs its own command unchanged (a small launcher,
+- **What changed.** Every such tool now starts from a private folder that holds only a
+  few inert marker files, made for that task and that tool, and then runs its own command unchanged (a small launcher,
   `backend/app/mcp_launch.py`, changes folder and starts the command). The tool is also
   told where the project is, in the environment variable `CO_PROJECT_DIR`, when the task
   has a project folder. Web (HTTP) tools, the **Test** button and the policies are not
-  changed.
+  changed. The marker files (a `package.json` holding `{}`, an empty `node_modules/`,
+  an empty `.npmrc` and an empty `uv.toml`) stop `npm`, `npx` and `uv` from looking in
+  the folders above for a project of their own.
 - **The switch.** On a tool's form, under **More options**, **Start in the project
   folder** (admins only, stdio tools only, off by default). Use it only for a tool that
   must start inside the project; the project's own files can then change what the tool
   runs. With it on the tool starts exactly as before, and the list shows a small tag,
   "Starts in the project folder". The **System health** page counts such tools under
   **Connected tools**.
-- **A command that starts with `./`** (a file in the project) cannot work from an empty
-  folder. The form refuses to save it unless the switch is on: "A command that starts
+- **A command that starts with `./`** (a file in the project) cannot work from the tool's
+  own folder. The form refuses to save it unless the switch is on: "A command that starts
   with ./ needs 'Start in the project folder'". A bare name such as `npx` or an absolute
   path is fine.
 - **Tools already added** move to the new behaviour on their next task. Nothing needs
   doing.
-- **Cleanup.** The tool settings folder for a task (the tool config and the empty start
+- **Cleanup.** The tool settings folder for a task (the tool config and the tools' start
   folders) is removed when the task ends. Before this change it was left behind.
 
 ### Not covered / to know
@@ -1714,7 +1716,7 @@ recorded decisions for the files an answer names, and labels for old code.
   gates. The home folder is a private one of its own (`_codemap/_home/`, owner-only),
   not the one command gates share. Git's repo-local `core.fsmonitor` and
   `core.hooksPath` settings are switched off for every git the tool runs, so a
-  repository's own git config cannot run commands during the build. It runs from a private empty folder under the
+  repository's own git config cannot run commands during the build. It runs from a private folder that holds only a few inert marker files, under the
   workspaces folder (`_codemap/run/<project id>/`), not from the project folder. This
   is on purpose: `npx` reads the `.npmrc` of the folder it runs in and prefers that
   folder's own `node_modules`, so a hostile repository could otherwise swap in its own
@@ -1769,9 +1771,9 @@ recorded decisions for the files an answer names, and labels for old code.
   it. Related settings: `CO_CODE_MAP_SCAN_INTERVAL_SECONDS` (600),
   `CO_CODE_MAP_TIMEOUT_SECONDS` (900), `CO_CODE_MAP_MAX_JOBS` (2).
 - **The tool when a task starts it.** A task starts the Code map tool from a private
-  empty folder too, like every connected tool now (see "Where connected tools start"),
+  folder that holds only a few inert marker files too, like every connected tool now (see "Where connected tools start"),
   unless its **Start in the project folder** switch is on. The build always runs from
-  the private empty folder.
+  its own private folder that holds only a few inert marker files.
 - **"How far behind" is not told to the agent.** Only the three lines above are.
 - **No index of our own.** The app does not build or store a map; it depends on the
   outside tool.
