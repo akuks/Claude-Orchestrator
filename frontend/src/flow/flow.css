@@ -1,0 +1,617 @@
+/* Workflow flow canvas. Colours come from the --co-* variables, so light and
+   night modes both work. Box heights are fixed (see SIZES in flow.js): the
+   connector lines are drawn from those numbers, not measured. */
+
+.co-flow {
+  --flow-agent: var(--co-primary);
+  --flow-gate: var(--co-success);
+  --flow-approval: var(--co-warning);
+  --flow-fix: var(--co-success);
+  --flow-line: color-mix(in srgb, var(--co-text-muted) 55%, transparent);
+  --flow-line-on: var(--co-primary);
+  --flow-ring: color-mix(in srgb, var(--co-primary) 45%, transparent);
+  position: relative;
+  min-width: 0;
+}
+.co-flow-full,
+.co-flow-mini {
+  overflow-x: auto;
+  overflow-y: hidden;
+  scrollbar-width: thin;
+}
+/* Soft fade on an edge with more to scroll to. */
+.co-flow-more-right {
+  -webkit-mask-image: linear-gradient(to right, #000 calc(100% - 36px), transparent 100%);
+  mask-image: linear-gradient(to right, #000 calc(100% - 36px), transparent 100%);
+}
+.co-flow-more-left {
+  -webkit-mask-image: linear-gradient(to right, transparent 0, #000 36px);
+  mask-image: linear-gradient(to right, transparent 0, #000 36px);
+}
+.co-flow-more-left.co-flow-more-right {
+  -webkit-mask-image: linear-gradient(to right, transparent 0, #000 36px, #000 calc(100% - 36px), transparent 100%);
+  mask-image: linear-gradient(to right, transparent 0, #000 36px, #000 calc(100% - 36px), transparent 100%);
+}
+/* Centred when narrower than the frame; scrolls from the left when wider. */
+.co-flow-center .co-flow-track {
+  margin: 0 auto;
+}
+.co-flow-track {
+  display: flex;
+  align-items: center;
+  width: max-content;
+  padding: 14px 28px;
+}
+.co-flow-mini .co-flow-track {
+  padding: 2px 0;
+}
+.co-flow-seg {
+  display: flex;
+  align-items: center;
+  flex: 0 0 auto;
+}
+
+/* ---- Start / Done pills ---------------------------------------------------- */
+.co-flow-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  flex: 0 0 auto;
+  height: 30px;
+  padding: 0 12px;
+  border-radius: 999px;
+  border: 1px solid var(--co-border);
+  background: var(--co-surface-solid);
+  color: var(--co-text-secondary);
+  font-size: 13px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+.co-flow-start .anticon {
+  color: var(--co-primary);
+}
+.co-flow-end .anticon {
+  color: var(--co-success);
+}
+.co-flow-pill-mini {
+  height: 22px;
+  padding: 0 8px;
+  font-size: 11px;
+  gap: 4px;
+}
+.co-flow-pill-wrap {
+  display: inline-flex;
+  border-radius: 999px;
+  outline: none;
+}
+.co-flow-pill-wrap:focus-visible {
+  box-shadow: 0 0 0 3px var(--flow-ring);
+}
+
+/* ---- Connectors ------------------------------------------------------------ */
+.co-flow-link {
+  position: relative;
+  flex: 0 0 auto;
+}
+.co-flow-link svg {
+  display: block;
+  overflow: visible;
+}
+.co-flow-line {
+  fill: none;
+  stroke: var(--flow-line);
+  stroke-width: 1.6;
+  stroke-linecap: round;
+}
+.co-flow-arrow {
+  fill: var(--flow-line);
+}
+.co-flow-dash {
+  stroke-dasharray: 4 4;
+}
+.co-flow-link-reached .co-flow-line {
+  stroke: var(--flow-line-on);
+  stroke-width: 2;
+}
+.co-flow-link-reached .co-flow-arrow {
+  fill: var(--flow-line-on);
+}
+.co-flow-link-muted .co-flow-line {
+  stroke-dasharray: 3 4;
+  opacity: 0.7;
+}
+.co-flow-link-muted .co-flow-arrow {
+  opacity: 0.7;
+}
+
+.co-flow-plus {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  transform: translate(-50%, -50%);
+  width: 24px;
+  height: 24px;
+  border-radius: 50%;
+  border: 1px solid color-mix(in srgb, var(--co-primary) 45%, var(--co-border));
+  background: var(--co-surface-solid);
+  color: var(--co-primary);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 12px;
+  padding: 0;
+  cursor: pointer;
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.08);
+  transition: transform 0.15s ease, background 0.15s ease;
+}
+.co-flow-plus:hover,
+.co-flow-plus:focus-visible {
+  background: var(--co-primary);
+  color: #fff;
+  transform: translate(-50%, -50%) scale(1.12);
+  outline: none;
+}
+.co-flow-plus:focus-visible {
+  box-shadow: 0 0 0 3px var(--flow-ring);
+}
+.co-flow-plus-pulse {
+  animation: co-flow-pulse-once 1.4s ease-out 2;
+}
+@keyframes co-flow-pulse-once {
+  0% {
+    box-shadow: 0 0 0 0 color-mix(in srgb, var(--co-primary) 55%, transparent);
+  }
+  100% {
+    box-shadow: 0 0 0 14px transparent;
+  }
+}
+
+/* The three choices behind a "+". */
+.co-flow-add {
+  display: flex;
+  gap: 8px;
+}
+.co-flow-add-choice {
+  --k: var(--flow-agent);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  width: 104px;
+  height: 84px;
+  border-radius: 12px;
+  border: 1px solid color-mix(in srgb, var(--k) 35%, var(--co-border));
+  background: color-mix(in srgb, var(--k) 7%, var(--co-surface-solid));
+  color: var(--co-text);
+  font: inherit;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+}
+.co-flow-add-choice.co-flow-k-gate {
+  --k: var(--co-success);
+}
+.co-flow-add-choice.co-flow-k-approval {
+  --k: var(--co-warning);
+}
+.co-flow-add-choice:hover,
+.co-flow-add-choice:focus-visible {
+  border-color: var(--k);
+  background: color-mix(in srgb, var(--k) 14%, var(--co-surface-solid));
+  outline: none;
+}
+.co-flow-add-icon {
+  font-size: 22px;
+  color: var(--k);
+}
+
+/* ---- Columns --------------------------------------------------------------- */
+.co-flow-col {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  flex: 0 0 auto;
+}
+.co-flow-mini .co-flow-col {
+  gap: 6px;
+}
+.co-flow-colname {
+  position: absolute;
+  bottom: calc(100% + 6px);
+  left: 2px;
+  max-width: 196px;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  color: var(--co-text-muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  pointer-events: none;
+}
+.co-flow-mode-edit .co-flow-colname {
+  max-width: 112px;
+}
+
+/* Step controls: shown on hover or keyboard focus, always reachable by Tab. */
+.co-flow-tools {
+  position: absolute;
+  bottom: calc(100% + 4px);
+  right: 0;
+  display: flex;
+  gap: 2px;
+  padding: 2px;
+  border-radius: 8px;
+  border: 1px solid var(--co-border);
+  background: var(--co-surface-solid);
+  opacity: 0;
+  transition: opacity 0.15s ease;
+  z-index: 2;
+}
+.co-flow-col:hover > .co-flow-tools,
+.co-flow-col:focus-within > .co-flow-tools {
+  opacity: 1;
+}
+.co-flow-tools button {
+  width: 24px;
+  height: 22px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--co-text-secondary);
+  font-size: 12px;
+  padding: 0;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+.co-flow-tools button:hover:not(:disabled),
+.co-flow-tools button:focus-visible {
+  background: var(--co-hover);
+  color: var(--co-text);
+  outline: none;
+}
+.co-flow-tools button:focus-visible {
+  box-shadow: 0 0 0 2px var(--flow-ring);
+}
+.co-flow-tools button:disabled {
+  opacity: 0.35;
+  cursor: default;
+}
+.co-flow-tools .co-flow-tool-del:hover,
+.co-flow-tools .co-flow-tool-del:focus-visible {
+  color: var(--co-danger-text);
+}
+
+.co-flow-chip {
+  position: absolute;
+  top: calc(100% + 8px);
+  left: 50%;
+  transform: translateX(-50%);
+  height: 24px;
+  padding: 0 10px;
+  border-radius: 999px;
+  border: 1px dashed color-mix(in srgb, var(--co-primary) 50%, var(--co-border));
+  background: var(--co-surface-solid);
+  color: var(--co-text-secondary);
+  font: inherit;
+  font-size: 12px;
+  white-space: nowrap;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+.co-flow-chip:hover,
+.co-flow-chip:focus-visible {
+  color: var(--co-primary);
+  border-style: solid;
+  outline: none;
+}
+.co-flow-chip:focus-visible {
+  box-shadow: 0 0 0 3px var(--flow-ring);
+}
+
+/* ---- Boxes ----------------------------------------------------------------- */
+.co-flow-box {
+  --k: var(--flow-agent);
+  position: relative;
+  box-sizing: border-box;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 200px;
+  height: 64px;
+  padding: 8px 12px;
+  border-radius: 12px;
+  border: 1px solid color-mix(in srgb, var(--k) 40%, var(--co-border));
+  background: color-mix(in srgb, var(--k) 6%, var(--co-surface-solid));
+  color: var(--co-text);
+  font: inherit;
+  text-align: left;
+  min-width: 0;
+  transition: border-color 0.15s ease, box-shadow 0.15s ease;
+}
+button.co-flow-box {
+  cursor: pointer;
+}
+button.co-flow-box:hover {
+  border-color: var(--k);
+  box-shadow: 0 2px 10px color-mix(in srgb, var(--k) 16%, transparent);
+}
+button.co-flow-box:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 3px var(--flow-ring);
+}
+.co-flow-k-gate {
+  --k: var(--flow-gate);
+}
+.co-flow-k-approval {
+  --k: var(--flow-approval);
+  border-radius: 22px;
+}
+.co-flow-k-fix {
+  --k: var(--flow-fix);
+  border-style: dashed;
+}
+.co-flow-box-fixer {
+  width: 152px;
+  height: 44px;
+  margin: 0 auto;
+  padding: 6px 10px;
+  gap: 8px;
+}
+.co-flow-box-mini {
+  width: auto;
+  max-width: 130px;
+  height: 30px;
+  padding: 0 10px;
+  gap: 6px;
+  border-radius: 8px;
+  font-size: 12px;
+}
+.co-flow-box-mini.co-flow-k-approval {
+  border-radius: 15px;
+}
+
+.co-flow-icon {
+  flex: 0 0 auto;
+  width: 30px;
+  height: 30px;
+  border-radius: 9px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 15px;
+  color: var(--k);
+  background: color-mix(in srgb, var(--k) 13%, transparent);
+}
+.co-flow-k-approval .co-flow-icon {
+  border-radius: 50%;
+}
+.co-flow-box-fixer .co-flow-icon {
+  width: 24px;
+  height: 24px;
+  font-size: 13px;
+}
+.co-flow-box-mini .co-flow-icon {
+  width: auto;
+  height: auto;
+  background: none;
+  font-size: 13px;
+}
+.co-flow-text {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  flex: 1 1 auto;
+  gap: 2px;
+}
+.co-flow-title {
+  font-size: 13px;
+  font-weight: 600;
+  line-height: 18px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.co-flow-box-mini .co-flow-title {
+  font-size: 12px;
+  font-weight: 500;
+}
+.co-flow-box-fixer .co-flow-title {
+  font-size: 12px;
+}
+.co-flow-sub {
+  font-size: 12px;
+  line-height: 16px;
+  color: var(--co-text-secondary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.co-flow-mono {
+  font-family: var(--co-mono);
+  font-size: 11.5px;
+}
+.co-flow-badges {
+  position: absolute;
+  bottom: -9px;
+  right: 10px;
+  display: flex;
+  gap: 4px;
+}
+.co-flow-badge {
+  cursor: help;
+  height: 18px;
+  padding: 0 6px;
+  border-radius: 999px;
+  border: 1px solid color-mix(in srgb, var(--k) 40%, var(--co-border));
+  background: var(--co-surface-solid);
+  color: var(--k);
+  font-size: 11px;
+  line-height: 16px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+/* Selected: a clear ring in the brand colour. */
+.co-flow-box.co-flow-sel {
+  border-color: var(--co-primary);
+  box-shadow: 0 0 0 3px var(--flow-ring);
+}
+
+/* A box whose fields have a problem. */
+.co-flow-errdot {
+  position: absolute;
+  top: -5px;
+  left: -5px;
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  background: var(--co-danger);
+  border: 2px solid var(--co-surface-solid);
+}
+.co-flow-box.co-flow-err {
+  border-color: var(--co-danger);
+}
+
+/* ---- Fixer branch ------------------------------------------------------------ */
+.co-flow-branch {
+  position: absolute;
+  top: 100%;
+  left: 0;
+  width: 200px;
+}
+.co-flow-branch-svg {
+  display: block;
+  overflow: visible;
+}
+.co-flow-branch-svg .co-flow-line {
+  stroke: color-mix(in srgb, var(--flow-fix) 60%, var(--co-border));
+}
+.co-flow-branch-svg .co-flow-arrow {
+  fill: color-mix(in srgb, var(--flow-fix) 60%, var(--co-border));
+}
+.co-flow-branch-l,
+.co-flow-branch-r {
+  position: absolute;
+  top: 20px;
+  font-size: 11px;
+  line-height: 14px;
+  color: var(--co-text-muted);
+  white-space: nowrap;
+}
+.co-flow-branch-l {
+  right: calc(100% - 82px);
+}
+.co-flow-branch-r {
+  left: 118px;
+}
+
+/* ---- Run statuses ------------------------------------------------------------ */
+.co-flow-dot {
+  position: absolute;
+  top: -7px;
+  right: -7px;
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 10px;
+  color: #fff;
+  border: 2px solid var(--co-surface-solid);
+  box-sizing: content-box;
+}
+.co-flow-dot-done {
+  background: var(--co-success);
+}
+.co-flow-dot-running {
+  background: var(--co-info);
+  width: 10px;
+  height: 10px;
+  top: -5px;
+  right: -5px;
+}
+.co-flow-dot-waiting {
+  background: var(--co-warning);
+}
+.co-flow-dot-held {
+  background: var(--co-warning);
+}
+.co-flow-dot-failed {
+  background: var(--co-danger);
+}
+.co-flow-box.co-flow-st-done {
+  border-color: color-mix(in srgb, var(--co-success) 70%, var(--co-border));
+}
+.co-flow-box.co-flow-st-running {
+  border-color: var(--co-info);
+  animation: co-flow-running 1.8s ease-in-out infinite;
+}
+.co-flow-box.co-flow-st-waiting,
+.co-flow-box.co-flow-st-held {
+  border-color: var(--co-warning);
+}
+.co-flow-box.co-flow-st-failed {
+  border-color: var(--co-danger);
+}
+.co-flow-box.co-flow-st-next {
+  opacity: 0.72;
+}
+.co-flow-box.co-flow-st-next.co-flow-sel {
+  opacity: 1;
+}
+.co-flow-box.co-flow-sel.co-flow-st-running {
+  animation: none;
+}
+@keyframes co-flow-running {
+  0%,
+  100% {
+    box-shadow: 0 0 0 0 color-mix(in srgb, var(--co-info) 35%, transparent);
+  }
+  50% {
+    box-shadow: 0 0 0 5px color-mix(in srgb, var(--co-info) 12%, transparent);
+  }
+}
+
+html[data-reduce-motion='true'] .co-flow-box.co-flow-st-running,
+html[data-reduce-motion='true'] .co-flow-plus-pulse {
+  animation: none;
+}
+@media (prefers-reduced-motion: reduce) {
+  .co-flow-box.co-flow-st-running,
+  .co-flow-plus-pulse {
+    animation: none;
+  }
+  .co-flow-plus,
+  .co-flow-tools,
+  .co-flow-box {
+    transition: none;
+  }
+}
+
+/* A mini canvas that opens the full view. */
+.co-flow-open {
+  border-radius: 10px;
+  padding: 6px;
+  margin: -6px;
+  cursor: pointer;
+  outline: none;
+}
+.co-flow-open:hover {
+  background: var(--co-hover);
+}
+.co-flow-open:focus-visible {
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--co-primary) 45%, transparent);
+}
+
+/* The "+" choices sit below the line, clear of the boxes beside it. */
+.co-flow-add-pop .ant-popover-inner {
+  padding: 10px;
+}

@@ -290,3 +290,6 @@
   font-size: 12px;
   color: var(--co-text-secondary);
 }
+.co-run-timeline .co-flow-full {
+  margin: 0 -14px;
+}

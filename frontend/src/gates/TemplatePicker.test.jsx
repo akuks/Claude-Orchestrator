@@ -129,6 +129,39 @@ describe('workflow templates, export, import', () => {
   })
 })
 
+describe('template cards draw their steps', () => {
+  let view
+  afterEach(async () => {
+    await view?.unmount()
+    view = null
+    vi.clearAllMocks()
+  })
+  const click = async (el) => {
+    await act(async () => el.dispatchEvent(new MouseEvent('click', { bubbles: true })))
+    await flush()
+  }
+
+  it('each template shows a small flow; opening it shows the full canvas with Use this', async () => {
+    api.workflowTemplates.mockResolvedValue(TEMPLATES)
+    view = await render(<WorkflowsView isAdmin />)
+    await flush()
+    await click(document.body.querySelector('[data-testid="new-workflow"]'))
+    await click([...document.body.querySelectorAll('.ant-dropdown-menu-item')].find((li) => li.textContent.trim() === 'Start from a template'))
+    await flush()
+    const first = document.body.querySelector('[data-testid="template-item"]')
+    const mini = first.querySelector('[data-testid="flow-canvas"]')
+    expect(mini.className).toContain('co-flow-mini')
+    expect([...mini.querySelectorAll('[data-testid="flow-box"]')].map((b) => b.textContent)).toEqual(['Planner', 'Builder', 'Tests'])
+    await click(first.querySelector('[data-testid="flow-open"]'))
+    const pv = document.body.querySelector('[data-testid="flow-preview"]')
+    expect(pv.querySelectorAll('[data-testid="flow-box"]').length).toBe(3)
+    await click(document.body.querySelector('[data-testid="preview-use"]'))
+    await flush()
+    const names = [...document.body.querySelectorAll('input')].map((i) => i.value)
+    expect(names).toContain('T-software')
+  })
+})
+
 describe('templateHint', () => {
   it('shows the plain hint for the server wording and when a check step has none', () => {
     expect(templateHint({ hint: HINT, stages: [] })).toBe(GATE_HINT)

@@ -4,7 +4,6 @@ import { ReloadOutlined, StopOutlined } from '@ant-design/icons'
 import dayjs from 'dayjs'
 import relativeTime from 'dayjs/plugin/relativeTime'
 import { api } from '../api'
-import Comets3D from '../comets/Comets3D'
 import { stateLabel } from '../comets/CometSvg'
 import { timelineComet } from '../comets/timeline'
 import TaskDetail from '../components/TaskDetail'
@@ -25,6 +24,8 @@ import GateCard from '../gates/GateCard'
 import RunLog from '../gates/RunLog'
 import { RUN_STATUS_COLOR, runStatusText, stageKind } from '../gates/gates'
 import { revealHidden } from '../guard/guard'
+import FlowCanvas from '../flow/FlowCanvas'
+import { runBoxStatuses } from '../flow/flow'
 import './run.css'
 
 dayjs.extend(relativeTime)
@@ -158,8 +159,8 @@ function NotFound() {
   )
 }
 
-// A workflow run's own page (#/runs/<id>): header, a comet timeline across
-// its stages, the selected stage's tasks, and the selected task's live detail
+// A workflow run's own page (#/runs/<id>): header, the flow canvas of its
+// steps with their statuses, the selected stage's tasks, and the selected task's live detail
 // (the TaskDetail component, inline).
 //
 // With `onSelectStage` the selected stage is controlled by the `stage` prop
@@ -219,13 +220,25 @@ export default function RunView({ id, user, projects = [], navigate, onOpenCrede
   const run = data?.run
   const tasks = data?.tasks || []
   // Polls return fresh objects; keep the same stages array while nothing
-  // changed so the 3D timeline isn't rebuilt (and its labels re-placed) every poll.
+  // changed so the canvas statuses aren't recomputed every poll.
   const sstate = data?.stage_state || run?.stage_state
   const freshStages = useMemo(() => runStages(run, tasks, sstate), [run, tasks, sstate])
   const stagesKey = JSON.stringify(freshStages)
   // eslint-disable-next-line react-hooks/exhaustive-deps
   const stages = useMemo(() => freshStages, [stagesKey])
   const head = useMemo(() => timelineComet(stages).headIndex, [stages])
+  // Each box's status on the canvas: a step's own, each agent's current task.
+  const boxStatus = useMemo(() => runBoxStatuses({ stages: run?.stages, states: stages, sstate, tasks }), [run?.stages, stages, sstate, tasks])
+  const statusOf = useCallback(
+    (i, item) => {
+      const b = boxStatus[i]
+      if (!b) return 'next'
+      if (item === 'fix') return b.fix || 'next'
+      if (typeof item === 'number') return b.items[item] || b.status
+      return b.status
+    },
+    [boxStatus],
+  )
   const selStage = stageIdx != null && stageIdx < stages.length ? stageIdx : head >= 0 ? head : null
   const curAttempt = selStage == null ? 0 : stageAttempt(sstate, selStage)
   const stageTasks = selStage == null ? [] : tasksOfStage(tasks, selStage, curAttempt)
@@ -246,12 +259,15 @@ export default function RunView({ id, user, projects = [], navigate, onOpenCrede
     },
     [controlled, onSelectStage],
   )
-  const selectStage = useCallback(
-    (_stage, i) => {
-      pickStage(i)
-      setTaskId(null)
+  // A box on the canvas: select its step; an agent (or the fixer) also opens its task.
+  const selectBox = useCallback(
+    ({ step, item }) => {
+      pickStage(step)
+      const b = boxStatus[step]
+      const tid = typeof item === 'number' ? b?.itemTasks?.[item] : item === 'fix' ? b?.fixTask : null
+      setTaskId(tid || null)
     },
-    [pickStage],
+    [pickStage, boxStatus],
   )
   // Thread steps and follow-ups from the embedded detail: run tasks stay here,
   // anything else (a follow-up thread) opens on the Tasks page.
@@ -469,7 +485,17 @@ export default function RunView({ id, user, projects = [], navigate, onOpenCrede
 
       <section className="co-surface co-run-timeline" aria-label="Steps">
         {stages.length ? (
-          <Comets3D variant="timeline" stages={stages} selectedStage={selStage} onSelectStage={selectStage} />
+          <FlowCanvas
+            mode="run"
+            center
+            steps={run.stages}
+            statusOf={statusOf}
+            selected={selStage == null ? null : { step: selStage }}
+            onSelect={selectBox}
+            input={run.input}
+            focusStep={head >= 0 ? head : null}
+            label="Steps of this run"
+          />
         ) : (
           <div className="co-run-empty">This run has no steps.</div>
         )}
