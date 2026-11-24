@@ -1488,9 +1488,9 @@ Admins get a **System health** page (nav entry, `#/health`). It shows one overal
 check, problems first. Each card has a coloured dot, a plain title, one sentence and a
 collapsed **Details** with versions, timings and a suggested fix.
 
-- **The thirteen checks.** Claude is installed; Python; Git; Node; The guard is intact;
+- **The fourteen checks.** Claude is installed; Python; Git; Node; The guard is intact;
   The guard blocks what it should; Guard errors in the last 7 days; The app can write its
-  folders; Database is up to date; Connected tools; Skill packs; Docker (for 'wait until
+  folders; Database is up to date; Connected tools; Skill packs; Code map; Docker (for 'wait until
   ready' checks); Free disk space. A missing Node or Docker is only "attention"; a
   missing Claude or Git is a problem.
 - **When it runs.** Only when an admin opens the page or presses **Check again**; there
@@ -1629,6 +1629,90 @@ pack that has a source address.
   fetched with the SSH keys and agent of the account the server runs as (host keys must
   already be trusted; there are no prompts). Anyone who can add such a pack makes the
   server use those keys.
+
+## Code map
+
+A code map is a searchable index of a project's code. An agent can ask it "where is
+this function used?" instead of reading many files. An outside tool,
+**codebase-memory-mcp**, builds and answers from the map; this app does not build one
+itself. What the app adds around it is freshness (how current each answer is),
+recorded decisions for the files an answer names, and labels for old code.
+
+- **Setting it up.**
+  1. An admin opens **Connected tools** and adds the **Code map** tool from the preset
+     list (`npx -y codebase-memory-mcp@0.12.1`, a pinned version). The preset only
+     fills in the form; nothing installs until the admin saves it.
+  2. A maintainer opens the project, goes to its **Code map** tab and switches on
+     **Keep a map of this project's code**. The project needs a folder that exists. For
+     a project whose trust is `external` (outside code), only an admin can switch it on;
+     the server answers 403 to anyone else. Nothing switches it on by itself.
+- **When it refreshes.** A map is rebuilt when a task of the project finishes and the
+  project folder's commit differs from the one the map was built at; every 10 minutes
+  (a server-wide pass over switched-on projects whose commit differs); and when a
+  maintainer presses **Refresh now** (`POST /projects/{id}/code-map/refresh`). After a
+  failed build the next automatic try waits 2, 4, 8 ... minutes, up to 60 (the count
+  doubles with each failure in a row); **Refresh now** ignores that wait. A build is
+  stopped after 15 minutes. Only one build per project runs at a time, and at most two
+  run across the server. A build left "running" by a server restart is marked failed.
+- **How the build runs.** The command is `npx -y codebase-memory-mcp@0.12.1 cli
+  index_repository` followed by the project's folder. It runs without credentials, in
+  the same clean, private environment command gates use (no `CO_` settings, no ssh
+  agent, a private home folder). It runs from a private empty folder under the
+  workspaces folder (`_codemap/run/<project id>/`), not from the project folder. This
+  is on purpose: `npx` reads the `.npmrc` of the folder it runs in and prefers that
+  folder's own `node_modules`, so a hostile repository could otherwise swap in its own
+  code for the indexer. npm's own user and global settings files are also switched off.
+  Output goes to a capped log (1 MB, owner-only) that is scrubbed before it is shown.
+- **What the agent is told after each map answer.** When a task calls one of the code
+  map's query tools (`search_graph`, `trace_path`, `detect_changes`,
+  `get_file_outline`, `get_architecture`, `get_code_snippet`, `search_code`,
+  `query_graph`), the guard adds one line to the answer:
+  - `Code map: current (built at <commit>).`
+  - `Code map: may be out of date. It was built at <commit>; the folder is now at
+    <commit>. Check a file before relying on this answer.`
+  - `Code map: freshness unknown.`
+
+  The guard reads the project folder's git state directly (`.git/HEAD` and the branch
+  file) and never runs git, so it can say the map "may be out of date" but not by how
+  much. The project's **Code map** tab shows how many changes behind it is. These lines
+  never change a guard decision, and the run log gets a line, "Code map answer:
+  current", "may be out of date" or "freshness unknown".
+- **Decisions and old code.** The guard looks for file names in the answer (at most 20
+  checked, and only files that exist inside the project folder). For those files it adds
+  up to 3 of the project's recorded decisions, framed as data, not instructions. Each
+  decision is shown at most once per conversation for map answers; this is kept
+  separately from the note shown before an edit, so a map answer does not use that note
+  up. Starting again after a compaction shows them again. The whole addition is capped
+  at 2000 characters. For a project that has read-only reference projects, a map
+  answer that names files inside a reference folder (a reference project that has its
+  own code map switched on and built) gets `Old code: these files are from a read-only
+  reference (built at <commit>). Never edit them.`
+- **Where to look.** The project's **Code map** tab shows a plain status line ("Up to
+  date", "3 changes behind — refreshing soon", "Last refresh failed — <reason>", "Not
+  built yet", "Add the Code map tool first"), **Refresh now**, and a collapsed
+  **Details** with commits, times and the last 50 log lines
+  (`GET /projects/{id}/code-map/log`). The **System health** page has a **Code map** card:
+  how many projects keep a map, and it asks for attention if any refresh is failing or
+  the tool is missing while a project has it switched on. Status is
+  `GET /projects/{id}/code-map`.
+
+### Not covered
+
+- **The default build command has not been run against the real tool.** The command is
+  the setting `CO_CODE_MAP_INDEX_COMMAND` (a JSON list, default
+  `["npx","-y","codebase-memory-mcp@0.12.1","cli","index_repository"]`; the project
+  folder is added as the last argument). If it is wrong, the build fails and the error
+  shows on the project's Code map tab and in the health card, so an admin can correct
+  it. Related settings: `CO_CODE_MAP_SCAN_INTERVAL_SECONDS` (600),
+  `CO_CODE_MAP_TIMEOUT_SECONDS` (900), `CO_CODE_MAP_MAX_JOBS` (2).
+- **The tool when a task starts it.** Tools that a task starts through the same
+  launcher still run from the task's folder, as every connected tool always has. Only
+  the build runs from the private empty folder.
+- **"How far behind" is not told to the agent.** Only the three lines above are.
+- **No index of our own.** The app does not build or store a map; it depends on the
+  outside tool.
+- **A separate copy.** The freshness line reports on the project folder, even when a
+  task works in a separate copy of it.
 
 ---
 
