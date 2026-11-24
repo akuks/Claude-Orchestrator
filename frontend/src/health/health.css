@@ -1,0 +1,90 @@
+/* System health page. Colours come from the theme's CSS variables only. */
+.co-health-top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 12px;
+  margin-bottom: 20px;
+}
+.co-health-overall {
+  font-size: 28px;
+  font-weight: 600;
+  margin: 0;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  color: var(--co-text);
+}
+.co-health-checked {
+  color: var(--co-text-secondary);
+  font-size: 13px;
+}
+.co-health-actions {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+.co-health-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+  gap: 12px;
+}
+.co-health-card {
+  padding: 14px 16px;
+  min-width: 0;
+}
+.co-health-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-weight: 600;
+  color: var(--co-text);
+}
+.co-health-summary {
+  margin: 6px 0 0 18px;
+  color: var(--co-text-secondary);
+}
+.co-health-dot {
+  flex: none;
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  background: var(--co-success);
+}
+.co-health-dot-attention {
+  background: var(--co-warning);
+}
+.co-health-dot-problem {
+  background: var(--co-danger);
+}
+.co-health-dot-big {
+  width: 14px;
+  height: 14px;
+}
+.co-health-details {
+  margin: 8px 0 0 18px;
+  color: var(--co-text-secondary);
+  font-size: 13px;
+}
+.co-health-details summary {
+  cursor: pointer;
+  color: var(--co-text-muted);
+}
+.co-health-details dl {
+  margin: 6px 0 0;
+  display: grid;
+  grid-template-columns: max-content 1fr;
+  gap: 2px 12px;
+}
+.co-health-details dt {
+  color: var(--co-text-muted);
+}
+.co-health-details dd {
+  margin: 0;
+  font-family: var(--co-mono);
+  overflow-wrap: anywhere;
+}
+.co-health-fix {
+  margin-top: 6px;
+}

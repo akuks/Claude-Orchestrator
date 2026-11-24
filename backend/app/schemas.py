@@ -374,6 +374,8 @@ class ProjectOut(BaseModel):
     fresh_session_tokens: Optional[int] = None
     # create/import only: why suggest_trust chose `trust`
     trust_reason: Optional[str] = None
+    licence: Optional[dict] = None
+    licence_badge: Optional[dict] = None  # {label, tone}, computed by the server
     task_count: int = 0
     total_cost_usd: float = 0.0
     my_role: Optional[str] = None
@@ -729,6 +731,7 @@ class SkillPackCreate(BaseModel):
     description: Optional[str] = None
     scope: str = "global"  # global | project
     project_id: Optional[str] = None
+    pinned_sha: Optional[str] = None  # install at exactly this commit (40 hex)
 
 
 class SkillPackUpdate(BaseModel):
@@ -748,6 +751,10 @@ class SkillPackOut(BaseModel):
     scope: str
     project_id: Optional[str]
     created_at: datetime
+    current_sha: Optional[str] = None
+    latest_sha: Optional[str] = None
+    checked_at: Optional[datetime] = None
+    update_available: bool = False
 
     model_config = {"from_attributes": True}
 

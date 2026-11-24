@@ -129,6 +129,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Annotated, Any, Literal, Optional
 
 from fastapi import APIRouter, Body, Depends, Header, HTTPException, Query, Request, Response
+from fastapi.responses import PlainTextResponse
 from pydantic import BaseModel, Field
 from sqlalchemy import and_, func, or_, select, update
 from sqlalchemy.exc import IntegrityError
@@ -148,6 +149,7 @@ from ..constants import Status
 from ..database import SessionLocal
 from ..guard import custom as guard_custom
 from ..guard import dbrules as guard_dbrules
+from ..guard import export as guard_export
 from ..guard import grants as guard_grants
 from ..guard import policy_store
 from ..guard import rules as guard_rules
@@ -1189,6 +1191,25 @@ async def list_builtins(request: Request):
         {"id": rid, "reason": reason, "hard_reason": hard, "disableable": rid in guard_rules.DISABLEABLE}
         for rid, (reason, hard) in guard_rules.RULES.items()
     ]
+
+
+@api.get("/export.md")
+async def export_rules(request: Request, project_id: Optional[str] = None):
+    """The rules as a downloadable text file (any person; a project needs visibility, else 404)."""
+    p = request.state.principal
+    _person(p)
+    async with SessionLocal() as s:
+        project = None
+        if project_id is not None:
+            await require_project_role(s, p, project_id)
+            project = await s.get(Project, project_id)
+            if project is None:
+                raise HTTPException(404, "Not found")
+        elif not p.user.active:
+            raise HTTPException(404, "Not found")
+        text = await guard_export.render(s, project, _now())
+    return PlainTextResponse(text, media_type="text/markdown; charset=utf-8",
+                             headers={"Content-Disposition": 'attachment; filename="rules.md"'})
 
 
 class OrgSettingsIn(BaseModel):

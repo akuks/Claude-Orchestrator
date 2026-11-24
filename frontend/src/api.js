@@ -152,6 +152,7 @@ export const api = {
   discoverProjects: () => req('GET', '/projects/discover'),
   importProjects: (directories) => req('POST', '/projects/import', { directories }),
   updateProject: (id, payload) => req('PATCH', `/projects/${id}`, payload),
+  refreshLicence: (id) => req('POST', `/projects/${id}/licence/refresh`),
   deleteProject: (id) => req('DELETE', `/projects/${id}`),
   listProjectServers: (id) => req('GET', `/projects/${id}/servers`),
   saveProjectServers: (id, servers) => req('PUT', `/projects/${id}/servers`, servers),
@@ -246,6 +247,8 @@ export const api = {
   skillTemplate: () => req('GET', '/skills/template'),
   lintSkillText: (text) => req('POST', '/skills/lint', { text }),
   lintSkillPack: (id) => req('GET', `/skills/${id}/lint`),
+  checkSkillUpdate: (id) => req('POST', `/skills/${id}/check-update`),
+  updateSkillPack: (id) => req('POST', `/skills/${id}/update`),
   // ---- Context Store (curated knowledge docs, tiered) ----
   listContextDocs: (params = {}) => req('GET', `/context-docs${qs(params)}`),
   previewContext: (projectId) => req('GET', `/context-docs/preview${qs({ project_id: projectId })}`),
@@ -288,8 +291,11 @@ export const api = {
   updateGuardRule: (id, payload) => req('PATCH', `/guard/rules/${encodeURIComponent(id)}`, payload),
   deleteGuardRule: (id) => req('DELETE', `/guard/rules/${encodeURIComponent(id)}`),
   guardBuiltins: () => req('GET', '/guard/builtins'),
+  exportRules: (projectId) => reqText(`/guard/export.md${qs({ project_id: projectId })}`),
   guardOrgSettings: () => req('GET', '/guard/org-settings'),
   guardHealth: () => req('GET', '/guard/health'),
+  // admin: the system health checks (refresh skips the server's 30 s cache)
+  systemHealth: (refresh) => req('GET', `/admin/health${refresh ? '?refresh=true' : ''}`),
   saveGuardOrgSettings: (payload) => req('PUT', '/guard/org-settings', payload),
   projectRulesFile: (id) => req('GET', `/projects/${encodeURIComponent(id)}/guard/rules-file`),
 

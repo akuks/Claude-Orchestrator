@@ -9,10 +9,12 @@ vi.mock('../api', () => ({
     userDirectory: vi.fn(async () => []),
     listTeams: vi.fn(async () => []),
     updateProject: vi.fn(async (id, v) => ({ id, ...v })),
+    refreshLicence: vi.fn(async () => ({})),
   },
 }))
 import { api } from '../api'
-import { GitStateWarning, ProjectModal } from './ProjectsView'
+import { GitStateWarning, LicenceCheck, ProjectModal } from './ProjectsView'
+import LicenceBadge from '../projects/LicenceBadge'
 
 let view
 beforeAll(() => {
@@ -111,5 +113,63 @@ describe('project form: fresh-session threshold (phase 3b)', () => {
     view = await render(<ProjectModal open project={null} isAdmin={false} currentUser={{ id: 'u1' }} onClose={() => {}} />)
     await settle()
     expect(field()).toBeNull()
+  })
+})
+
+describe('licence badge (phase 6a)', () => {
+  const badge = () => document.querySelector('[data-testid="licence-badge"]')
+  it('draws the server label as text, with the tone', async () => {
+    view = await render(<LicenceBadge project={{ licence_badge: { label: '<b>GPL-3.0</b> — share-alike', tone: 'warning' } }} />)
+    await flush()
+    expect(badge().textContent).toBe('<b>GPL-3.0</b> — share-alike')
+    expect(badge().querySelector('b')).toBeNull()
+    expect(badge().getAttribute('data-tone')).toBe('warning')
+  })
+  it('draws nothing without a badge', async () => {
+    view = await render(<LicenceBadge project={{ licence_badge: null }} />)
+    await flush()
+    expect(badge()).toBeNull()
+  })
+  it('hover tooltip says it is a hint, not legal advice', async () => {
+    view = await render(<LicenceBadge project={{ licence_badge: { label: 'MIT', tone: 'info' } }} />)
+    await flush()
+    await act(async () => badge().dispatchEvent(new MouseEvent('mouseover', { bubbles: true })))
+    await act(async () => new Promise((r) => setTimeout(r, 150)))
+    expect(document.body.textContent).toContain('A hint, not legal advice.')
+  })
+  it('"Check again" is for maintainers and refreshes', async () => {
+    const onSaved = vi.fn()
+    view = await render(<LicenceCheck project={{ id: 'p1', licence_badge: null }} canEdit={false} onSaved={onSaved} />)
+    await flush()
+    expect(document.querySelector('[data-testid="licence-check-again"]')).toBeNull()
+    await view.unmount()
+    view = await render(<LicenceCheck project={{ id: 'p1', licence_badge: null }} canEdit onSaved={onSaved} />)
+    await flush()
+    await act(async () => document.querySelector('[data-testid="licence-check-again"]').dispatchEvent(new MouseEvent('click', { bubbles: true })))
+    await flush()
+    expect(api.refreshLicence).toHaveBeenCalledWith('p1')
+    expect(onSaved).toHaveBeenCalled()
+  })
+  describe('licence line wording', () => {
+    const line = async (project) => {
+      view = await render(<LicenceCheck project={{ id: 'p1', licence_badge: null, ...project }} canEdit onSaved={vi.fn()} />)
+      await flush()
+      return document.querySelector('[data-testid="licence-line"]').textContent
+    }
+    it('not checked yet, with the maintainer link', async () => {
+      const txt = await line({ licence: null })
+      expect(txt).toContain('Licence: not checked yet')
+      expect(txt).toContain('Check again')
+      expect(txt).not.toContain('not shown for your own code')
+    })
+    it('unknown is not recognised', async () => {
+      expect(await line({ licence: { kind: 'unknown', id: 'x' } })).toContain('Licence: not recognised')
+    })
+    it('none says no licence file', async () => {
+      expect(await line({ licence: { kind: 'none' } })).toContain('No licence file found')
+    })
+    it('a permissive own licence shows its name', async () => {
+      expect(await line({ trust: 'own', licence: { kind: 'permissive', id: 'MIT' } })).toContain('Licence: MIT')
+    })
   })
 })

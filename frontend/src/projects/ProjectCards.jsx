@@ -1,4 +1,5 @@
 import { Tag, Tooltip } from 'antd'
+import LicenceBadge from './LicenceBadge'
 import CometSvg, { stateLabel } from '../comets/CometSvg'
 import { layoutComets } from '../comets/layout'
 import './projects.css'
@@ -52,6 +53,7 @@ function Card({ project, model, onOpen, actions }) {
           {project.name}
         </button>
         {project.archived && <Tag className="co-pcard-tag">archived</Tag>}
+        <LicenceBadge project={project} />
       </div>
       <div className="co-pcard-sub">
         {project.my_role || 'member'} · {project.task_count ?? 0} task{project.task_count === 1 ? '' : 's'}

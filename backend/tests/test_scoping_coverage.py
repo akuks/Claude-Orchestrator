@@ -71,6 +71,7 @@ ADMIN_ONLY = {
     ("PUT", "/teams/{team_id}/members"),
     ("GET", "/projects/discover"),
     ("GET", "/admin/org-fallback"),
+    ("GET", "/admin/health"),
     ("PUT", "/admin/org-fallback"),
     ("DELETE", "/admin/org-fallback"),
     ("PUT", "/guard/org-settings"),

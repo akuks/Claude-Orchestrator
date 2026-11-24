@@ -28,6 +28,7 @@ from .routers import (
     credentials,
     decisions,
     guard,
+    health as health_router,
     findings,
     handoffs,
     launch,
@@ -186,6 +187,7 @@ for _r in (
     teams.router,
     credentials.router,
     credentials.admin_router,
+    health_router.router,
     guard.api,
 ):
     app.include_router(_r, dependencies=_authed)

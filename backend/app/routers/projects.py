@@ -10,6 +10,7 @@ from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel
 from sqlalchemy import delete, func, select, update
 
+from .. import licence as licence_mod
 from .. import memory
 from ..agent_env import MissingCredential
 from ..config import settings
@@ -216,6 +217,7 @@ def _to_out(
 ) -> ProjectOut:
     out = ProjectOut.model_validate(project)
     out.my_role = role
+    out.licence_badge = licence_mod.badge(project)
     if not admin:
         out.env = {k: MASK for k in out.env}
     out.task_count = count
@@ -260,6 +262,7 @@ async def create_project(payload: ProjectCreate, request: Request):
             created_by=request.state.principal.user.id,
             trust=trust,
             quarantine=trust == "external",
+            licence=await licence_mod.for_directory(str(directory.resolve())),
         )
         s.add(project)
         await s.commit()
@@ -433,6 +436,7 @@ async def import_projects(payload: ImportRequest, request: Request):
                 created_by=request.state.principal.user.id,
                 trust=trust,
                 quarantine=trust == "external",
+                licence=await licence_mod.for_directory(d),
             )
             s.add(project)
             existing_dirs.add(d)
@@ -501,6 +505,8 @@ async def update_project(project_id: str, payload: ProjectUpdate, request: Reque
                 raise HTTPException(400, f"Could not access directory: {exc}")
             dir_changed = str(d.resolve()) != project.directory
             project.directory = str(d.resolve())
+            if dir_changed:
+                project.licence = await licence_mod.for_directory(project.directory)
         else:
             dir_changed = False
         # A moved folder re-checks the stored paths and references (M3).
@@ -525,6 +531,20 @@ async def update_project(project_id: str, payload: ProjectUpdate, request: Reque
             )
         for k, v in data.items():
             setattr(project, k, v)
+        await s.commit()
+        await s.refresh(project)
+        counts = await _counts(s, [project_id])
+    return _to_out(project, *counts.get(project_id, (0, 0.0)), role=role, admin=principal.is_admin)
+
+
+@router.post("/{project_id}/licence/refresh", response_model=ProjectOut)
+async def refresh_licence(project_id: str, request: Request):
+    """Re-read the project's licence file (maintainers). Never run on a page load."""
+    principal = request.state.principal
+    async with SessionLocal() as s:
+        role = await require_project_role(s, principal, project_id, "maintainer")
+        project = await _get_or_404(s, project_id)
+        project.licence = await licence_mod.for_directory(project.directory)
         await s.commit()
         await s.refresh(project)
         counts = await _counts(s, [project_id])

@@ -12,7 +12,7 @@ from sqlalchemy.orm import Session
 from app import models
 from app.database import _alembic_cfg, _baseline_metadata, run_migrations
 
-HEAD = "0016"  # the latest revision
+HEAD = "0017"  # the latest revision
 
 
 def _tables(db) -> set[str]:
@@ -559,3 +559,46 @@ def test_migration_0016_upgrade_downgrade(scratch_url):
         return sc.exec_driver_sql("SELECT version_num FROM alembic_version").scalar()
 
     assert _inspect(url, check_down) == "0015"
+
+
+def test_migration_0017_upgrade_downgrade(scratch_url):
+    from alembic import command
+
+    url = scratch_url
+    command.upgrade(_alembic_cfg(url), "0016")
+
+    def old_rows(sc, insp):  # rows from before 0017
+        sc.exec_driver_sql(
+            "INSERT INTO projects (id, name, slug, directory, default_model, env, memory, memory_enabled,"
+            " archived, auto_review_prs, created_at, launch_seq) VALUES ('p17', 'old', 'old', '/x', 'sonnet', '{}', '',"
+            " true, false, false, CURRENT_TIMESTAMP, 0)")
+        sc.exec_driver_sql(
+            "INSERT INTO skill_packs (id, name, local_path, enabled, scope, created_at)"
+            " VALUES ('k17', 'old-pack', '/x', true, 'global', CURRENT_TIMESTAMP)")
+
+    _inspect(url, old_rows)
+    command.upgrade(_alembic_cfg(url), "0017")
+
+    def check(sc, insp):
+        assert "licence" in {c["name"] for c in insp.get_columns("projects")}
+        cols = {c["name"] for c in insp.get_columns("skill_packs")}
+        assert {"latest_sha", "checked_at"} <= cols
+        return sc.exec_driver_sql("SELECT version_num FROM alembic_version").scalar()
+
+    assert _inspect(url, check) == "0017"
+
+    def old_read(sc, insp):
+        return (sc.exec_driver_sql("SELECT licence FROM projects WHERE id='p17'").scalar(),
+                sc.exec_driver_sql("SELECT latest_sha FROM skill_packs WHERE id='k17'").scalar(),
+                sc.exec_driver_sql("SELECT checked_at FROM skill_packs WHERE id='k17'").scalar())
+
+    assert _inspect(url, old_read) == (None, None, None)
+    command.downgrade(_alembic_cfg(url), "0016")
+
+    def check_down(sc, insp):
+        assert "licence" not in {c["name"] for c in insp.get_columns("projects")}
+        cols = {c["name"] for c in insp.get_columns("skill_packs")}
+        assert not ({"latest_sha", "checked_at"} & cols)
+        return sc.exec_driver_sql("SELECT version_num FROM alembic_version").scalar()
+
+    assert _inspect(url, check_down) == "0016"

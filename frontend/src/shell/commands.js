@@ -14,6 +14,7 @@ export const NAV_PAGES = [
   { page: 'users', label: 'Users', adminOnly: true },
   { page: 'teams', label: 'Teams', adminOnly: true },
   { page: 'guard', label: 'Agent guard', keywords: 'settings co-guard rules policy built-in dev database', adminOnly: true },
+  { page: 'health', label: 'System health', keywords: 'status checks doctor diagnostics disk docker claude', adminOnly: true },
 ]
 
 export function visiblePages(isAdmin) {

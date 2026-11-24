@@ -51,7 +51,7 @@ describe('parseHash', () => {
 
   it('knows every page in the route list', () => {
     expect(PAGES).toEqual([
-      'home', 'tasks', 'runs', 'projects', 'automation', 'approvals', 'mcp', 'usage', 'security', 'users', 'teams', 'guard',
+      'home', 'tasks', 'runs', 'projects', 'automation', 'approvals', 'mcp', 'usage', 'security', 'users', 'teams', 'guard', 'health',
     ])
   })
 })

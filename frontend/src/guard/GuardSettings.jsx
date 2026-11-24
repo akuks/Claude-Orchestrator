@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from 'react'
 import { Alert, Button, Divider, Input, InputNumber, Select, Slider, Space, Switch, Tag, Typography, message } from 'antd'
 import { DeleteOutlined, EyeInvisibleOutlined, FileTextOutlined, PlusOutlined, SafetyOutlined } from '@ant-design/icons'
 import { api } from '../api'
+import DownloadRules from './DownloadRules'
 import RuleTable from './RuleTable'
 import {
   GUARD_SETTINGS_HELP,
@@ -203,6 +204,9 @@ export default function GuardSettings({ project, canEdit, onSaved, ruleDraft, on
       <Typography.Paragraph type="secondary" data-testid="guard-help">
         <SafetyOutlined /> {GUARD_SETTINGS_HELP}
       </Typography.Paragraph>
+      <div style={{ marginBottom: 12 }}>
+        <DownloadRules projectId={project.id} />
+      </div>
 
       <div className="co-guard-settings-row">
         <Switch
