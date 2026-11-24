@@ -339,6 +339,38 @@ async def check_skill_packs(s) -> Result:
     return Result(OK, summary, {"packs": listing})
 
 
+async def check_code_map(s) -> Result:
+    """Which projects keep a code map, and whether any refresh is failing. Reads the database only."""
+    from ..codemap.status import code_map_server
+    from ..models import McpServer, Project, ProjectIndex
+
+    async with s() as sess:
+        servers = (await sess.execute(select(McpServer).where(McpServer.enabled.is_(True)))).scalars().all()
+        rows = (await sess.execute(
+            select(Project.name, ProjectIndex.status)
+            .select_from(Project).outerjoin(ProjectIndex, ProjectIndex.project_id == Project.id)
+            .where(Project.code_map.is_(True)).order_by(Project.name))).all()
+    have_tool = code_map_server(servers) is not None
+    failing = [n for n, st in rows if st == "failed"]
+    listing = [{"project": n, "status": st or "never"} for n, st in rows]
+    detail = {"projects": listing, "tool_added": have_tool}
+    n = len(rows)
+    if failing:
+        k = len(failing)
+        return Result(ATTENTION, f"{k} project{chr(39)}s code map is failing" if k == 1 else f"{k} projects{chr(39)} code maps are failing",
+                      detail, "Open the project, then Code map, and read why the last refresh failed.")
+    if not have_tool:
+        if n:
+            return Result(ATTENTION, "The Code map tool is not added yet", detail,
+                          "Open Connected tools and add the Code map preset.")
+        return Result(OK, "The Code map tool is not added yet", detail)
+    if not n:
+        return Result(OK, "No project keeps a code map", detail)
+    waiting = sum(1 for _, st in rows if st != "ok")
+    head = f"{n} project{'s' if n != 1 else ''} keep{'s' if n == 1 else ''} a code map"
+    return Result(OK, head + ("; all up to date" if not waiting else f"; {waiting} not built yet"), detail)
+
+
 async def check_disk(s) -> Result:
     free = await asyncio.to_thread(disk_free_bytes, Path(settings.workspaces_dir))
     gb = free / GB
@@ -362,6 +394,7 @@ CHECKS: list[Check] = [
     Check("database", "Database is up to date", check_database),
     Check("mcp", "Connected tools", check_mcp),
     Check("skill_packs", "Skill packs", check_skill_packs),
+    Check("code_map", "Code map", check_code_map),
     Check("docker", "Docker (for 'wait until ready' checks)", check_docker),
     Check("disk", "Free disk space", check_disk),
 ]

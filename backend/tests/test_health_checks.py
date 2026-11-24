@@ -30,6 +30,7 @@ def test_check_ids_and_titles_are_exact():
         ("guard_files", "The guard is intact"), ("guard_selftest", "The guard blocks what it should"),
         ("guard_errors", "Guard errors in the last 7 days"), ("folders", "The app can write its folders"),
         ("database", "Database is up to date"), ("mcp", "Connected tools"), ("skill_packs", "Skill packs"),
+        ("code_map", "Code map"),
         ("docker", "Docker (for 'wait until ready' checks)"), ("disk", "Free disk space")]
 
 
@@ -415,3 +416,48 @@ def test_real_run_has_no_home_path_and_is_complete(client):
     assert [c["id"] for c in data["checks"]] == [c.id for c in checks.CHECKS]
     assert guard_runtime.real_home() not in str(data)
     runner.clear_cache()
+
+
+def test_code_map(db):
+    from app.models import McpServer, Project, ProjectIndex
+
+    async def go(tool, projects):
+        ids = []
+        async with db() as s:
+            if tool:
+                m = McpServer(name="hc-cm", command="npx", args=["-y", "codebase-memory-mcp@0.12.1"])
+                s.add(m)
+                await s.flush()
+                ids.append((McpServer, m.id))
+            for i, st in enumerate(projects):
+                p = Project(name=f"hc-cm-{i}", slug=f"hc-cm-{i}", directory="/x", code_map=True)
+                s.add(p)
+                await s.flush()
+                s.add(ProjectIndex(project_id=p.id, status=st))
+                ids.append((Project, p.id))
+            await s.commit()
+        return ids
+
+    async def rm(ids):
+        async with db() as s:
+            for model, i in ids:
+                await s.delete(await s.get(model, i))
+            await s.commit()
+
+    def check(tool, projects):
+        ids = run(go(tool, projects))
+        try:
+            return run(by_id("code_map").fn(db))
+        finally:
+            run(rm(ids))
+
+    r = check(False, [])
+    assert (r.status, r.summary) == (OK, "The Code map tool is not added yet")
+    r = check(True, [])
+    assert (r.status, r.summary) == (OK, "No project keeps a code map")
+    r = check(False, ["ok"])
+    assert (r.status, r.summary) == (ATTENTION, "The Code map tool is not added yet")
+    r = check(True, ["ok", "ok"])
+    assert (r.status, r.summary) == (OK, "2 projects keep a code map; all up to date")
+    r = check(True, ["ok", "failed"])
+    assert (r.status, r.summary) == (ATTENTION, "1 project's code map is failing")
