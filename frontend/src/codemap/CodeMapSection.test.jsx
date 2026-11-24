@@ -29,6 +29,45 @@ afterEach(async () => {
   document.body.innerHTML = ''
 })
 
+describe('CodeMapSection polling', () => {
+  afterEach(() => vi.useRealTimers())
+  const tick = (ms) => act(async () => { await vi.advanceTimersByTimeAsync(ms) })
+  it('polls every 5 s while running, status only, and stops when done', async () => {
+    vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval'] })
+    api.getCodeMap.mockResolvedValue(st({ status: 'running', sha: null }))
+    await mount()
+    expect(api.getCodeMap).toHaveBeenCalledTimes(1)
+    await tick(4900)
+    expect(api.getCodeMap).toHaveBeenCalledTimes(1)
+    await tick(200)
+    expect(api.getCodeMap).toHaveBeenCalledTimes(2)
+    expect(api.getCodeMapLog).not.toHaveBeenCalled()
+    api.getCodeMap.mockResolvedValue(st())
+    await tick(5000)
+    const n = api.getCodeMap.mock.calls.length
+    await tick(15000)
+    expect(api.getCodeMap).toHaveBeenCalledTimes(n)
+  })
+  it('does not poll on an inactive tab or a hidden page', async () => {
+    vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval'] })
+    api.getCodeMap.mockResolvedValue(st({ status: 'running', sha: null }))
+    await mount({ active: false })
+    await tick(20000)
+    expect(api.getCodeMap).toHaveBeenCalledTimes(1)
+    await view.unmount()
+    await mount()
+    Object.defineProperty(document, 'hidden', { configurable: true, get: () => true })
+    await tick(20000)
+    expect(api.getCodeMap).toHaveBeenCalledTimes(2)
+    delete document.hidden
+  })
+  it('reveals hidden characters in the reason', async () => {
+    api.getCodeMap.mockResolvedValue(st({ status: 'failed', error: 'bad\u202Etxt' }))
+    await mount()
+    expect(q('codemap-line').textContent).toContain('⟦U+202E⟧')
+  })
+})
+
 describe('CodeMapSection', () => {
   it('off: only the switch and the one-line explanation', async () => {
     api.getCodeMap.mockResolvedValue(st({ enabled: false }))
@@ -41,7 +80,7 @@ describe('CodeMapSection', () => {
     await mount()
     expect(q('codemap-line').textContent).toBe('Up to date')
     expect(q('codemap-details').textContent).toContain('abc1234')
-    expect(q('codemap-details').textContent).toContain('indexed 10 files')
+    expect(api.getCodeMapLog).not.toHaveBeenCalled()
   })
   it('missing tool links to Connected tools', async () => {
     api.getCodeMap.mockResolvedValue(st({ server_registered: false }))

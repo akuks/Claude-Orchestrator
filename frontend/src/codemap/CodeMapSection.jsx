@@ -1,13 +1,17 @@
 import { useCallback, useEffect, useState } from 'react'
 import { Button, Space, Spin, Switch, Typography } from 'antd'
 import { api } from '../api'
+import { revealHidden } from '../guard/guard'
 import { EXPLAIN, SWITCH_LABEL, sha7, statusLine, statusTone } from './codemap'
 import './codemap.css'
 
 const NOT_ALLOWED = 'You do not have permission to do that here.'
 const plain = (e) => (/admin can turn the code map on/i.test(e?.message || '') ? e.message : e?.status === 403 || /403|forbidden/i.test(e?.message || '') ? NOT_ALLOWED : String(e?.message || 'Something went wrong'))
 
-export default function CodeMapSection({ project, canEdit }) {
+export const POLL_MS = 5000
+
+export default function CodeMapSection({ project, canEdit, active = true }) {
+  const [open, setOpen] = useState(false)
   const [st, setSt] = useState(null)
   const [lines, setLines] = useState([])
   const [err, setErr] = useState('')
@@ -17,10 +21,6 @@ export default function CodeMapSection({ project, canEdit }) {
     try {
       const s = await api.getCodeMap(project.id)
       setSt(s)
-      if (s.enabled) {
-        const l = await api.getCodeMapLog(project.id).catch(() => ({ lines: [] }))
-        setLines(l?.lines || [])
-      }
     } catch (e) {
       setErr(plain(e))
     }
@@ -30,12 +30,27 @@ export default function CodeMapSection({ project, canEdit }) {
     load()
   }, [load])
 
-  // While a build runs, look again every few seconds.
+  // The log: only when Details is open, and again when the status settles (done or failed).
   useEffect(() => {
-    if (st?.status !== 'running') return undefined
-    const t = setInterval(load, 4000)
+    if (!open || !st?.enabled || st.status === 'running') return
+    let live = true
+    Promise.resolve(api.getCodeMapLog(project.id))
+      .then((l) => live && setLines(l?.lines || []))
+      .catch(() => {})
+    return () => {
+      live = false
+    }
+  }, [open, st?.enabled, st?.status, project.id])
+
+  // While a build runs, look again every few seconds: only on this tab and only on a visible page.
+  const running = st?.status === 'running'
+  useEffect(() => {
+    if (!running || !active) return undefined
+    const t = setInterval(() => {
+      if (!document.hidden) load()
+    }, POLL_MS)
     return () => clearInterval(t)
-  }, [st?.status, load])
+  }, [running, active, load])
 
   const toggle = async (on) => {
     setErr('')
@@ -75,18 +90,18 @@ export default function CodeMapSection({ project, canEdit }) {
         <>
           <div className="co-codemap-status" data-testid="codemap-status">
             {showSpin ? <Spin size="small" /> : <span className={`co-codemap-dot co-codemap-dot-${statusTone(st)}`} />}
-            <span data-testid="codemap-line">{line}</span>
+            <span data-testid="codemap-line">{revealHidden(line).text}</span>
             {!st.server_registered && <a href="#/mcp" data-testid="codemap-tools-link">Connected tools</a>}
           </div>
           {canEdit && st.server_registered && (
             <Button size="small" onClick={refresh} disabled={busy || st.status === 'running'} data-testid="codemap-refresh">Refresh now</Button>
           )}
-          <details className="co-codemap-details" data-testid="codemap-details">
+          <details className="co-codemap-details" data-testid="codemap-details" onToggle={(e) => setOpen(e.currentTarget.open)}>
             <summary>Details</summary>
             <div>Built at: {sha7(st.sha) || '—'}</div>
             <div>Last built: {st.indexed_at || '—'}</div>
             {st.next_try_at && <div>Next try: {st.next_try_at}</div>}
-            {lines.length > 0 && <pre>{lines.join('\n')}</pre>}
+            {lines.length > 0 && <pre>{lines.map((l) => revealHidden(l).text).join('\n')}</pre>}
           </details>
         </>
       )}

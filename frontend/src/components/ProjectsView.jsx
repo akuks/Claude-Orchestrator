@@ -521,7 +521,7 @@ export function ProjectDrawer({ project, tab, onTab, currentUser, onClose, onSav
                   <ApiOutlined /> Code map
                 </span>
               ),
-              children: <CodeMapSection key={project.id} project={project} canEdit={canEditGuard(project, currentUser)} />,
+              children: <CodeMapSection key={project.id} active={tab === 'codemap'} project={project} canEdit={canEditGuard(project, currentUser)} />,
             },
             {
               key: 'guard',
