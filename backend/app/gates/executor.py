@@ -146,13 +146,14 @@ def _write_all(fd: int, data: bytes) -> int:
     return done
 
 
-async def _pump(proc, fd: int, state: dict) -> None:
-    """Copy the pipe to the log up to LOG_CAP; always keep draining so the child never blocks."""
+async def _pump(proc, fd: int, state: dict, cap: int | None = None) -> None:
+    """Copy the pipe to the log up to ``cap`` (LOG_CAP by default); always keep draining so the child never blocks."""
+    cap = LOG_CAP if cap is None else cap
     while True:
         chunk = await proc.stdout.read(65536)
         if not chunk:
             return
-        room = LOG_CAP - state["written"]
+        room = cap - state["written"]
         if room > 0 and not state.get("error"):
             part = chunk[:room]
             try:

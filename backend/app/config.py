@@ -41,6 +41,14 @@ class Settings(BaseSettings):
     mcp_health_interval_seconds: int = 300
     mcp_probe_timeout_seconds: int = 15
 
+    # Code map (phase 6b): the index command is argv (no shell); the project directory is appended last.
+    # Unverified against the real tool: an admin can correct it here.
+    code_map_index_command: list[str] = ["npx", "-y", "codebase-memory-mcp@0.12.1", "cli", "index_repository"]
+    code_map_scan_interval_seconds: int = 600
+    code_map_timeout_seconds: int = 900
+    code_map_stale_seconds: int = 1200
+    code_map_max_jobs: int = 2
+
     # GitHub webhook (auto-trigger reviews). Set the secret you configure in the
     # repo's webhook settings; blank disables signature verification.
     github_webhook_secret: str = ""

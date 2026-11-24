@@ -1,0 +1,46 @@
+"""Code map routes (phase 6b): status, refresh (maintainers) and the log tail."""
+
+from fastapi import APIRouter, HTTPException, Request
+
+from ..access import require_project_role
+from ..codemap import indexer, status
+from ..database import SessionLocal
+from ..models import Project
+from ..schemas import CodeMapLogOut, CodeMapOut
+
+router = APIRouter(prefix="/projects/{project_id}/code-map", tags=["code-map"])
+
+
+async def _project(s, project_id: str) -> Project:
+    project = await s.get(Project, project_id)
+    if project is None:
+        raise HTTPException(404, "Not found")
+    return project
+
+
+@router.get("", response_model=CodeMapOut)
+async def get_code_map(project_id: str, request: Request):
+    async with SessionLocal() as s:
+        await require_project_role(s, request.state.principal, project_id)
+        return await status.for_project(s, await _project(s, project_id))
+
+
+@router.post("/refresh", response_model=CodeMapOut)
+async def refresh_code_map(project_id: str, request: Request):
+    async with SessionLocal() as s:
+        await require_project_role(s, request.state.principal, project_id, "maintainer")
+        project = await _project(s, project_id)
+        if not project.code_map:
+            raise HTTPException(409, "Turn the code map on for this project first")
+        if not project.directory:
+            raise HTTPException(422, "The code map needs a project folder")
+        indexer.start(project_id, manual=True)
+        return await status.for_project(s, project)
+
+
+@router.get("/log", response_model=CodeMapLogOut)
+async def get_log(project_id: str, request: Request):
+    async with SessionLocal() as s:
+        await require_project_role(s, request.state.principal, project_id)
+        project = await _project(s, project_id)
+    return {"lines": await status.log_lines(project)}

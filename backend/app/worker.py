@@ -1889,10 +1889,12 @@ class WorkerManager:
             await questions.capture_final(task_id, ending=ending)
         except Exception as e:  # noqa: BLE001 - never breaks a finish
             log.warning("questions: capture failed for %s: %s", task_id, e)
+        codemap_project = None
         async with SessionLocal() as s:
             task = await s.get(Task, task_id)
             if task is None:
                 return
+            codemap_project = task.project_id
             task.status = status
             task.completed_at = completed_at
             task.run_pgid = task.run_proc_start = task.heartbeat_at = None
@@ -1928,6 +1930,14 @@ class WorkerManager:
             await guard_grants.after_task_finished(task_id, submit=self.submit)
         except Exception:  # noqa: BLE001 - never breaks a finish
             pass
+        # code map: refresh the project's index when its folder moved on (background; never fails the task)
+        if codemap_project:
+            try:
+                from .codemap import indexer as codemap_indexer
+
+                await codemap_indexer.maybe_refresh(codemap_project)
+            except Exception as e:  # noqa: BLE001
+                log.warning("codemap: refresh trigger failed for %s: %s", task_id, e)
         # token care: a step that crossed the fresh-session threshold continues in a fresh session
         await self._maybe_auto_continue(task_id)
 

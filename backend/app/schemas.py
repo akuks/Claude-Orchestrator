@@ -337,6 +337,8 @@ class ProjectUpdate(BaseModel):
     reference_project_ids: Optional[list[str]] = None
     # token care (phase 3b, maintainer-editable): null turns the fresh-session hand-over off.
     fresh_session_tokens: Optional[int] = Field(None, ge=50000, le=900000)
+    # code map (phase 6b, maintainer-editable): needs a project directory
+    code_map: Optional[bool] = None
 
 
 class ReadonlyPathIn(BaseModel):
@@ -374,6 +376,7 @@ class ProjectOut(BaseModel):
     fresh_session_tokens: Optional[int] = None
     # create/import only: why suggest_trust chose `trust`
     trust_reason: Optional[str] = None
+    code_map: bool = False
     licence: Optional[dict] = None
     licence_badge: Optional[dict] = None  # {label, tone}, computed by the server
     task_count: int = 0
@@ -1146,3 +1149,21 @@ class LaunchOut(BaseModel):
     launch: Optional[LaunchSettingsOut] = None
     items: list[LaunchItemOut] = []
     all_linked_done: dict[int, bool] = {}
+
+
+# ---- Code map (phase 6b) ----------------------------------------------------
+
+
+class CodeMapOut(BaseModel):
+    enabled: bool
+    status: str  # never | running | ok | failed
+    sha: Optional[str] = None
+    indexed_at: Optional[datetime] = None
+    behind: Optional[int] = None  # commits between sha and HEAD; null when unknown
+    error: Optional[str] = None
+    next_try_at: Optional[datetime] = None
+    server_registered: bool = False
+
+
+class CodeMapLogOut(BaseModel):
+    lines: list[str]

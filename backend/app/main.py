@@ -10,6 +10,7 @@ from sqlalchemy import select
 
 from . import mcp_manager
 from . import auth as auth_mod
+from .codemap import indexer as codemap_indexer
 from .asks.service import fail_interrupted_asks
 from .auth import current_principal
 from .config import settings
@@ -24,6 +25,7 @@ from .routers import (
     agents,
     approvals,
     auth,
+    codemap as codemap_router,
     context_docs,
     credentials,
     decisions,
@@ -59,6 +61,18 @@ async def _mcp_health_loop():
             await mcp_manager.health_check_all()
         except Exception:  # noqa: BLE001
             continue
+
+
+async def _codemap_scan_loop():
+    """Refresh stale code maps; the first pass also resets jobs a restart left `running`."""
+    first = True
+    while True:
+        try:
+            await codemap_indexer.scan_once(startup=first)
+        except Exception:  # noqa: BLE001
+            pass
+        first = False
+        await asyncio.sleep(settings.code_map_scan_interval_seconds)
 
 
 async def auto_reject_stale(submit=None) -> list[str]:
@@ -123,11 +137,14 @@ async def lifespan(app: FastAPI):
     await workflow_runner.start()
     health_task = asyncio.create_task(_mcp_health_loop())
     approval_task = asyncio.create_task(_approval_timeout_loop())
+    codemap_task = asyncio.create_task(_codemap_scan_loop())
     try:
         yield
     finally:
         health_task.cancel()
         approval_task.cancel()
+        codemap_task.cancel()
+        await codemap_indexer.shutdown()
         await workflow_runner.stop()
         await scheduler.stop()
         await worker.stop()
@@ -173,6 +190,7 @@ for _r in (
     projects.router,
     decisions.router,
     launch.router,
+    codemap_router.router,
     templates.router,
     schedules.router,
     approvals.router,

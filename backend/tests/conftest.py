@@ -38,6 +38,7 @@ os.environ.update(
         "CO_SCHEDULER_INTERVAL_SECONDS": "99999",
         "CO_WORKFLOW_RUNNER_INTERVAL_SECONDS": "1",
         "CO_APPROVAL_CHECK_INTERVAL_SECONDS": "99999",
+        "CO_CODE_MAP_SCAN_INTERVAL_SECONDS": "99999",
         # tests sweep explicitly (WorkerManager._sweep_once)
         "CO_RECOVERY_SWEEP_SECONDS": "99999",
         "CO_GITHUB_WEBHOOK_SECRET": "testsecret",
