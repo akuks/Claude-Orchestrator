@@ -210,9 +210,12 @@ function FixFields({ name, agents, repick }) {
   )
 }
 
-function GateFields({ name, projects, agents }) {
+// focus 'fix' shows only the fixer fields (the canvas's Fixer box); the rest
+// stay mounted, hidden, so the form keeps validating them.
+function GateFields({ name, projects, agents, focus }) {
   const form = Form.useFormInstance()
   const [repick, setRepick] = useState(false)
+  const fixOnly = focus === 'fix'
   // The fixer must belong to the check's project: a new project clears it.
   const projectChanged = () => {
     if (form.getFieldValue(['stages', name, 'fix', 'agent'])) {
@@ -220,71 +223,77 @@ function GateFields({ name, projects, agents }) {
       setRepick(true)
     }
   }
+  const fixFields = <FixFields name={name} agents={agents} repick={repick} />
   return (
     <>
-      <ProjectSelect name={name} projects={projects} required label="Where to run it" onChange={projectChanged} />
-      <Form.Item
-        label="Commands to run"
-        extra="Add one command per box. They run in order and stop at the first one that fails."
-        style={{ marginBottom: 14 }}
-      >
-        <Form.List name={[name, 'run']}>
-          {(rows, { add, remove }) => (
-            <>
-              {rows.map((r) => (
-                <div key={r.key} className="co-wf-row">
-                  <Form.Item name={r.name} rules={[cmdRule]} style={{ marginBottom: 6 }}>
-                    <Input placeholder="e.g. npm test" aria-label="Command" className="co-wf-mono" />
-                  </Form.Item>
-                  <Button type="text" danger icon={<DeleteOutlined />} disabled={rows.length <= 1} onClick={() => remove(r.name)} aria-label="Remove command" />
-                </div>
-              ))}
-              <Button size="small" type="dashed" icon={<PlusOutlined />} disabled={rows.length >= 10} onClick={() => add('')}>
-                Add a command
-              </Button>
-            </>
-          )}
-        </Form.List>
-      </Form.Item>
-      <MoreOptions name={name} kind="gate">
-        <Form.Item noStyle shouldUpdate>
-          {({ getFieldValue }) => {
-            const run = getFieldValue(['stages', name, 'run']) || []
-            const single = run.length === 1
-            return (
-              <Form.Item
-                name={[name, 'retry']}
-                label="If it fails, re-run only the failures with (optional)"
-                extra={
-                  single
-                    ? 'Then the full command runs once more. Only that full run can pass the step.'
-                    : 'This works only when there is exactly one command.'
-                }
-                dependencies={[['stages', name, 'run']]}
-                rules={[
-                  {
-                    validator: (_, v) => {
-                      if (!v || !single) return Promise.resolve()
-                      const r = checkCommand(v)
-                      if (r) return Promise.reject(new Error(r))
-                      if (v.trim() === (run[0] || '').trim()) return Promise.reject(new Error('this must differ from the command'))
-                      return Promise.resolve()
+      <div hidden={fixOnly}>
+        <ProjectSelect name={name} projects={projects} required label="Where to run it" onChange={projectChanged} />
+        <Form.Item
+          label="Commands to run"
+          extra="Add one command per box. They run in order and stop at the first one that fails."
+          style={{ marginBottom: 14 }}
+        >
+          <Form.List name={[name, 'run']}>
+            {(rows, { add, remove }) => (
+              <>
+                {rows.map((r) => (
+                  <div key={r.key} className="co-wf-row">
+                    <Form.Item name={r.name} rules={[cmdRule]} style={{ marginBottom: 6 }}>
+                      <Input placeholder="e.g. npm test" aria-label="Command" className="co-wf-mono" />
+                    </Form.Item>
+                    <Button type="text" danger icon={<DeleteOutlined />} disabled={rows.length <= 1} onClick={() => remove(r.name)} aria-label="Remove command" />
+                  </div>
+                ))}
+                <Button size="small" type="dashed" icon={<PlusOutlined />} disabled={rows.length >= 10} onClick={() => add('')}>
+                  Add a command
+                </Button>
+              </>
+            )}
+          </Form.List>
+        </Form.Item>
+      </div>
+      {fixOnly && fixFields}
+      <div hidden={fixOnly}>
+        <MoreOptions name={name} kind="gate">
+          <Form.Item noStyle shouldUpdate>
+            {({ getFieldValue }) => {
+              const run = getFieldValue(['stages', name, 'run']) || []
+              const single = run.length === 1
+              return (
+                <Form.Item
+                  name={[name, 'retry']}
+                  label="If it fails, re-run only the failures with (optional)"
+                  extra={
+                    single
+                      ? 'Then the full command runs once more. Only that full run can pass the step.'
+                      : 'This works only when there is exactly one command.'
+                  }
+                  dependencies={[['stages', name, 'run']]}
+                  rules={[
+                    {
+                      validator: (_, v) => {
+                        if (!v || !single) return Promise.resolve()
+                        const r = checkCommand(v)
+                        if (r) return Promise.reject(new Error(r))
+                        if (v.trim() === (run[0] || '').trim()) return Promise.reject(new Error('this must differ from the command'))
+                        return Promise.resolve()
+                      },
                     },
-                  },
-                ]}
-                style={{ marginBottom: 14 }}
-              >
-                <Input disabled={!single} placeholder="e.g. npm test -- --only-failures" data-testid="gate-retry" className="co-wf-mono" />
-              </Form.Item>
-            )
-          }}
-        </Form.Item>
-        <FixFields name={name} agents={agents} repick={repick} />
-        <BeforeList name={name} />
-        <Form.Item name={[name, 'timeout_min']} label="Give up after (minutes)" style={{ marginBottom: 0 }}>
-          <InputNumber min={1} max={720} precision={0} style={{ width: '100%' }} />
-        </Form.Item>
-      </MoreOptions>
+                  ]}
+                  style={{ marginBottom: 14 }}
+                >
+                  <Input disabled={!single} placeholder="e.g. npm test -- --only-failures" data-testid="gate-retry" className="co-wf-mono" />
+                </Form.Item>
+              )
+            }}
+          </Form.Item>
+          {!fixOnly && fixFields}
+          <BeforeList name={name} />
+          <Form.Item name={[name, 'timeout_min']} label="Give up after (minutes)" style={{ marginBottom: 0 }}>
+            <InputNumber min={1} max={720} precision={0} style={{ width: '100%' }} />
+          </Form.Item>
+        </MoreOptions>
+      </div>
     </>
   )
 }
@@ -320,16 +329,18 @@ function AutoRetry({ name }) {
   )
 }
 
-export default function StageFields({ name, projects = [], agents = [], agentFields }) {
+// showKind: the step type picker (off in the canvas editor, where the type is
+// chosen when the step is added). focus: 'fix' for a check's fixer fields only.
+export default function StageFields({ name, projects = [], agents = [], agentFields, showKind = true, focus }) {
   return (
     <Form.Item noStyle shouldUpdate>
       {({ getFieldValue }) => {
         const kind = getFieldValue(['stages', name, 'kind']) || 'agent'
         return (
           <>
-            <KindSelect name={name} kind={kind} />
+            {showKind && <KindSelect name={name} kind={kind} />}
             {kind === 'gate' ? (
-              <GateFields name={name} projects={projects} agents={agents} />
+              <GateFields name={name} projects={projects} agents={agents} focus={focus} />
             ) : kind === 'approval' ? (
               <ApprovalFields name={name} projects={projects} />
             ) : (

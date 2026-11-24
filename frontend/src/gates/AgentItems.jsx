@@ -69,7 +69,9 @@ function AgentMore({ stageName, itemName }) {
 // The agents of one "Agents do the work" step. Each agent stacks: who does it,
 // then what they should do, then buttons that insert the shared values.
 // `stageName` is the Form.List name of the step, `stepIndex` its position.
-export default function AgentItems({ stageName, stepIndex, agentOptions = [] }) {
+// `only`: show just that agent (the others stay mounted, hidden, so the form
+// still checks them); `showAdd` hides "Add another agent" when false.
+export default function AgentItems({ stageName, stepIndex, agentOptions = [], only = null, showAdd = true }) {
   const form = Form.useFormInstance()
   const stages = Form.useWatch('stages', form)
   const named = earlierOutputs(stages, stepIndex)
@@ -83,7 +85,7 @@ export default function AgentItems({ stageName, stepIndex, agentOptions = [] }) 
       {(items, { add, remove }) => (
         <div className="co-wf-agents">
           {items.map((item, ai) => (
-            <div key={item.key} className="co-wf-agent" data-testid="agent-item">
+            <div key={item.key} className="co-wf-agent" data-testid="agent-item" hidden={only != null && ai !== only}>
               <div className="co-wf-agent-top">
                 <Form.Item
                   name={[item.name, 'agent']}
@@ -141,9 +143,11 @@ export default function AgentItems({ stageName, stepIndex, agentOptions = [] }) 
               <AgentMore stageName={stageName} itemName={item.name} />
             </div>
           ))}
-          <Button size="small" type="dashed" icon={<PlusOutlined />} onClick={() => add({})}>
-            Add another agent
-          </Button>
+          {showAdd && (
+            <Button size="small" type="dashed" icon={<PlusOutlined />} onClick={() => add({})}>
+              Add another agent
+            </Button>
+          )}
         </div>
       )}
     </Form.List>
