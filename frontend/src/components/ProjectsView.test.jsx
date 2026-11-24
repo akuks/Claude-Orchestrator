@@ -150,4 +150,26 @@ describe('licence badge (phase 6a)', () => {
     expect(api.refreshLicence).toHaveBeenCalledWith('p1')
     expect(onSaved).toHaveBeenCalled()
   })
+  describe('licence line wording', () => {
+    const line = async (project) => {
+      view = await render(<LicenceCheck project={{ id: 'p1', licence_badge: null, ...project }} canEdit onSaved={vi.fn()} />)
+      await flush()
+      return document.querySelector('[data-testid="licence-line"]').textContent
+    }
+    it('not checked yet, with the maintainer link', async () => {
+      const txt = await line({ licence: null })
+      expect(txt).toContain('Licence: not checked yet')
+      expect(txt).toContain('Check again')
+      expect(txt).not.toContain('not shown for your own code')
+    })
+    it('unknown is not recognised', async () => {
+      expect(await line({ licence: { kind: 'unknown', id: 'x' } })).toContain('Licence: not recognised')
+    })
+    it('none says no licence file', async () => {
+      expect(await line({ licence: { kind: 'none' } })).toContain('No licence file found')
+    })
+    it('a permissive own licence shows its name', async () => {
+      expect(await line({ trust: 'own', licence: { kind: 'permissive', id: 'MIT' } })).toContain('Licence: MIT')
+    })
+  })
 })

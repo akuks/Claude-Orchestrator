@@ -378,14 +378,19 @@ export function LicenceCheck({ project, canEdit, onSaved }) {
       setBusy(false)
     }
   }
+  const lic = project.licence
+  const kind = lic?.kind
+  const plain = !lic ? 'not checked yet' : kind === 'unknown' ? 'not recognised' : String(lic.id || lic.name || 'not recognised')
   return (
     <div style={{ marginBottom: 12 }} data-testid="licence-line">
-      <Typography.Text type="secondary">Licence: </Typography.Text>
-      <LicenceBadge project={project} />
-      {!project.licence_badge && (
-        <Typography.Text type="secondary">
-          {project.licence?.id && project.licence.kind !== 'unknown' ? String(project.licence.id) : 'not shown for your own code'}
-        </Typography.Text>
+      {kind === 'none' && !project.licence_badge ? (
+        <Typography.Text type="secondary">No licence file found</Typography.Text>
+      ) : (
+        <>
+          <Typography.Text type="secondary">Licence: </Typography.Text>
+          <LicenceBadge project={project} />
+          {!project.licence_badge && <Typography.Text type="secondary">{plain}</Typography.Text>}
+        </>
       )}
       {canEdit && (
         <Typography.Link onClick={busy ? undefined : again} data-testid="licence-check-again" style={{ marginLeft: 8 }}>

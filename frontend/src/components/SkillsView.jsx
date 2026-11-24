@@ -160,7 +160,7 @@ export default function SkillsView({ projects = [], isAdmin = false }) {
     setBusy(row.id)
     try {
       const r = await api.updateSkillPack(row.id)
-      message.success(`Updated to ${short(r.to)}`)
+      message.success('Skill pack updated.')
       if (r.lint?.length) setUpdated({ name: row.name, results: r.lint })
       await refresh()
     } catch (e) {
@@ -188,12 +188,14 @@ export default function SkillsView({ projects = [], isAdmin = false }) {
       render: (n, row) => (
         <div>
           <b>{n}</b> {row.version && <Tag>{`v${row.version}`}</Tag>}
-          {row.current_sha && (
-            <Tooltip title={`Commit ${row.current_sha}`}>
-              <Tag style={{ marginLeft: 4 }} data-testid={`sha-${row.id}`}>{short(row.current_sha)}</Tag>
-            </Tooltip>
-          )}
+          {row.update_available && <Tag color="blue" style={{ marginLeft: 4 }}>New version available</Tag>}
           {row.description && <div style={{ fontSize: 12, color: 'var(--co-text-secondary)' }}>{row.description}</div>}
+          {row.current_sha && (
+            <details style={{ fontSize: 12, color: 'var(--co-text-secondary)' }} data-testid={`details-${row.id}`}>
+              <summary>Details</summary>
+              <span data-testid={`sha-${row.id}`}>Version id: {short(row.current_sha)}</span>
+            </details>
+          )}
         </div>
       ),
     },
@@ -228,7 +230,7 @@ export default function SkillsView({ projects = [], isAdmin = false }) {
                 onConfirm={() => applyUpdate(row)}
               >
                 <Button size="small" type="primary" data-testid={`update-pack-${row.id}`}>
-                  Update to {short(row.latest_sha)}
+                  Update
                 </Button>
               </Popconfirm>
             )}
