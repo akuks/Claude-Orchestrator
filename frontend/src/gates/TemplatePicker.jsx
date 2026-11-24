@@ -1,7 +1,8 @@
 import { useEffect, useState } from 'react'
-import { Alert, Button, Empty, Modal } from 'antd'
+import { Alert, Button, Empty, Modal, Space } from 'antd'
 import { api } from '../api'
-import StepFlow from './StepFlow'
+import FlowPreview from '../flow/FlowPreview'
+import MiniFlow from '../flow/MiniFlow'
 import './workflows.css'
 
 export const GATE_HINT = "Set your project's own test command in the check step."
@@ -29,7 +30,7 @@ export function missingAgents(stages, agents) {
   return out
 }
 
-function TemplateCard({ t, onPick }) {
+function TemplateCard({ t, onPick, onOpen }) {
   return (
     <div className="co-wf-tpl" data-testid="template-item">
       <div className="co-wf-tpl-head">
@@ -39,7 +40,7 @@ function TemplateCard({ t, onPick }) {
         </Button>
       </div>
       {t.description && <div className="co-wf-tpl-desc">{t.description}</div>}
-      <StepFlow stages={t.stages || []} />
+      <MiniFlow steps={t.stages || []} label={`See the steps of ${t.name}`} onOpen={() => onOpen(t)} />
     </div>
   )
 }
@@ -49,6 +50,7 @@ function TemplateCard({ t, onPick }) {
 export default function TemplatePicker({ open, onClose, onPick, presets = [] }) {
   const [templates, setTemplates] = useState([])
   const [error, setError] = useState('')
+  const [preview, setPreview] = useState(null)
 
   useEffect(() => {
     if (!open) return
@@ -66,7 +68,7 @@ export default function TemplatePicker({ open, onClose, onPick, presets = [] }) 
       ) : (
         <div className="co-wf-tpl-grid">
           {templates.map((t) => (
-            <TemplateCard key={t.key || t.name} t={t} onPick={onPick} />
+            <TemplateCard key={t.key || t.name} t={t} onPick={onPick} onOpen={setPreview} />
           ))}
         </div>
       )}
@@ -75,11 +77,34 @@ export default function TemplatePicker({ open, onClose, onPick, presets = [] }) 
           <h3 className="co-wf-group">Your team's</h3>
           <div className="co-wf-tpl-grid" data-testid="team-templates">
             {presets.map((t) => (
-              <TemplateCard key={t.name} t={t} onPick={onPick} />
+              <TemplateCard key={t.name} t={t} onPick={onPick} onOpen={setPreview} />
             ))}
           </div>
         </>
       )}
+      <FlowPreview
+        open={!!preview}
+        title={preview?.name}
+        description={preview?.description}
+        steps={preview?.stages}
+        onClose={() => setPreview(null)}
+        footer={
+          <Space>
+            <Button onClick={() => setPreview(null)}>Back</Button>
+            <Button
+              type="primary"
+              onClick={() => {
+                const t = preview
+                setPreview(null)
+                onPick(t)
+              }}
+              data-testid="preview-use"
+            >
+              Use this
+            </Button>
+          </Space>
+        }
+      />
     </Modal>
   )
 }

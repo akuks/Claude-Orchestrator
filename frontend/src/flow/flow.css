@@ -582,3 +582,18 @@ html[data-reduce-motion='true'] .co-flow-plus-pulse {
     transition: none;
   }
 }
+
+/* A mini canvas that opens the full view. */
+.co-flow-open {
+  border-radius: 10px;
+  padding: 6px;
+  margin: -6px;
+  cursor: pointer;
+  outline: none;
+}
+.co-flow-open:hover {
+  background: var(--co-hover);
+}
+.co-flow-open:focus-visible {
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--co-primary) 45%, transparent);
+}

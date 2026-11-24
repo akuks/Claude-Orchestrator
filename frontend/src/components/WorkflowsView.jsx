@@ -19,11 +19,12 @@ import { api } from '../api'
 import { useRoute } from '../shell/router'
 import StageFields from '../gates/StageFields'
 import AgentItems from '../gates/AgentItems'
-import StepFlow from '../gates/StepFlow'
 import TemplatePicker, { missingAgents, templateHint } from '../gates/TemplatePicker'
 import ImportWorkflow from '../gates/ImportWorkflow'
 import { RUN_STATUS_COLOR, budgetPayload, exportFileName, formStage, runStatusText, runStepText, stageKind, stagePayload } from '../gates/gates'
 import FlowCanvas from '../flow/FlowCanvas'
+import FlowPreview from '../flow/FlowPreview'
+import MiniFlow from '../flow/MiniFlow'
 import { errorBoxes, fieldSelection, newStep, selAfterMove, selAfterRemove } from '../flow/flow'
 import '../gates/workflows.css'
 
@@ -347,7 +348,7 @@ function RunDialog({ workflow, onClose, onRan }) {
 }
 
 // ---- One workflow card -----------------------------------------------------
-function WorkflowCard({ w, isAdmin, onRun, onEdit, onExport, onDelete }) {
+function WorkflowCard({ w, isAdmin, agents, onRun, onEdit, onExport, onDelete, onOpen }) {
   const items = [
     isAdmin && { key: 'edit', label: 'Edit', icon: <EditOutlined /> },
     { key: 'export', label: 'Export', icon: <DownloadOutlined /> },
@@ -368,7 +369,15 @@ function WorkflowCard({ w, isAdmin, onRun, onEdit, onExport, onDelete }) {
   }
   const n = (w.stages || []).length
   return (
-    <article className="co-wf-card" data-testid="workflow-card">
+    <article
+      className="co-wf-card"
+      data-testid="workflow-card"
+      onClick={(e) => {
+        // The card body opens the read-only view; its own buttons and menus do their own thing.
+        if (e.target.closest?.('button, a, .ant-dropdown, [data-testid="flow-open"]')) return
+        onOpen(w)
+      }}
+    >
       <div className="co-wf-card-head">
         <div className="co-wf-card-name">{w.name}</div>
         <Dropdown menu={{ items, onClick: onMenu }} trigger={['click']}>
@@ -376,7 +385,7 @@ function WorkflowCard({ w, isAdmin, onRun, onEdit, onExport, onDelete }) {
         </Dropdown>
       </div>
       {w.description && <p className="co-wf-card-desc">{w.description}</p>}
-      <StepFlow stages={w.stages || []} />
+      <MiniFlow steps={w.stages || []} agents={agents} label={`Open ${w.name}`} onOpen={() => onOpen(w)} />
       <div className="co-wf-card-foot">
         <span>{n === 1 ? '1 step' : `${n} steps`}</span>
         <Button type="primary" icon={<PlayCircleOutlined />} onClick={() => onRun(w)}>
@@ -400,6 +409,7 @@ export default function WorkflowsView({ agents = [], isAdmin = false, runWorkflo
   const [pickerOpen, setPickerOpen] = useState(false)
   const [importOpen, setImportOpen] = useState(false)
   const [runWf, setRunWf] = useState(null)
+  const [viewing, setViewing] = useState(null)
   const [, navigate] = useRoute()
   const [loaded, setLoaded] = useState(false)
   const [loadFailed, setLoadFailed] = useState(false)
@@ -546,7 +556,7 @@ export default function WorkflowsView({ agents = [], isAdmin = false, runWorkflo
       ) : (
         <div className="co-wf-grid">
           {workflows.map((w) => (
-            <WorkflowCard key={w.id} w={w} isAdmin={isAdmin} onRun={setRunWf} onEdit={openEdit} onExport={exportWf} onDelete={remove} />
+            <WorkflowCard key={w.id} w={w} isAdmin={isAdmin} agents={agents} onRun={setRunWf} onEdit={openEdit} onExport={exportWf} onDelete={remove} onOpen={setViewing} />
           ))}
         </div>
       )}
@@ -572,6 +582,44 @@ export default function WorkflowsView({ agents = [], isAdmin = false, runWorkflo
       <TemplatePicker open={pickerOpen} presets={presets} onClose={() => setPickerOpen(false)} onPick={fromTemplate} />
       <ImportWorkflow open={importOpen} onClose={() => setImportOpen(false)} onImported={imported} />
       <WorkflowEditor open={modalOpen} workflow={editing} prefill={prefill} hint={hint} missing={missing} agents={agents} onClose={() => setModalOpen(false)} onSaved={refresh} />
+      <FlowPreview
+        open={!!viewing}
+        title={viewing?.name}
+        description={viewing?.description}
+        steps={viewing?.stages}
+        agents={agents}
+        onClose={() => setViewing(null)}
+        footer={
+          <Space>
+            <Button onClick={() => setViewing(null)}>Close</Button>
+            {isAdmin && (
+              <Button
+                icon={<EditOutlined />}
+                onClick={() => {
+                  const w = viewing
+                  setViewing(null)
+                  openEdit(w)
+                }}
+                data-testid="preview-edit"
+              >
+                Edit
+              </Button>
+            )}
+            <Button
+              type="primary"
+              icon={<PlayCircleOutlined />}
+              onClick={() => {
+                const w = viewing
+                setViewing(null)
+                setRunWf(w)
+              }}
+              data-testid="preview-run"
+            >
+              Run
+            </Button>
+          </Space>
+        }
+      />
       {runWf && <RunDialog workflow={runWf} onClose={() => setRunWf(null)} onRan={(id) => navigate({ page: 'runs', id })} />}
     </>
   )

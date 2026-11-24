@@ -82,17 +82,19 @@ describe('WorkflowsView: stage kinds', () => {
     return api.updateWorkflow.mock.calls[0]?.[1]
   }
 
-  it('lists check and person steps as a readable flow', async () => {
+  it('each card draws its steps as a small flow', async () => {
     api.listWorkflows.mockResolvedValue([
       { id: 'w1', name: 'Ship', stages: [{ name: 'Dev', items: [{ agent: 'a' }, { agent: 'b' }] }, { name: 'Tests', kind: 'gate', run: ['x'] }, { name: 'Sign', kind: 'approval' }] },
     ])
     view = await render(<WorkflowsView />)
     await flush()
-    const pills = [...view.container.querySelectorAll('[data-testid="flow-step"]')]
-    expect(pills.map((p) => p.dataset.kind)).toEqual(['agent', 'gate', 'approval'])
-    expect(pills[0].textContent).toContain('2 at once')
-    expect(pills[1].textContent).toContain('Run a check: Tests')
-    expect(pills[2].textContent).toContain('Ask a person: Sign')
+    const card = view.container.querySelector('[data-testid="workflow-card"]')
+    const canvas = card.querySelector('[data-testid="flow-canvas"]')
+    expect(canvas.className).toContain('co-flow-mini')
+    expect([...canvas.querySelectorAll('[data-testid="flow-step"]')].map((p) => p.dataset.kind)).toEqual(['agent', 'gate', 'approval'])
+    // two agents side by side in the first step, then the check and the person
+    expect([...canvas.querySelectorAll('[data-testid="flow-box"]')].map((b) => b.textContent)).toEqual(['a', 'b', 'Tests', 'Sign'])
+    expect(canvas.querySelector('[data-testid="flow-box"]').getAttribute('title')).toBe('Step 1, Agent 1 of 2: a')
     expect(view.container.textContent).not.toMatch(/gate|pipeline/i)
   })
 
@@ -345,5 +347,60 @@ describe('WorkflowsView: the canvas editor', () => {
     await click(drawer().querySelector('[data-testid="flow-add-agent"]'))
     expect(drawer().querySelectorAll('[data-testid="flow-box"]').length).toBe(3)
     expect(box('Step 2, Agent 2 of 2').getAttribute('aria-pressed')).toBe('true')
+  })
+})
+
+describe('WorkflowsView: opening a card', () => {
+  let view
+  beforeAll(() => {
+    window.matchMedia ||= () => ({ matches: false, addListener() {}, removeListener() {}, addEventListener() {}, removeEventListener() {} })
+  })
+  afterEach(async () => {
+    await view?.unmount()
+    view = null
+    vi.clearAllMocks()
+  })
+  const click = async (el) => {
+    await act(async () => el.dispatchEvent(new MouseEvent('click', { bubbles: true })))
+    await flush()
+  }
+  const W = { id: 'w1', name: 'Ship', description: 'ships it', stages: [{ name: 'Dev', items: [{ agent: 'a', prompt: 'do' }] }, { name: 'Tests', kind: 'gate', run: ['npm test'] }] }
+
+  it('the card body opens the full read-only canvas with Edit and Run', async () => {
+    api.listWorkflows.mockResolvedValue([W])
+    view = await render(<WorkflowsView isAdmin />)
+    await flush()
+    await click(view.container.querySelector('[data-testid="flow-open"]'))
+    const pv = document.body.querySelector('[data-testid="flow-preview"]')
+    expect(pv).not.toBeNull()
+    const canvas = pv.querySelector('[data-testid="flow-canvas"]')
+    expect(canvas.className).toContain('co-flow-full')
+    expect(canvas.querySelector('[data-testid="flow-plus"]')).toBeNull()
+    expect(canvas.textContent).toContain('npm test')
+    expect(document.body.querySelector('[data-testid="preview-edit"]')).not.toBeNull()
+    await click(document.body.querySelector('[data-testid="preview-run"]'))
+    expect(document.body.querySelector('textarea[aria-label="What to run it on"]')).not.toBeNull()
+  })
+
+  it('people who are not admins get Run but no Edit; Enter on the drawing opens it', async () => {
+    api.listWorkflows.mockResolvedValue([W])
+    view = await render(<WorkflowsView />)
+    await flush()
+    const open = view.container.querySelector('[data-testid="flow-open"]')
+    await act(async () => open.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true })))
+    await flush()
+    expect(document.body.querySelector('[data-testid="flow-preview"]')).not.toBeNull()
+    expect(document.body.querySelector('[data-testid="preview-edit"]')).toBeNull()
+    expect(document.body.querySelector('[data-testid="preview-run"]')).not.toBeNull()
+  })
+
+  it('Edit in the view opens the editor', async () => {
+    api.listWorkflows.mockResolvedValue([W])
+    view = await render(<WorkflowsView isAdmin />)
+    await flush()
+    await click(view.container.querySelector('.co-wf-card-desc'))
+    await click(document.body.querySelector('[data-testid="preview-edit"]'))
+    await flush()
+    expect(document.body.querySelector('.ant-drawer-open .ant-drawer-title').textContent).toBe('Edit “Ship”')
   })
 })
