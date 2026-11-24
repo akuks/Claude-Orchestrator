@@ -1709,6 +1709,7 @@ class WorkerManager:
         each ``band`` -> a ``usage_band`` event {band, value} and a TaskUsage.bands entry {band, ts}, at most
         once per band name (the row decides). With no live state (a crashed run's recovery) the whole spool
         is read and only bands are recorded. Each ``decisions`` nudge -> a ``decision_note`` event {ids, path}
+        and each ``code_map`` nudge -> a ``code_map`` event {fresh, decisions, old_code}
         (live state only: a recovery's re-read would repeat the ones already shown). Never raises."""
         live = task_id in self._usage_spool
         state = self._usage_spool.get(task_id) or self._new_usage_spool()
@@ -1722,8 +1723,9 @@ class WorkerManager:
                     if await self._record_band(task_id, band, ts):
                         await emit("usage_band", {"band": band, "value": value})
                     state["pending"].pop(0)
-                while state["notes"]:  # phase 4a: decisions co-guard showed before an edit
-                    await emit("decision_note", state["notes"][0])
+                while state["notes"]:  # phase 4a / 6b: decision notes and code map answers co-guard showed
+                    etype, payload = state["notes"][0]
+                    await emit(etype, payload)
                     state["notes"].pop(0)
             except Exception as e:  # noqa: BLE001 - usage bookkeeping never stops a run
                 log.warning("usage: band ingest failed for %s: %s", task_id, e)
@@ -1738,7 +1740,11 @@ class WorkerManager:
             if rec.get("nudge") == "decisions":
                 note = cls._decision_note(rec)
                 if note is not None:
-                    state.setdefault("notes", []).append(note)
+                    state.setdefault("notes", []).append(("decision_note", note))
+            elif rec.get("nudge") == "code_map":
+                note = cls._code_map_line(rec)
+                if note is not None:
+                    state.setdefault("notes", []).append(("code_map", note))
             band = rec.get("band")
             if band is not None and band not in cls.USAGE_BANDS:
                 continue  # not a record co-guard writes
@@ -1761,6 +1767,17 @@ class WorkerManager:
         if not ids or not isinstance(path, str):
             return None
         return {"ids": ids, "path": path[:300]}
+
+    @staticmethod
+    def _code_map_line(rec: dict) -> dict | None:
+        """co-guard's ``code_map`` nudge line -> the ``code_map`` payload ``{fresh, decisions, old_code}``
+        (None when it is not one co-guard writes)."""
+        fresh = rec.get("fresh")
+        ids = rec.get("decisions")
+        if (fresh is not None and not isinstance(fresh, bool)) or not isinstance(ids, list):
+            return None
+        ids = [i for i in ids if isinstance(i, int) and not isinstance(i, bool) and i > 0][:3]
+        return {"fresh": fresh, "decisions": ids, "old_code": rec.get("old_code") is True}
 
     @staticmethod
     async def _record_band(task_id: str, band: str, ts) -> bool:
