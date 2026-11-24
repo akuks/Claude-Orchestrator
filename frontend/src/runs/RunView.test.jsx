@@ -21,20 +21,6 @@ vi.mock('../components/TaskDetail', () => ({
   default: ({ taskId }) => <div data-testid="task-detail-stub">{taskId}</div>,
 }))
 
-// Records the stages handed to the timeline, rendering the real component.
-const seen = vi.hoisted(() => ({ stages: [] }))
-vi.mock('../comets/Comets3D', async (importOriginal) => {
-  const m = await importOriginal()
-  const { createElement } = await import('react')
-  return {
-    ...m,
-    default: (p) => {
-      if (p.variant === 'timeline') seen.stages.push(p.stages)
-      return createElement(m.default, p)
-    },
-  }
-})
-
 import { api } from '../api'
 import RunView, { totalsLine } from './RunView'
 import { canManageRun, defaultTaskFor, earlierAttemptTasks, runStages, stageState, tasksOfStage } from './runStages'
@@ -199,8 +185,8 @@ describe('RunView', () => {
     const sub = c.querySelector('[data-testid="run-subtitle"]').textContent
     expect(sub).toContain('Canonizer')
     expect(sub).toContain('you')
-    // reduced motion (matchMedia true) → SVG timeline with 3 stage buttons
-    const stages = c.querySelectorAll('[data-testid="timeline-stage"]')
+    // the flow canvas: one box per step (these steps list no agents)
+    const stages = c.querySelectorAll('[data-testid="flow-box"]')
     expect(stages.length).toBe(3)
     expect(stages[1].getAttribute('aria-pressed')).toBe('true')
     expect(c.querySelector('[data-testid="task-detail-stub"]').textContent).toBe('c')
@@ -227,47 +213,105 @@ describe('RunView', () => {
     }))
     const onSelectStage = vi.fn()
     const c = await mount({ stage: 0, onSelectStage })
-    let stages = c.querySelectorAll('[data-testid="timeline-stage"]')
+    let stages = c.querySelectorAll('[data-testid="flow-box"]')
     expect(stages[0].getAttribute('aria-pressed')).toBe('true')
     expect(c.querySelector('[data-testid="task-detail-stub"]').textContent).toBe('a')
     await act(async () => stages[2].click())
     expect(onSelectStage).toHaveBeenCalledWith(2)
     // the route (not local state) moves the selection: Back/Forward restore it
-    expect(c.querySelectorAll('[data-testid="timeline-stage"]')[0].getAttribute('aria-pressed')).toBe('true')
+    expect(c.querySelectorAll('[data-testid="flow-box"]')[0].getAttribute('aria-pressed')).toBe('true')
     await view.rerender(
       <RunView id="r1" user={{ id: 'u1', role: 'member' }} projects={[]} navigate={() => {}} stage={1} onSelectStage={onSelectStage} />,
     )
-    stages = c.querySelectorAll('[data-testid="timeline-stage"]')
+    stages = c.querySelectorAll('[data-testid="flow-box"]')
     expect(stages[1].getAttribute('aria-pressed')).toBe('true')
     expect(c.querySelector('[data-testid="task-detail-stub"]').textContent).toBe('c')
     // an out-of-range stage falls back to the head stage
     await view.rerender(
       <RunView id="r1" user={{ id: 'u1', role: 'member' }} projects={[]} navigate={() => {}} stage={9} onSelectStage={onSelectStage} />,
     )
-    expect(c.querySelectorAll('[data-testid="timeline-stage"]')[1].getAttribute('aria-pressed')).toBe('true')
+    expect(c.querySelectorAll('[data-testid="flow-box"]')[1].getAttribute('aria-pressed')).toBe('true')
   })
 
-  it('keeps the same stages object across polls that change nothing', async () => {
+  it('a poll that changes a task updates its box on the canvas', async () => {
     vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval'] })
     try {
       api.getWorkflowRun.mockImplementation(async () => ({ run: run(), tasks: [t('c', 1, 'running')] }))
-      await mount()
-      const first = seen.stages.at(-1)
-      seen.stages.length = 0
-      await act(async () => vi.advanceTimersByTime(3100))
-      await flush()
-      expect(api.getWorkflowRun).toHaveBeenCalledTimes(2)
-      expect(seen.stages.length).toBeGreaterThan(0)
-      expect(seen.stages.every((s) => s === first)).toBe(true)
-      // a real change does produce new stages
+      const c = await mount()
+      const status = () => [...c.querySelectorAll('[data-testid="flow-box"]')].map((b) => b.dataset.status)
+      expect(status()).toEqual(['done', 'running', 'next'])
       api.getWorkflowRun.mockImplementation(async () => ({ run: run(), tasks: [t('c', 1, 'completed')] }))
       await act(async () => vi.advanceTimersByTime(3100))
       await flush()
-      expect(seen.stages.at(-1)).not.toBe(first)
-      expect(seen.stages.at(-1)[1].state).toBe('done')
+      expect(status()[1]).toBe('done')
     } finally {
       vi.useRealTimers()
     }
+  })
+
+  it('draws the run as a flow: each agent has its own status, and clicking it opens its task', async () => {
+    api.getWorkflowRun.mockImplementation(async () => ({
+      run: run({
+        current_stage: 1,
+        stages: [
+          { name: 'Plan', items: [{ agent: 'Planner' }] },
+          { name: 'Develop', items: [{ agent: 'Dev' }, { agent: 'Docs' }] },
+          { name: 'Tests', kind: 'gate', run: ['npm test'], project: 'p1' },
+          { name: 'Sign', kind: 'approval' },
+        ],
+      }),
+      tasks: [
+        t('a', 0, 'completed', { title: '[Plan] Planner: plan' }),
+        t('d', 1, 'running', { title: '[Develop] Dev: build' }),
+        t('e', 1, 'completed', { title: '[Develop] Docs: write' }),
+      ],
+    }))
+    const onSelectStage = vi.fn()
+    const c = await mount({ stage: 1, onSelectStage })
+    const canvas = c.querySelector('.co-run-timeline [data-testid="flow-canvas"]')
+    expect(canvas.className).toContain('co-flow-mode-run')
+    const boxes = [...canvas.querySelectorAll('[data-testid="flow-box"]')]
+    expect(boxes.map((b) => b.getAttribute('aria-label'))).toEqual([
+      'Step 1, Agent: Planner, done',
+      'Step 2, Agent 1 of 2: Dev, running',
+      'Step 2, Agent 2 of 2: Docs, done',
+      'Step 3, Check: Tests, not started',
+      'Step 4, Ask a person: Sign, not started',
+    ])
+    expect(boxes[1].className).toContain('co-flow-st-running')
+    // the selected step: both of its agents
+    expect(boxes.map((b) => b.getAttribute('aria-pressed'))).toEqual(['false', 'true', 'true', 'false', 'false'])
+    expect(canvas.querySelector('[aria-label="Start, running on: build teams page"]')).not.toBeNull()
+    // the default task of the step is the running one; clicking Docs opens Docs's task
+    expect(c.querySelector('[data-testid="task-detail-stub"]').textContent).toBe('d')
+    await act(async () => boxes[2].click())
+    expect(onSelectStage).toHaveBeenCalledWith(1)
+    expect(c.querySelector('[data-testid="task-detail-stub"]').textContent).toBe('e')
+    // the line into the running step is coloured, later ones muted
+    const links = [...canvas.querySelectorAll('[data-testid="flow-link"]')].map((l) => l.className)
+    expect(links[0]).toContain('reached')
+    expect(links[1]).toContain('reached')
+    expect(links[2]).toContain('muted')
+    expect(links[4]).toContain('muted')
+  })
+
+  it('a check being fixed shows as failed with its fixer running; the fixer opens the fix task', async () => {
+    api.getWorkflowRun.mockImplementation(async () => ({
+      run: run({ current_stage: 1, stages: [{ name: 'Plan', items: [] }, { name: 'Tests', kind: 'gate', run: ['pytest -q'], project: 'p1', fix: { agent: 'ag1', rounds: 2 } }] }),
+      tasks: [t('a', 0, 'completed'), t('fx', 1, 'running', { title: '[Tests] Fixer: fix round 1' })],
+      stage_state: { 1: { status: 'fixing', fix_round: 1, fix_task: 'fx', attempt: 0 } },
+      gate_runs: [],
+    }))
+    const c = await mount()
+    const boxes = [...c.querySelectorAll('[data-testid="flow-box"]')]
+    expect(boxes.map((b) => [b.dataset.kind, b.dataset.status])).toEqual([
+      ['agent', 'done'],
+      ['gate', 'failed'],
+      ['fix', 'running'],
+    ])
+    expect(c.querySelector('[data-testid="task-detail-stub"]')).toBeNull()
+    await act(async () => boxes[2].click())
+    expect(c.querySelector('[data-testid="task-detail-stub"]').textContent).toBe('fx')
   })
 
   it('marks a stage whose agents run in parallel', async () => {
@@ -280,7 +324,7 @@ describe('RunView', () => {
     expect(head.querySelector('[data-testid="run-stage-parallel"]')?.textContent).toBe('2 agents at once')
   })
 
-  it('a gate stage renders GateCard (timeline still renders) and the totals line shows', async () => {
+  it('a gate stage renders GateCard (the canvas still renders) and the totals line shows', async () => {
     api.getWorkflowRun.mockImplementation(async () => ({
       run: run({ current_stage: 1, stages: [{ name: 'Plan', items: [] }, { name: 'Tests', kind: 'gate', run: ['pytest -q'], project: 'p1' }] }),
       tasks: [t('a', 0, 'completed')],
@@ -294,7 +338,7 @@ describe('RunView', () => {
     expect(c.querySelector('[data-testid="gate-card"]')).not.toBeNull()
     expect(c.querySelector('[data-testid="gate-words"]').textContent).toContain('not yet passed (0 of 1 commands passed')
     expect(c.querySelector('[data-testid="run-totals-line"]').textContent).toBe('So far: $1.23 over 2 tasks')
-    expect(seen.stages.at(-1).map((s) => s.task_count)).toEqual([1, 0])
+    expect([...c.querySelectorAll('[data-testid="flow-box"]')].map((b) => b.dataset.status)).toEqual(['done', 'running'])
     const lines = [...c.querySelectorAll('[data-testid="run-log"] li')].map((l) => l.textContent)
     expect(lines[0]).toContain('second line')
   })
@@ -311,7 +355,7 @@ describe('RunView', () => {
     expect(d.open).toBe(false)
     const outer = [...c.querySelectorAll('.co-run-tasks')].filter((u) => !d.contains(u))
     expect(outer[0].querySelectorAll('[data-testid="run-task"]').length).toBe(1)
-    expect(seen.stages.at(-1)[1]).toMatchObject({ state: 'current', task_count: 1 })
+    expect(c.querySelectorAll('[data-testid="flow-box"]')[1].dataset.status).toBe('running')
   })
 
   it('a run paused on an approval step points at the step, and the step panel is full width', async () => {
