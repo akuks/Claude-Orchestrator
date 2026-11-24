@@ -1481,6 +1481,143 @@ skill lint. It shows a template `SKILL.md` and a box where you paste your own.
 
 ---
 
+## System health
+
+Admins get a **System health** page (nav entry, `#/health`). It shows one overall line
+("Everything looks good", "2 things need attention" or "1 problem") and a card for each
+check, problems first. Each card has a coloured dot, a plain title, one sentence and a
+collapsed **Details** with versions, timings and a suggested fix.
+
+- **The thirteen checks.** Claude is installed; Python; Git; Node; The guard is intact;
+  The guard blocks what it should; Guard errors in the last 7 days; The app can write its
+  folders; Database is up to date; Connected tools; Skill packs; Docker (for 'wait until
+  ready' checks); Free disk space. A missing Node or Docker is only "attention"; a
+  missing Claude or Git is a problem.
+- **When it runs.** Only when an admin opens the page or presses **Check again**; there
+  is no background job. Results are reused for 30 seconds (per server process), and
+  **Check again** skips that reuse (`GET /admin/health?refresh=true`).
+- **Time limits.** Each check gets 10 seconds and the whole run 60. A check that fails,
+  times out or does not finish shows as a problem with the summary "could not check".
+- **What it runs.** The only Claude command is `claude --version`; a prompt is never
+  sent. It also runs `git --version`, `node --version` and `docker version`.
+- **Guard self-test.** It feeds the guard's hook one harmless command and one
+  dangerous command (`rm -rf /`) and checks the answers are allow and deny. The
+  dangerous command is only evaluated, never executed. The test uses a throw-away
+  policy and a throw-away folder, and is pointed away from the real server.
+- **Secrets.** Every summary and detail is scrubbed: known secrets are masked and home
+  folders show as `~`. Text is cut at 500 characters.
+- **API.** `GET /admin/health` returns `{checked_at, overall, checks}`. Admin only.
+
+### Not covered
+
+- **No auto-fix.** It reports and suggests; it changes nothing.
+- **No background monitoring and no alerts.** Nothing is recorded between visits and
+  nothing is sent when a check fails.
+
+## Licence hints
+
+A project shows a small licence badge when its code might not be yours to reuse freely.
+The badge shows on the project card, the table row and the drawer title. The project
+drawer also has a "Licence:" line.
+
+- **When the badge shows.** For every project whose trust is `external`, and for any
+  project whose licence is share-alike (copyleft), proprietary, or missing. Your own
+  project with a permissive or unrecognised licence shows nothing. The wording is the
+  licence name (for example "MIT"), "GPL-3.0 — share-alike", "All rights reserved" or
+  "… — not free for commercial use", "No licence found", or "Licence not recognised".
+  The tooltip says "A hint, not legal advice."
+- **Kinds.** `permissive`, `copyleft`, `proprietary` (this includes non-commercial
+  licences and "All rights reserved"), `none` and `unknown`.
+- **When it is worked out.** When a project is created, when projects are imported,
+  when a project's directory changes, and when a maintainer presses **Check again**
+  (`POST /projects/{id}/licence/refresh`). It is stored on the project and is never
+  recomputed on a page load, so a licence file you edit later is not seen until one of
+  those happens.
+- **File rules.** Only the project's root folder is looked at. The first file, in name
+  order, whose name starts with `LICENSE`, `LICENCE` or `COPYING` is used. It must be a
+  regular file (a symlink or other special file is not followed and gives
+  "not recognised"), and only the first 64 KB is read.
+- **A hint, not legal advice.** The classifier is a small port of jspark-forge's. It
+  matches licence text and can be wrong.
+
+### Not covered
+
+- **Sub-folder licences.** Licence files in sub-folders, and licences of dependencies,
+  are not read.
+- **Compatibility.** Nothing checks whether one licence is compatible with another or
+  with how you use the code.
+
+## Rules export
+
+The rules agents work under can be downloaded as one plain-text Markdown file
+(`rules.md`).
+
+- **Where.** A **Download the rules as a file** button on the organisation Guard page
+  (the whole organisation) and in each project's guard settings (that project).
+  API: `GET /guard/export.md`, with `?project_id=` for a project.
+- **What it contains.** A header line ("Rules for agents working on … generated …. For
+  use outside the orchestrator; inside it these are enforced, not just written."), then:
+  1. **Ground rules** that are switched on.
+  2. **Always blocked** and **Needs a person's OK**: the built-in rules, one line each,
+     in words.
+  3. The organisation's own custom rules, or for a project, **This project's own
+     rules**.
+  4. For your own projects, rules from the project's rules file, if it has one.
+  5. For your own projects, the project's active **Decisions** (number, title and why).
+
+  Custom rules are shown as written. At most 500 rules and 100 decisions are listed,
+  with an "and N more not shown" line.
+- **Guard off for a project.** The built-in rules section is replaced by a sentence
+  saying the guard is switched off for that project and the built-in rules are not
+  enforced there. The ground rules, custom rules and decisions are still listed.
+- **Who can download.** Any signed-in person. For a project they must be able to see it,
+  otherwise the answer is 404. Agent tokens are refused.
+- **Secrets.** The project's environment values are masked wherever they appear, and
+  hidden characters are cleaned from the text. No environment value is written out.
+
+### Not covered
+
+- **A copy, not enforcement.** The file is for use elsewhere, such as another tool or
+  a human reader. Nothing enforces it outside the orchestrator.
+
+## Updating skill packs
+
+The **Skills** tab lists installed packs. An admin sees an **Updates** column for each
+pack that has a source address.
+
+- **Check for update.** Asks the pack's stored source address which commit its main
+  branch is on (`git ls-remote`, 20 second limit, https or ssh addresses only) and
+  compares it with the commit installed. The answer is saved on the pack. If a newer
+  commit exists, the row shows **Update to** the short commit; clicking it asks you to
+  confirm, and **Update** goes ahead.
+- **What Update refuses.** A pack with local changes (any uncommitted change in its
+  folder); a pack with no source address, or one that is not https or ssh; a pack that
+  is not a git checkout; and anything that is not a fast-forward, meaning the remote
+  history no longer continues from the installed commit. A refusal changes nothing and
+  says why.
+- **Nothing from the pack is run.** Git hooks are switched off, no credential helpers
+  or prompts are used, and only fetch, status, rev-parse, ls-remote and a
+  fast-forward-only merge are issued. Only one update per pack runs at a time.
+- **After an update.** The pack's lint is run again (see Skill lint) and any warnings
+  are shown; the pack's version is re-read from its plugin file and the page refreshes.
+- **API.** `POST /skills/{id}/check-update` and `POST /skills/{id}/update`. Admin only.
+- **The superpowers preset.** The preset list includes **superpowers**
+  (`https://github.com/obra/superpowers`) with a recorded commit (`22f0b463...`, the
+  superpowers 7.0.2 plugin). An admin chooses to install it; nothing is installed
+  automatically. The recorded commit is information only. It is returned by
+  `GET /skills/presets`, but installing clones the repository's current main branch and
+  the page does not use or check it, so a fresh install can be on a newer commit.
+  Update then moves a pack to the remote's latest commit, not back to the recorded one.
+
+### Not covered
+
+- **Automatic updates.** Nothing checks or updates on a schedule.
+- **Rollback.** There is no undo to an earlier commit.
+- **Pack code is not reviewed.** The lint checks the shape of skill files only.
+- **Update uses the stored source address.** It does not read the pack's own git remote.
+
+---
+
 ## REST API
 
 Full interactive docs at `/docs`. Highlights:
