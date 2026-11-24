@@ -139,11 +139,14 @@ def _orchestrator_folders() -> set[str]:
 
 
 def _refuse_orchestrator_folder(directory) -> None:
-    """422 when `directory` is, holds or sits inside one of the orchestrator's own folders."""
+    """422 when `directory` IS one of the orchestrator's own folders or sits
+    INSIDE one. A folder that only contains them (the whole orchestrator
+    checkout, backend/, workspaces/) is allowed: the guard still protects the
+    core folders inside it."""
     d = str(directory)
     forms = {os.path.normpath(os.path.abspath(d)), os.path.realpath(d)}
     for o in _orchestrator_folders():
-        if any(_covers(f, o) or _covers(o, f) for f in forms):
+        if any(_covers(o, f) for f in forms):
             raise HTTPException(422, ORCHESTRATOR_FOLDER)
 
 
@@ -537,7 +540,8 @@ async def update_project(project_id: str, payload: ProjectUpdate, request: Reque
             await _require_unique_name(s, data["name"], exclude_id=project_id)
         if "directory" in data and data["directory"]:
             d = Path(data.pop("directory")).expanduser()
-            _refuse_orchestrator_folder(d)  # before anything is created there
+            if os.path.realpath(str(d)) != os.path.realpath(project.directory or ""):
+                _refuse_orchestrator_folder(d)  # a new folder only, before anything is created there
             try:
                 d.mkdir(parents=True, exist_ok=True)
             except OSError as exc:

@@ -433,15 +433,15 @@ ORCH = "That folder is part of the orchestrator itself"
 def test_project_folder_inside_the_orchestrator_is_refused(client, tmp_path):
     from app.guard.runtime import BACKEND_DIR
 
+    (settings.workspaces_dir / "_newthing").mkdir(parents=True, exist_ok=True)
     bad = [BACKEND_DIR / "app", BACKEND_DIR / "app" / "sub", BACKEND_DIR / "migrations",
            BACKEND_DIR / ".venv" / "x", Path(sys.prefix), settings.workspaces_dir / "_mcp_configs",
-           settings.workspaces_dir / "_tasks" / "y", settings.workspaces_dir / "_newthing",
-           settings.workspaces_dir, BACKEND_DIR]  # the last two hold internals
-    (settings.workspaces_dir / "_newthing").mkdir(parents=True, exist_ok=True)
+           settings.workspaces_dir / "_tasks" / "x", settings.workspaces_dir / "_newthing"]
     for d in bad:
         r = client.post("/projects", json={"name": f"orch-{_uid()}", "directory": str(d)})
         assert r.status_code == 422 and r.json()["detail"] == ORCH, (d, r.text)
     assert not (BACKEND_DIR / "app" / "sub").exists()  # refused before anything is created
+    assert not (settings.workspaces_dir / "_tasks" / "x").exists()
     # through a symlink too (real paths)
     link = tmp_path / "link"
     link.symlink_to(BACKEND_DIR / "app")
@@ -457,3 +457,51 @@ def test_project_folder_inside_the_orchestrator_is_refused(client, tmp_path):
     # import
     r = client.post("/projects/import", json={"directories": [str(BACKEND_DIR / "app")]})
     assert r.status_code == 422 and r.json()["detail"] == ORCH
+
+
+def test_project_folders_that_only_contain_the_orchestrator_are_allowed(client):
+    """The owner develops the orchestrator as a project (its checkout), and keeps
+    projects under backend/projects/: folders that hold the core are fine."""
+    from app.guard.runtime import BACKEND_DIR
+
+    checkout = BACKEND_DIR.parent
+    inner = BACKEND_DIR / "projects" / f"x-{_uid()}"
+    made = []
+    try:
+        for d in (checkout, BACKEND_DIR, settings.workspaces_dir, inner):
+            r = client.post("/projects", json={"name": f"own-{_uid()}", "directory": str(d)})
+            assert r.status_code == 201, (d, r.text)
+            made.append(r.json()["id"])
+        # re-saving the checkout project with its unchanged folder (and other fields) is accepted
+        r = client.patch(f"/projects/{made[0]}", json={"directory": str(checkout), "instructions": "dev"})
+        assert r.status_code == 200, r.text
+        assert r.json()["directory"] == str(checkout.resolve())
+    finally:
+        for pid in made:
+            client.delete(f"/projects/{pid}")
+        import shutil as _sh
+
+        _sh.rmtree(inner, ignore_errors=True)
+        try:
+            (BACKEND_DIR / "projects").rmdir()  # only if this test made it and it is empty
+        except OSError:
+            pass
+
+
+def test_resaving_an_unchanged_folder_is_never_refused(client):
+    """A project already stored inside a core folder (from before the rule) can
+    still be saved as long as its folder does not change."""
+    from app.guard.runtime import BACKEND_DIR
+    from app.models import Project
+
+    pid = uuid.uuid4().hex
+    legacy = str((settings.workspaces_dir / "_tasks" / f"legacy-{_uid()}").resolve())
+    Path(legacy).mkdir(parents=True)
+    _add(Project(id=pid, name=f"legacy-{_uid()}", slug=f"legacy-{_uid()}", directory=legacy))
+    try:
+        r = client.patch(f"/projects/{pid}", json={"directory": legacy, "instructions": "x"})
+        assert r.status_code == 200, r.text
+        r = client.patch(f"/projects/{pid}", json={"directory": str(BACKEND_DIR / "app")})
+        assert r.status_code == 422 and r.json()["detail"] == ORCH
+    finally:
+        client.delete(f"/projects/{pid}")
