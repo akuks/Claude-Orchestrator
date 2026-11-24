@@ -247,6 +247,8 @@ export const api = {
   skillTemplate: () => req('GET', '/skills/template'),
   lintSkillText: (text) => req('POST', '/skills/lint', { text }),
   lintSkillPack: (id) => req('GET', `/skills/${id}/lint`),
+  checkSkillUpdate: (id) => req('POST', `/skills/${id}/check-update`),
+  updateSkillPack: (id) => req('POST', `/skills/${id}/update`),
   // ---- Context Store (curated knowledge docs, tiered) ----
   listContextDocs: (params = {}) => req('GET', `/context-docs${qs(params)}`),
   previewContext: (projectId) => req('GET', `/context-docs/preview${qs({ project_id: projectId })}`),

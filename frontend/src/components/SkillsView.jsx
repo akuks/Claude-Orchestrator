@@ -11,6 +11,7 @@ import {
   Switch,
   Table,
   Tag,
+  Tooltip,
   Typography,
   message,
 } from 'antd'
@@ -87,6 +88,8 @@ export default function SkillsView({ projects = [], isAdmin = false }) {
   const [installing, setInstalling] = useState(null)
   const [modalOpen, setModalOpen] = useState(false)
   const [lintPack, setLintPack] = useState(null) // {name, results}
+  const [busy, setBusy] = useState(null)
+  const [updated, setUpdated] = useState(null) // {name, results}: warnings after an update
 
   const projName = (id) => projects.find((p) => p.id === id)?.name
 
@@ -137,6 +140,36 @@ export default function SkillsView({ projects = [], isAdmin = false }) {
     }
   }
 
+  const short = (sha) => (sha ? sha.slice(0, 7) : null)
+
+  const checkUpdate = async (row) => {
+    setBusy(row.id)
+    try {
+      const r = await api.checkSkillUpdate(row.id)
+      if (r.update_available) message.info('A newer version is available.')
+      else message.success('This skill pack is up to date.')
+      await refresh()
+    } catch (e) {
+      message.error(e.message)
+    } finally {
+      setBusy(null)
+    }
+  }
+
+  const applyUpdate = async (row) => {
+    setBusy(row.id)
+    try {
+      const r = await api.updateSkillPack(row.id)
+      message.success(`Updated to ${short(r.to)}`)
+      if (r.lint?.length) setUpdated({ name: row.name, results: r.lint })
+      await refresh()
+    } catch (e) {
+      message.error(e.message)
+    } finally {
+      setBusy(null)
+    }
+  }
+
   const remove = async (id) => {
     try {
       await api.deleteSkill(id)
@@ -155,6 +188,11 @@ export default function SkillsView({ projects = [], isAdmin = false }) {
       render: (n, row) => (
         <div>
           <b>{n}</b> {row.version && <Tag>{`v${row.version}`}</Tag>}
+          {row.current_sha && (
+            <Tooltip title={`Commit ${row.current_sha}`}>
+              <Tag style={{ marginLeft: 4 }} data-testid={`sha-${row.id}`}>{short(row.current_sha)}</Tag>
+            </Tooltip>
+          )}
           {row.description && <div style={{ fontSize: 12, color: 'var(--co-text-secondary)' }}>{row.description}</div>}
         </div>
       ),
@@ -172,6 +210,30 @@ export default function SkillsView({ projects = [], isAdmin = false }) {
       width: 90,
       render: (en, row) =>
         isAdmin ? <Switch checked={en} onChange={(v) => toggle(row, v)} /> : en ? <Tag color="green">on</Tag> : <Tag>off</Tag>,
+    },
+    isAdmin && {
+      title: 'Updates',
+      key: 'u',
+      width: 220,
+      render: (_, row) =>
+        row.source_url ? (
+          <Space size={4} wrap>
+            <Button size="small" loading={busy === row.id} onClick={() => checkUpdate(row)} data-testid={`check-update-${row.id}`}>
+              Check for update
+            </Button>
+            {row.update_available && (
+              <Popconfirm
+                title="This pulls the newest version of this skill pack."
+                okText="Update"
+                onConfirm={() => applyUpdate(row)}
+              >
+                <Button size="small" type="primary" data-testid={`update-pack-${row.id}`}>
+                  Update to {short(row.latest_sha)}
+                </Button>
+              </Popconfirm>
+            )}
+          </Space>
+        ) : null,
     },
     {
       title: '',
@@ -236,6 +298,11 @@ export default function SkillsView({ projects = [], isAdmin = false }) {
 
       <Modal open={!!lintPack} title={lintPack ? `Lint: ${lintPack.name}` : ''} footer={null} onCancel={() => setLintPack(null)}>
         <PackResults results={lintPack?.results} />
+      </Modal>
+
+      <Modal open={!!updated} title={updated ? `Updated: ${updated.name}` : ''} footer={null} onCancel={() => setUpdated(null)}>
+        <Alert type="warning" showIcon style={{ marginBottom: 12 }} message="The new version has some skill files that need a look." />
+        <PackResults results={updated?.results} />
       </Modal>
 
       <InstallModal open={modalOpen} projects={projects} onClose={() => setModalOpen(false)} onDone={refresh} />
