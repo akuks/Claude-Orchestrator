@@ -44,7 +44,7 @@ function textToObj(text) {
   return out
 }
 
-export default function McpServerModal({ open, server, onClose, onSaved }) {
+export default function McpServerModal({ open, server, preset, onClose, onSaved }) {
   const [form] = Form.useForm()
   const [transport, setTransport] = useState('stdio')
   const [saving, setSaving] = useState(false)
@@ -77,9 +77,10 @@ export default function McpServerModal({ open, server, onClose, onSaved }) {
         enabled: true,
         environment: 'unknown',
         default_action: 'require_approval',
+        ...(preset ? { name: preset.name, command: preset.command, args: preset.args } : {}),
       })
     }
-  }, [open, server])
+  }, [open, server, preset])
 
   const submit = async () => {
     let v

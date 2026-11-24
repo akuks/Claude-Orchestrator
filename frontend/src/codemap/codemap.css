@@ -1,0 +1,12 @@
+/* Code map drawer section and tool presets. Colours come from the --co-* variables only. */
+.co-codemap-dot { flex: none; width: 10px; height: 10px; border-radius: 50%; background: var(--co-success); }
+.co-codemap-dot-attention { background: var(--co-warning); }
+.co-codemap-dot-problem { background: var(--co-danger); }
+.co-codemap-dot-idle { background: var(--co-border); }
+.co-codemap-status { display: flex; align-items: center; gap: 8px; margin: 12px 0 8px; color: var(--co-text); }
+.co-codemap-explain { color: var(--co-text-secondary); margin: 6px 0 0; }
+.co-codemap-details { margin-top: 8px; color: var(--co-text-secondary); font-size: 13px; }
+.co-codemap-details pre { margin: 6px 0 0; white-space: pre-wrap; word-break: break-word; font-size: 12px; }
+.co-preset-row { display: flex; flex-wrap: wrap; gap: 12px; margin-bottom: 16px; }
+.co-preset-card { flex: 1 1 260px; max-width: 360px; padding: 12px 14px; }
+.co-preset-card p { margin: 4px 0 8px; color: var(--co-text-secondary); }

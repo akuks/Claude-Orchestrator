@@ -23,6 +23,7 @@ import {
   message,
 } from 'antd'
 import {
+  ApiOutlined,
   DeleteOutlined,
   EditOutlined,
   PlusOutlined,
@@ -44,6 +45,7 @@ import GuardSettings from '../guard/GuardSettings'
 import { canEditGuard } from '../guard/guard'
 import DecisionsPane from '../decisions/DecisionsPane'
 import LaunchTab from '../launch/LaunchTab'
+import CodeMapSection from '../codemap/CodeMapSection'
 import { FRESH_SUGGEST, freshSessionError } from '../usage/usage'
 
 dayjs.extend(relativeTime)
@@ -511,6 +513,15 @@ export function ProjectDrawer({ project, tab, onTab, currentUser, onClose, onSav
                 </span>
               ),
               children: <LaunchTab key={project.id} project={project} canEdit={canEditGuard(project, currentUser)} />,
+            },
+            {
+              key: 'codemap',
+              label: (
+                <span>
+                  <ApiOutlined /> Code map
+                </span>
+              ),
+              children: <CodeMapSection key={project.id} active={tab === 'codemap'} project={project} canEdit={canEditGuard(project, currentUser)} />,
             },
             {
               key: 'guard',

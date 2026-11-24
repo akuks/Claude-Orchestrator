@@ -224,7 +224,25 @@ class Project(Base):
     launch_seq: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
     # Licence hint (phase 6a): {id, name, kind, file, hash, checked_at}; NULL = never checked.
     licence: Mapped[dict | None] = mapped_column(JSON(none_as_null=True), nullable=True)
+    # Code map (phase 6b): keep an index of this project's code (maintainers set it).
+    code_map: Mapped[bool] = mapped_column(Boolean, default=False, server_default=false())
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+
+
+class ProjectIndex(Base):
+    """The code map index record of a project (phase 6b): one row per project, made on the first job.
+    status never | running | ok | failed; `sha` is the commit the index was built at."""
+
+    __tablename__ = "project_indexes"
+
+    project_id: Mapped[str] = mapped_column(ForeignKey("projects.id", ondelete="CASCADE"), primary_key=True)
+    sha: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    indexed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    status: Mapped[str] = mapped_column(String(16), default="never", server_default="never")
+    error: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    fail_count: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
+    next_try_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
 
 class ActionApproval(Base):

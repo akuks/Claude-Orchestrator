@@ -7,6 +7,7 @@ from .. import mcp_manager
 from ..access import ALL, task_visibility_clause, visible_project_ids
 from ..auth import require_admin
 from ..constants import VALID_MODELS  # noqa: F401 (kept for symmetry)
+from ..codemap.presets import PRESETS
 from ..crypto import decrypt_json, encrypt_json
 from ..database import SessionLocal
 from ..models import McpCall, McpServer, McpToolPolicy, Project, Task
@@ -63,6 +64,12 @@ def _pack_secrets(env: dict | None, headers: dict | None) -> str | None:
     if headers:
         payload["headers"] = headers
     return encrypt_json(payload) if payload else None
+
+
+@router.get("/presets")
+async def list_presets():
+    """Pinned presets an admin can add from (any signed-in user may read them)."""
+    return [dict(p, args=list(p["args"])) for p in PRESETS]
 
 
 @router.post("/servers", response_model=McpServerOut, status_code=201, dependencies=_admin)

@@ -454,7 +454,7 @@ function AppInner({ user, onLogout }) {
               onOpenCredentials={() => setCredsOpen(true)}
             />
           )}
-          {page === 'mcp' && <McpRegistry />}
+          {page === 'mcp' && <McpRegistry isAdmin={isAdmin} />}
           {page === 'users' && isAdmin && <UsersView currentUser={user} onFallbackChanged={loadClaudeInfo} />}
           {page === 'teams' && isAdmin && <TeamsView />}
           {page === 'guard' && isAdmin && <OrgGuardView isAdmin={isAdmin} />}

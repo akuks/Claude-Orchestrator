@@ -12,7 +12,7 @@ from sqlalchemy.orm import Session
 from app import models
 from app.database import _alembic_cfg, _baseline_metadata, run_migrations
 
-HEAD = "0017"  # the latest revision
+HEAD = "0018"  # the latest revision
 
 
 def _tables(db) -> set[str]:
@@ -602,3 +602,40 @@ def test_migration_0017_upgrade_downgrade(scratch_url):
         return sc.exec_driver_sql("SELECT version_num FROM alembic_version").scalar()
 
     assert _inspect(url, check_down) == "0016"
+
+
+def test_migration_0018_upgrade_downgrade(scratch_url):
+    from alembic import command
+
+    url = scratch_url
+    command.upgrade(_alembic_cfg(url), "0017")
+
+    def old_rows(sc, insp):  # a project from before 0018
+        sc.exec_driver_sql(
+            "INSERT INTO projects (id, name, slug, directory, default_model, env, memory, memory_enabled,"
+            " archived, auto_review_prs, created_at, launch_seq) VALUES ('p18', 'old', 'old', '/x', 'sonnet', '{}', '',"
+            " true, false, false, CURRENT_TIMESTAMP, 0)")
+
+    _inspect(url, old_rows)
+    command.upgrade(_alembic_cfg(url), "0018")
+
+    def check(sc, insp):
+        assert "code_map" in {c["name"] for c in insp.get_columns("projects")}
+        cols = {c["name"] for c in insp.get_columns("project_indexes")}
+        assert {"project_id", "sha", "indexed_at", "status", "error", "fail_count", "next_try_at",
+                "started_at"} <= cols
+        sc.exec_driver_sql("INSERT INTO project_indexes (project_id) VALUES ('p18')")
+        return (sc.exec_driver_sql("SELECT code_map FROM projects WHERE id='p18'").scalar(),
+                sc.exec_driver_sql("SELECT status, fail_count FROM project_indexes").first(),
+                sc.exec_driver_sql("SELECT version_num FROM alembic_version").scalar())
+
+    code_map, idx, ver = _inspect(url, check)
+    assert not code_map and tuple(idx) == ("never", 0) and ver == "0018"
+    command.downgrade(_alembic_cfg(url), "0017")
+
+    def check_down(sc, insp):
+        assert "project_indexes" not in insp.get_table_names()
+        assert "code_map" not in {c["name"] for c in insp.get_columns("projects")}
+        return sc.exec_driver_sql("SELECT version_num FROM alembic_version").scalar()
+
+    assert _inspect(url, check_down) == "0017"

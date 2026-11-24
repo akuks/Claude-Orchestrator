@@ -387,6 +387,23 @@ describe('decision_review run-log line', () => {
   })
 })
 
+describe('code_map run-log line', () => {
+  it('says how fresh the answer was and which decisions it showed', () => {
+    const line = (payload) => renderLine({ type: 'code_map', payload }).text
+    expect(line({ fresh: true, decisions: [], old_code: false })).toBe('Code map answer: current')
+    expect(line({ fresh: false, decisions: [12], old_code: true })).toBe('Code map answer: may be out of date · showed D-012')
+    expect(line({ fresh: null, decisions: [12, 15] })).toBe('Code map answer: freshness unknown · showed D-012, D-015')
+    expect(line({})).toBe('Code map answer: freshness unknown')
+  })
+  it('says when some recorded decisions were not checked', () => {
+    const line = (type, payload) => renderLine({ type, payload }).text
+    expect(line('code_map', { fresh: true, decisions: [12], partial: true })).toBe('Code map answer: current · showed D-012 · some recorded decisions were not checked')
+    expect(line('code_map', { fresh: null, decisions: [], partial: 'yes' })).toBe('Code map answer: freshness unknown')
+    expect(line('decision_note', { ids: [3], path: 'src/a.py', partial: true })).toBe('Showed D-003 before editing src/a.py · some recorded decisions were not checked')
+    expect(line('decision_note', { ids: [3], path: 'src/a.py' })).toBe('Showed D-003 before editing src/a.py')
+  })
+})
+
 describe('critical_paths run-log line', () => {
   it('renders the chip text', () => {
     expect(renderLine({ type: 'critical_paths', payload: { paths: ['src/a.py', 'src/b.py'], globs: ['src/**'] } }).text).toBe(

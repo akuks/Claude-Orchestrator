@@ -12,6 +12,8 @@ docstring) and says what the worker must add to the ``claude`` command:
   lists are always lists (Rulings P10/P20: a null fails closed in the hook).
   ``trust`` other than ``own`` means ``external`` and ``on_no_answer`` other
   than ``deny_and_resume`` means ``deny``.
+  ``code_map`` / ``code_map_refs`` (phase 6b) only for a switched-on project with an ``ok`` index and a
+  registered code map server.
 * ``add_dirs`` - the reference projects' folders, for ``--add-dir``.
 * ``decisions_index`` - the same index, for the worker to append after the ground rules, or None.
 * ``data_line`` - ``co_hook.DATA_LINE`` for an external project (the worker
@@ -49,12 +51,14 @@ import os
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
+from sqlalchemy import select
+
 from ..access import project_role
 from ..briefs import render, scope
 from ..auth import Principal
 from ..decisions import snapshot as decisions_snapshot
 from ..decisions.texts import SUGGEST_LINE
-from ..models import Project, User
+from ..models import McpServer, Project, ProjectIndex, User
 from ..resume import ground_rules
 from . import custom, policy_store
 from .co_hook import DATA_LINE, NOTES_AFTER_ACTS
@@ -115,7 +119,9 @@ def _readonly(project, events: list[dict]) -> list[dict]:
     return out
 
 
-async def _references(s, project, owner_id: str | None, events: list[dict]) -> list[str]:
+async def _references(s, project, owner_id: str | None, events: list[dict],
+                      kept: list | None = None) -> list[str]:
+    """The mounted reference folders (real paths); ``kept`` (when given) gets (real path, reference project)."""
     ids = getattr(project, "reference_project_ids", None) if project is not None else None
     if ids is not None and (not isinstance(ids, list) or not all(isinstance(i, str) for i in ids)):
         raise PolicyInputError("the project's reference projects are malformed")  # P22: never fail open
@@ -145,9 +151,53 @@ async def _references(s, project, owner_id: str | None, events: list[dict]) -> l
             continue
         if real not in dirs:
             dirs.append(real)
+            if kept is not None:
+                kept.append((real, ref))
     if dirs:  # task viewers may not see the reference projects: a count only, no names or paths
         events.append({"event": "references", "count": len(dirs)})
     return dirs
+
+
+def _iso(dt) -> str | None:
+    if dt is None:
+        return None
+    if dt.tzinfo is None:  # SQLite: naive UTC
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.isoformat()
+
+
+async def _ok_index(s, project_id: str, *, need_sha: bool = True):
+    """The project's `ok` index row, or None. A reference's needs a sha (the old-code line prints it); the
+    project's own may have none (no commit to compare: the hook says "freshness unknown")."""
+    row = await s.get(ProjectIndex, project_id)
+    return row if row is not None and row.status == "ok" and (row.sha or not need_sha) else None
+
+
+async def _code_map(s, project, ref_projects: list) -> dict:
+    """Phase 6b: ``code_map`` {sha, indexed_at, prefix} and ``code_map_refs`` [{dir, sha}] for co-guard's code
+    map answers, only when the project is switched on, its index is ``ok`` (with or without a sha: none means
+    freshness unknown) and a code map server is registered for it (an old project: nothing). A reference is
+    listed only with its own ``ok`` index and a sha."""
+    if project is None or getattr(project, "code_map", False) is not True:
+        return {}
+    row = await _ok_index(s, project.id, need_sha=False)
+    if row is None:
+        return {}
+    from ..codemap import status as cm_status  # lazy: the code map package pulls in the job runner
+
+    servers = (await s.execute(select(McpServer).where(McpServer.enabled.is_(True)))).scalars().all()
+    server = cm_status.code_map_server(
+        [m for m in servers if m.scope != "project" or m.project == project.name])
+    if server is None:
+        return {}
+    refs = []
+    for real, ref in ref_projects:
+        if getattr(ref, "code_map", False) is True:
+            rrow = await _ok_index(s, ref.id)
+            if rrow is not None:
+                refs.append({"dir": real, "sha": rrow.sha})
+    return {"code_map": {"sha": row.sha, "indexed_at": _iso(row.indexed_at), "prefix": cm_status.tool_prefix(server)},
+            "code_map_refs": refs}
 
 
 async def gather(s, *, task, project, owner_id: str | None, mcp: dict | None) -> PolicyInputs:
@@ -160,7 +210,8 @@ async def gather(s, *, task, project, owner_id: str | None, mcp: dict | None) ->
         on_no_answer = project.on_no_answer if getattr(project, "on_no_answer", None) in ON_NO_ANSWER else "deny"
 
     readonly = _readonly(project, events)
-    refs = await _references(s, project, owner_id, events)
+    ref_projects: list = []
+    refs = await _references(s, project, owner_id, events, ref_projects)
     for d in refs:
         # the deny text shows this reason to task viewers: no project name
         readonly.append({"path": d, "reason": "a reference project", "source": "reference"})
@@ -206,6 +257,7 @@ async def gather(s, *, task, project, owner_id: str | None, mcp: dict | None) ->
         if snap and index:
             policy["decisions"] = snap
             policy["decisions_index"] = index
+    policy.update(await _code_map(s, project, ref_projects))
     brief = getattr(task, "brief", None)  # JSON null reads as None: falsy is no brief
     brief_text = brief_layers = None
     if brief:

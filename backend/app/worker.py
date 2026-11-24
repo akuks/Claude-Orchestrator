@@ -1709,6 +1709,8 @@ class WorkerManager:
         each ``band`` -> a ``usage_band`` event {band, value} and a TaskUsage.bands entry {band, ts}, at most
         once per band name (the row decides). With no live state (a crashed run's recovery) the whole spool
         is read and only bands are recorded. Each ``decisions`` nudge -> a ``decision_note`` event {ids, path}
+        and each ``code_map`` nudge -> a ``code_map`` event {fresh, decisions, old_code} (both with
+        ``partial: true`` when the matching bound left decisions unchecked)
         (live state only: a recovery's re-read would repeat the ones already shown). Never raises."""
         live = task_id in self._usage_spool
         state = self._usage_spool.get(task_id) or self._new_usage_spool()
@@ -1722,8 +1724,9 @@ class WorkerManager:
                     if await self._record_band(task_id, band, ts):
                         await emit("usage_band", {"band": band, "value": value})
                     state["pending"].pop(0)
-                while state["notes"]:  # phase 4a: decisions co-guard showed before an edit
-                    await emit("decision_note", state["notes"][0])
+                while state["notes"]:  # phase 4a / 6b: decision notes and code map answers co-guard showed
+                    etype, payload = state["notes"][0]
+                    await emit(etype, payload)
                     state["notes"].pop(0)
             except Exception as e:  # noqa: BLE001 - usage bookkeeping never stops a run
                 log.warning("usage: band ingest failed for %s: %s", task_id, e)
@@ -1738,7 +1741,11 @@ class WorkerManager:
             if rec.get("nudge") == "decisions":
                 note = cls._decision_note(rec)
                 if note is not None:
-                    state.setdefault("notes", []).append(note)
+                    state.setdefault("notes", []).append(("decision_note", note))
+            elif rec.get("nudge") == "code_map":
+                note = cls._code_map_line(rec)
+                if note is not None:
+                    state.setdefault("notes", []).append(("code_map", note))
             band = rec.get("band")
             if band is not None and band not in cls.USAGE_BANDS:
                 continue  # not a record co-guard writes
@@ -1751,8 +1758,8 @@ class WorkerManager:
 
     @staticmethod
     def _decision_note(rec: dict) -> dict | None:
-        """co-guard's ``decisions`` nudge line -> the ``decision_note`` payload ``{ids, path}`` (None when it is
-        not one co-guard writes)."""
+        """co-guard's ``decisions`` nudge line -> the ``decision_note`` payload ``{ids, path}`` (+ ``partial``;
+        None when it is not one co-guard writes)."""
         ids = rec.get("ids")
         if not isinstance(ids, list):
             return None
@@ -1760,7 +1767,24 @@ class WorkerManager:
         path = rec.get("path")
         if not ids or not isinstance(path, str):
             return None
-        return {"ids": ids, "path": path[:300]}
+        note = {"ids": ids, "path": path[:300]}
+        if rec.get("partial") is True:  # the matching bound cut it short
+            note["partial"] = True
+        return note
+
+    @staticmethod
+    def _code_map_line(rec: dict) -> dict | None:
+        """co-guard's ``code_map`` nudge line -> the ``code_map`` payload ``{fresh, decisions, old_code}``
+        (+ ``partial``; None when it is not one co-guard writes)."""
+        fresh = rec.get("fresh")
+        ids = rec.get("decisions")
+        if (fresh is not None and not isinstance(fresh, bool)) or not isinstance(ids, list):
+            return None
+        ids = [i for i in ids if isinstance(i, int) and not isinstance(i, bool) and i > 0][:3]
+        note = {"fresh": fresh, "decisions": ids, "old_code": rec.get("old_code") is True}
+        if rec.get("partial") is True:  # the matching bound cut it short
+            note["partial"] = True
+        return note
 
     @staticmethod
     async def _record_band(task_id: str, band: str, ts) -> bool:
@@ -1889,10 +1913,12 @@ class WorkerManager:
             await questions.capture_final(task_id, ending=ending)
         except Exception as e:  # noqa: BLE001 - never breaks a finish
             log.warning("questions: capture failed for %s: %s", task_id, e)
+        codemap_project = None
         async with SessionLocal() as s:
             task = await s.get(Task, task_id)
             if task is None:
                 return
+            codemap_project = task.project_id
             task.status = status
             task.completed_at = completed_at
             task.run_pgid = task.run_proc_start = task.heartbeat_at = None
@@ -1928,6 +1954,14 @@ class WorkerManager:
             await guard_grants.after_task_finished(task_id, submit=self.submit)
         except Exception:  # noqa: BLE001 - never breaks a finish
             pass
+        # code map: refresh the project's index when its folder moved on (background; never fails the task)
+        if codemap_project:
+            try:
+                from .codemap import indexer as codemap_indexer
+
+                await codemap_indexer.maybe_refresh(codemap_project)
+            except Exception as e:  # noqa: BLE001
+                log.warning("codemap: refresh trigger failed for %s: %s", task_id, e)
         # token care: a step that crossed the fresh-session threshold continues in a fresh session
         await self._maybe_auto_continue(task_id)
 
