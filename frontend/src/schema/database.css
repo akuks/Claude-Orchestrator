@@ -13,7 +13,7 @@
 .co-db-col:first-child { border-top: 0; }
 .co-db-keyslot { width: 14px; flex: none; text-align: center; }
 .co-db-key { color: var(--co-warning); }
-.co-db-colname { color: var(--co-text); min-width: 0; flex: 1 1 60%; overflow-wrap: break-word; }
+.co-db-colname { color: var(--co-text); min-width: 0; flex: 1 1 auto; overflow-wrap: break-word; }
 .co-db-right { display: flex; align-items: center; gap: 6px; flex-shrink: 0; margin-left: auto; }
 .co-db-type { color: var(--co-text-muted); font-size: 12px; }
 .co-db-chip { font: inherit; font-size: 12px; padding: 0 8px; border-radius: 10px; border: 1px solid var(--co-primary); color: var(--co-primary); background: transparent; cursor: pointer; }
