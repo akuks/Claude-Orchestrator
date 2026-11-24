@@ -19,4 +19,22 @@ PRESETS: list[dict] = [
         "args": ["-y", "@playwright/mcp@0.0.86"],
         "pinned": "0.0.86",
     },
+    {
+        "key": "browser-devtools",
+        "name": "Browser inspector (DevTools)",
+        "description": "Lets a task inspect a running page: its console, network and speed.",
+        "transport": "stdio",
+        "command": "npx",
+        "args": ["-y", "chrome-devtools-mcp@1.13.0"],
+        "pinned": "1.13.0",
+    },
+    {
+        "key": "ui-shadcn",
+        "name": "Interface parts (shadcn)",
+        "description": "Lets a task browse and add ready-made interface parts for a React project.",
+        "transport": "stdio",
+        "command": "npx",
+        "args": ["-y", "shadcn@4.23.0", "mcp"],
+        "pinned": "4.23.0",
+    },
 ]

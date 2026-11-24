@@ -226,6 +226,9 @@ class Project(Base):
     licence: Mapped[dict | None] = mapped_column(JSON(none_as_null=True), nullable=True)
     # Code map (phase 6b): keep an index of this project's code (maintainers set it).
     code_map: Mapped[bool] = mapped_column(Boolean, default=False, server_default=false())
+    # Design skills (phase 6c): tell agents on a project with a user interface to use them; optional brand skill.
+    ui_skills: Mapped[bool] = mapped_column(Boolean, default=True, server_default=true())
+    brand_skill: Mapped[str | None] = mapped_column(String(120), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
 
 

@@ -48,6 +48,8 @@ CLAUDE_PROJECTS_DIR = Path.home() / ".claude" / "projects"
 
 MAINTAINER_FIELDS = {
     "code_map",
+    "ui_skills",
+    "brand_skill",
     "name",
     "instructions",
     "default_model",
@@ -75,7 +77,7 @@ READONLY_MAX = 50
 REFERENCES_MAX = 20
 IMPORT_TRUST_BUDGET = 30  # seconds of trust checks per import; later folders get R_TIME_LIMIT
 _NULL_MEANS_LEAVE = ("name", "guard_enabled", "approval_wait_seconds", "trust", "quarantine", "on_no_answer",
-                     "readonly_paths", "reference_project_ids", "code_map")
+                     "readonly_paths", "reference_project_ids", "code_map", "ui_skills")
 
 
 def _require_admin(request: Request) -> None:

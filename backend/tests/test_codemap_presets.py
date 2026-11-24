@@ -11,13 +11,17 @@ def test_presets_exact(client):
     r = client.get("/mcp/presets")
     assert r.status_code == 200
     by = {p["name"]: p for p in r.json()}
-    assert list(by) == ["Code map", "Browser (Playwright)"]
+    assert list(by) == ["Code map", "Browser (Playwright)", "Browser inspector (DevTools)",
+                        "Interface parts (shadcn)"]
+    dt, sh = by["Browser inspector (DevTools)"], by["Interface parts (shadcn)"]
+    assert (dt["args"], dt["pinned"], sh["args"], sh["pinned"]) == (
+        ["-y", "chrome-devtools-mcp@1.13.0"], "1.13.0", ["-y", "shadcn@4.23.0", "mcp"], "4.23.0")
     cm, br = by["Code map"], by["Browser (Playwright)"]
     assert (cm["transport"], cm["command"], cm["args"], cm["pinned"]) == (
         "stdio", "npx", ["-y", "codebase-memory-mcp@0.12.1"], "0.12.1")
     assert (br["transport"], br["command"], br["args"], br["pinned"]) == (
         "stdio", "npx", ["-y", "@playwright/mcp@0.0.86"], "0.0.86")
-    for p in (cm, br):
+    for p in (cm, br, dt, sh):
         assert set(p) == {"key", "name", "description", "transport", "command", "args", "pinned", "start_in_project"}
         assert p["start_in_project"] is False
 
