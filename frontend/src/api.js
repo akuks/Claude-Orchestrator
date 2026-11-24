@@ -290,6 +290,8 @@ export const api = {
   guardBuiltins: () => req('GET', '/guard/builtins'),
   guardOrgSettings: () => req('GET', '/guard/org-settings'),
   guardHealth: () => req('GET', '/guard/health'),
+  // admin: the system health checks (refresh skips the server's 30 s cache)
+  systemHealth: (refresh) => req('GET', `/admin/health`),
   saveGuardOrgSettings: (payload) => req('PUT', '/guard/org-settings', payload),
   projectRulesFile: (id) => req('GET', `/projects/${encodeURIComponent(id)}/guard/rules-file`),
 

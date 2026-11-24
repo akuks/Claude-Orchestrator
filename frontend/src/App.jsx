@@ -34,6 +34,7 @@ import ApprovalsView from './components/ApprovalsView'
 import UsageView from './components/UsageView'
 import SecurityView from './components/SecurityView'
 import OrgGuardView from './guard/OrgGuardView'
+import SystemHealthView from './health/SystemHealthView'
 import UsersView from './components/UsersView'
 import TeamsView from './components/TeamsView'
 import HomeView from './home/HomeView'
@@ -457,6 +458,7 @@ function AppInner({ user, onLogout }) {
           {page === 'users' && isAdmin && <UsersView currentUser={user} onFallbackChanged={loadClaudeInfo} />}
           {page === 'teams' && isAdmin && <TeamsView />}
           {page === 'guard' && isAdmin && <OrgGuardView isAdmin={isAdmin} />}
+          {page === 'health' && isAdmin && <SystemHealthView />}
           {page === 'projects' && <ProjectsView currentUser={user} onProjectsChanged={loadProjects} />}
           {page === 'automation' && (
             <AutomationView

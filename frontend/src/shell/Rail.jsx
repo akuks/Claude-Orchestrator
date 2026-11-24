@@ -4,6 +4,7 @@ import {
   ClockCircleOutlined,
   DollarOutlined,
   FolderOutlined,
+  HeartOutlined,
   HomeOutlined,
   SafetyCertificateOutlined,
   SafetyOutlined,
@@ -27,6 +28,7 @@ const ICONS = {
   users: <UserOutlined />,
   teams: <TeamOutlined />,
   guard: <SecurityScanOutlined />,
+  health: <HeartOutlined />,
 }
 
 // Pages without their own rail item light up their parent.

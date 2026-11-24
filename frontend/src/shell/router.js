@@ -16,6 +16,7 @@ export const PAGES = [
   'users',
   'teams',
   'guard',
+  'health',
 ]
 
 // Pages addressed by id. `runs` only exists with one.
@@ -127,7 +128,7 @@ export function returnTo(route, navigate) {
   else navigate(route, { replace: true })
 }
 
-const ADMIN_PAGES = new Set(['users', 'teams', 'guard'])
+const ADMIN_PAGES = new Set(['users', 'teams', 'guard', 'health'])
 
 // Members following a link to an admin page land on Home. Replace, so Back
 // doesn't bounce into the redirect again.
