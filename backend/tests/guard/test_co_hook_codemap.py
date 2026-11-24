@@ -278,3 +278,111 @@ def test_head_reader_parity(tmp_path):
         got.append(co_hook._head_sha(str(repo)))
     assert got[:7] == [SHA, HEAD2, REF_SHA, None, None, None, None]
     assert co_hook._head_sha(None) is None and co_hook._head_sha("") is None
+
+
+# ---- bounded matching (review round 1) ------------------------------------------------------------
+
+EVIL = "/".join(["**", "*"] * 10) + "/zz"  # 30 wildcards, inside the matcher caps, never matches
+
+
+def _evil_decisions():
+    return [_d(i, f"Evil {i}", [EVIL] * 20) for i in range(1, 201)]
+
+
+def test_adversarial_patterns_on_deep_paths_are_bounded(tmp_path, monkeypatch):
+    monkeypatch.setenv("CO_TASK_DIR", str(tmp_path))
+    proj = tmp_path / "p"
+    deep = proj.joinpath(*[f"d{i}" for i in range(28)])
+    deep.mkdir(parents=True)
+    names = []
+    for i in range(20):
+        (deep / f"f{i}.py").write_text("x")
+        names.append(str((deep / f"f{i}.py").relative_to(proj)))
+    set_head(proj, SHA)
+    pol = dict(cm_policy(), project_dir=str(proj), decisions=_evil_decisions() + [_d(999, "Late", ["**/f0.py"])])
+    assert co_hook.matches(EVIL, "a/b") is False and co_hook._glob_parts(EVIL, "x", None) is not None
+    t0 = time.monotonic()
+    out = co_hook._code_map_note(pol, answer(" ".join(names)))
+    elapsed = time.monotonic() - t0
+    assert elapsed < 0.5, elapsed
+    assert out.startswith(CURRENT)  # the late match was cut off by the bound: no error, no decision
+    assert "D-999" not in out
+
+
+def test_before_edit_note_is_bounded_on_a_deep_path(tmp_path, monkeypatch):
+    monkeypatch.setenv("CO_TASK_DIR", str(tmp_path))
+    deep = "/".join(f"d{i}" for i in range(200)) + "/f.py"
+    pol = {"cwd": str(tmp_path), "decisions": _evil_decisions()}
+    payload = {"tool_name": "Edit", "session_id": "s1", "tool_input": {"file_path": deep}}
+    t0 = time.monotonic()
+    assert co_hook._decision_notes(pol, payload, "Edit") is None
+    assert time.monotonic() - t0 < 0.5
+
+
+def test_matcher_call_budget_and_first_match():
+    calls = []
+    real = co_hook.specificity
+
+    def counting(t, rel, ci=None):
+        calls.append(t)
+        return real(t, rel, ci)
+
+    decisions = [_d(i, "x", ["nope/*"] * 20) for i in range(1, 201)]
+    try:
+        co_hook.specificity = counting
+        assert co_hook._covering(decisions, ["a.py", "b.py"]) == []
+        assert len(calls) == co_hook.DECISIONS_MATCH_CALLS
+        calls.clear()
+        found = co_hook._covering([_d(1, "x", ["a.py", "b.py", "*.py"])], ["a.py"])
+        assert [f[2] for f in found] == [1] and calls == ["a.py"]  # the first matching touch ends the scan
+    finally:
+        co_hook.specificity = real
+
+
+def test_paths_deeper_than_the_cap_are_left_out(tmp_path):
+    proj = tmp_path / "p"
+    deep = proj.joinpath(*[f"d{i}" for i in range(31)])
+    deep.mkdir(parents=True)
+    (deep / "f.py").write_text("x")
+    ok = proj.joinpath(*[f"d{i}" for i in range(29)]) / "g.py"
+    ok.write_text("x")
+    rels, _ = co_hook._map_paths(f"{(deep / 'f.py').relative_to(proj)} {ok.relative_to(proj)}",
+                                 os.path.realpath(proj), [])
+    assert rels == [str(ok.relative_to(proj))]
+
+
+def test_absolute_tokens_elsewhere_never_touch_the_disk(tmp_path, monkeypatch):
+    proj = tmp_path / "p"
+    proj.mkdir()
+    (proj / "a.py").write_text("x")
+    root = os.path.realpath(proj)
+    seen = []
+    real = os.path.realpath
+
+    def counting(p, *a, **k):
+        seen.append(p)
+        return real(p, *a, **k)
+
+    monkeypatch.setattr(co_hook.os.path, "realpath", counting)
+    text = "/net/host/a.py /Volumes/x/b.py /etc/passwd " + str(proj / "a.py")
+    rels, old = co_hook._map_paths(text, root, [], [os.path.normpath(str(proj)), root])
+    assert rels == ["a.py"] and old == []
+    assert seen == [str(proj / "a.py")]
+
+
+def _block(path, start, end):
+    import re
+    from pathlib import Path
+
+    text = Path(path).read_text()
+    m = re.search(rf"^{start}.*?^{end}\n", text, re.S | re.M)
+    assert m, path
+    return [ln for ln in m.group(0).splitlines() if not ln.startswith("def ")]
+
+
+def test_head_reader_source_is_a_copy():
+    from app.skillpacks import update
+
+    app_src = _block(update.__file__, r"def _read_small\(", r"    return head if _HEX\.match\(head\) else None")
+    hook_src = _block(co_hook.__file__, r"def _read_small\(", r"    return head if _SHA\.match\(head\) else None")
+    assert [ln.replace("_SHA", "_HEX") for ln in hook_src] == app_src

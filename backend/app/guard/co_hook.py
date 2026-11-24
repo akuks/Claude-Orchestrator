@@ -169,6 +169,10 @@ DECISIONS_MAX_CHARS = 2000  # the whole injection
 DECISIONS_SCAN_MAX = 200  # decisions read from the policy (the snapshot's cap)
 DECISIONS_TOUCHES_MAX = 20
 DECISION_TOOLS = ("Edit", "Write", "MultiEdit", "NotebookEdit")
+# the matcher work one note may do (a legal pattern such as **/*/**/* on a deep path costs up to ~2 ms a call):
+# past either bound the note uses what it found so far
+DECISIONS_MATCH_CALLS = 4000
+DECISIONS_MATCH_SECONDS = 0.15
 # phase 6b: code map answers (forge F54-F56). The policy's ``code_map`` {sha, indexed_at, prefix} and
 # ``code_map_refs`` [{dir, sha}]; the query tools of the code map server (the plan's list, exact).
 CODE_MAP_TOOLS = ("search_graph", "trace_path", "detect_changes", "get_file_outline", "get_architecture",
@@ -183,6 +187,7 @@ CODE_MAP_SCAN_MAX = 200 * 1024  # characters of the tool response scanned for pa
 CODE_MAP_TOKENS_MAX = 2000  # tokens examined
 CODE_MAP_PATHS_MAX = 20  # candidates checked on disk
 CODE_MAP_REFS_MAX = 20
+CODE_MAP_DEPTH_MAX = 30  # a deeper path is never matched against decisions
 CODE_MAP_MAX_CHARS = 2000  # the whole addition
 _SHA = re.compile(r"^[0-9a-f]{7,64}$")  # app.skillpacks.update._HEX
 _COMMIT = re.compile(r"""(?:^|[;&|(\s"'])git\b[^;&|]*\bcommit\b""")
@@ -1048,10 +1053,13 @@ def _note_block(d):
     return "\n".join(lines)
 
 
-def _covering(decisions, rels):
+def _covering(decisions, rels, calls=DECISIONS_MATCH_CALLS, seconds=DECISIONS_MATCH_SECONDS):
     """[(specificity, position, n, decision)] of the decisions whose touches match any of ``rels``, most specific
-    first (exact, folder, glob), then in snapshot order (newest first)."""
+    first (exact, folder, glob), then in snapshot order (newest first). A decision's first matching touch
+    counts. Bounded: after ``calls`` matcher calls or ``seconds`` it stops and returns what it found so far."""
     found = []
+    deadline = time.monotonic() + seconds
+    used = 0
     for pos, d in enumerate(decisions[:DECISIONS_SCAN_MAX]):
         if not isinstance(d, dict):
             continue
@@ -1063,9 +1071,15 @@ def _covering(decisions, rels):
             if not isinstance(t, str):
                 continue
             for rel in rels:
-                sp = specificity(t, rel)
-                if sp is not None and (best is None or sp < best):
-                    best = sp
+                if used >= calls or time.monotonic() >= deadline:
+                    found.sort(key=lambda x: (x[0], x[1]))
+                    return found
+                used += 1
+                best = specificity(t, rel)
+                if best is not None:
+                    break
+            if best is not None:
+                break
         if best is not None:
             found.append((best, pos, n, d))
     found.sort(key=lambda x: (x[0], x[1]))
@@ -1478,8 +1492,10 @@ def _response_text(value, cap=CODE_MAP_SCAN_MAX):
 
 
 def _map_tokens(text):
-    """Distinct path-like tokens from at most CODE_MAP_TOKENS_MAX tokens: the ones with a ``/`` first, then the
-    ones with only a file extension, each in order. A ``:<line>`` suffix is split off by the delimiters."""
+    """Distinct path-like tokens: the ones with a ``/`` first, then the ones with only a file extension, each in
+    order. Only the first CODE_MAP_TOKENS_MAX tokens of the text (path-like or not) are examined, so on a
+    code-heavy answer that is often much less than the CODE_MAP_SCAN_MAX characters scanned. A ``:<line>`` suffix
+    is split off by the delimiters."""
     seen, examined = {}, 0
     for m in _MAP_TOKEN.finditer(text):
         examined += 1
@@ -1503,10 +1519,13 @@ def _inside(real, root):
     return rel if rel and ".." not in rel.split("/") else None
 
 
-def _map_paths(text, root, refs):
+def _map_paths(text, root, refs, lexical=()):
     """(project files, reference shas) named in a map answer. At most CODE_MAP_PATHS_MAX candidates are looked
     up: a relative one (never with ``..``) or an absolute one must resolve (realpath) inside the project root
-    and exist (lstat) - a symlink out of it is refused; an absolute one inside a reference dir marks old code."""
+    and exist (lstat) - a symlink out of it is refused; an absolute one inside a reference dir marks old code.
+    An absolute token must first be lexically under one of ``lexical`` (the root and the reference dirs, as
+    given and as real paths), so text naming other places never touches the disk. A project file deeper than
+    CODE_MAP_DEPTH_MAX segments is left out."""
     rels, old = [], []
     checked = 0
     for tok in _map_tokens(text):
@@ -1514,6 +1533,8 @@ def _map_paths(text, root, refs):
             break
         absolute = os.path.isabs(tok)
         if not absolute and (root is None or ".." in tok.split("/")):
+            continue
+        if absolute and not any(_inside(os.path.normpath(tok), base) is not None for base in lexical):
             continue
         checked += 1
         try:
@@ -1523,7 +1544,7 @@ def _map_paths(text, root, refs):
             continue
         rel = _inside(real, root) if root else None
         if rel is not None:
-            if rel not in rels:
+            if rel not in rels and rel.count("/") < CODE_MAP_DEPTH_MAX:
                 rels.append(rel)
             continue
         if absolute:
@@ -1540,7 +1561,7 @@ def _map_refs(policy):
     for r in refs[:CODE_MAP_REFS_MAX] if isinstance(refs, list) else []:
         d, sha = (r.get("dir"), r.get("sha")) if isinstance(r, dict) else (None, None)
         if isinstance(d, str) and os.path.isabs(d) and "\0" not in d and isinstance(sha, str) and _SHA.match(sha):
-            out.append((os.path.realpath(d), sha))
+            out.append((os.path.realpath(d), sha, os.path.normpath(d)))
     return out
 
 
@@ -1552,8 +1573,9 @@ def _code_map_note(policy, payload):
     """A code map query answer (``code_map.prefix`` + one of CODE_MAP_TOOLS): how fresh the map is (HEAD read
     from the project folder without git), the old-code line for files under a reference's folder, and the
     decisions covering the project files it names that this conversation was not yet shown for a map answer
-    (the ``mapshown`` set, at most DECISIONS_MAX_NOTES). At most CODE_MAP_MAX_CHARS in all; spools a
-    ``code_map`` nudge. None for any other call. Never changes a decision."""
+    (the ``mapshown`` set, at most DECISIONS_MAX_NOTES). The response is read up to CODE_MAP_SCAN_MAX characters
+    and, within that, its first CODE_MAP_TOKENS_MAX tokens; the matching is bounded (``_covering``). At most
+    CODE_MAP_MAX_CHARS in all; spools a ``code_map`` nudge. None for any other call. Never changes a decision."""
     cm = policy.get("code_map")
     tool = payload.get("tool_name")
     if not isinstance(cm, dict) or not isinstance(tool, str):
@@ -1573,7 +1595,12 @@ def _code_map_note(policy, payload):
     else:
         fresh, line = False, CODE_MAP_BEHIND.replace("{sha}", sha[:7]).replace("{head}", head[:7])
     lines = [_clean(line)]
-    rels, old = _map_paths(_response_text(payload.get("tool_response")), root, _map_refs(policy))
+    refs = _map_refs(policy)
+    lexical = [os.path.normpath(policy["project_dir"]), root] if root else []
+    for rdir, _rsha, given in refs:
+        lexical += [given, rdir]
+    rels, old = _map_paths(_response_text(payload.get("tool_response")), root,
+                           [(rdir, rsha) for rdir, rsha, _given in refs], [x for x in dict.fromkeys(lexical) if x])
     for rsha in old:
         old_line = _clean(CODE_MAP_OLD.replace("{sha}", rsha[:7]))
         if len("\n".join(lines + [old_line])) <= CODE_MAP_MAX_CHARS:
