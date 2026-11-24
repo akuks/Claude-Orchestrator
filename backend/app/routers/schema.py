@@ -104,7 +104,7 @@ def _work(directory: str, deadline: float):
             results = [(rf.root, len(rf.files), schema_replay.replay(rf.files, deadline=deadline))
                        for rf in collected.roots]
             hit = (collected.limits, results)
-            _cache_put(key, hit, sum(f[1] for f in sc.signature) + 1024)
+            _cache_put(key, hit, sum(len(t) for rf in collected.roots for _, t in rf.files) + 1024)
     except TimeoutError:
         if sc is not None and sc.signature:  # ran out during the listing: nothing to remember it by
             with _lock:
@@ -139,7 +139,7 @@ async def _submit(directory: str, deadline: float):
                 return fut
             if _slots.acquire(blocking=False):
                 try:
-                    fut = _pool.submit(_job, directory, key, deadline)
+                    fut = _pool.submit(_job, key, key, deadline)
                 except BaseException:
                     _slots.release()
                     raise

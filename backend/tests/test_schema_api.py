@@ -186,6 +186,23 @@ def test_waits_for_a_free_worker_within_budget(client, tmp_path, monkeypatch):
     assert j["note"] == schema_router.NOTE_SLOW and j["found"] is True and j["roots"] == []
 
 
+def test_job_gets_the_real_path(client, tmp_path, monkeypatch):
+    import os as _os
+
+    p, d = _project(client, tmp_path)
+    _sql(d, "1.sql", "CREATE TABLE a (id int);")
+    seen = []
+    real = schema_router.schema_files.scan
+
+    def spy(directory, deadline=None):
+        seen.append(directory)
+        return real(directory, deadline)
+
+    monkeypatch.setattr(schema_router.schema_files, "scan", spy)
+    assert client.get(f"/projects/{p['id']}/schema").status_code == 200
+    assert seen == [_os.path.realpath(str(d))]
+
+
 def test_unexpected_error_is_a_plain_answer(client, tmp_path, monkeypatch):
     p, d = _project(client, tmp_path)
     _sql(d, "1.sql", "CREATE TABLE a (id int);")

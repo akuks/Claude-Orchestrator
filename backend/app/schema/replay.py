@@ -213,6 +213,7 @@ class _Replay:
         self.deadline = deadline
         self.idx: dict[str, str] = {}  # lowercase -> table key
         self.counted = False
+        self.touched: set[str] = set()
 
     # ---- table lookup
     def get(self, name: str) -> Table | None:
@@ -246,12 +247,17 @@ class _Replay:
                     raise TimeoutError("schema replay over budget")
                 at = f"{rel}:{line}"
                 self.counted = False
+                self.touched = set()
                 try:
                     self.statement(sql, rel, at)
                 except TimeoutError:
                     raise
                 except Exception:  # a statement we cannot handle never breaks the answer
                     self.bad(at)
+                    for name in self.touched:  # it may have changed these halfway
+                        t = self.get(name)
+                        if t is not None:
+                            t.uncertain = True
         return self.s
 
     def statement(self, sql: str, rel: str, at: str):
@@ -283,6 +289,7 @@ class _Replay:
         elif isinstance(node, exp.Drop) and str(node.args.get("kind") or "").upper() == "TABLE":
             for t in node.args.get("tables") or []:
                 if isinstance(t, exp.Table):
+                    self.touched.add(_tname(t))
                     self.remove(_tname(t))
         elif isinstance(node, exp.Command):
             self.command(node, sql, at)
@@ -308,6 +315,7 @@ class _Replay:
             self.bad(at)
             return
         name = _tname(tbl)
+        self.touched.add(name)
         old = self.get(name)
         if old is not None and node.args.get("exists"):
             return  # CREATE TABLE IF NOT EXISTS: the first one stands
@@ -378,6 +386,7 @@ class _Replay:
         tbl = node.this
         if not isinstance(tbl, exp.Table):
             return
+        self.touched.add(_tname(tbl))
         t = self.get(_tname(tbl))
         if t is None:
             self.bad(at)  # a change to a table we never saw: counted, not guessed
@@ -468,6 +477,7 @@ class _Replay:
                     lk.to_columns = [new if c.lower() == old.lower() else c for c in lk.to_columns]
 
     def rename_table(self, old: str, new: str):
+        self.touched.update((old, new))
         t = self.get(old)
         if t is None:
             return

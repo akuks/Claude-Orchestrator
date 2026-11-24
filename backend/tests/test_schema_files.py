@@ -194,3 +194,28 @@ def test_project_folder_is_not_reopened_by_path(tmp_path, monkeypatch):
     monkeypatch.setattr(files, "_after_list", swap)
     c = files.collect(str(proj))
     assert [f[1] for f in _names(c, "migrations")] == ["create table fine (id int);"]
+
+
+def test_total_limit_holds_when_files_grow_after_listing(tmp_path, monkeypatch):
+    monkeypatch.setattr(files, "MAX_BYTES", 5000)
+    paths = [_w(tmp_path, f"migrations/{i}.sql", "x") for i in range(40)]
+
+    def grow():
+        for p in paths:
+            p.write_text("-- " + "y" * 3000)
+
+    monkeypatch.setattr(files, "_after_list", lambda: None)
+    sc = files.scan(str(tmp_path))
+    grow()
+    try:
+        res = files.read(sc, accept_changed=True)
+    finally:
+        sc.close()
+    total = sum(len(t) for r in res.roots for _, t in r.files)
+    assert total <= 5000 and files.LIMIT_BYTES in res.limits
+    # through collect (rescan + accept) the same
+    for p in paths:
+        p.write_text("x")
+    monkeypatch.setattr(files, "_after_list", grow)
+    c = files.collect(str(tmp_path))
+    assert sum(len(t) for r in c.roots for _, t in r.files) <= 5000 and files.LIMIT_BYTES in c.limits

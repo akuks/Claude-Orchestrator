@@ -221,3 +221,16 @@ def test_statement_counted_once():
     assert s.not_understood_count == 1
     s = run("CREATE TABLE a (x int);\nALTER TABLE a ALTER COLUMN x SET DEFAULT 1; ALTER TABLE a OWNER TO b;")
     assert s.not_understood_count == 2
+
+
+def test_statement_that_raises_halfway_marks_its_tables_uncertain(monkeypatch):
+    import app.schema.replay as r
+
+    def boom(self, *a, **k):
+        raise AttributeError("x")
+
+    monkeypatch.setattr(r._Replay, "alter_column", boom)
+    s = run("CREATE TABLE a (x int); CREATE TABLE b (y int);",
+            "ALTER TABLE a ADD COLUMN q int, ALTER COLUMN x TYPE bigint;")
+    assert [c.name for c in s.tables["a"].columns] == ["x", "q"]
+    assert s.tables["a"].uncertain and not s.tables["b"].uncertain and s.not_understood_count == 1

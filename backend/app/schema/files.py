@@ -214,21 +214,28 @@ def read(sc: Scan, deadline: float | None = None, accept_changed: bool = False) 
     if not sc.roots or sc.base_fd < 0:
         return res
     _after_list()
+    total = 0  # bytes actually read in this pass, whatever the listing said
     for root, entries in sc.roots:
         rf = RootFiles(root)
         for rel, size, _ in entries:
             _check(deadline)
-            got = _read_one(sc.base_fd, rel, MAX_BYTES)
+            got = _read_one(sc.base_fd, rel, MAX_BYTES - total)
             if got is None:
                 continue
             text, now = got
+            if text is None:  # over what is left of the 5 MB: stop, no gaps after it
+                if LIMIT_BYTES not in res.limits:
+                    res.limits.append(LIMIT_BYTES)
+                if rf.files:
+                    res.roots.append(rf)
+                return res
+            total += now
             if now != size:
                 res.changed.append(rel)
                 if not accept_changed:
                     continue
                 res.limits.append(f"{rel} changed while it was being read.")
-            if text is not None:
-                rf.files.append((rel, text))
+            rf.files.append((rel, text))
         if rf.files:
             res.roots.append(rf)
     return res
