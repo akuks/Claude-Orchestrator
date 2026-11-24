@@ -62,7 +62,7 @@ def test_claude_only_runs_version(monkeypatch):
 
 def test_claude_runs_the_mock_for_real():
     r = run(by_id("claude").fn(None))  # CO_CLAUDE_BIN is the mock script; stdin is /dev/null
-    assert r.status in (OK, PROBLEM)  # never hangs
+    assert r.status == OK and r.detail["version"]  # never hangs
 
 
 def test_tool_check_nonzero_exit_is_not_ok(monkeypatch):
@@ -356,6 +356,25 @@ def test_cache_holds_for_30_seconds(monkeypatch):
         assert len(calls) == 3
 
     run(go())
+    runner.clear_cache()
+
+
+def test_concurrent_refreshes_share_one_run(monkeypatch):
+    calls = []
+
+    async def slow(s):
+        calls.append(1)
+        await asyncio.sleep(0.2)
+        return Result(OK, "x")
+
+    monkeypatch.setattr(checks, "CHECKS", [checks.Check("a", "A", slow)])
+    runner.clear_cache()
+
+    async def go():
+        return await asyncio.gather(*(runner.run_all(lambda: None, force=True) for _ in range(5)))
+
+    out = run(go())
+    assert len(calls) == 1 and all(o is out[0] for o in out)
     runner.clear_cache()
 
 

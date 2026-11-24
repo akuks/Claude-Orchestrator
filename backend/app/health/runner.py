@@ -25,8 +25,8 @@ _HOME_RE = re.compile(r"(?:/Users|/home)/[^/\s\"']+")
 
 _clock = time.monotonic  # tests replace it
 _cache: tuple[float, dict] | None = None
-_lock: asyncio.Lock | None = None
-_lock_loop = None
+_inflight: asyncio.Task | None = None
+_inflight_loop = None
 
 
 def overall(checks: list[dict]) -> str:
@@ -112,21 +112,24 @@ async def _run_fresh(s) -> dict:
 
 async def run_all(s=None, *, force: bool = False) -> dict:
     """The spec's response shape. ``s``: a session factory (default SessionLocal).
-    ``force`` skips the 30 s cache."""
-    global _cache, _lock, _lock_loop
+    ``force`` skips the 30 s cache; concurrent callers share one in-flight run."""
+    global _cache, _inflight, _inflight_loop
     if s is None:
         from ..database import SessionLocal
 
         s = SessionLocal
     loop = asyncio.get_running_loop()
-    if _lock is None or _lock_loop is not loop:
-        _lock, _lock_loop = asyncio.Lock(), loop
-    async with _lock:
-        if not force and _cache is not None and _clock() - _cache[0] < CACHE_SECONDS:
-            return _cache[1]
-        data = await _run_fresh(s)
-        _cache = (_clock(), data)
-        return data
+    if not force and _cache is not None and _clock() - _cache[0] < CACHE_SECONDS:
+        return _cache[1]
+    if _inflight is None or _inflight.done() or _inflight_loop is not loop:
+        async def go():
+            global _cache
+            data = await _run_fresh(s)
+            _cache = (_clock(), data)
+            return data
+
+        _inflight, _inflight_loop = loop.create_task(go()), loop
+    return await asyncio.shield(_inflight)  # a cancelled caller does not cancel the shared run
 
 
 def clear_cache() -> None:
