@@ -68,6 +68,8 @@ function clampSel(sel, stages) {
   return sel
 }
 
+const money = (v) => '$' + Number(v).toFixed(2)
+
 const sameKeys = (a, b) => a.size === b.size && [...a].every((k) => b.has(k))
 
 function WorkflowEditor({ open, workflow, prefill, hint, missing = [], agents, onClose, onSaved }) {
@@ -82,6 +84,8 @@ function WorkflowEditor({ open, workflow, prefill, hint, missing = [], agents, o
   const watched = Form.useWatch('stages', { form, preserve: true })
   const stages = useMemo(() => (Array.isArray(watched) ? watched : []), [watched])
   const sel = clampSel(rawSel, stages)
+  const limit = Form.useWatch('budget_usd', form)
+  const limitSet = limit != null && limit !== '' && Number.isFinite(Number(limit))
   const isEdit = !!workflow
   const blankStart = open && !workflow && !prefill
 
@@ -90,7 +94,7 @@ function WorkflowEditor({ open, workflow, prefill, hint, missing = [], agents, o
     setError('')
     setSel(null)
     setErrKeys(new Set())
-    setSettingsOpen(workflow?.budget_usd != null)
+    setSettingsOpen(false)
     if (workflow) {
       form.setFieldsValue({ ...workflow, budget_usd: workflow.budget_usd ?? null, stages: (workflow.stages || []).map(formStage) })
     } else if (prefill) {
@@ -202,15 +206,27 @@ function WorkflowEditor({ open, workflow, prefill, hint, missing = [], agents, o
           <Form.Item name="description" label="What is it for? (optional)" className="co-wf-ed-desc">
             <Input placeholder="One sentence your team sees on the card" />
           </Form.Item>
-          <Button
-            className="co-wf-ed-settings-btn"
-            icon={<SettingOutlined />}
-            onClick={() => setSettingsOpen((o) => !o)}
-            aria-expanded={settingsOpen}
-            data-testid="workflow-settings"
-          >
-            Settings
-          </Button>
+          <div className="co-wf-ed-head-side">
+            {limitSet && (
+              <button
+                type="button"
+                className="co-wf-ed-limit co-num"
+                onClick={() => setSettingsOpen(true)}
+                aria-label={`Spending limit ${money(limit)}, open settings`}
+                data-testid="workflow-limit-chip"
+              >
+                Limit {money(limit)}
+              </button>
+            )}
+            <Button
+              icon={<SettingOutlined />}
+              onClick={() => setSettingsOpen((o) => !o)}
+              aria-expanded={settingsOpen}
+              data-testid="workflow-settings"
+            >
+              Settings
+            </Button>
+          </div>
         </div>
         <div className="co-wf-ed-settings" hidden={!settingsOpen} data-testid="workflow-settings-panel">
           <Form.Item

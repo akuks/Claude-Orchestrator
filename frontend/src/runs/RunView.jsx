@@ -487,6 +487,7 @@ export default function RunView({ id, user, projects = [], navigate, onOpenCrede
         {stages.length ? (
           <FlowCanvas
             mode="run"
+            center
             steps={run.stages}
             statusOf={statusOf}
             selected={selStage == null ? null : { step: selStage }}

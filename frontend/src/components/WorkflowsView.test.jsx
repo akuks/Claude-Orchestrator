@@ -148,6 +148,13 @@ describe('WorkflowsView: stage kinds', () => {
     await click(document.body.querySelector('[data-testid="workflow-more"]'))
     await click(menuItem('Edit'))
     await flush()
+    // the limit stays tucked away behind Settings, with a chip that opens it
+    const panel = document.body.querySelector('[data-testid="workflow-settings-panel"]')
+    expect(panel.hidden).toBe(true)
+    const chip = document.body.querySelector('[data-testid="workflow-limit-chip"]')
+    expect(chip.textContent).toBe('Limit $4.00')
+    await click(chip)
+    expect(panel.hidden).toBe(false)
     const input = document.body.querySelector('[data-testid="workflow-budget"] input') || document.body.querySelector('input[aria-label="Spending limit for each run"]')
     expect(input.value).toBe('4.00')
     await act(async () => {

@@ -270,6 +270,7 @@ describe('RunView', () => {
     const c = await mount({ stage: 1, onSelectStage })
     const canvas = c.querySelector('.co-run-timeline [data-testid="flow-canvas"]')
     expect(canvas.className).toContain('co-flow-mode-run')
+    expect(canvas.className).toContain('co-flow-center')
     const boxes = [...canvas.querySelectorAll('[data-testid="flow-box"]')]
     expect(boxes.map((b) => b.getAttribute('aria-label'))).toEqual([
       'Step 1, Agent: Planner, done',

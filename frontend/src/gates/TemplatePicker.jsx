@@ -59,7 +59,7 @@ export default function TemplatePicker({ open, onClose, onPick, presets = [] }) 
   }, [open])
 
   return (
-    <Modal title="Start from a template" open={open} onCancel={onClose} footer={null} width="min(900px, 92vw)">
+    <Modal title="Start from a template" open={open} onCancel={onClose} footer={null} width="min(1040px, 94vw)">
       <p className="co-wf-muted">Pick one to start with. You can change everything before you save it.</p>
       {error && <Alert type="error" showIcon message={error} style={{ marginBottom: 10 }} />}
       <h3 className="co-wf-group">Built-in</h3>

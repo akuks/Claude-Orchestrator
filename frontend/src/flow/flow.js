@@ -8,8 +8,8 @@ import { splitStageTitle } from '../runs/runStages'
 // Box sizes (px). Fixed heights keep the connector lines exact without
 // measuring the DOM.
 export const SIZES = {
-  full: { box: 200, h: 64, gap: 12, link: 48, editLink: 72, branch: 56, fixer: 44, tools: 34, chip: 34, caption: 24 },
-  mini: { box: 130, h: 30, gap: 6, link: 22, editLink: 22, branch: 0, fixer: 0, tools: 0, chip: 0, caption: 0 },
+  full: { box: 200, h: 64, gap: 12, link: 40, editLink: 72, branch: 56, fixer: 44, tools: 34, chip: 34, caption: 24 },
+  mini: { box: 130, h: 30, gap: 6, link: 26, editLink: 26, branch: 0, fixer: 0, tools: 0, chip: 0, caption: 0 },
 }
 export const sizeOf = (size) => (size === 'mini' ? SIZES.mini : SIZES.full)
 
@@ -30,7 +30,16 @@ export function agentName(ref, agents) {
   return revealHidden(hit ? hit.name : String(ref)).text
 }
 
-const outputCount = (it) => (Array.isArray(it?.outputs) ? it.outputs.filter((n) => String(n ?? '').trim()).length : 0)
+const outputNames = (it) => (Array.isArray(it?.outputs) ? it.outputs.map((n) => String(n ?? '').trim()).filter(Boolean) : [])
+
+// What a box's badges mean, in words (tooltips and screen readers).
+export function badgeWords(kind, box) {
+  const out = []
+  if (box?.retry) out.push(kind === 'gate' ? 'Re-runs only the failures first' : 'Tries once more if it fails')
+  const names = box?.outputs || []
+  if (names.length) out.push(`Hands over ${names.length} thing${names.length === 1 ? '' : 's'}: ${names.join(', ')}`)
+  return out
+}
 
 // The drawing model of a workflow: one column per step, each with its boxes.
 // item is the agent's index in the step, null for a single-box step, and
@@ -47,7 +56,8 @@ export function flowModel(steps, agents) {
             title: agentName(it?.agent, agents) || 'Pick an agent',
             sub: revealHidden(firstLine(it?.prompt)).text,
             retry: st?.auto_retry === true,
-            handsOver: outputCount(it),
+            handsOver: outputNames(it).length,
+            outputs: outputNames(it).map((n) => revealHidden(n).text),
           }))
         : [{ item: null, title: 'No agent yet', sub: '', retry: false, handsOver: 0 }]
       return { index, kind, name, boxes, fix: null }

@@ -172,4 +172,37 @@ describe('FlowCanvas', () => {
     v = await render(<FlowCanvas mode="run" steps={STEPS} input="PR 12" />)
     expect(v.container.querySelector('[aria-label="Start, running on: PR 12"]')).not.toBeNull()
   })
+
+  it('badges explain themselves in a tooltip and to screen readers', async () => {
+    v = await render(
+      <FlowCanvas
+        steps={[
+          { name: 'A', auto_retry: true, items: [{ agent: 'X', prompt: 'p', outputs: ['summary'] }] },
+          { name: 'T', kind: 'gate', run: ['npm test'], retry: 'npm test -- --lf' },
+        ]}
+        onSelect={() => {}}
+      />,
+    )
+    const badges = [...v.container.querySelectorAll('[data-testid="flow-badge"]')]
+    expect(badges.map((b) => b.getAttribute('aria-label'))).toEqual([
+      'Tries once more if it fails',
+      'Hands over 1 thing: summary',
+      'Re-runs only the failures first',
+    ])
+    const b = boxes(v.container)
+    expect(b[0].getAttribute('aria-label')).toBe('Step 1, Agent: X, tries once more if it fails, hands over 1 thing: summary')
+    await act(async () => badges[1].dispatchEvent(new MouseEvent('mouseover', { bubbles: true })))
+    await new Promise((r) => setTimeout(r, 200))
+    await flush()
+    expect(document.body.querySelector('.ant-tooltip')?.textContent).toContain('Hands over 1 thing: summary')
+  })
+
+  it('the + choices open below the line with an arrow; center and mini are classes', async () => {
+    v = await render(<FlowCanvas mode="edit" center steps={STEPS} onSelect={() => {}} onInsert={() => {}} />)
+    await click(v.container.querySelector('[data-testid="flow-plus"]'))
+    const pop = document.body.querySelector('.co-flow-add-pop')
+    expect(pop.className).toContain('ant-popover-placement-bottom')
+    expect(pop.querySelector('.ant-popover-arrow')).not.toBeNull()
+    expect(v.container.querySelector('[data-testid="flow-canvas"]').className).toContain('co-flow-center')
+  })
 })

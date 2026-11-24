@@ -16,7 +16,7 @@ import {
   ToolOutlined,
   UserOutlined,
 } from '@ant-design/icons'
-import { KIND_WORD, STATUS_WORD, boxKey, connectorPaths, flowModel, layout, sizeOf } from './flow'
+import { KIND_WORD, STATUS_WORD, badgeWords, boxKey, connectorPaths, flowModel, layout, sizeOf } from './flow'
 import './flow.css'
 
 const KIND_ICON = { agent: <RobotOutlined />, gate: <CheckCircleOutlined />, approval: <UserOutlined />, fix: <ToolOutlined /> }
@@ -33,7 +33,7 @@ export const ADD_CHOICES = [
   { kind: 'approval', label: 'Ask a person', icon: <UserOutlined /> },
 ]
 
-function Box({ kind, title, sub, mono, retry, handsOver, status, selected, error, label, onClick, mini, step, item, small }) {
+function Box({ kind, title, sub, mono, retry, handsOver, outputs, status, selected, error, label, onClick, mini, step, item, small }) {
   const cls = [
     'co-flow-box',
     `co-flow-k-${kind}`,
@@ -45,7 +45,12 @@ function Box({ kind, title, sub, mono, retry, handsOver, status, selected, error
   ]
     .filter(Boolean)
     .join(' ')
-  const words = [label, status ? STATUS_WORD[status] : null, error ? 'needs attention' : null].filter(Boolean).join(', ')
+  const badges = mini ? [] : badgeWords(kind, { retry, outputs: outputs || [] })
+  const words = [label, status ? STATUS_WORD[status] : null, error ? 'needs attention' : null, ...badges.map((b) => b.toLowerCase())]
+    .filter(Boolean)
+    .join(', ')
+  const retryWord = badges.find((b) => !b.startsWith('Hands over'))
+  const handWord = badges.find((b) => b.startsWith('Hands over'))
   const body = (
     <>
       <span className="co-flow-icon" aria-hidden="true">
@@ -56,16 +61,20 @@ function Box({ kind, title, sub, mono, retry, handsOver, status, selected, error
         {!mini && sub ? <span className={`co-flow-sub${mono ? ' co-flow-mono' : ''}`}>{sub}</span> : null}
       </span>
       {!mini && (retry || handsOver > 0) && (
-        <span className="co-flow-badges" aria-hidden="true">
+        <span className="co-flow-badges">
           {retry && (
-            <span className="co-flow-badge" title={kind === 'gate' ? 'Re-runs only the failures' : 'Tries once more'}>
-              ↻
-            </span>
+            <Tooltip title={retryWord}>
+              <span className="co-flow-badge" role="img" aria-label={retryWord} data-testid="flow-badge">
+                ↻
+              </span>
+            </Tooltip>
           )}
           {handsOver > 0 && (
-            <span className="co-flow-badge" title={`Hands over ${handsOver} thing${handsOver === 1 ? '' : 's'}`}>
-              ⇢ {handsOver}
-            </span>
+            <Tooltip title={handWord}>
+              <span className="co-flow-badge" role="img" aria-label={handWord} data-testid="flow-badge">
+                ⇢ {handsOver}
+              </span>
+            </Tooltip>
           )}
         </span>
       )}
@@ -110,6 +119,9 @@ function Connector({ nLeft, nRight, height, width, size, state, addAt, onAdd, pu
           open={openAt === addAt}
           onOpenChange={(o) => setOpenAt(o ? addAt : null)}
           placement="bottom"
+          arrow={{ pointAtCenter: true }}
+          align={{ offset: [0, 30] }}
+          overlayClassName="co-flow-add-pop"
           content={
             <div className="co-flow-add" data-testid="flow-add-menu">
               {ADD_CHOICES.map((c) => (
@@ -219,6 +231,7 @@ export default function FlowCanvas({
   focusStep = null,
   pulseAdd = false,
   label = 'Workflow steps',
+  center = false,
 }) {
   const mini = size === 'mini'
   const edit = mode === 'edit' && !mini
@@ -229,6 +242,26 @@ export default function FlowCanvas({
   const linkW = edit ? s.editLink : s.link
   const [openAt, setOpenAt] = useState(null)
   const scroller = useRef(null)
+  // Which edges have more to scroll to (for the fade).
+  const [more, setMore] = useState({ left: false, right: false })
+  useEffect(() => {
+    const sc = scroller.current
+    if (!sc) return undefined
+    const check = () => {
+      const left = sc.scrollLeft > 1
+      const right = sc.scrollLeft + sc.clientWidth < sc.scrollWidth - 1
+      setMore((m) => (m.left === left && m.right === right ? m : { left, right }))
+    }
+    check()
+    sc.addEventListener('scroll', check, { passive: true })
+    const ro = typeof ResizeObserver === 'function' ? new ResizeObserver(check) : null
+    ro?.observe(sc)
+    if (sc.firstElementChild) ro?.observe(sc.firstElementChild)
+    return () => {
+      sc.removeEventListener('scroll', check)
+      ro?.disconnect()
+    }
+  }, [model.length])
 
   // Keep the focused step (the run's current step, or the one being edited) in view.
   useEffect(() => {
@@ -280,12 +313,21 @@ export default function FlowCanvas({
   return (
     <div
       ref={scroller}
-      className={`co-flow co-flow-${mini ? 'mini' : 'full'} co-flow-mode-${mode}`}
+      className={[
+        'co-flow',
+        `co-flow-${mini ? 'mini' : 'full'}`,
+        `co-flow-mode-${mode}`,
+        center && 'co-flow-center',
+        more.left && 'co-flow-more-left',
+        more.right && 'co-flow-more-right',
+      ]
+        .filter(Boolean)
+        .join(' ')}
       role="group"
       aria-label={label}
       data-testid="flow-canvas"
     >
-      <div className="co-flow-track" style={mini ? undefined : { paddingTop: 14 + geo.padTop, paddingBottom: 14 + geo.padBottom }}>
+      <div className="co-flow-track" style={mini ? undefined : { paddingTop: 14 + geo.padTop, paddingBottom: 14 + geo.padBottom }} data-testid="flow-track">
         {input ? (
           <Tooltip title={`Running on: ${input}`}>
             <span className="co-flow-pill-wrap" tabIndex={0} aria-label={`Start, running on: ${input}`}>
@@ -322,6 +364,7 @@ export default function FlowCanvas({
                       mono={b.mono}
                       retry={b.retry}
                       handsOver={b.handsOver}
+                      outputs={b.outputs}
                       status={status}
                       selected={isSel(i, b.item)}
                       error={hasErr(i, b.item)}

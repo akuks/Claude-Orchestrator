@@ -13,13 +13,28 @@
   position: relative;
   min-width: 0;
 }
-.co-flow-full {
+.co-flow-full,
+.co-flow-mini {
   overflow-x: auto;
   overflow-y: hidden;
-  /* Soft fade at both edges; the track's side padding keeps content clear of it at rest. */
-  -webkit-mask-image: linear-gradient(to right, transparent 0, #000 20px, #000 calc(100% - 20px), transparent 100%);
-  mask-image: linear-gradient(to right, transparent 0, #000 20px, #000 calc(100% - 20px), transparent 100%);
   scrollbar-width: thin;
+}
+/* Soft fade on an edge with more to scroll to. */
+.co-flow-more-right {
+  -webkit-mask-image: linear-gradient(to right, #000 calc(100% - 36px), transparent 100%);
+  mask-image: linear-gradient(to right, #000 calc(100% - 36px), transparent 100%);
+}
+.co-flow-more-left {
+  -webkit-mask-image: linear-gradient(to right, transparent 0, #000 36px);
+  mask-image: linear-gradient(to right, transparent 0, #000 36px);
+}
+.co-flow-more-left.co-flow-more-right {
+  -webkit-mask-image: linear-gradient(to right, transparent 0, #000 36px, #000 calc(100% - 36px), transparent 100%);
+  mask-image: linear-gradient(to right, transparent 0, #000 36px, #000 calc(100% - 36px), transparent 100%);
+}
+/* Centred when narrower than the frame; scrolls from the left when wider. */
+.co-flow-center .co-flow-track {
+  margin: 0 auto;
 }
 .co-flow-track {
   display: flex;
@@ -28,9 +43,6 @@
   padding: 14px 28px;
 }
 .co-flow-mini .co-flow-track {
-  width: auto;
-  flex-wrap: wrap;
-  row-gap: 8px;
   padding: 2px 0;
 }
 .co-flow-seg {
@@ -433,6 +445,7 @@ button.co-flow-box:focus-visible {
   gap: 4px;
 }
 .co-flow-badge {
+  cursor: help;
   height: 18px;
   padding: 0 6px;
   border-radius: 999px;
@@ -596,4 +609,9 @@ html[data-reduce-motion='true'] .co-flow-plus-pulse {
 }
 .co-flow-open:focus-visible {
   box-shadow: 0 0 0 3px color-mix(in srgb, var(--co-primary) 45%, transparent);
+}
+
+/* The "+" choices sit below the line, clear of the boxes beside it. */
+.co-flow-add-pop .ant-popover-inner {
+  padding: 10px;
 }

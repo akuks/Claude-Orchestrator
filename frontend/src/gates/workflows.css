@@ -45,8 +45,9 @@ input.co-wf-mono {
 }
 .co-wf-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
+  grid-template-columns: repeat(auto-fill, minmax(min(460px, 100%), 1fr));
   gap: 14px;
+  align-items: start;
 }
 .co-wf-card {
   display: flex;
@@ -76,7 +77,6 @@ input.co-wf-mono {
   margin: 0;
 }
 .co-wf-card-foot {
-  margin-top: auto;
   display: flex;
   justify-content: space-between;
   align-items: center;
@@ -207,8 +207,9 @@ input.co-wf-mono {
 }
 .co-wf-tpl-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
+  grid-template-columns: repeat(auto-fill, minmax(min(460px, 100%), 1fr));
   gap: 10px;
+  align-items: start;
 }
 .co-wf-tpl {
   display: flex;
@@ -519,9 +520,6 @@ input.co-wf-step-name {
   min-width: 0;
   margin-bottom: 12px;
 }
-.co-wf-ed-settings-btn {
-  margin-top: 30px;
-}
 .co-wf-ed-settings {
   padding: 12px 14px;
   margin-bottom: 12px;
@@ -576,4 +574,30 @@ input.co-wf-step-name {
 }
 .co-wf-ed-step {
   max-width: 760px;
+}
+
+/* The spending limit, when set, as a chip beside Settings. */
+.co-wf-ed-head-side {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 30px;
+}
+.co-wf-ed-limit {
+  height: 24px;
+  padding: 0 10px;
+  border-radius: 999px;
+  border: 1px solid color-mix(in srgb, var(--co-primary) 40%, var(--co-border));
+  background: color-mix(in srgb, var(--co-primary) 8%, var(--co-surface-solid));
+  color: var(--co-text);
+  font: inherit;
+  font-size: 12px;
+  font-weight: 600;
+  white-space: nowrap;
+  cursor: pointer;
+}
+.co-wf-ed-limit:hover,
+.co-wf-ed-limit:focus-visible {
+  border-color: var(--co-primary);
+  outline: none;
 }
