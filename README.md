@@ -1648,9 +1648,23 @@ agent guard.
   `backend/app/mcp_launch.py`, changes folder and starts the command). The tool is also
   told where the project is, in the environment variable `CO_PROJECT_DIR`, when the task
   has a project folder. Web (HTTP) tools, the **Test** button and the policies are not
-  changed. The marker files (a `package.json` holding `{}`, an empty `node_modules/`,
-  an empty `.npmrc` and an empty `uv.toml`) stop `npm`, `npx` and `uv` from looking in
-  the folders above for a project of their own.
+  changed.
+- **Marker files.** The tool's folder holds an empty `node_modules/`, an empty `.npmrc`
+  and an empty `uv.toml`, so `npm`, `npx` and `uv` treat the folder itself as the project
+  instead of looking for one in the folders above. There is deliberately no
+  `package.json` (one would let a `package.json` higher up adopt the folder as a
+  workspace).
+- **Nothing to plant above.** npm also puts the `node_modules/.bin` of every folder above
+  on the tool's PATH, and no marker can stop that. So the agent guard refuses, in every
+  folder above the tool folders and the Code map build folder (up to `/`), the creation
+  of the files that steer launchers: `package.json`, `package-lock.json`,
+  `node_modules`, `.npmrc`, `pnpm-workspace.yaml`, `.pnpmfile.cjs`, `uv.toml`,
+  `bunfig.toml`, `.yarnrc.yml` and `pyproject.toml`. The task's own project folder is the
+  exception (see below).
+- **Own package cache.** Tools use their own npm cache, `workspaces/_mcp_cache/npm`
+  (owner-only, agents cannot write it), instead of the server user's `~/.npm`, unless
+  the tool's own settings set `npm_config_cache`. The Code map build already had its own
+  (under `_codemap/_home/`).
 - **The switch.** On a tool's form, under **More options**, **Start in the project
   folder** (admins only, stdio tools only, off by default). Use it only for a tool that
   must start inside the project; the project's own files can then change what the tool
@@ -1671,11 +1685,37 @@ agent guard.
 - **This has not been run against the real `claude` command-line tool or real connected
   tools.** The change is a plain change of folder followed by the tool's command. If a
   tool stops working, turn its **Start in the project folder** switch on.
-- A tool can still read the project: it is told where it is and runs as the same user.
-  The change only stops the project from choosing which code runs as the tool.
-- `npx` still reads the server user's own `~/.npmrc` and cache (needed for private
-  registries).
-- If the server stops in the middle of a task, that task's folder may stay on disk.
+- **This is not a sandbox.** A tool can still read the project: it is told where it is
+  and runs as the same user, with the same credentials as before. The change stops
+  agents from choosing which code runs as a tool through the folder it starts in, the
+  folders above it, or the package cache.
+- **A project whose folder contains the workspaces folder** (the orchestrator checkout
+  itself, used as a project) keeps its own `package.json`, `node_modules`, `.npmrc` and
+  the like writable, because they are its own work. Its agents can therefore still
+  influence what every connected tool and the Code map build run, in every project.
+  Its agents can also change `start.sh`, `frontend/`, `backend/scripts/` and
+  `backend/tests/` without approval; the server's code (`backend/app`, migrations, the
+  venv, `.env`) stays protected.
+- **Settings an admin puts in a project's env** (for example `NODE_OPTIONS`,
+  `NODE_PATH`, `PATH_PREPEND` or any `npm_config_*` value) reach the Code map build, and
+  reach tools if `claude` passes its environment on. Point them only at folders agents
+  cannot write.
+- **`npx` and `uvx` are covered best.** `pnpm dlx` and `bunx` get the protected names
+  above, but have not been looked at as closely. `uvx` still reads the server user's own
+  `~/.config/uv/uv.toml` and uv cache.
+- `npx` still reads the server user's own `~/.npmrc` (needed for private registries).
+- If the server stops in the middle of a task, that task's folder may stay on disk; it is
+  removed the next time the server starts.
+
+### Project folders that are part of the orchestrator
+
+A project's folder cannot be the server's own code, migrations or virtual environment
+(`backend/app`, `backend/migrations`, the venv) or one of the app's private
+`workspaces/_…` folders, or any folder inside them. Creating, importing or moving a
+project there answers 422 "That folder is part of the orchestrator itself". A folder
+that only contains them (the orchestrator checkout, `backend/`, `workspaces/`) is
+allowed, and saving a project with an unchanged folder is never refused. Whatever the
+folder, the server's own code stays protected from the project's agents.
 
 ## Code map
 
@@ -1771,9 +1811,12 @@ recorded decisions for the files an answer names, and labels for old code.
   it. Related settings: `CO_CODE_MAP_SCAN_INTERVAL_SECONDS` (600),
   `CO_CODE_MAP_TIMEOUT_SECONDS` (900), `CO_CODE_MAP_MAX_JOBS` (2).
 - **The tool when a task starts it.** A task starts the Code map tool from a private
-  folder that holds only a few inert marker files too, like every connected tool now (see "Where connected tools start"),
-  unless its **Start in the project folder** switch is on. The build always runs from
-  its own private folder that holds only a few inert marker files.
+  folder that holds only a few inert marker files, like every connected tool now (see
+  "Where connected tools start"), unless its **Start in the project folder** switch is
+  on. The build always runs from its own private folder with the same marker files, and
+  agents cannot plant launcher files in the folders above it. The limits listed under
+  "Where connected tools start" apply here too: the orchestrator checkout used as a
+  project, and settings in a project's env, can still influence the build.
 - **"How far behind" is not told to the agent.** Only the three lines above are.
 - **No index of our own.** The app does not build or store a map; it depends on the
   outside tool.

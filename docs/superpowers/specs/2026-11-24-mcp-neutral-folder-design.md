@@ -31,13 +31,20 @@ truly needs to start in the project folder. Applies to **all projects**.
   project is without starting there (only added when the task has a project folder).
 - **Neutral folder:** `workspaces/_mcp_configs/<task_id>/cwd/<server prefix>/` — per task and per tool, created
   0700 by `prepare_for_task`, under the per-task config folder that agents already cannot read and that is
-  removed with the task's config. Never shared between tasks or users. *Amended after the security review:* it is
-  not strictly empty. The server writes only inert stopper files into it when it is created — `package.json`
-  containing `{}`, an empty `node_modules/`, an empty `.npmrc` and an empty `uv.toml` (files 0600, folder 0700) —
-  because npm takes the nearest ancestor with `node_modules` or `package.json` as the project (reading its
-  `.npmrc` and preferring its `node_modules`) and uv walks up for `uv.toml`; without them the search climbed to
-  `workspaces/`, which agents can write. The code map index folder (`workspaces/_codemap/run/<project_id>/`) gets
-  the same stoppers, and the guard also protects those marker names directly under `workspaces/`.
+  removed with the task's config. Never shared between tasks or users. *Amended after the security reviews:* it is
+  not strictly empty. The server writes only inert stopper files into it when it is created — an empty
+  `node_modules/`, an empty `.npmrc` and an empty `uv.toml` (files 0600, folder 0700) — because npm takes the
+  nearest ancestor with `node_modules` or `package.json` as the project (reading its `.npmrc` and preferring its
+  `node_modules`) and uv walks up for `uv.toml`. There is **no** `package.json` stopper: with one, an ancestor
+  `package.json` whose `workspaces` glob matches the folder adopts it as a workspace (and an older stopper is
+  removed). npm also puts every ancestor's `node_modules/.bin` on PATH, which no stopper can stop, so the guard
+  protects the walk-up names (`package.json`, `package-lock.json`, `node_modules`, `.npmrc`,
+  `pnpm-workspace.yaml`, `.pnpmfile.cjs`, `uv.toml`, `bunfig.toml`, `.yarnrc.yml`, `pyproject.toml`) in every
+  ancestor of `workspaces/_mcp_configs` and `workspaces/_codemap/run`, up to `/`, in normalised and real form,
+  except in an ancestor that is (inside) the task's own project folder. Residual: a project whose folder
+  contains the workspaces folder (the orchestrator checkout as a project) can still influence tools through its
+  own package files. The code map index folder (`workspaces/_codemap/run/<project_id>/`) gets the same
+  stoppers.
 - A relative `command` (contains `/` but is not absolute, e.g. `./bin/tool`) cannot work from a neutral folder;
   the registry refuses to save one unless the switch is on ("A command that starts with ./ needs 'Start in the
   project folder'"). A bare name (`npx`, `uvx`, `node`) is resolved through PATH as today.
@@ -53,7 +60,10 @@ truly needs to start in the project folder. Applies to **all projects**.
 ### What does not change
 - `http` tools (no process). The server-side "Test" probe (already runs from the server's own folder).
 - The environment the tool gets (credentials are unchanged — the tool is the admin's chosen code; the change stops
-  the *project* from replacing that code).
+  the *project* from replacing that code), except two additions: `CO_PROJECT_DIR`, and *(amended)*
+  `npm_config_cache=workspaces/_mcp_cache/npm` (0700, guard-protected, made on demand) unless the tool's own env
+  sets `npm_config_cache`/`NPM_CONFIG_CACHE` — tools no longer share the agent-writable `~/.npm/_npx`. The code
+  map build keeps its own private cache under `_codemap/_home/`.
 - Tool names and prefixes, policies, the guard.
 
 ### Health and visibility
