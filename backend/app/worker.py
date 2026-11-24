@@ -1709,7 +1709,8 @@ class WorkerManager:
         each ``band`` -> a ``usage_band`` event {band, value} and a TaskUsage.bands entry {band, ts}, at most
         once per band name (the row decides). With no live state (a crashed run's recovery) the whole spool
         is read and only bands are recorded. Each ``decisions`` nudge -> a ``decision_note`` event {ids, path}
-        and each ``code_map`` nudge -> a ``code_map`` event {fresh, decisions, old_code}
+        and each ``code_map`` nudge -> a ``code_map`` event {fresh, decisions, old_code} (both with
+        ``partial: true`` when the matching bound left decisions unchecked)
         (live state only: a recovery's re-read would repeat the ones already shown). Never raises."""
         live = task_id in self._usage_spool
         state = self._usage_spool.get(task_id) or self._new_usage_spool()
@@ -1757,8 +1758,8 @@ class WorkerManager:
 
     @staticmethod
     def _decision_note(rec: dict) -> dict | None:
-        """co-guard's ``decisions`` nudge line -> the ``decision_note`` payload ``{ids, path}`` (None when it is
-        not one co-guard writes)."""
+        """co-guard's ``decisions`` nudge line -> the ``decision_note`` payload ``{ids, path}`` (+ ``partial``;
+        None when it is not one co-guard writes)."""
         ids = rec.get("ids")
         if not isinstance(ids, list):
             return None
@@ -1766,18 +1767,24 @@ class WorkerManager:
         path = rec.get("path")
         if not ids or not isinstance(path, str):
             return None
-        return {"ids": ids, "path": path[:300]}
+        note = {"ids": ids, "path": path[:300]}
+        if rec.get("partial") is True:  # the matching bound cut it short
+            note["partial"] = True
+        return note
 
     @staticmethod
     def _code_map_line(rec: dict) -> dict | None:
         """co-guard's ``code_map`` nudge line -> the ``code_map`` payload ``{fresh, decisions, old_code}``
-        (None when it is not one co-guard writes)."""
+        (+ ``partial``; None when it is not one co-guard writes)."""
         fresh = rec.get("fresh")
         ids = rec.get("decisions")
         if (fresh is not None and not isinstance(fresh, bool)) or not isinstance(ids, list):
             return None
         ids = [i for i in ids if isinstance(i, int) and not isinstance(i, bool) and i > 0][:3]
-        return {"fresh": fresh, "decisions": ids, "old_code": rec.get("old_code") is True}
+        note = {"fresh": fresh, "decisions": ids, "old_code": rec.get("old_code") is True}
+        if rec.get("partial") is True:  # the matching bound cut it short
+            note["partial"] = True
+        return note
 
     @staticmethod
     async def _record_band(task_id: str, band: str, ts) -> bool:

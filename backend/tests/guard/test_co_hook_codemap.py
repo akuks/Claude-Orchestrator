@@ -307,6 +307,52 @@ def test_adversarial_patterns_on_deep_paths_are_bounded(tmp_path, monkeypatch):
     assert elapsed < 0.5, elapsed
     assert out.startswith(CURRENT)  # the late match was cut off by the bound: no error, no decision
     assert "D-999" not in out
+    rec = [r for r in co_hook_spool(tmp_path) if r.get("nudge") == "code_map"]
+    assert rec and rec[-1]["partial"] is True  # and the record says some were not checked
+
+
+def co_hook_spool(tdir):
+    path = tdir / "spool.jsonl"
+    return [json.loads(ln) for ln in path.read_text().splitlines()] if path.exists() else []
+
+
+def test_before_edit_note_spools_partial_when_cut_short(tmp_path, monkeypatch):
+    monkeypatch.setenv("CO_TASK_DIR", str(tmp_path))
+    pol = {"cwd": str(tmp_path), "decisions": [_d(1, "Billing", ["src/billing.py"])] + [
+        _d(i, f"Old {i}", ["src/billing.py"]) for i in range(2, 6)]}
+    payload = {"tool_name": "Edit", "session_id": "s1", "tool_input": {"file_path": "src/billing.py"}}
+    found, partial = co_hook._covering(pol["decisions"], ["src/billing.py"], calls=2)
+    assert [f[2] for f in found] == [1, 2] and partial is True
+    orig = co_hook._covering
+
+    def tight(decisions, rels):
+        return orig(decisions, rels, calls=2)
+
+    monkeypatch.setattr(co_hook, "_covering", tight)
+    assert "D-001" in co_hook._decision_notes(pol, payload, "Edit")
+    rec = [r for r in co_hook_spool(tmp_path) if r.get("nudge") == "decisions"]
+    assert rec[-1]["ids"] == [1, 2] and rec[-1]["partial"] is True
+    # not cut short: no partial key
+    monkeypatch.setattr(co_hook, "_covering", orig)
+    assert co_hook._decision_notes(pol, dict(payload, session_id="s2"), "Edit")
+    assert "partial" not in [r for r in co_hook_spool(tmp_path) if r.get("nudge") == "decisions"][-1]
+
+
+def test_code_map_note_has_no_partial_when_complete(crun):
+    crun(answer("src/billing.py"), event="PostToolUse")
+    assert "partial" not in nudges(crun)[-1]
+
+
+def test_ok_index_without_a_commit_says_freshness_unknown(crun):
+    """The policy sends sha None for an ``ok`` index with no commit to compare: the line is "freshness
+    unknown" and the decisions are still shown."""
+    crun.policy["code_map"]["sha"] = None
+    (crun.tdir / "policy.json").write_text(json.dumps(crun.policy))
+    out = ctx(crun(answer("src/billing.py"), event="PostToolUse"))
+    assert out.startswith(UNKNOWN + "\n" + DEC) and "D-012" in out
+    assert nudges(crun)[-1]["fresh"] is None
+    assert co_hook._code_map_note({**crun.policy, "project_dir": str(crun.project)},
+                                  answer("x", session="s9")).startswith(UNKNOWN)
 
 
 def test_before_edit_note_is_bounded_on_a_deep_path(tmp_path, monkeypatch):
@@ -319,7 +365,7 @@ def test_before_edit_note_is_bounded_on_a_deep_path(tmp_path, monkeypatch):
     assert time.monotonic() - t0 < 0.5
 
 
-def test_matcher_call_budget_and_first_match():
+def test_matcher_call_budget_and_best_of_touches():
     calls = []
     real = co_hook.specificity
 
@@ -330,13 +376,36 @@ def test_matcher_call_budget_and_first_match():
     decisions = [_d(i, "x", ["nope/*"] * 20) for i in range(1, 201)]
     try:
         co_hook.specificity = counting
-        assert co_hook._covering(decisions, ["a.py", "b.py"]) == []
+        assert co_hook._covering(decisions, ["a.py", "b.py"]) == ([], True)
         assert len(calls) == co_hook.DECISIONS_MATCH_CALLS
         calls.clear()
-        found = co_hook._covering([_d(1, "x", ["a.py", "b.py", "*.py"])], ["a.py"])
-        assert [f[2] for f in found] == [1] and calls == ["a.py"]  # the first matching touch ends the scan
+        # an exact match ends the decision's scan; touches without a wildcard are tried first
+        found, partial = co_hook._covering([_d(1, "x", ["*.py", "b.py", "a.py"])], ["a.py"])
+        assert [(f[0], f[2]) for f in found] == [(0, 1)] and calls == ["b.py", "a.py"] and partial is False
+        calls.clear()
+        # a folder match: the remaining plain touches are tried (one may be exact), the globs are skipped
+        found, _ = co_hook._covering([_d(1, "x", ["src/**", "src", "lib"])], ["src/a.py"])
+        assert [f[0] for f in found] == [1] and calls == ["src", "lib"]
+        calls.clear()
+        # only globs: every glob touch is tried, the best (2) counts
+        found, _ = co_hook._covering([_d(1, "x", ["*.md", "src/**"])], ["src/a.py"])
+        assert [f[0] for f in found] == [2] and calls == ["*.md", "src/**"]
     finally:
         co_hook.specificity = real
+
+
+def test_exact_touch_after_a_glob_ranks_exact_before_an_edit(tmp_path, monkeypatch):
+    """The 4a ranking (the review's repro): a decision whose first touch is a glob and whose second is the
+    exact file ranks as exact and is in the top 3, ahead of newer glob-only decisions."""
+    monkeypatch.setenv("CO_TASK_DIR", str(tmp_path))
+    decisions = [_d(5, "Five", ["src/*.py"]), _d(4, "Four", ["**/*.py"]), _d(3, "Three", ["src/**"]),
+                 _d(2, "Two", ["*/billing.py"]), _d(1, "One", ["src/**", "src/billing.py"])]  # newest first
+    found, partial = co_hook._covering(decisions, ["src/billing.py"])
+    assert found[0][2] == 1 and found[0][0] == 0 and partial is False
+    payload = {"tool_name": "Edit", "session_id": "s1", "tool_input": {"file_path": "src/billing.py"}}
+    out = co_hook._decision_notes({"cwd": str(tmp_path), "decisions": decisions}, payload, "Edit")
+    shown = [ln.split(" ")[0] for ln in out.splitlines()[1:] if ln.startswith("D-")]
+    assert shown == ["D-001", "D-005", "D-004"]
 
 
 def test_paths_deeper_than_the_cap_are_left_out(tmp_path):

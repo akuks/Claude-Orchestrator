@@ -1054,36 +1054,49 @@ def _note_block(d):
 
 
 def _covering(decisions, rels, calls=DECISIONS_MATCH_CALLS, seconds=DECISIONS_MATCH_SECONDS):
-    """[(specificity, position, n, decision)] of the decisions whose touches match any of ``rels``, most specific
-    first (exact, folder, glob), then in snapshot order (newest first). A decision's first matching touch
-    counts. Bounded: after ``calls`` matcher calls or ``seconds`` it stops and returns what it found so far."""
+    """(found, partial): ``found`` is [(specificity, position, n, decision)] of the decisions whose touches match
+    any of ``rels``, most specific first (exact, folder, glob), then in snapshot order (newest first). A
+    decision ranks by its best matching touch; its touches without a wildcard are tried first (a glob can only
+    rank 2, so once one of them matched the globs are skipped) and an exact match ends its scan. Bounded: after
+    ``calls`` matcher calls or ``seconds`` it stops, keeps what it found so far and ``partial`` is True."""
     found = []
     deadline = time.monotonic() + seconds
     used = 0
+    partial = False
     for pos, d in enumerate(decisions[:DECISIONS_SCAN_MAX]):
         if not isinstance(d, dict):
             continue
         n, touches = d.get("n"), d.get("touches")
         if not isinstance(n, int) or isinstance(n, bool) or n <= 0 or not isinstance(touches, list):
             continue
+        valid = [t for t in touches[:DECISIONS_TOUCHES_MAX] if isinstance(t, str)]
+        plain = [t for t in valid if "*" not in t and "?" not in t]
+        wild = [t for t in valid if "*" in t or "?" in t]
         best = None
-        for t in touches[:DECISIONS_TOUCHES_MAX]:
-            if not isinstance(t, str):
-                continue
-            for rel in rels:
-                if used >= calls or time.monotonic() >= deadline:
-                    found.sort(key=lambda x: (x[0], x[1]))
-                    return found
-                used += 1
-                best = specificity(t, rel)
-                if best is not None:
+        for group in (plain, wild):
+            if best is not None:  # a plain touch matched: a glob cannot beat it
+                break
+            for t in group:
+                for rel in rels:
+                    if used >= calls or time.monotonic() >= deadline:
+                        partial = True
+                        break
+                    used += 1
+                    sp = specificity(t, rel)
+                    if sp is not None and (best is None or sp < best):
+                        best = sp
+                        if best == 0:
+                            break
+                if partial or best == 0:
                     break
-            if best is not None:
+            if partial:
                 break
         if best is not None:
             found.append((best, pos, n, d))
+        if partial:
+            break
     found.sort(key=lambda x: (x[0], x[1]))
-    return found
+    return found, partial
 
 
 def _decision_notes(policy, payload, tool):
@@ -1099,7 +1112,7 @@ def _decision_notes(policy, payload, tool):
     rel = _rel_target(policy, payload)
     if rel is None:
         return None
-    found = _covering(decisions, [rel])
+    found, partial = _covering(decisions, [rel])
     if not found:
         return None
     path = _shown_path(payload.get("session_id"), payload.get("agent_id"))
@@ -1119,8 +1132,11 @@ def _decision_notes(policy, payload, tool):
         if not ids:
             return None
         _write_shown(path, payload.get("session_id"), shown | set(ids))
-    _spool({"event": "PreToolUse", "nudge": "decisions", "ids": ids, "path": redact(rel, None)[:WHAT_PATH_MAX],
-            "injected": len(text)})
+    rec = {"event": "PreToolUse", "nudge": "decisions", "ids": ids, "path": redact(rel, None)[:WHAT_PATH_MAX],
+           "injected": len(text)}
+    if partial:  # the matching bound cut it short: older decisions were not checked
+        rec["partial"] = True
+    _spool(rec)
     return text
 
 
@@ -1608,7 +1624,9 @@ def _code_map_note(policy, payload):
     text = "\n".join(lines)
     ids = []
     decisions = policy.get("decisions")
-    found = _covering(decisions, rels) if rels and isinstance(decisions, list) and decisions else []
+    found, partial = [], False
+    if rels and isinstance(decisions, list) and decisions:
+        found, partial = _covering(decisions, rels)
     if found:
         path = _shown_path(payload.get("session_id"), payload.get("agent_id"), "mapshown")
         with _TaskLock():
@@ -1628,8 +1646,11 @@ def _code_map_note(policy, payload):
                 _write_shown(path, payload.get("session_id"), shown | set(ids))
                 text = body
     text = text[:CODE_MAP_MAX_CHARS]
-    _spool({"event": "PostToolUse", "nudge": "code_map", "fresh": fresh, "decisions": ids, "old_code": bool(old),
-            "injected": len(text)})
+    rec = {"event": "PostToolUse", "nudge": "code_map", "fresh": fresh, "decisions": ids, "old_code": bool(old),
+           "injected": len(text)}
+    if partial:  # the matching bound cut it short: older decisions were not checked
+        rec["partial"] = True
+    _spool(rec)
     return text
 
 
