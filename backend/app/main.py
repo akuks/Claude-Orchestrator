@@ -144,10 +144,10 @@ async def lifespan(app: FastAPI):
         health_task.cancel()
         approval_task.cancel()
         codemap_task.cancel()
-        await codemap_indexer.shutdown()
         await workflow_runner.stop()
         await scheduler.stop()
         await worker.stop()
+        await codemap_indexer.shutdown()  # after the worker: its last finishes may start jobs
 
 
 app = FastAPI(title="Claude Orchestrator", version="0.1.0", lifespan=lifespan)

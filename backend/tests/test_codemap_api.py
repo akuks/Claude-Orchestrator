@@ -111,8 +111,22 @@ def test_server_registered(client, tmp_path):
         async with SessionLocal() as s:
             return await cm_status.server_registered(s, await s.get(Project, p["id"]))
 
-    assert asyncio.run(check()) in (True, False)  # other tests may register one
     asyncio.run(add(name=name, scope="project", project=p["name"], command="npx",
                     args=["-y", "codebase-memory-mcp@0.12.1"], enabled=True))
     assert asyncio.run(check()) is True
     assert client.get(f"/projects/{p['id']}/code-map").json()["server_registered"] is True
+
+
+def test_external_trust_needs_an_admin(client, tmp_path):
+    p, _ = _project(client, tmp_path)
+    maint = login_as(f"cm-m-{uuid.uuid4().hex[:6]}@test.local")
+    _grant(client, p["id"], maint.user_id, "maintainer")
+    assert client.patch(f"/projects/{p['id']}", json={"trust": "external"}).status_code == 200
+    r = maint.patch(f"/projects/{p['id']}", json={"code_map": True})
+    assert r.status_code == 403 and "admin" in r.json()["detail"]
+    assert client.get(f"/projects/{p['id']}/code-map").json()["enabled"] is False
+    # an admin may; and a maintainer may on a project that is not external
+    assert client.patch(f"/projects/{p['id']}", json={"code_map": True}).status_code == 200
+    q, _ = _project(client, tmp_path)
+    _grant(client, q["id"], maint.user_id, "maintainer")
+    assert maint.patch(f"/projects/{q['id']}", json={"code_map": True}).status_code == 200

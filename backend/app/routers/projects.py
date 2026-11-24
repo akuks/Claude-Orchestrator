@@ -530,6 +530,8 @@ async def update_project(project_id: str, payload: ProjectUpdate, request: Reque
                 .where(McpServer.scope == "project", McpServer.project == project.name)
                 .values(project=data["name"])
             )
+        if data.get("code_map") and data.get("trust", project.trust) == "external" and not principal.is_admin:
+            raise HTTPException(403, "Only an admin can turn the code map on for outside code")
         if data.get("code_map") and not (project.directory and Path(project.directory).is_dir()):
             raise HTTPException(422, "The code map needs a project folder that exists")
         for k, v in data.items():

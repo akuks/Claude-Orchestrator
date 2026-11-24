@@ -34,7 +34,7 @@ async def refresh_code_map(project_id: str, request: Request):
             raise HTTPException(409, "Turn the code map on for this project first")
         if not project.directory:
             raise HTTPException(422, "The code map needs a project folder")
-        indexer.start(project_id, manual=True)
+        indexer.start(project_id)  # a manual refresh ignores back-off
         return await status.for_project(s, project)
 
 

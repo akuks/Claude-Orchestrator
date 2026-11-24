@@ -1,6 +1,11 @@
 """The code map index job: runs the configured index command (argv, never a shell) in the gate-style clean
 environment, with a timeout that kills the process group, a capped private log, one job per project and at most
-`code_map_max_jobs` at once. The row ends `ok` (sha = HEAD read before the run) or `failed` with back-off."""
+`code_map_max_jobs` at once. The row ends `ok` (sha = HEAD read before the run) or `failed` with back-off.
+
+The command never runs inside the project folder: `npx` would read that folder's `.npmrc` and prefer its own
+`node_modules`, so a hostile repository could swap the indexer for its own code. It runs from a private, empty
+folder (`workspaces/_codemap/run/<project_id>/`) with npm's user/global config switched off, and the project's
+real absolute path is only the last argument."""
 
 from __future__ import annotations
 
@@ -12,7 +17,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
 
-from sqlalchemy import select
+from sqlalchemy import select, update
 
 from .. import redaction
 from ..config import settings
@@ -29,6 +34,7 @@ _SAFE_ID = re.compile(r"^[A-Za-z0-9._-]{1,64}$")
 
 _inflight: set[str] = set()  # projects with a job claimed (running or waiting for a slot)
 _tasks: set[asyncio.Task] = set()
+_started: set[str] = set()  # jobs that wrote their `running` row
 _sem: tuple[object, asyncio.Semaphore] | None = None
 
 
@@ -48,6 +54,32 @@ def log_path(project_id: str) -> Path:
     if not _SAFE_ID.match(str(project_id)):
         raise ValueError("bad project id")
     return codemap_root() / f"{project_id}.log"
+
+
+def run_dir(project_id: str) -> Path:
+    """The neutral, empty, private folder the index command runs from."""
+    if not _SAFE_ID.match(str(project_id)):
+        raise ValueError("bad project id")
+    root = codemap_root()
+    d = root / "run" / project_id
+    for x in (root, root / "run", d):
+        x.mkdir(parents=True, exist_ok=True, mode=0o700)
+        os.chmod(x, 0o700)
+    return d
+
+
+def index_env(project) -> dict[str, str]:
+    env = gx.gate_env(project)
+    env.pop("INIT_CWD", None)
+    env.pop("PWD", None)
+    env.update({
+        "npm_config_userconfig": "/dev/null",
+        "npm_config_globalconfig": "/dev/null",
+        "NPM_CONFIG_UPDATE_NOTIFIER": "false",
+        "npm_config_fund": "false",
+        "npm_config_audit": "false",
+    })
+    return env
 
 
 def inflight(project_id: str) -> bool:
@@ -147,13 +179,15 @@ async def _job(project_id: str) -> str:
         async with _semaphore():
             return await _job_locked(project_id)
     except asyncio.CancelledError:
-        await _finish_row(project_id, "failed", "Interrupted (the server is stopping)", None)
+        if project_id in _started:  # a job still waiting for a slot leaves the row as it was
+            await _finish_row(project_id, "failed", "Interrupted (the server is stopping)", None)
         raise
     except Exception as e:  # noqa: BLE001 - a job never takes the server down
         log.warning("codemap: job for %s crashed: %s", project_id, e)
         await _finish_row(project_id, "failed", f"The index job crashed ({type(e).__name__})", None)
         return "failed"
     finally:
+        _started.discard(project_id)
         _inflight.discard(project_id)
 
 
@@ -190,13 +224,12 @@ async def _job_locked(project_id: str) -> str:
         row = await _get_row(s, project_id)
         row.status, row.started_at = "running", _now()
         await s.commit()
-    root = codemap_root()
-    root.mkdir(parents=True, exist_ok=True, mode=0o700)
-    os.chmod(root, 0o700)
+        _started.add(project_id)
+    cwd = run_dir(project_id)
     path = log_path(project_id)
-    argv = [*settings.code_map_index_command, str(directory)]
+    argv = [*settings.code_map_index_command, os.path.realpath(directory)]
     outcome, code = await _run_argv(
-        argv, cwd=directory, env=gx.gate_env(env_project), path=path,
+        argv, cwd=cwd, env=index_env(env_project), path=path,
         timeout_s=settings.code_map_timeout_seconds)
     if outcome == "ok":
         await _finish_row(project_id, "ok", None, sha_before)
@@ -241,8 +274,9 @@ async def refresh(project_id: str, *, manual: bool = False) -> str:
     return await _job(project_id)
 
 
-def start(project_id: str, *, manual: bool = False) -> bool:
-    """Start the job as a background task (the claim is taken here, so two starts run one job)."""
+def start(project_id: str) -> bool:
+    """Start the job as a background task (the claim is taken here, so two starts run one job). It never checks
+    back-off: callers (`maybe_refresh`, the scan) decide that."""
     if not _claim(project_id):
         return False
     t = asyncio.ensure_future(_job(project_id))
@@ -297,19 +331,21 @@ async def maybe_refresh(project_id: str) -> None:
 
 
 async def reset_stale(*, all_running: bool = False) -> int:
-    """`running` rows with no live job (a restart) become `failed`. At boot nothing is live: all of them."""
+    """`running` rows with no live job (a restart) become `failed`. At boot nothing is live: all of them.
+    The UPDATE only touches a row that is still `running`, so a job that just finished `ok` is never overwritten."""
     n = 0
     async with SessionLocal() as s:
         rows = (await s.execute(select(ProjectIndex).where(ProjectIndex.status == "running"))).scalars().all()
-        for row in rows:
-            if row.project_id in _inflight or not (all_running or _stale(row)):
+        todo = [(r.project_id, (r.fail_count or 0) + 1) for r in rows
+                if r.project_id not in _inflight and (all_running or _stale(r))]
+        for pid, fails in todo:
+            if pid in _inflight:
                 continue
-            row.status = "failed"
-            row.error = "Interrupted (the server restarted)"
-            row.fail_count = (row.fail_count or 0) + 1
-            row.next_try_at = _now() + timedelta(minutes=backoff_minutes(row.fail_count))
-            row.started_at = None
-            n += 1
+            res = await s.execute(
+                update(ProjectIndex).where(ProjectIndex.project_id == pid, ProjectIndex.status == "running")
+                .values(status="failed", error="Interrupted (the server restarted)", fail_count=fails,
+                        next_try_at=_now() + timedelta(minutes=backoff_minutes(fails)), started_at=None))
+            n += res.rowcount or 0
         await s.commit()
     return n
 

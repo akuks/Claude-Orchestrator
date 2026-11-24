@@ -19,7 +19,7 @@ MOCK = r'''
 import os, sys, time, subprocess, json
 here = os.path.dirname(os.path.abspath(__file__))
 mode = open(os.path.join(here, "mode")).read().strip()
-open(os.path.join(here, "argv.json"), "w").write(json.dumps({"argv": sys.argv[1:], "env": sorted(os.environ), "cwd": os.getcwd()}))
+open(os.path.join(here, "argv.json"), "w").write(json.dumps({"argv": sys.argv[1:], "env": dict(os.environ), "cwd": os.getcwd()}))
 with open(os.path.join(here, "runs"), "a") as f:
     f.write("x\n")
 if mode == "ok":
@@ -109,8 +109,10 @@ def test_success_stores_head_before_run(mock, tmp_path):
 
     pid = asyncio.run(go())
     seen = __import__("json").loads((mdir / "argv.json").read_text())
-    assert seen["argv"] == [str(repo)]  # the directory is the last argv item
-    assert os.path.samefile(seen["cwd"], repo)
+    assert seen["argv"] == [os.path.realpath(repo)]  # the real directory is the last argv item
+    assert os.path.samefile(seen["cwd"], indexer.run_dir(pid))  # never the project folder
+    assert not os.path.samefile(seen["cwd"], repo)
+    assert os.stat(indexer.run_dir(pid)).st_mode & 0o777 == 0o700
     assert os.stat(indexer.log_path(pid)).st_mode & 0o777 == 0o600
     assert os.stat(indexer.codemap_root()).st_mode & 0o777 == 0o700
 
@@ -143,11 +145,40 @@ def test_no_credentials_in_env(mock, tmp_path, monkeypatch):
     async def go():
         pid = await _mk_project(repo, env={"MY_TOOL_SETTING": "abc123456"})
         await indexer.refresh(pid)
+        return pid
 
     asyncio.run(go())
     env = __import__("json").loads((mdir / "argv.json").read_text())["env"]
     assert not {"ANTHROPIC_API_KEY", "GITHUB_TOKEN", "CO_SECRET_KEY"} & set(env)
     assert "HOME" in env and "MY_TOOL_SETTING" in env
+
+
+def test_neutral_folder_and_npm_config_off(mock, tmp_path, monkeypatch):
+    """The project's .npmrc and node_modules/.bin are not in reach: the command runs elsewhere, with npm's
+    user/global config off and no INIT_CWD/PWD pointing at the project."""
+    mdir, _ = mock
+    monkeypatch.setenv("INIT_CWD", str(tmp_path))
+    monkeypatch.setenv("PWD", str(tmp_path))
+    repo = tmp_path / "repo-npm"
+    make_repo(repo)
+    (repo / ".npmrc").write_text("registry=http://evil.invalid/\n")
+    (repo / "node_modules" / ".bin").mkdir(parents=True)
+    (repo / "node_modules" / ".bin" / "codebase-memory-mcp").write_text("#!/bin/sh\nexit 0\n")
+
+    async def go():
+        pid = await _mk_project(repo)
+        await indexer.refresh(pid)
+        return pid
+
+    pid = asyncio.run(go())
+    seen = __import__("json").loads((mdir / "argv.json").read_text())
+    env = seen["env"]
+    assert os.path.samefile(seen["cwd"], indexer.run_dir(pid)) and os.listdir(seen["cwd"]) == []
+    assert env["npm_config_userconfig"] == "/dev/null" and env["npm_config_globalconfig"] == "/dev/null"
+    assert env["NPM_CONFIG_UPDATE_NOTIFIER"] == "false"
+    assert env["npm_config_fund"] == "false" and env["npm_config_audit"] == "false"
+    assert "INIT_CWD" not in env and "PWD" not in env
+    assert str(repo) not in env.get("PATH", "")
 
 
 def test_failure_scrubbed_with_growing_capped_backoff(mock, tmp_path):
@@ -234,7 +265,10 @@ def test_one_job_per_project_and_two_server_wide(mock, tmp_path, monkeypatch):
         assert await indexer.refresh(pids[0]) == "running"  # the same project: one job
         b = asyncio.ensure_future(indexer.refresh(pids[1]))
         c = asyncio.ensure_future(indexer.refresh(pids[2]))
-        await asyncio.sleep(0.45)
+        for _ in range(100):  # poll: two jobs start, the third waits for a slot
+            if (mdir / "runs").exists() and (mdir / "runs").read_text().count("x") >= 2:
+                break
+            await asyncio.sleep(0.05)
         assert (mdir / "runs").read_text().count("x") == 2  # the third waits
         assert await asyncio.gather(a, b, c) == ["ok", "ok", "ok"]
         assert (mdir / "runs").read_text().count("x") == 3
@@ -327,5 +361,84 @@ def test_missing_command_fails_cleanly(mock, tmp_path, monkeypatch):
         pid = await _mk_project(repo)
         assert await indexer.refresh(pid) == "failed"
         assert "could not start" in (await _row(pid)).error
+
+    asyncio.run(go())
+
+
+def test_cancel_while_waiting_leaves_ok_row(mock, tmp_path, monkeypatch):
+    mdir, set_mode = mock
+    repo = tmp_path / "repo11"
+    head = make_repo(repo)
+    monkeypatch.setattr(settings, "code_map_max_jobs", 1)
+
+    async def go():
+        pid = await _mk_project(repo)
+        assert await indexer.refresh(pid) == "ok"
+        before = await _row(pid)
+        sem = indexer._semaphore()
+        await sem.acquire()  # no free slot: the next job waits
+        try:
+            t = asyncio.ensure_future(indexer.refresh(pid, manual=True))
+            await asyncio.sleep(0.2)
+            t.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await t
+        finally:
+            sem.release()
+        after = await _row(pid)
+        assert (after.status, after.sha, after.fail_count, after.error) == ("ok", head, 0, None)
+        assert before.indexed_at == after.indexed_at and not indexer.inflight(pid)
+
+    asyncio.run(go())
+
+
+def test_reset_does_not_overwrite_a_finished_row(mock, tmp_path):
+    repo = tmp_path / "repo12"
+    make_repo(repo)
+
+    async def go():
+        pid = await _mk_project(repo, code_map=False)
+        async with SessionLocal() as s:
+            s.add(ProjectIndex(project_id=pid, status="ok", sha="a" * 40))
+            await s.commit()
+        assert await indexer.reset_stale(all_running=True) == 0
+        assert (await _row(pid)).status == "ok"
+
+    asyncio.run(go())
+
+
+def test_finish_hook_triggers_and_survives_a_raise(mock, tmp_path, monkeypatch):
+    from app.models import Task
+    from app.worker import WorkerManager
+
+    repo = tmp_path / "repo13"
+    make_repo(repo)
+    calls = []
+
+    async def spy(pid):
+        calls.append(pid)
+
+    async def boom(pid):
+        raise RuntimeError("boom")
+
+    async def go():
+        pid = await _mk_project(repo)
+        tids = []
+        async with SessionLocal() as s:
+            for _ in range(2):
+                tk = Task(title="t", prompt="x", project_id=pid, status="running")
+                s.add(tk)
+                await s.flush()
+                tk.root_id = tk.id
+                tids.append(tk.id)
+            await s.commit()
+        w = WorkerManager()
+        monkeypatch.setattr(indexer, "maybe_refresh", spy)
+        await w._finish(tids[0], "completed")
+        assert calls == [pid]
+        monkeypatch.setattr(indexer, "maybe_refresh", boom)
+        await w._finish(tids[1], "completed")  # a raising hook never fails the finish
+        async with SessionLocal() as s:
+            assert (await s.get(Task, tids[1])).status == "completed"
 
     asyncio.run(go())
