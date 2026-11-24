@@ -237,10 +237,91 @@ def test_repeated_link_and_the_21st_are_not_spooled(orun):
     assert len({r["link"] for r in recs}) == 20
 
 
-def test_broken_state_file_never_fails_the_call(orun):
-    orun.tdir.joinpath(co_hook.OUTPUTS_FILE).write_text("{not json")
+@pytest.mark.parametrize("content", ["{not json", '{"links": 5}', "[1]",
+                                     '{"links": ["a"], "pad": "' + "x" * 70000 + '"}'])
+def test_broken_or_big_state_file_counts_as_the_cap_reached(orun, content):
+    orun.tdir.joinpath(co_hook.OUTPUTS_FILE).write_text(content)
+    assert orun(post("mcp__p__publish", "https://ex.example.com/ok"), event="PostToolUse") is None
+    assert outputs(orun) == []
+    assert not [r for r in orun.spool() if r.get("event") == "guard_error"]
+
+
+def test_fifo_state_file_never_blocks(orun):
+    os.mkfifo(orun.tdir / co_hook.OUTPUTS_FILE)
+    t0 = time.monotonic()
+    orun(post("mcp__p__publish", "https://ex.example.com/ok"), event="PostToolUse", timeout=10)
+    assert time.monotonic() - t0 < 5
+    assert outputs(orun) == []
+
+
+def test_linked_state_file_is_not_read(orun, tmp_path):
+    target = tmp_path / "elsewhere.json"
+    target.write_text('{"links": []}')
+    (orun.tdir / co_hook.OUTPUTS_FILE).symlink_to(target)
+    orun(post("mcp__p__publish", "https://ex.example.com/ok"), event="PostToolUse")
+    assert outputs(orun) == [] and target.read_text() == '{"links": []}'
+
+
+def test_tmp_link_is_never_written_through(orun, tmp_path):
+    victim = tmp_path / "victim.txt"
+    victim.write_text("keep me")
+    (orun.tdir / (co_hook.OUTPUTS_FILE + ".tmp")).symlink_to(victim)
     rec = one(orun, post("mcp__p__publish", "https://ex.example.com/ok"))
     assert rec["link"] == "https://ex.example.com/ok"
+    assert victim.read_text() == "keep me"
+    state = orun.tdir / co_hook.OUTPUTS_FILE
+    assert not state.is_symlink() and json.loads(state.read_text()) == {"links": ["https://ex.example.com/ok"]}
+
+
+@pytest.mark.parametrize("link", [
+    "https://hooks.slack.com/services/T000/B000/XXXXsecretXXXX",
+    "https://hooks.slack.com/anything",
+    "https://discord.com/api/webhooks/1234/abcdtoken",
+    "https://canary.discord.com/api/webhooks/1234/abcdtoken",
+    "https://discordapp.com/api/webhooks/1234/abcdtoken",
+    "https://ex.example.com/hooks/webhooks/abc123",
+    "https://ex.example.com/api/Webhook/abc/def",
+    "https://ex.example.com/%77ebhooks/abc",
+])
+def test_webhook_links_dropped(orun, link):
+    assert one(orun, post("mcp__p__create_webhook", f"Created: {link}")) is None
+
+
+@pytest.mark.parametrize("link", ["https://docs.example.com/guides/webhooks", "https://docs.example.com/webhooks/",
+                                  "https://discord.com/channels/1/2"])
+def test_links_merely_about_webhooks_kept(orun, link):
+    assert one(orun, post("mcp__p__publish", link))["link"] == link
+
+
+def test_backslash_path_dropped_and_non_ascii_encoded(orun):
+    assert one(orun, post("mcp__p__publish", "https://good.example.com/a\\b")) is None
+    assert one(orun, post("mcp__p__publish", "https://good.example.com/caf\u00e9/\u2215evil"))["link"] == \
+        "https://good.example.com/caf%C3%A9/%E2%88%95evil"
+
+
+@pytest.mark.parametrize("link,ok", [
+    ("https://.../a", False), ("https://intranet/a", False), ("https://a..b.com/x", False),
+    ("http://[fe80::1%25eth0]/a", False), ("https://-bad.example.com/", False),
+    ("http://localhost:3000/a", True), ("http://10.0.0.7/a", True), ("http://[2001:db8::1]/a", True),
+    ("https://xn--bcher-kva.example/a", True),
+])
+def test_host_must_be_a_name_or_an_ip(orun, link, ok):
+    rec = one(orun, post("mcp__p__publish", link))
+    assert (rec is not None) is ok, link
+
+
+def test_relative_local_file_uses_the_calls_cwd_inside_a_root(orun, tmp_path):
+    (orun.project / "sub").mkdir()
+    (orun.project / "sub" / "r.md").write_text("x")
+    (orun.project / "r.md").write_text("x")
+    p = post("Bash", {"stdout": "https://gist.github.com/u/abc"}, {"command": "cd sub && gh gist create r.md"})
+    p["cwd"] = str(orun.project / "sub")
+    assert one(orun, p)["local_file"] == "sub/r.md"
+    # a cwd outside the roots is ignored: the workspace is used
+    (orun.tdir / "spool.jsonl").unlink()
+    (orun.tdir / co_hook.OUTPUTS_FILE).unlink()
+    p["cwd"] = str(tmp_path)
+    assert one(orun, p)["local_file"] == "r.md"
 
 
 @pytest.mark.parametrize("resp", [None, 5, {"a": [1, 2, None]}, [{"type": "image"}]])

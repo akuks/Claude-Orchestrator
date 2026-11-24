@@ -13,15 +13,21 @@ from sqlalchemy import select
 from app import worker as worker_mod
 from app.database import SessionLocal
 from app.guard import runtime as guard_runtime
-from app.models import Task, TaskEvent
+from app.models import Project, Task, TaskEvent
 
 
-def _task_row():
+def _task_row(workspace=None, project_dir=None):
     tid = uuid.uuid4().hex
 
     async def go():
         async with SessionLocal() as s:
-            s.add(Task(id=tid, title="t", prompt="p", root_id=tid, status="running"))
+            pid = None
+            if project_dir is not None:
+                pid = uuid.uuid4().hex
+                s.add(Project(id=pid, name="p-" + pid[:6], slug="p-" + pid, directory=str(project_dir)))
+                await s.flush()
+            s.add(Task(id=tid, title="t", prompt="p", root_id=tid, status="running", project_id=pid,
+                       workspace_dir=str(workspace) if workspace is not None else None))
             await s.commit()
 
     asyncio.run(go())
@@ -51,8 +57,10 @@ def out(link, **kw):
             "ts": 1.0, **kw}
 
 
-def test_record_becomes_an_output_event_with_kept(client):
-    tid = _task_row()
+def test_record_becomes_an_output_event_with_kept(client, tmp_path):
+    (tmp_path / "site").mkdir()
+    (tmp_path / "site" / "page.html").write_text("x")
+    tid = _task_row(workspace=tmp_path)
     got = _ingest(tid, out("https://ex.example.com/a", title="Page", local_file="site/page.html"),
                   out("https://ex.example.com/b", tool="Bash"))
     assert got == [
@@ -80,9 +88,12 @@ def test_record_becomes_an_output_event_with_kept(client):
     out("https://ex.example.com/a", tool=7),
     out("https://ex.example.com/a", title=["x"]),
     out("https://ex.example.com/a", local_file={"x": 1}),
-    out("https://ex.example.com/a", local_file="/etc/passwd"),
-    out("https://ex.example.com/a", local_file="../x.md"),
-    out("https://ex.example.com/a", local_file="a/../../x.md"),
+    out("https://hooks.slack.com/services/T0/B0/abcdefgh"),
+    out("https://discord.com/api/webhooks/123/tok"),
+    out("https://ex.example.com/hooks/webhook/abc"),
+    out("https://.../a"),
+    out("https://intranet/a"),
+    out("https://ex.example.com/a\\b"),
     {"event": "Output"},
     {"event": "Output", "link": "https://ex.example.com/a"},
 ])
@@ -122,3 +133,48 @@ def test_cap_and_duplicates_are_counted_in_the_database(client):
     assert len({g["link"] for g in got}) == 20
     assert "https://ex.example.com/n4" in {g["link"] for g in got}
     assert "https://ex.example.com/n5" not in {g["link"] for g in got}
+
+
+def test_kept_is_checked_on_disk(client, tmp_path):
+    ws, proj, outside = tmp_path / "ws", tmp_path / "proj", tmp_path / "outside"
+    for d in (ws, proj, outside):
+        d.mkdir()
+    (ws / "in_ws.md").write_text("x")
+    (proj / "docs").mkdir()
+    (proj / "docs" / "in_proj.md").write_text("x")
+    (outside / "secret.md").write_text("x")
+    (ws / "link.md").symlink_to(outside / "secret.md")
+    (ws / "outdir").symlink_to(outside)
+    (ws / "folder").mkdir()
+    tid = _task_row(workspace=ws, project_dir=proj)
+    cases = {"in_ws.md": True, "docs/in_proj.md": True, "missing.md": False, "link.md": False,
+             "outdir/secret.md": False, "folder": False, "../outside/secret.md": False,
+             str(outside / "secret.md"): False, "/etc/hosts": False, "": False}
+    got = _ingest(tid, *[out(f"https://ex.example.com/k{i}", local_file=lf) for i, lf in enumerate(cases)])
+    assert len(got) == len(cases)
+    for (lf, kept), g in zip(cases.items(), got):
+        assert g["kept"] is kept, lf
+        assert g["local_file"] == (lf if kept else None), lf
+
+
+def test_kept_false_without_a_task_row(client, tmp_path):
+    assert guard_runtime.output_payload(out("https://ex.example.com/a", local_file="a.md"))["kept"] is False
+    (tmp_path / "a.md").write_text("x")
+    p = guard_runtime.output_payload(out("https://ex.example.com/a", local_file="a.md"), [str(tmp_path)])
+    assert p["kept"] is True and p["local_file"] == "a.md"
+    assert guard_runtime.output_payload(out("https://ex.example.com/a", local_file="a.md"), ["rel/dir"])[
+        "kept"] is False
+
+
+def test_stored_events_without_a_text_link_use_no_slot(client):
+    tid = _task_row()
+
+    async def seed():
+        async with SessionLocal() as s:
+            for i, pl in enumerate([{"link": None}, {}, {"link": 5}, {"link": ["x"]}]):
+                s.add(TaskEvent(task_id=tid, seq=i + 1, type="output", payload=pl))
+            await s.commit()
+
+    asyncio.run(seed())
+    got = _ingest(tid, *[out(f"https://ex.example.com/s{i}") for i in range(20)])
+    assert len([g for g in got if isinstance(g.get("link"), str)]) == 20

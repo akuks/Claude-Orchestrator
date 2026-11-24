@@ -1673,7 +1673,11 @@ OUTPUT_PATHS_MAX = 20  # input strings looked up on disk for local_file
 OUTPUT_PATH_LEN = 4096
 _OUTPUT_LINK = re.compile(r"https?://[^\s<>\"'`]+", re.IGNORECASE)
 _OUTPUT_TRIM = ").,;:!?]}>*'\""
-_OUTPUT_HOST = re.compile(r"^(?:[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\.)*[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\.?$|^[0-9a-f:.]+$")
+OUTPUTS_STATE_MAX = 64 * 1024  # a bigger (or unreadable) outputs.json counts as the cap reached
+# a normal dotted name (letters, digits, hyphens; at least one dot); anything else must be an IP address
+_OUTPUT_HOST = re.compile(r"^(?:[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\.)+[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$")
+_OUTPUT_PATH_SAFE = "/%:@!$&'()*+,;=-._~"
+_OUTPUT_WEBHOOK_SEGMENTS = ("webhook", "webhooks")
 
 
 def _output_tool(payload):
@@ -1708,14 +1712,47 @@ def clean_link(raw):
     except ValueError:
         return None
     scheme = u.scheme.lower()
-    if scheme not in ("http", "https") or not host or not _OUTPUT_HOST.match(host):
+    if scheme not in ("http", "https") or not _output_host(host) or "\\" in u.path or _webhook(host, u.path):
         return None
+    path = urllib.parse.quote(u.path, safe=_OUTPUT_PATH_SAFE)  # non-ASCII is stored percent-encoded
     if ":" in host:
         host = f"[{host}]"
-    link = urllib.parse.urlunsplit((scheme, host + (f":{port}" if port is not None else ""), u.path, "", ""))
+    link = urllib.parse.urlunsplit((scheme, host + (f":{port}" if port is not None else ""), path, "", ""))
     if len(link) > OUTPUT_LINK_MAX or redact(link, None) != link:
         return None
     return link
+
+
+def _output_host(host):
+    """A normal dotted name, ``localhost``, or an IP address (no zone id); ``...`` and the like are not hosts."""
+    import ipaddress
+
+    if not isinstance(host, str) or not host:
+        return False
+    if host == "localhost" or _OUTPUT_HOST.match(host):
+        return True
+    if "%" in host:
+        return False
+    try:
+        ipaddress.ip_address(host)
+    except ValueError:
+        return False
+    return True
+
+
+def _webhook(host, path):
+    """A webhook address (its path is the secret): Slack's hooks host, Discord's ``/api/webhooks/``, or any path
+    with a ``webhook``/``webhooks`` segment followed by more."""
+    import urllib.parse
+
+    if host == "hooks.slack.com":
+        return True
+    plain = urllib.parse.unquote(path or "").lower()
+    if any(host == d or host.endswith("." + d) for d in ("discord.com", "discordapp.com")) \
+            and plain.startswith("/api/webhooks/"):
+        return True
+    segs = plain.split("/")
+    return any(seg in _OUTPUT_WEBHOOK_SEGMENTS and any(segs[i + 1:]) for i, seg in enumerate(segs))
 
 
 def clean_label(value, cap):
@@ -1760,7 +1797,13 @@ def _output_local_file(policy, payload):
             roots.append((os.path.normpath(r), os.path.realpath(r)))
     if not roots:
         return None
-    base = roots[-1][0]  # a relative string is read from the task workspace (the run's cwd)
+    base = roots[-1][0]  # a relative string is read from the call's cwd when inside a root, else the workspace
+    pcwd = payload.get("cwd")
+    if isinstance(pcwd, str) and os.path.isabs(pcwd) and "\0" not in pcwd:
+        pcwd = os.path.normpath(pcwd)
+        if any(pcwd in (given, real) or _inside(pcwd, given) is not None or _inside(pcwd, real) is not None
+               for given, real in roots):
+            base = pcwd
     ti = payload.get("tool_input")
     cands = list(_input_strings(ti))
     if payload.get("tool_name") == "Bash" and isinstance(ti, dict) and isinstance(ti.get("command"), str):
@@ -1790,13 +1833,25 @@ def _output_local_file(policy, payload):
 
 
 def _outputs_seen(path):
+    """The links already spooled ([] when there is no state file yet), or None - the cap counts as reached - when
+    the file is too big, not a regular file (a link, a FIFO), unreadable or malformed. Never blocks."""
     try:
-        with open(path, encoding="utf-8") as f:
-            data = json.load(f)
-        links = data.get("links") if isinstance(data, dict) else None
-        return [x for x in links if isinstance(x, str)] if isinstance(links, list) else []
-    except (OSError, ValueError):
+        st = os.lstat(path)
+    except FileNotFoundError:
         return []
+    except OSError:
+        return None
+    if not stat.S_ISREG(st.st_mode) or st.st_size > OUTPUTS_STATE_MAX:
+        return None
+    text = _read_small(path, OUTPUTS_STATE_MAX + 1)
+    if text is None or len(text) > OUTPUTS_STATE_MAX:
+        return None
+    try:
+        data = json.loads(text)
+    except ValueError:
+        return None
+    links = data.get("links") if isinstance(data, dict) else None
+    return [x for x in links if isinstance(x, str)] if isinstance(links, list) else None
 
 
 def _output_record(policy, payload):
@@ -1814,14 +1869,18 @@ def _output_record(policy, payload):
     state = os.path.join(os.environ["CO_TASK_DIR"], OUTPUTS_FILE)
     with _TaskLock():
         seen = _outputs_seen(state)
-        if link in seen or len(seen) >= OUTPUTS_MAX:
+        if seen is None or link in seen or len(seen) >= OUTPUTS_MAX:
             return
         rec = {"event": "Output", "link": link, "tool": clean_label(payload["tool_name"], OUTPUT_TOOL_MAX),
                "title": _output_title(payload.get("tool_input")),
                "local_file": _output_local_file(policy, payload)}
         _spool_strict(rec)
         tmp = state + ".tmp"
-        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        try:
+            os.unlink(tmp)  # an old tmp (or a link planted there) is removed, never written through
+        except FileNotFoundError:
+            pass
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
         with os.fdopen(fd, "w", encoding="utf-8") as f:
             json.dump({"links": seen + [link]}, f)
         os.replace(tmp, state)
