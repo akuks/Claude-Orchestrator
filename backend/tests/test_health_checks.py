@@ -461,3 +461,5 @@ def test_code_map(db):
     assert (r.status, r.summary) == (OK, "2 projects keep a code map; all up to date")
     r = check(True, ["ok", "failed"])
     assert (r.status, r.summary) == (ATTENTION, "1 project's code map is failing")
+    r = check(True, ["ok", "running", "never"])
+    assert (r.status, r.summary) == (OK, "3 projects keep a code map; 1 not built yet, 1 building")

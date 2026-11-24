@@ -366,9 +366,11 @@ async def check_code_map(s) -> Result:
         return Result(OK, "The Code map tool is not added yet", detail)
     if not n:
         return Result(OK, "No project keeps a code map", detail)
-    waiting = sum(1 for _, st in rows if st != "ok")
+    building = sum(1 for _, st in rows if st == "running")
+    waiting = sum(1 for _, st in rows if st not in ("ok", "running"))
     head = f"{n} project{'s' if n != 1 else ''} keep{'s' if n == 1 else ''} a code map"
-    return Result(OK, head + ("; all up to date" if not waiting else f"; {waiting} not built yet"), detail)
+    parts = ([f"{waiting} not built yet"] if waiting else []) + ([f"{building} building"] if building else [])
+    return Result(OK, head + ("; " + ", ".join(parts) if parts else "; all up to date"), detail)
 
 
 async def check_disk(s) -> Result:
