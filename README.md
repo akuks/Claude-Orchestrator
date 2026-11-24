@@ -1635,6 +1635,46 @@ pack that has a source address.
   already be trusted; there are no prompts). Anyone who can add such a pack makes the
   server use those keys.
 
+## Where connected tools start
+
+A connected tool that runs as a program on the server (the "stdio" kind) used to start
+inside the project's own folder. Some launchers (such as `npx`) read files from the
+folder they start in. So a file in the project, committed or written by an agent in an
+earlier task, could decide what ran as the tool, before any tool call and outside the
+agent guard.
+
+- **What changed.** Every such tool now starts from a private, empty folder made for
+  that task and that tool, and then runs its own command unchanged (a small launcher,
+  `backend/app/mcp_launch.py`, changes folder and starts the command). The tool is also
+  told where the project is, in the environment variable `CO_PROJECT_DIR`, when the task
+  has a project folder. Web (HTTP) tools, the **Test** button and the policies are not
+  changed.
+- **The switch.** On a tool's form, under **More options**, **Start in the project
+  folder** (admins only, stdio tools only, off by default). Use it only for a tool that
+  must start inside the project; the project's own files can then change what the tool
+  runs. With it on the tool starts exactly as before, and the list shows a small tag,
+  "Starts in the project folder". The **System health** page counts such tools under
+  **Connected tools**.
+- **A command that starts with `./`** (a file in the project) cannot work from an empty
+  folder. The form refuses to save it unless the switch is on: "A command that starts
+  with ./ needs 'Start in the project folder'". A bare name such as `npx` or an absolute
+  path is fine.
+- **Tools already added** move to the new behaviour on their next task. Nothing needs
+  doing.
+- **Cleanup.** The tool settings folder for a task (the tool config and the empty start
+  folders) is removed when the task ends. Before this change it was left behind.
+
+### Not covered / to know
+
+- **This has not been run against the real `claude` command-line tool or real connected
+  tools.** The change is a plain change of folder followed by the tool's command. If a
+  tool stops working, turn its **Start in the project folder** switch on.
+- A tool can still read the project: it is told where it is and runs as the same user.
+  The change only stops the project from choosing which code runs as the tool.
+- `npx` still reads the server user's own `~/.npmrc` and cache (needed for private
+  registries).
+- If the server stops in the middle of a task, that task's folder may stay on disk.
+
 ## Code map
 
 A code map is a searchable index of a project's code. An agent can ask it "where is
@@ -1728,9 +1768,10 @@ recorded decisions for the files an answer names, and labels for old code.
   shows on the project's Code map tab and in the health card, so an admin can correct
   it. Related settings: `CO_CODE_MAP_SCAN_INTERVAL_SECONDS` (600),
   `CO_CODE_MAP_TIMEOUT_SECONDS` (900), `CO_CODE_MAP_MAX_JOBS` (2).
-- **The tool when a task starts it.** Tools that a task starts through the same
-  launcher still run from the task's folder, as every connected tool always has. Only
-  the build runs from the private empty folder.
+- **The tool when a task starts it.** A task starts the Code map tool from a private
+  empty folder too, like every connected tool now (see "Where connected tools start"),
+  unless its **Start in the project folder** switch is on. The build always runs from
+  the private empty folder.
 - **"How far behind" is not told to the agent.** Only the three lines above are.
 - **No index of our own.** The app does not build or store a map; it depends on the
   outside tool.
