@@ -136,3 +136,16 @@ def test_settings_validation_and_roles(client, tmp_path):
     assert member.get(f"/projects/{p['id']}/recommended").status_code == 200
     assert maint.patch(f"/projects/{p['id']}", json={"brand_skill": "b1"}).status_code == 200
     assert out.get(f"/projects/{p['id']}/recommended").status_code in (403, 404)
+
+
+def test_slow_detect_answers_no_ui(client, tmp_path, monkeypatch):
+    import time
+
+    from app.recommend import detect as detect_mod
+
+    p, d = _project(client, tmp_path)
+    (d / "index.html").write_text("<p>")
+    monkeypatch.setattr(detect_mod, "TIMEOUT", 0.1)
+    monkeypatch.setattr(detect_mod, "detect", lambda _d: time.sleep(0.6) or detect_mod.Detected(has_ui=True))
+    b = _get(client, p["id"])
+    assert b["has_ui"] is False and b["items"] == []

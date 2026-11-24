@@ -20,5 +20,9 @@ async def get_recommended(project_id: str, request: Request):
         project = await s.get(Project, project_id)
         if project is None:
             raise HTTPException(404, "Not found")
-        found = await asyncio.to_thread(detect_mod.detect, project.directory)
+        try:
+            found = await asyncio.wait_for(asyncio.to_thread(detect_mod.detect, project.directory),
+                                           detect_mod.TIMEOUT)
+        except Exception:  # too slow (or any failure): answer as if no user interface
+            found = detect_mod.Detected()
         return await panel.build(s, project, found)

@@ -208,7 +208,7 @@ async def _ui_skills(project) -> str | None:
     from ..recommend import detect as ui_detect, panel as ui_panel  # lazy
 
     try:
-        found = await asyncio.to_thread(ui_detect.detect, project.directory)
+        found = await asyncio.wait_for(asyncio.to_thread(ui_detect.detect, project.directory), ui_detect.TIMEOUT)
         return ui_panel.ui_skills_text(project, found)
     except Exception:
         return None

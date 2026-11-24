@@ -71,3 +71,17 @@ def test_no_paragraph_off_no_ui_or_adhoc(tmp_path):
 
     r = _run(adhoc())
     assert "frontend-design" not in r.main_text
+
+
+def test_slow_detect_gives_no_paragraph(tmp_path, monkeypatch):
+    import time
+
+    from app.recommend import detect as detect_mod
+
+    p = _project(tmp_path)
+    (tmp_path / p.name / "index.html").write_text("<p>")
+    _add(p)
+    monkeypatch.setattr(detect_mod, "TIMEOUT", 0.1)
+    monkeypatch.setattr(detect_mod, "detect", lambda _d: time.sleep(0.6) or detect_mod.Detected(has_ui=True))
+    r = _gather(p)
+    assert "frontend-design" not in r.main_text and "ui_skills" not in r.ground_included
