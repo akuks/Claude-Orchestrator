@@ -1655,13 +1655,19 @@ agent guard.
   `package.json` (one would let a `package.json` higher up adopt the folder as a
   workspace).
 - **The folders above.** npm also puts the `node_modules/.bin` of every folder above on
-  the tool's PATH, and no marker can stop that. So the agent guard refuses direct writes
-  and package-manager installs (`npm`/`pnpm`/`yarn`/`bun` install, add, ci, link, with
-  `--prefix`, `--dir`, `--cwd`, `-C` or after a `cd`) that would create the files that
-  steer launchers in any folder above the tool folders and the Code map build folder
-  (up to `/`): `package.json`, `package-lock.json`, `node_modules`, `.npmrc`,
-  `pnpm-workspace.yaml`, `.pnpmfile.cjs`, `uv.toml`, `bunfig.toml`, `.yarnrc.yml` and
-  `pyproject.toml`. The task's own project folder is the exception (see below).
+  the tool's PATH, and no marker can stop that. So the agent guard refuses, in any folder
+  above the tool folders and the Code map build folder (up to `/`), direct writes of the
+  files that steer launchers (`package.json`, `package-lock.json`, `node_modules`,
+  `.npmrc`, `pnpm-workspace.yaml`, `.pnpmfile.cjs`, `uv.toml`, `bunfig.toml`,
+  `.yarnrc.yml` and `pyproject.toml`), package-manager installs there (`npm`/`pnpm`/
+  `yarn`/`bun` install, add, ci, link, update - also run through `npx`, `npm exec`,
+  `pnpm dlx` or `corepack`), and `init`/`create`/`npm pkg set` writing a `package.json`
+  there. The folder comes from `--prefix`, `--dir`, `--cwd`, `-C`, or the folder after a
+  `cd`. In the task's own project or workspace all of these work as before; the project
+  folder is also the exception for the folders above (see below). A `package.json` that
+  already exists in a folder above (put there by a person, for example `~/package.json`)
+  still makes a plain `npm install` land in that folder; `CO_TOOL_RUN_DIR` is the stricter
+  option.
 - **Own package cache and global folder.** Tools use their own npm cache,
   `workspaces/_mcp_cache/npm`, and their own empty npm global folder,
   `workspaces/_mcp_cache/npm-global` (both owner-only; agents cannot write them),
@@ -1673,8 +1679,10 @@ agent guard.
   start folders in a folder of the admin's choice instead of under `workspaces/`. Point
   it at a folder whose parent folders the server user cannot write (for example one an
   administrator creates under `/var/lib` and hands to the server user); then nothing can
-  be planted above a tool folder at all, whatever the guard sees. It gets the same
-  protection and cleanup.
+  be planted above a tool folder at all, whatever the guard sees. The tool folders go in
+  its own subfolder, `co-tool-folders/`; the same protection and cleanup apply there, and
+  the cleanup only ever removes folders named like a task id, so other files in the
+  configured folder are never touched.
 - **The switch.** On a tool's form, under **More options**, **Start in the project
   folder** (admins only, stdio tools only, off by default). Use it only for a tool that
   must start inside the project; the project's own files can then change what the tool
