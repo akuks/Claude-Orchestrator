@@ -1883,7 +1883,6 @@ files in order. It never connects to a database and never runs anything. With mo
 - Supabase projects show a high "not understood" count: security and ownership
   statements are counted, not applied.
 - A very large single statement can run a few seconds past the time limit.
-- In a folder with more than 5,000 entries, a file listed after that point is missed.
 
 ## Recommended tools for projects with a user interface
 
@@ -1895,7 +1894,7 @@ Projects without one do not show it (`GET /projects/{id}/recommended` says `has_
 - **The list.** Browser (Playwright), Browser inspector (DevTools), Interface parts
   (shadcn, React projects only) and the frontend-design skill. Each shows **Added** or,
   for an admin, **Add** with a question first ("Add <name> to this project?"). Add
-  creates a connected tool for this project only, named "<tool> (<project>)", switched
+  creates a connected tool for this project only, named "<tool> (<project>)" (cut to the name length limit of 120), switched
   on (it is an admin's explicit click) and starting in the private folder, not in the
   project folder, through the same call as the **Connected tools** page. Non-admins see
   "Ask an admin to add this". The skill is added under **Skills**. Nothing is installed
@@ -1911,6 +1910,11 @@ Projects without one do not show it (`GET /projects/{id}/recommended` says `has_
 - The two new presets (Chrome DevTools `chrome-devtools-mcp@1.13.0`, shadcn
   `shadcn@4.23.0 mcp`) were taken from the npm registry on 2026-11-24 and have not been
   run. Chrome DevTools needs Node 20.19 or newer.
+- In a folder with more than 5,000 entries, a page file listed after that point is
+  missed, so the Recommended tab may not appear for that project.
+- From the first task after this update, projects with a user interface get one extra
+  sentence telling agents to use the design skills. Switch it off per project on the
+  Recommended tab.
 - None of this has been run against the real `claude` CLI.
 
 ## Published outside the project
@@ -1922,17 +1926,22 @@ when there is nothing. A new ground rule, **Keep a copy in the project** (on by 
 under Settings, Agent guard, Ground rules), tells agents to keep the source of anything
 they publish inside the project.
 
-- **How it is found.** The guard notes a tool whose name contains `create`, `publish`,
-  `upload`, `post`, `share`, `deploy` or `send` and whose answer holds a web link, and
-  `gh pr create`, `gh gist create`, `gh release create` and `gh issue create`. At most
-  20 per task; the same link is listed once. The link is stored without its query string,
-  fragment or password.
+- **How it is found.** A publication is noted when a connected tool (a tool whose name
+  starts with `mcp__`) has a last name part that contains `create`, `publish`, `upload`,
+  `post`, `share`, `deploy` or `send`, or when the command is `gh pr create`, `gh gist
+  create`, `gh release create` or `gh issue create`, **and** its answer holds a web link.
+  Only the first link is used. Links to webhooks, links whose path looks like a secret,
+  and links with non-ASCII or unusual host names are left out. The link is stored without
+  its query string, fragment or password. At most 20 per task; the same link is listed
+  once. The list fills in when a step finishes.
 
 ### To know
 
 - A tool that publishes without returning a link is missed, and a link in a `create`
   answer that is not a publication is listed.
 - Published links whose path looks like a secret are not listed.
+- The "Keep a copy in the project" rule is on for everyone after the update; an admin
+  can switch it off on the ground-rules screen.
 
 ---
 
