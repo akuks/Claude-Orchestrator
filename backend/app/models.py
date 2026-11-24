@@ -222,6 +222,8 @@ class Project(Base):
     decision_seq: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
     # High-water mark of launch-list item numbers (phase 5b); never decreases.
     launch_seq: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
+    # Licence hint (phase 6a): {id, name, kind, file, hash, checked_at}; NULL = never checked.
+    licence: Mapped[dict | None] = mapped_column(JSON(none_as_null=True), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
 
 
@@ -811,6 +813,9 @@ class SkillPack(Base):
     # "global" applies to every task; "project" applies only to its project_id.
     scope: Mapped[str] = mapped_column(String(16), default="global")
     project_id: Mapped[str | None] = mapped_column(String(32), nullable=True, index=True)
+    # Update check (phase 6a): the remote HEAD last seen, and when.
+    latest_sha: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    checked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
 
 

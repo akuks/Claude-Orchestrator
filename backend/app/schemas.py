@@ -374,6 +374,8 @@ class ProjectOut(BaseModel):
     fresh_session_tokens: Optional[int] = None
     # create/import only: why suggest_trust chose `trust`
     trust_reason: Optional[str] = None
+    licence: Optional[dict] = None
+    licence_badge: Optional[dict] = None  # {label, tone}, computed by the server
     task_count: int = 0
     total_cost_usd: float = 0.0
     my_role: Optional[str] = None
