@@ -12,6 +12,7 @@ vi.mock('../api', () => ({
     approveWorkflowStage: vi.fn(),
     rejectWorkflowStage: vi.fn(),
     workflowGateLog: vi.fn(),
+    raiseRunBudget: vi.fn(),
   },
   STATUS_COLORS: {},
 }))
@@ -338,6 +339,158 @@ describe('RunView', () => {
     expect(c.querySelector('[data-testid="run-paused"]').textContent).toContain('decide it in Approvals')
     expect(c.querySelector('[data-testid="run-stage-state"]').textContent).toBe('Waiting for approval')
     expect(c.querySelector('[data-testid="run-task-count"]')).not.toBeNull()
+  })
+})
+
+describe('RunView: hand-overs, fixes and the spending limit', () => {
+  let view
+  beforeAll(() => {
+    window.matchMedia ||= () => ({ matches: true, addListener() {}, removeListener() {}, addEventListener() {}, removeEventListener() {} })
+  })
+  beforeEach(() => {
+    vi.clearAllMocks()
+    api.userDirectory.mockImplementation(async () => [])
+  })
+  afterEach(async () => {
+    await view?.unmount()
+    view = null
+  })
+  const mount = async (user = { id: 'u1', role: 'member' }) => {
+    view = await render(<RunView id="r1" user={user} projects={[{ id: 'p1', name: 'Canonizer', my_role: 'contributor' }]} navigate={() => {}} />)
+    await flush()
+    await flush()
+    return view.container
+  }
+
+  it('lists what an agent handed over, as text', async () => {
+    api.getWorkflowRun.mockImplementation(async () => ({
+      run: run({ current_stage: 0, stages: [{ name: 'Plan', items: [{ agent: 'Planner', prompt: 'p', outputs: ['plan_path', 'summary'] }] }] }),
+      tasks: [t('a', 0, 'completed', { title: '[Feature flow] Planner: plan', outputs: { plan_path: 'docs/plan.md', summary: '<b>bold</b>\u202Eevil' } })],
+    }))
+    const c = await mount()
+    const box = c.querySelector('[data-testid="run-handed-over"]')
+    expect(box.textContent).toContain('Handed over')
+    const rows = [...box.querySelectorAll('[data-testid="run-handed-row"]')]
+    expect(rows.map((r) => r.querySelector('dt').textContent)).toEqual(['plan_path', 'summary'])
+    expect(rows[0].querySelector('dd').textContent).toBe('docs/plan.md')
+    expect(rows[1].querySelector('b')).toBeNull()
+    expect(rows[1].querySelector('dd').textContent).toContain('<b>bold</b>')
+    expect(rows[1].querySelector('dd').textContent).toContain('U+202E')
+  })
+
+  it('reveals hidden characters in the agent name of a hand-over', async () => {
+    api.getWorkflowRun.mockImplementation(async () => ({
+      run: run({ current_stage: 0, stages: [{ name: 'Plan', items: [] }] }),
+      tasks: [
+        t('a', 0, 'completed', { title: '[F] Pl\u202Ean: x', outputs: { s: '1' } }),
+        t('b', 0, 'completed', { title: '[F] B: y', outputs: { s: '2' } }),
+      ],
+    }))
+    const c = await mount()
+    expect(c.querySelector('.co-run-handed-agent').textContent).toContain('⟦U+202E⟧')
+  })
+
+  it('no hand-over list when no task handed anything over', async () => {
+    api.getWorkflowRun.mockImplementation(async () => ({ run: run(), tasks: [t('c', 1, 'running')] }))
+    const c = await mount()
+    expect(c.querySelector('[data-testid="run-handed-over"]')).toBeNull()
+  })
+
+  it('a check being fixed leads with the try and opens the fix task only on request', async () => {
+    api.getWorkflowRun.mockImplementation(async () => ({
+      run: run({ current_stage: 1, stages: [{ name: 'Plan', items: [] }, { name: 'Tests', kind: 'gate', run: ['pytest -q'], project: 'p1', fix: { agent: 'ag1', rounds: 2 } }] }),
+      tasks: [t('a', 0, 'completed'), t('fx', 1, 'running', { title: '[Tests] Fixer: fix round 1' })],
+      stage_state: { 1: { status: 'fixing', fix_round: 1, fix_task: 'fx', attempt: 0 } },
+      gate_runs: [],
+    }))
+    const c = await mount()
+    expect(c.querySelector('[data-testid="gate-lead"]').textContent).toBe('The check failed. An agent is fixing it (try 1 of 2).')
+    expect(c.querySelector('[data-testid="task-detail-stub"]')).toBeNull()
+    await act(async () => c.querySelector('[data-testid="gate-fix-task"]').click())
+    expect(c.querySelector('[data-testid="task-detail-stub"]').textContent).toBe('fx')
+  })
+
+  it('a passed check keeps its fix attempts reachable, earlier attempts included', async () => {
+    api.getWorkflowRun.mockImplementation(async () => ({
+      run: run({ current_stage: 1, stages: [{ name: 'Plan', items: [] }, { name: 'Tests', kind: 'gate', run: ['pytest -q'], project: 'p1', fix: { agent: 'ag1', rounds: 2 } }] }),
+      tasks: [
+        t('a', 0, 'completed'),
+        t('old', 1, 'failed', { stage_attempt: 0, title: '[Tests] Fixer: fix round 1' }),
+        t('fx', 1, 'completed', { stage_attempt: 1, title: '[Tests] Fixer: fix round 1' }),
+      ],
+      stage_state: { 1: { status: 'passed', fix_round: 1, fix_task: 'fx', attempt: 1 } },
+      gate_runs: [],
+    }))
+    const c = await mount()
+    const rows = [...c.querySelectorAll('[data-testid="gate-fix-attempt"]')]
+    expect(rows.length).toBe(2)
+    expect(c.querySelector('[data-testid="task-detail-stub"]')).toBeNull()
+    await act(async () => rows[0].querySelector('[data-testid="gate-fix-attempt-open"]').click())
+    expect(c.querySelector('[data-testid="task-detail-stub"]').textContent).toBe('old')
+  })
+
+  it('shows the spending in the header', async () => {
+    api.getWorkflowRun.mockImplementation(async () => ({ run: run(), tasks: [t('c', 1, 'running')], budget: { spent: 0.5, budget_usd: 2 } }))
+    const c = await mount()
+    expect(c.querySelector('[data-testid="run-budget-line"]').textContent).toBe('Spent $0.50 of $2.00')
+    expect(c.querySelector('[data-testid="run-budget-panel"]')).toBeNull()
+  })
+
+  it('no spending line without a limit', async () => {
+    api.getWorkflowRun.mockImplementation(async () => ({ run: run(), tasks: [], budget: { spent: 0.5, budget_usd: null } }))
+    const c = await mount()
+    expect(c.querySelector('[data-testid="run-budget-line"]')).toBeNull()
+  })
+
+  const held = () => ({
+    run: run({ status: 'paused', current_stage: 1 }),
+    tasks: [t('a', 0, 'completed')],
+    stage_state: { 1: { status: 'budget', reason: 'budget reached ($1.25 of $1.00)', attempt: 0 } },
+    budget: { spent: 1.25, budget_usd: 1 },
+  })
+
+  it('a step held by the limit shows the panel; a manager raises it', async () => {
+    api.getWorkflowRun.mockImplementation(async () => held())
+    api.raiseRunBudget.mockResolvedValue({})
+    const c = await mount()
+    const panel = c.querySelector('[data-testid="run-budget-panel"]')
+    expect(panel.textContent).toContain('This run reached its spending limit ($1.25 of $1.00).')
+    expect(c.querySelector('[data-testid="run-paused"]')).toBeNull()
+    const raise = c.querySelector('[data-testid="run-budget-raise"]')
+    expect(raise.textContent).toBe('Raise the limit and continue')
+    expect(raise.disabled).toBe(true)
+    const input = c.querySelector('input[aria-label="New limit"]')
+    await act(async () => {
+      Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set.call(input, '3')
+      input.dispatchEvent(new Event('input', { bubbles: true }))
+    })
+    await flush()
+    await act(async () => c.querySelector('[data-testid="run-budget-raise"]').click())
+    await flush()
+    expect(api.raiseRunBudget).toHaveBeenCalledWith('r1', 3)
+    expect(api.getWorkflowRun.mock.calls.length).toBeGreaterThanOrEqual(2)
+  })
+
+  it("a refused raise shows the server's reason", async () => {
+    api.getWorkflowRun.mockImplementation(async () => held())
+    api.raiseRunBudget.mockRejectedValue(err(409, 'the budget must be more than the $1.25 already spent'))
+    const c = await mount()
+    const input = c.querySelector('input[aria-label="New limit"]')
+    await act(async () => {
+      Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set.call(input, '1.1')
+      input.dispatchEvent(new Event('input', { bubbles: true }))
+    })
+    await flush()
+    await act(async () => c.querySelector('[data-testid="run-budget-raise"]').click())
+    await flush()
+    expect(c.querySelector('[data-testid="run-budget-error"]').textContent).toContain('the budget must be more than the $1.25 already spent')
+  })
+
+  it('people who cannot manage the run see the panel without the raise', async () => {
+    api.getWorkflowRun.mockImplementation(async () => ({ ...held(), run: run({ status: 'paused', current_stage: 1, created_by: 'someone' }) }))
+    const c = await mount()
+    expect(c.querySelector('[data-testid="run-budget-panel"]')).not.toBeNull()
+    expect(c.querySelector('[data-testid="run-budget-raise"]')).toBeNull()
   })
 })
 

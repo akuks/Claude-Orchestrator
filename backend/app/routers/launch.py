@@ -53,7 +53,7 @@ async def _full(s, project_id: str) -> LaunchOut:
     names = await _names(s, items)
     return LaunchOut(
         launch=LaunchSettingsOut(launch_date=row.launch_date, critical_paths=list(row.critical_paths or []),
-                                 version=row.version) if row is not None else None,
+                                 raise_risk=bool(row.raise_risk), version=row.version) if row is not None else None,
         items=[_item_out(i, names) for i in items],
         all_linked_done=await store.all_linked_done(s, project_id))
 
@@ -106,7 +106,7 @@ async def put_launch(project_id: str, payload: LaunchPut, request: Request):
             if payload.version not in (None, 0):
                 raise HTTPException(409, STALE)
             s.add(ProjectLaunch(project_id=project_id, launch_date=payload.launch_date, critical_paths=paths,
-                                version=1, updated_at=_now()))
+                                raise_risk=bool(payload.raise_risk), version=1, updated_at=_now()))
             try:
                 await s.commit()
             except IntegrityError:  # two first writes at once: the loser reloads
@@ -115,10 +115,12 @@ async def put_launch(project_id: str, payload: LaunchPut, request: Request):
         else:
             if payload.version is None or payload.version != row.version:
                 raise HTTPException(409, STALE)
+            vals = dict(launch_date=payload.launch_date, critical_paths=paths,
+                        version=ProjectLaunch.version + 1, updated_at=_now())
+            if payload.raise_risk is not None:
+                vals["raise_risk"] = payload.raise_risk
             res = await s.execute(update(ProjectLaunch).where(
-                ProjectLaunch.project_id == project_id, ProjectLaunch.version == payload.version).values(
-                launch_date=payload.launch_date, critical_paths=paths, version=ProjectLaunch.version + 1,
-                updated_at=_now()))
+                ProjectLaunch.project_id == project_id, ProjectLaunch.version == payload.version).values(**vals))
             if res.rowcount != 1:
                 await s.rollback()
                 raise HTTPException(409, STALE)

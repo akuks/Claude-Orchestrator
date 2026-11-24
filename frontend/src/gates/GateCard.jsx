@@ -1,6 +1,7 @@
 import { useState } from 'react'
 import { Alert, Button, Tag, message } from 'antd'
 import { api } from '../api'
+import { revealHidden } from '../guard/guard'
 import './workflows.css'
 
 const OUTCOME_COLOR = { passed: 'success', failed: 'error', refused: 'error', timeout: 'error', timed_out: 'error' }
@@ -23,12 +24,38 @@ export function gateWords(stage, state, live) {
   return status.replace('_', ' ')
 }
 
+const FIX_STATUS = {
+  queued: 'Waiting to start',
+  running: 'Working on it',
+  awaiting_approval: 'Waiting for approval',
+  completed: 'Done',
+  failed: 'Did not finish',
+  cancelled: 'Cancelled',
+}
+
+// The fix tasks of a check step, oldest first, with their try number (from the
+// server's title "…: fix round k", else their position).
+export function fixAttempts(tasks = [], index) {
+  return tasks
+    .filter((t) => t.stage_index === index)
+    .map((t, i) => {
+      const m = String(t.title || '').match(/fix round (\d+)\s*$/)
+      return { task: t, k: m ? Number(m[1]) : i + 1, status: FIX_STATUS[t.status] || String(t.status || '').replace(/_/g, ' ') }
+    })
+}
+
 const plural = (n, one, many) => `${n} ${n === 1 ? one : many}`
 
 // The plain sentence a check step leads with, and its tone. `rows` are this
 // step's command runs, oldest first.
-export function gateLead(state, rows = []) {
+export function gateLead(state, rows = [], stage = null) {
   const status = state?.status || 'waiting'
+  if (status === 'fixing') {
+    const n = Number(stage?.fix?.rounds) || 1
+    const k = Number(state?.fix_round) || 1
+    return { tone: 'running', text: `The check failed. An agent is fixing it (try ${k} of ${n}).` }
+  }
+  if (status === 'budget') return { tone: 'waiting', text: 'Paused — this run reached its spending limit' }
   const last = rows[rows.length - 1]
   if (status === 'passed') {
     const full = [...rows].reverse().find((r) => r.kind !== 'retry') || last
@@ -63,16 +90,16 @@ export function failureMessage(reason, last) {
   if (ran && TIMED_OUT.has(last.outcome))
     return (
       <>
-        The command <code>{last.command}</code> took too long and was stopped
+        The command <code>{revealHidden(last.command).text}</code> took too long and was stopped
       </>
     )
   if (ran && last.exit_code != null)
     return (
       <>
-        The command <code>{last.command}</code> failed (exit code {last.exit_code})
+        The command <code>{revealHidden(last.command).text}</code> failed (exit code {last.exit_code})
       </>
     )
-  return reason
+  return revealHidden(String(reason)).text
 }
 
 function LogToggle({ runId, row, testid }) {
@@ -128,13 +155,15 @@ function GateRun({ runId, row }) {
 
 // A "Run a check" step: a plain sentence with the test result first, the
 // failing tests, anything that needs a person, then the details collapsed.
-export default function GateCard({ runId, index, stage, state, live, gateRuns = [], canAllow = true, onChanged }) {
+export default function GateCard({ runId, index, stage, state, live, gateRuns = [], canAllow = true, onChanged, tasks = [], onOpenTask }) {
   const [busy, setBusy] = useState(false)
   const st = state || {}
   const mine = live && live.stage_index === index ? live : null
   const rows = gateRuns.filter((r) => r.stage_index === index)
   const last = rows[rows.length - 1]
-  const lead = gateLead(st, rows)
+  const lead = gateLead(st, rows, stage)
+  const attempts = fixAttempts(tasks, index)
+  const fixTask = st.status === 'fixing' && st.fix_task ? tasks.find((t) => t.id === st.fix_task) : null
   const words = gateWords(stage, st, mine)
   const showWords = words && words !== (st.status || 'waiting').replace('_', ' ')
   const failing = st.status === 'failed' && last?.failing?.length ? last.failing : []
@@ -157,6 +186,16 @@ export default function GateCard({ runId, index, stage, state, live, gateRuns = 
       <div className={`co-gate-lead co-gate-lead-${lead.tone}`} data-testid="gate-lead">
         {lead.text}
       </div>
+      {st.status === 'fixing' && st.reason && (
+        <div className="co-gate-words" data-testid="gate-fix-reason">
+          What failed: {failureMessage(st.reason, last)}
+        </div>
+      )}
+      {fixTask && onOpenTask && (
+        <Button size="small" type="link" style={{ paddingInline: 0 }} onClick={() => onOpenTask(fixTask.id)} data-testid="gate-fix-task">
+          See what the agent is doing
+        </Button>
+      )}
       {showWords && (
         <div className="co-gate-words" data-testid="gate-words">
           {words}
@@ -222,6 +261,23 @@ export default function GateCard({ runId, index, stage, state, live, gateRuns = 
             )
           }
         />
+      )}
+      {attempts.length > 0 && (
+        <div className="co-gate-fixes" data-testid="gate-fix-attempts">
+          <div className="co-gate-failing-title">Fix attempts</div>
+          <ul className="co-gate-runs">
+            {attempts.map((a) => (
+              <li key={a.task.id} className="co-gate-run" data-testid="gate-fix-attempt">
+                <span>Try {a.k}</span> <Tag>{a.status}</Tag>
+                {onOpenTask && (
+                  <Button size="small" type="link" onClick={() => onOpenTask(a.task.id)} data-testid="gate-fix-attempt-open">
+                    Open
+                  </Button>
+                )}
+              </li>
+            ))}
+          </ul>
+        </div>
       )}
       {logRow && <LogToggle key={logRow.id} runId={runId} row={logRow} testid="gate-show-log" />}
       {rows.length > 0 && (

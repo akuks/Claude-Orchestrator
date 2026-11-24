@@ -43,6 +43,7 @@ class TaskOut(BaseModel):
     attempt: int = 0
     stage_attempt: int = 0
     launch_item_id: Optional[str] = None
+    outputs: Optional[dict] = None  # typed outputs parsed from the result (phase 5c)
     exit_code: Optional[int]
     error: Optional[str]
     result_text: Optional[str]
@@ -86,6 +87,10 @@ class TaskOut(BaseModel):
     @classmethod
     def _bounds_none(cls, v):
         return [] if v is None else v
+
+
+class TaskLaunchLink(BaseModel):
+    launch_item_id: Optional[str]  # required; null unlinks
 
 
 class FollowupCreate(BaseModel):
@@ -599,6 +604,7 @@ class ServerEntry(BaseModel):
 class WorkflowStageItem(BaseModel):
     agent: str  # agent id or exact name
     prompt: str = Field(min_length=1)
+    outputs: Optional[Any] = None  # checked by gates.spec.validate_stages
 
 
 class WorkflowStage(BaseModel):
@@ -613,11 +619,14 @@ class WorkflowStage(BaseModel):
     before: Optional[list[str]] = None
     timeout_min: Optional[int] = None
     message: Optional[str] = None
+    auto_retry: Optional[Any] = None  # checked by validate_stages (must be a bool)
+    fix: Optional[Any] = None  # gate fix loop, checked by validate_stages
 
 
 class WorkflowCreate(BaseModel):
     name: str = Field(min_length=1, max_length=200)
     description: Optional[str] = None
+    budget_usd: Optional[float] = Field(default=None, ge=0.01, le=10000, strict=True)
     stages: list[WorkflowStage] = Field(min_length=1)
 
 
@@ -625,6 +634,7 @@ class WorkflowUpdate(BaseModel):
     name: Optional[str] = None
     description: Optional[str] = None
     stages: Optional[list[WorkflowStage]] = None
+    budget_usd: Optional[float] = Field(default=None, ge=0.01, le=10000, strict=True)
 
 
 class WorkflowOut(BaseModel):
@@ -632,6 +642,7 @@ class WorkflowOut(BaseModel):
     name: str
     description: Optional[str]
     stages: list
+    budget_usd: Optional[float] = None
     created_at: datetime
 
     model_config = {"from_attributes": True}
@@ -652,6 +663,7 @@ class WorkflowRunSummaryOut(BaseModel):
     current_stage: int
     stages: list
     project_ids: list[str] = []
+    budget_usd: Optional[float] = None
     created_by: Optional[str] = None  # who started the run (run page header)
     created_at: datetime
     updated_at: datetime
@@ -668,6 +680,12 @@ class WorkflowRunOut(WorkflowRunSummaryOut):
     @classmethod
     def _none_empty(cls, v, info):
         return ({} if info.field_name == "stage_state" else []) if v is None else v
+
+
+class BudgetRaise(BaseModel):
+    """POST /workflows/runs/{id}/budget: the new cap (must also be more than spent)."""
+
+    budget_usd: float = Field(ge=0.01, le=10000, strict=True)
 
 
 class StageReject(BaseModel):
@@ -1053,6 +1071,7 @@ class LaunchPut(BaseModel):
     launch_date: Optional[date] = None
     critical_paths: list[str] = Field(default_factory=list)
     version: Optional[int] = None  # required once the launch row exists
+    raise_risk: Optional[bool] = Field(default=None, strict=True)  # omitted keeps the stored value
 
 
 class ScopeCheckIn(BaseModel):
@@ -1098,6 +1117,7 @@ class LaunchItemPatch(BaseModel):
 class LaunchSettingsOut(BaseModel):
     launch_date: Optional[date] = None
     critical_paths: list[str] = []
+    raise_risk: bool = False
     version: int
 
 

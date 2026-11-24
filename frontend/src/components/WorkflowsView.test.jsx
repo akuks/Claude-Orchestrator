@@ -69,9 +69,9 @@ describe('WorkflowsView: stage kinds', () => {
   const byText = (t) => [...document.body.querySelectorAll('button')].find((b) => b.textContent.replace(/\s/g, '') === t)
   const menuItem = (t) => [...document.body.querySelectorAll('.ant-dropdown-menu-item')].find((li) => li.textContent.trim() === t)
 
-  async function saveEdit(stages) {
-    api.listWorkflows.mockResolvedValue([{ id: 'w1', name: 'Ship', stages }])
-    view = await render(<WorkflowsView isAdmin />)
+  async function saveEdit(stages, extra = {}, agents = []) {
+    api.listWorkflows.mockResolvedValue([{ id: 'w1', name: 'Ship', stages, ...extra }])
+    view = await render(<WorkflowsView isAdmin agents={agents} />)
     await flush()
     await click(document.body.querySelector('[data-testid="workflow-more"]'))
     await click(menuItem('Edit'))
@@ -109,6 +109,55 @@ describe('WorkflowsView: stage kinds', () => {
   it('saves an old agent stage without a kind key', async () => {
     const p = await saveEdit([{ name: 'Dev', items: [{ agent: 'a', prompt: 'do' }] }])
     expect(p.stages).toEqual([{ name: 'Dev', items: [{ agent: 'a', prompt: 'do' }] }])
+  })
+
+  it('an old workflow saves exactly as before: no budget, outputs, auto_retry or fix keys', async () => {
+    const stages = [
+      { name: 'Dev', items: [{ agent: 'a', prompt: 'do' }] },
+      { name: 'Tests', kind: 'gate', before: [], project: 'p1', run: ['pytest -q'], timeout_min: 60 },
+    ]
+    const p = await saveEdit(stages, { description: 'd', budget_usd: null })
+    expect(JSON.stringify(p)).toBe(JSON.stringify({ name: 'Ship', description: 'd', stages }))
+  })
+
+  it('keeps hand-over names, the retry switch, the fix agent and the spending limit', async () => {
+    const stages = [
+      { name: 'Plan', auto_retry: true, items: [{ agent: 'a', prompt: 'plan', outputs: ['plan_path'] }] },
+      { name: 'Tests', kind: 'gate', before: [], project: 'p1', run: ['pytest -q'], timeout_min: 60, fix: { agent: 'ag1', rounds: 2 } },
+    ]
+    const agents = [{ id: 'ag1', name: 'Fixer', project_id: 'p1' }, { id: 'ag2', name: 'Other', project_id: 'p2' }]
+    const p = await saveEdit(stages, { budget_usd: 2.5 }, agents)
+    expect(p.budget_usd).toBe(2.5)
+    expect(p.stages).toEqual(stages)
+    // the editor shows the plain labels, never the technical words
+    const drawer = document.body.querySelector('.ant-drawer')
+    const text = drawer.textContent
+    expect(text).toContain('Spending limit for each run (optional)')
+    expect(text).toContain('What should this agent hand over? (optional)')
+    expect(text).toContain('Try once more if it fails')
+    expect(text).toContain('If the check fails, ask an agent to fix it (optional)')
+    expect(text).not.toMatch(/\b(gate|kind|stage|pre-flight|pipeline)\b/i)
+  })
+
+  it('clearing a saved spending limit sends null', async () => {
+    api.listWorkflows.mockResolvedValue([{ id: 'w1', name: 'Ship', budget_usd: 4, stages: [{ name: 'Dev', items: [{ agent: 'a', prompt: 'do' }] }] }])
+    view = await render(<WorkflowsView isAdmin />)
+    await flush()
+    await click(document.body.querySelector('[data-testid="workflow-more"]'))
+    await click(menuItem('Edit'))
+    await flush()
+    const input = document.body.querySelector('[data-testid="workflow-budget"] input') || document.body.querySelector('input[aria-label="Spending limit for each run"]')
+    expect(input.value).toBe('4.00')
+    await act(async () => {
+      Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set.call(input, '')
+      input.dispatchEvent(new Event('input', { bubbles: true }))
+      input.dispatchEvent(new Event('change', { bubbles: true }))
+    })
+    await flush()
+    await click(byText('Save'))
+    await new Promise((r) => setTimeout(r, 50))
+    await flush()
+    expect(api.updateWorkflow.mock.calls[0][1].budget_usd).toBeNull()
   })
 
   it('shows the server reason under the form', async () => {

@@ -14,7 +14,8 @@ from fastapi import HTTPException
 
 from .briefs.validate import child_scope, clean_brief
 from .constants import Status
-from .models import LaunchItem, Project, Task
+from .launch import critical
+from .models import LaunchItem, Project, ProjectLaunch, Task, TaskEvent
 
 
 @contextlib.contextmanager
@@ -48,7 +49,18 @@ _CRITICAL_PATTERNS = (
 )
 
 
-def classify_risk(prompt: str, project_id: str | None, tags: list | None = None) -> str:
+def critical_hit(prompt: str, critical_prefixes: list[str] | None) -> str | None:
+    """The first critical-path prefix (case-insensitive) the prompt mentions, else None."""
+    p = (prompt or "").lower()
+    for pre in critical_prefixes or []:
+        if pre and len(pre) >= 3 and pre.lower() in p:
+            return pre
+    return None
+
+
+def classify_risk(
+    prompt: str, project_id: str | None, tags: list | None = None, critical_prefixes: list[str] | None = None
+) -> str:
     """Task-level risk from the prompt: "critical" (a keyword in
     _CRITICAL_PATTERNS), "warning" (a project task, or a vapt/security
     review) or "info".
@@ -64,7 +76,7 @@ def classify_risk(prompt: str, project_id: str | None, tags: list | None = None)
     if tag_set & {"vapt", "security"}:
         return "warning"
     p = (prompt or "").lower()
-    if any(k in p for k in _CRITICAL_PATTERNS):
+    if any(k in p for k in _CRITICAL_PATTERNS) or critical_hit(prompt, critical_prefixes):
         return "critical"
     # A project task acts on a real repo/directory → at least a warning.
     if project_id:
@@ -97,6 +109,7 @@ async def build_task(
     created_by: str | None = None,
     brief: dict | None = None,
     launch_item_id: str | None = None,
+    risk_text: str | None = None,
 ) -> Task:
     """Create a Task row (flushed, not committed) in the given session.
 
@@ -121,7 +134,17 @@ async def build_task(
         bounds = []
     resolved_model = model or (project_obj.default_model if project_obj else "")
 
-    risk = classify_risk(prompt, project_id, tags)
+    # risk_text: the part of the prompt to classify when the rest is fixed server text whose
+    # own prohibitions ("do not merge or push") must not gate it (the gate fix prompt).
+    risk_src = prompt if risk_text is None else risk_text
+    prefixes: list[str] = []
+    if project_id:
+        launch = await s.get(ProjectLaunch, project_id)
+        if launch is not None and launch.raise_risk:
+            prefixes = critical.prefixes(launch.critical_paths)
+    risk = classify_risk(risk_src, project_id, tags, prefixes)
+    # a read-only review (vapt/security) stays "warning", so it records no critical-path reason
+    hit = critical_hit(risk_src, prefixes) if risk == "critical" else None
     # Auto-gate critical-risk work so it can't run unattended (config-controlled).
     gated = requires_approval or (settings.gate_critical_approval and risk == "critical")
 
@@ -159,6 +182,9 @@ async def build_task(
     # A dispatched child shares its coordinator's root so it shows in the same
     # thread/board; otherwise a task is its own root.
     task.root_id = parent.root_id if parent else task.id
+    if hit:
+        s.add(TaskEvent(task_id=task.id, seq=1, type="risk",
+                        payload={"risk": risk, "risk_reason": f"critical path {hit}"}))
 
     if project_obj:
         task.workspace_dir = project_obj.directory  # run in the repo

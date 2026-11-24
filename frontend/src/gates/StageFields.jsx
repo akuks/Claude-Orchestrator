@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import { Button, Collapse, Form, Input, InputNumber, Segmented, Select } from 'antd'
+import { Button, Collapse, Form, Input, InputNumber, Segmented, Select, Switch } from 'antd'
 import { CheckCircleOutlined, DeleteOutlined, PlusOutlined, RobotOutlined, UserOutlined } from '@ant-design/icons'
 import { KIND_HELP, KIND_OPTIONS, checkCommand } from './gates'
 import './workflows.css'
@@ -99,7 +99,7 @@ function BeforeList({ name }) {
   )
 }
 
-function ProjectSelect({ name, projects, required, label }) {
+function ProjectSelect({ name, projects, required, label, onChange }) {
   const options = projects.filter((p) => (p.directory || '').trim()).map((p) => ({ value: p.id, label: p.name }))
   return (
     <Form.Item
@@ -108,7 +108,7 @@ function ProjectSelect({ name, projects, required, label }) {
       rules={required ? [{ required: true, message: 'Pick a project' }] : []}
       style={{ marginBottom: 14 }}
     >
-      <Select showSearch optionFilterProp="label" allowClear={!required} placeholder="Pick a project" options={options} />
+      <Select showSearch optionFilterProp="label" allowClear={!required} placeholder="Pick a project" options={options} onChange={onChange} />
     </Form.Item>
   )
 }
@@ -120,7 +120,12 @@ const filled = (v) => (Array.isArray(v) ? v.some((x) => !blank(x)) : !blank(v))
 export function moreOptionsAuto(stage, kind) {
   const st = stage || {}
   if (kind === 'gate') {
-    return filled(st.retry) || filled(st.before) || (st.timeout_min != null && st.timeout_min !== DEFAULT_TIMEOUT)
+    return (
+      filled(st.retry) ||
+      filled(st.before) ||
+      filled(st.fix?.agent) ||
+      (st.timeout_min != null && st.timeout_min !== DEFAULT_TIMEOUT)
+    )
   }
   return filled(st.before) || filled(st.project)
 }
@@ -135,7 +140,7 @@ function MoreOptions({ name, kind, children }) {
   return (
     <Form.Item noStyle shouldUpdate={() => true}>
       {({ getFieldValue, getFieldsError }) => {
-        const keys = kind === 'gate' ? ['retry', 'before', 'timeout_min'] : ['project', 'before']
+        const keys = kind === 'gate' ? ['retry', 'before', 'timeout_min', 'fix'] : ['project', 'before']
         const errs = getFieldsError()
         const hasError = keys.some((k) => errorUnder(errs, ['stages', name, k]))
         const open = hasError || (userOpen ?? moreOptionsAuto(getFieldValue(['stages', name]), kind))
@@ -156,10 +161,68 @@ function MoreOptions({ name, kind, children }) {
   )
 }
 
-function GateFields({ name, projects }) {
+// "If the check fails, ask an agent to fix it": only agents of the check's
+// project can be picked. The agent is saved by its id.
+function FixFields({ name, agents, repick }) {
+  return (
+    <Form.Item noStyle shouldUpdate>
+      {({ getFieldValue }) => {
+        const project = getFieldValue(['stages', name, 'project'])
+        const chosen = getFieldValue(['stages', name, 'fix', 'agent'])
+        const options = agents.filter((a) => project && a.project_id === project).map((a) => ({ value: a.id, label: a.name }))
+        if (chosen && !options.some((o) => o.value === chosen)) {
+          const known = agents.find((a) => a.id === chosen)
+          options.push({ value: chosen, label: known ? `${known.name} (not in this project)` : 'An agent that is no longer here' })
+        }
+        return (
+          <div className="co-wf-fix" data-testid="gate-fix">
+            <Form.Item
+              name={[name, 'fix', 'agent']}
+              label="If the check fails, ask an agent to fix it (optional)"
+              extra="The agent gets the failing output, fixes it, and the check runs again."
+              style={{ marginBottom: 10 }}
+            >
+              <Select
+                allowClear
+                showSearch
+                optionFilterProp="label"
+                placeholder={project ? 'Pick an agent' : 'Pick where to run it first'}
+                notFoundContent={project ? 'No agents in this project' : 'Pick where to run it first'}
+                options={options}
+                aria-label="Agent that fixes a failed check"
+                data-testid="gate-fix-agent"
+              />
+            </Form.Item>
+            {repick && !chosen && (
+              <div className="co-wf-muted" data-testid="gate-fix-repick" style={{ marginTop: -6, marginBottom: 10 }}>
+                Pick the fixer again for this project
+              </div>
+            )}
+            {chosen && (
+              <Form.Item name={[name, 'fix', 'rounds']} label="How many tries" style={{ marginBottom: 14 }}>
+                <InputNumber min={1} max={3} precision={0} placeholder="1" style={{ width: '100%' }} data-testid="gate-fix-rounds" />
+              </Form.Item>
+            )}
+          </div>
+        )
+      }}
+    </Form.Item>
+  )
+}
+
+function GateFields({ name, projects, agents }) {
+  const form = Form.useFormInstance()
+  const [repick, setRepick] = useState(false)
+  // The fixer must belong to the check's project: a new project clears it.
+  const projectChanged = () => {
+    if (form.getFieldValue(['stages', name, 'fix', 'agent'])) {
+      form.setFieldValue(['stages', name, 'fix'], undefined)
+      setRepick(true)
+    }
+  }
   return (
     <>
-      <ProjectSelect name={name} projects={projects} required label="Where to run it" />
+      <ProjectSelect name={name} projects={projects} required label="Where to run it" onChange={projectChanged} />
       <Form.Item
         label="Commands to run"
         extra="Add one command per box. They run in order and stop at the first one that fails."
@@ -216,9 +279,10 @@ function GateFields({ name, projects }) {
             )
           }}
         </Form.Item>
+        <FixFields name={name} agents={agents} repick={repick} />
         <BeforeList name={name} />
         <Form.Item name={[name, 'timeout_min']} label="Give up after (minutes)" style={{ marginBottom: 0 }}>
-          <InputNumber min={1} max={720} precision={0} />
+          <InputNumber min={1} max={720} precision={0} style={{ width: '100%' }} />
         </Form.Item>
       </MoreOptions>
     </>
@@ -241,7 +305,22 @@ function ApprovalFields({ name, projects }) {
 
 // Fields of one step that depend on its type. `agentFields` is the agents
 // editor, rendered only for the "Agents do the work" type.
-export default function StageFields({ name, projects = [], agentFields }) {
+// "Try once more if it fails" for an agents step.
+function AutoRetry({ name }) {
+  return (
+    <Form.Item
+      name={[name, 'auto_retry']}
+      valuePropName="checked"
+      label="Try once more if it fails"
+      extra="Runs the step again one time. Never after someone cancels it."
+      style={{ marginTop: 14, marginBottom: 0 }}
+    >
+      <Switch data-testid="agent-auto-retry" />
+    </Form.Item>
+  )
+}
+
+export default function StageFields({ name, projects = [], agents = [], agentFields }) {
   return (
     <Form.Item noStyle shouldUpdate>
       {({ getFieldValue }) => {
@@ -250,11 +329,14 @@ export default function StageFields({ name, projects = [], agentFields }) {
           <>
             <KindSelect name={name} kind={kind} />
             {kind === 'gate' ? (
-              <GateFields name={name} projects={projects} />
+              <GateFields name={name} projects={projects} agents={agents} />
             ) : kind === 'approval' ? (
               <ApprovalFields name={name} projects={projects} />
             ) : (
-              agentFields
+              <>
+                {agentFields}
+                <AutoRetry name={name} />
+              </>
             )}
           </>
         )

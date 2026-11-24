@@ -113,3 +113,32 @@ describe('LaunchTab', () => {
     expect(q(c, 'launch-item-1').textContent).toContain('⟦U+202E⟧')
   })
 })
+
+describe('LaunchTab: critical files raise the risk', () => {
+  it('a maintainer turns it on: PUT with the stored date, paths, version and raise_risk', async () => {
+    api.saveLaunch.mockResolvedValue({})
+    const c = await mount()
+    expect(c.textContent).toContain('Treat tasks that mention a critical file as high risk')
+    expect(c.textContent).toContain('Such tasks are marked critical, which can require approval.')
+    const sw = q(c, 'launch-raise-risk')
+    expect(sw.getAttribute('aria-checked')).toBe('false')
+    // an unsaved date draft is not sent with the switch
+    await type(q(c, 'launch-date'), '2027-01-01')
+    await click(sw)
+    await flush()
+    expect(api.saveLaunch).toHaveBeenCalledWith('p1', { launch_date: '2026-12-01', critical_paths: ['src/billing/**'], version: 3, raise_risk: true })
+  })
+  it('shows the stored value and turns it off', async () => {
+    api.saveLaunch.mockResolvedValue({})
+    api.getLaunch.mockResolvedValue({ ...data(), launch: { ...data().launch, raise_risk: true } })
+    const c = await mount()
+    expect(q(c, 'launch-raise-risk').getAttribute('aria-checked')).toBe('true')
+    await click(q(c, 'launch-raise-risk'))
+    await flush()
+    expect(api.saveLaunch.mock.calls[0][1].raise_risk).toBe(false)
+  })
+  it('a contributor does not see the switch', async () => {
+    const c = await mount({ canEdit: false })
+    expect(q(c, 'launch-raise-risk')).toBeNull()
+  })
+})

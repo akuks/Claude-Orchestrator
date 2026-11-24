@@ -20,10 +20,11 @@ from ..database import SessionLocal
 from ..constants import Status
 from ..gates import executor, spec, test_results, totals
 from ..models import Agent, Project, Task, Workflow, WorkflowGateRun, WorkflowRun
-from ..redaction import clean_text
+from ..redaction import clean_text, env_values, mask_values
 from .. import workflow_templates as wft
 from ..workflow_runner import ACTIVE_RUN, gate_status_text
 from ..schemas import (
+    BudgetRaise,
     LiveItemOut,
     LiveStageOut,
     StageReject,
@@ -237,7 +238,8 @@ async def create_workflow(payload: WorkflowCreate, request: Request):
     async with SessionLocal() as s:
         stages = await _normalize(s, stages)
         await _validate_agents(s, stages)
-        wf = Workflow(name=payload.name, description=payload.description, stages=stages, created_by=request.state.principal.user.id)
+        wf = Workflow(name=payload.name, description=payload.description, stages=stages, budget_usd=payload.budget_usd,
+                      created_by=request.state.principal.user.id)
         s.add(wf)
         await s.commit()
         await s.refresh(wf)
@@ -295,6 +297,7 @@ async def run_workflow(workflow_id: str, payload: WorkflowRunCreate, request: Re
             name=wf.name,
             input=payload.input,
             stages=wf.stages,
+            budget_usd=wf.budget_usd,
             status="pending",
             current_stage=0,
             created_by=request.state.principal.user.id,
@@ -619,13 +622,16 @@ async def get_run(run_id: str, request: Request):
         for i, st in enumerate(run.stages or []):
             kind = spec.stage_kind(st)
             if kind == "agent":
+                if str(i) in stage_state:
+                    stage_state[str(i)].pop("expects", None)  # internal: task ids -> output names
                 continue
             entry = stage_state.setdefault(str(i), {})
             if kind == "gate":
                 lv = live if live and live.get("stage_index") == i else None
                 entry["status_text"] = gate_status_text(st, entry, lv)
             if i in hidden:
-                for k in ("summary", "hits", "reason", "others", "others_more", "flaky", "decided_by"):
+                for k in ("summary", "hits", "reason", "others", "others_more", "flaky", "decided_by",
+                          "fix_task", "fix_check", "fix_pending", "fix_round", "fail_reason"):
                     entry.pop(k, None)
                 entry["hidden"] = True
             elif entry.get("status") == "held" and others is not None:
@@ -641,6 +647,7 @@ async def get_run(run_id: str, request: Request):
         "gate_runs": gate_runs,
         "live": live,
         "totals": tot,
+        "budget": {"spent": tot["cost_usd"], "budget_usd": run_out.budget_usd},
         "log": out["log"],
     }
 
@@ -714,6 +721,19 @@ async def allow_gate(run_id: str, i: int, request: Request):
     return await _run_after(run_id)
 
 
+@router.post("/runs/{run_id}/budget", response_model=WorkflowRunSummaryOut)
+async def raise_budget(run_id: str, payload: BudgetRaise, request: Request):
+    """Raise the run's budget cap (must be more than spent); a run held on its budget resumes."""
+    p = request.state.principal
+    async with SessionLocal() as s:
+        await _require_run(s, p, run_id, manage=True)
+    try:
+        await request.app.state.workflow_runner.raise_budget(run_id, payload.budget_usd, p.user)
+    except ValueError as e:
+        raise HTTPException(409, str(e)) from None
+    return await _run_after(run_id)
+
+
 async def _run_after(run_id: str) -> WorkflowRunSummaryOut:
     async with SessionLocal() as s:
         return WorkflowRunSummaryOut.model_validate(await s.get(WorkflowRun, run_id))
@@ -734,25 +754,17 @@ async def gate_run_log(run_id: str, rid: str, request: Request):
             st.get("project") for st in (run.stages or [])
             if isinstance(st, dict) and spec.stage_kind(st) == "gate" and st.get("project")
         }
-        secrets: set[str] = set()
-        if pids:
-            envs = (await s.execute(select(Project.env).where(Project.id.in_(pids)))).scalars().all()
-            for env in envs:
-                for v in (env or {}).values() if isinstance(env, dict) else []:
-                    if isinstance(v, str) and len(v) >= 6:
-                        secrets.add(v)
+        envs = (await s.execute(select(Project.env).where(Project.id.in_(pids)))).scalars().all() if pids else []
+        ordered = env_values(envs)
         path = _log_path(run.id, g.log_name)
     if path is None:
         return {"lines": [], "truncated": False}
-    ordered = sorted(secrets, key=len, reverse=True)
 
     def work():
         text, cut = _read_tail(path, _LOG_TAIL)
         if not text:
             return {"lines": [], "truncated": False}
-        for v in ordered:
-            text = text.replace(v, "[redacted]")
-        text = clean_text(text)
+        text = mask_values(clean_text(mask_values(text, ordered)), ordered)
         lines = text.splitlines()
         if cut and lines:
             lines = lines[1:]  # the first line is probably cut mid-way

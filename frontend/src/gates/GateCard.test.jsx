@@ -104,4 +104,55 @@ describe('GateCard', () => {
     const c = await mount({ state: { status: 'failed', reason: 'the guard refused: rm -rf /' }, gateRuns: [] })
     expect(c.querySelector('[data-testid="gate-blocked"]').textContent).toBe('the guard refused: rm -rf /')
   })
+  it('a check being fixed leads with the try count and links to the fix task', async () => {
+    const onOpenTask = vi.fn()
+    const fixStage = { ...stage, fix: { agent: 'ag1', rounds: 3 } }
+    const c = await mount({
+      stage: fixStage,
+      state: { status: 'fixing', fix_round: 2, fix_task: 'fx1', reason: 'pytest -q, exit 1' },
+      gateRuns: [row({ command: 'pytest -q' })],
+      tasks: [{ id: 'fx1', stage_index: 1, status: 'running', title: '[Tests] Fixer: fix round 2' }],
+      onOpenTask,
+    })
+    expect(c.querySelector('[data-testid="gate-lead"]').textContent).toBe('The check failed. An agent is fixing it (try 2 of 3).')
+    expect(c.querySelector('[data-testid="gate-fix-reason"]').textContent).toBe('What failed: The command pytest -q failed (exit code 1)')
+    expect(c.querySelector('[data-testid="gate-words"]')).toBeNull()
+    await act(async () => c.querySelector('[data-testid="gate-fix-task"]').click())
+    expect(onOpenTask).toHaveBeenCalledWith('fx1')
+    expect(c.textContent).not.toMatch(/\b(gate|stage|pipeline)\b/i)
+  })
+  it('reveals hidden characters in the failure reason', async () => {
+    const c = await mount({ state: { status: 'fixing', fix_round: 1, reason: 'refused: a\u202Eb' }, gateRuns: [] })
+    expect(c.querySelector('[data-testid="gate-fix-reason"]').textContent).toContain('⟦U+202E⟧')
+    const d = await mount({ state: { status: 'fixing', fix_round: 1, reason: 'x\u200By, exit 1' }, gateRuns: [row({ command: 'x\u200By' })] })
+    expect(d.querySelector('[data-testid="gate-fix-reason"] code').textContent).toContain('⟦U+200B⟧')
+  })
+  it('no link when the fix task is not visible', async () => {
+    const c = await mount({ state: { status: 'fixing', fix_round: 1, fix_task: 'hidden' }, tasks: [], onOpenTask: () => {} })
+    expect(c.querySelector('[data-testid="gate-lead"]').textContent).toBe('The check failed. An agent is fixing it (try 1 of 1).')
+    expect(c.querySelector('[data-testid="gate-fix-task"]')).toBeNull()
+  })
+  it('keeps the fix attempts listed after the check passes', async () => {
+    const onOpenTask = vi.fn()
+    const c = await mount({
+      state: { status: 'passed', fix_round: 2, fix_task: 'f2' },
+      gateRuns: [row({ outcome: 'passed', exit_code: 0, failed: 0, failing: [] })],
+      tasks: [
+        { id: 'f1', stage_index: 1, status: 'failed', title: '[Tests] Fixer: fix round 1' },
+        { id: 'f2', stage_index: 1, status: 'completed', title: '[Tests] Fixer: fix round 2' },
+        { id: 'other', stage_index: 0, status: 'completed', title: '[Plan] A: plan' },
+      ],
+      onOpenTask,
+    })
+    const rows = [...c.querySelectorAll('[data-testid="gate-fix-attempt"]')]
+    expect(c.querySelector('[data-testid="gate-fix-attempts"]').textContent).toContain('Fix attempts')
+    expect(rows.map((r) => r.textContent)).toEqual(['Try 1 Did not finishOpen', 'Try 2 DoneOpen'])
+    expect(c.querySelector('[data-testid="gate-fix-task"]')).toBeNull()
+    await act(async () => rows[0].querySelector('[data-testid="gate-fix-attempt-open"]').click())
+    expect(onOpenTask).toHaveBeenCalledWith('f1')
+  })
+  it('no fix attempts list without fix tasks', async () => {
+    const c = await mount({ state: { status: 'passed' }, tasks: [] })
+    expect(c.querySelector('[data-testid="gate-fix-attempts"]')).toBeNull()
+  })
 })

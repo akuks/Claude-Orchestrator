@@ -51,7 +51,9 @@ remote's lazy fetch of a missing object), so every such call goes through
   (or holds ``=``) refuses the command ("unusual filter driver name");
 * the gate code-state hash's two reads: ``diff`` with exactly
   ``--no-ext-diff --no-textconv --binary HEAD`` and ``ls-files`` with exactly
-  ``--others --exclude-standard -z`` (each any order, nothing else).
+  ``--others --exclude-standard -z`` (each any order, nothing else);
+* the typed stage outputs' commit check: ``rev-parse --verify --quiet
+  <hex>^{commit}``, exactly that order (hex is 7-40 lowercase digits).
 
 It only reads metadata. Commands that need the network or write (clone,
 fetch, push, checkout ...) are refused; they are out of scope here.
@@ -122,6 +124,7 @@ STATUS_OPTIONS = ("--porcelain=v1", "-z", "--untracked-files=all", "--no-renames
 _HEX = r"[0-9a-f]{7,40}"
 _REV_RE = re.compile(rf"^(HEAD|{_HEX}(\.\.{_HEX})?)$")
 _SHA_RE = re.compile(rf"^{_HEX}$")
+_COMMIT_REV_RE = re.compile(rf"{_HEX}\^\{{commit\}}")  # used with fullmatch
 
 
 def check_args(args) -> None:
@@ -132,6 +135,9 @@ def check_args(args) -> None:
     if cmd == "--version" and not rest:
         return
     if cmd == "rev-parse" and all(a in ("--git-dir", "--show-toplevel", "--verify", "-q", "HEAD") for a in rest):
+        return
+    if cmd == "rev-parse" and len(rest) == 3 and rest[:2] == ["--verify", "--quiet"] \
+            and _COMMIT_REV_RE.fullmatch(rest[2]):
         return
     if cmd == "remote" and rest in ([], ["-v"]):
         return

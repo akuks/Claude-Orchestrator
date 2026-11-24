@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { Alert, Button, Popconfirm, Skeleton, Tag, message } from 'antd'
+import { Alert, Button, InputNumber, Popconfirm, Skeleton, Tag, message } from 'antd'
 import { ReloadOutlined, StopOutlined } from '@ant-design/icons'
 import dayjs from 'dayjs'
 import relativeTime from 'dayjs/plugin/relativeTime'
@@ -24,6 +24,7 @@ import ApprovalCard from '../gates/ApprovalCard'
 import GateCard from '../gates/GateCard'
 import RunLog from '../gates/RunLog'
 import { RUN_STATUS_COLOR, runStatusText, stageKind } from '../gates/gates'
+import { revealHidden } from '../guard/guard'
 import './run.css'
 
 dayjs.extend(relativeTime)
@@ -62,6 +63,88 @@ export function totalsLine(t) {
 
 const money = (c) => `$${Number(c || 0).toFixed(2)}`
 const compact = (n) => (n >= 1000 ? `${(n / 1000).toFixed(n >= 10000 ? 0 : 1)}k` : String(n))
+
+// What the agents of a step handed over (their named outputs), text only.
+function HandedOver({ tasks }) {
+  const withOut = tasks.filter((t) => t.outputs && typeof t.outputs === 'object' && Object.keys(t.outputs).length)
+  if (!withOut.length) return null
+  return (
+    <div className="co-run-handed" data-testid="run-handed-over">
+      <div className="co-run-handed-title">Handed over</div>
+      {withOut.map((t) => {
+        const { agent } = splitStageTitle(t.title)
+        return (
+          <dl key={t.id} className="co-run-handed-list">
+            {withOut.length > 1 && agent && <div className="co-run-handed-agent">{revealHidden(agent).text}</div>}
+            {Object.entries(t.outputs).map(([k, v]) => (
+              <div key={k} className="co-run-handed-row" data-testid="run-handed-row">
+                <dt>{k}</dt>
+                <dd>{revealHidden(typeof v === 'string' ? v : JSON.stringify(v)).text}</dd>
+              </div>
+            ))}
+          </dl>
+        )
+      })}
+    </div>
+  )
+}
+
+// A step held because the run reached its spending limit. Managers can raise
+// the limit; the server says why when it refuses (for example a run that ended).
+function BudgetPanel({ runId, budget, canRaise, onRaised }) {
+  const [value, setValue] = useState(null)
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState(null)
+  const raise = async () => {
+    setBusy(true)
+    setError(null)
+    try {
+      await api.raiseRunBudget(runId, Number(value))
+      message.success('Limit raised. The run continues.')
+      setValue(null)
+      await onRaised?.()
+    } catch (e) {
+      setError(e?.message || 'Could not raise the limit')
+    } finally {
+      setBusy(false)
+    }
+  }
+  return (
+    <Alert
+      className="co-run-paused"
+      type="warning"
+      showIcon
+      data-testid="run-budget-panel"
+      message={`This run reached its spending limit (${money(budget?.spent)} of ${money(budget?.budget_usd)}).`}
+      description={
+        <>
+          <div>Nothing already running was stopped. New work waits until the limit is raised.</div>
+          {canRaise && (
+            <div className="co-run-budget-raise">
+              <label>
+                <span className="co-run-budget-label">New limit</span>
+                <InputNumber
+                  prefix="$"
+                  min={0.01}
+                  max={10000}
+                  precision={2}
+                  value={value}
+                  onChange={setValue}
+                  aria-label="New limit"
+                  data-testid="run-budget-input"
+                />
+              </label>
+              <Button type="primary" loading={busy} disabled={value == null} onClick={raise} data-testid="run-budget-raise">
+                Raise the limit and continue
+              </Button>
+            </div>
+          )}
+          {error && <Alert type="error" showIcon message={error} data-testid="run-budget-error" style={{ marginTop: 8 }} />}
+        </>
+      }
+    />
+  )
+}
 
 function NotFound() {
   return (
@@ -147,8 +230,14 @@ export default function RunView({ id, user, projects = [], navigate, onOpenCrede
   const curAttempt = selStage == null ? 0 : stageAttempt(sstate, selStage)
   const stageTasks = selStage == null ? [] : tasksOfStage(tasks, selStage, curAttempt)
   const earlier = selStage == null ? [] : earlierAttemptTasks(tasks, selStage, curAttempt)
+  // A check step's tasks are its fix-it tasks: they open only when asked for.
+  const selIsAgent = selStage != null && stageKind(run?.stages?.[selStage]) === 'agent'
   const selTask =
-    taskId && [...stageTasks, ...earlier].some((t) => t.id === taskId) ? taskId : defaultTaskFor(stageTasks)
+    taskId && [...stageTasks, ...earlier].some((t) => t.id === taskId)
+      ? taskId
+      : selIsAgent
+        ? defaultTaskFor(stageTasks)
+        : null
 
   const pickStage = useCallback(
     (i) => {
@@ -241,6 +330,9 @@ export default function RunView({ id, user, projects = [], navigate, onOpenCrede
   const hasAgentSteps = (run.stages || []).some((st) => stageKind(st) === 'agent')
   const headDef = run.stages?.[run.current_stage]
   const headStatus = sstate?.[String(run.current_stage)]?.status
+  const budget = data?.budget
+  const hasBudget = budget?.budget_usd != null
+  const budgetHeld = active && Object.values(sstate || {}).some((st) => st?.status === 'budget')
   const pausedText =
     stageKind(headDef) === 'approval' && headStatus === 'waiting_approval'
       ? 'Waiting for someone to approve the step below.'
@@ -314,6 +406,11 @@ export default function RunView({ id, user, projects = [], navigate, onOpenCrede
                 )}
               </>
             )}
+            {hasBudget && (
+              <span data-testid="run-budget-line">
+                Spent {money(budget.spent)} of {money(budget.budget_usd)}
+              </span>
+            )}
             {hasAgentSteps && (
               <span data-testid="run-task-count">
                 <b>{tasks.length}</b> task{tasks.length === 1 ? '' : 's'}
@@ -353,7 +450,8 @@ export default function RunView({ id, user, projects = [], navigate, onOpenCrede
           <span>Running on</span> {run.input}
         </p>
       )}
-      {run.status === 'paused' && (
+      {budgetHeld && <BudgetPanel runId={id} budget={budget} canRaise={manage && active} onRaised={load} />}
+      {run.status === 'paused' && !budgetHeld && (
         <Alert
           className="co-run-paused"
           type="warning"
@@ -405,6 +503,8 @@ export default function RunView({ id, user, projects = [], navigate, onOpenCrede
                 gateRuns={data?.gate_runs || []}
                 canAllow={canAllow}
                 onChanged={load}
+                tasks={[...earlier, ...stageTasks]}
+                onOpenTask={setTaskId}
               />
             ) : kind === 'approval' ? (
               <ApprovalCard runId={id} index={selStage} stage={stageDef} state={sstate?.[String(selStage)]} canDecide={manage} onChanged={load} />
@@ -421,6 +521,7 @@ export default function RunView({ id, user, projects = [], navigate, onOpenCrede
                 ) : null}
               </div>
             )}
+            {kind === 'agent' && <HandedOver tasks={stageTasks} />}
             {kind === 'agent' && earlier.length > 0 && (
               <details className="co-run-earlier" data-testid="run-earlier">
                 <summary>Earlier attempts ({earlier.length})</summary>

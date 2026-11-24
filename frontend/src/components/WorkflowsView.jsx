@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from 'react'
-import { Alert, Button, Drawer, Dropdown, Empty, Form, Input, Modal, Space, Tag, message } from 'antd'
+import { Alert, Button, Drawer, Dropdown, Empty, Form, Input, InputNumber, Modal, Space, Tag, message } from 'antd'
 import {
   AppstoreOutlined,
   DeleteOutlined,
@@ -20,7 +20,7 @@ import AgentItems from '../gates/AgentItems'
 import StepFlow from '../gates/StepFlow'
 import TemplatePicker, { missingAgents, templateHint } from '../gates/TemplatePicker'
 import ImportWorkflow from '../gates/ImportWorkflow'
-import { RUN_STATUS_COLOR, exportFileName, formStage, runStatusText, runStepText, stagePayload } from '../gates/gates'
+import { RUN_STATUS_COLOR, budgetPayload, exportFileName, formStage, runStatusText, runStepText, stagePayload } from '../gates/gates'
 import '../gates/workflows.css'
 
 export const NEW_MENU = [
@@ -41,7 +41,7 @@ function WorkflowEditor({ open, workflow, prefill, hint, missing = [], agents, o
     if (!open) return
     setError('')
     if (workflow) {
-      form.setFieldsValue({ ...workflow, stages: (workflow.stages || []).map(formStage) })
+      form.setFieldsValue({ ...workflow, budget_usd: workflow.budget_usd ?? null, stages: (workflow.stages || []).map(formStage) })
     } else if (prefill) {
       form.resetFields()
       form.setFieldsValue({
@@ -65,7 +65,8 @@ function WorkflowEditor({ open, workflow, prefill, hint, missing = [], agents, o
     if (!v) return
     setSaving(true)
     setError('')
-    const payload = { ...v, stages: (v.stages || []).map(stagePayload) }
+    const { budget_usd: budget, ...rest } = v
+    const payload = { ...rest, stages: (v.stages || []).map((st) => stagePayload(st, agents)), ...budgetPayload(budget, workflow?.budget_usd) }
     try {
       if (isEdit) await api.updateWorkflow(workflow.id, payload)
       else await api.createWorkflow(payload)
@@ -104,6 +105,23 @@ function WorkflowEditor({ open, workflow, prefill, hint, missing = [], agents, o
         <Form.Item name="description" label="What is it for? (optional)">
           <Input placeholder="One sentence your team sees on the card" />
         </Form.Item>
+        <Form.Item
+          name="budget_usd"
+          label="Spending limit for each run (optional)"
+          extra="When a run reaches this amount it pauses before starting more work. Nothing already running is stopped."
+        >
+          <InputNumber
+            prefix="$"
+            min={0.01}
+            max={10000}
+            step={1}
+            precision={2}
+            placeholder="No limit"
+            style={{ width: '100%' }}
+            aria-label="Spending limit for each run"
+            data-testid="workflow-budget"
+          />
+        </Form.Item>
         {hint && <Alert data-testid="template-hint" type="info" showIcon message={hint} style={{ marginBottom: 10 }} />}
         {missing.length > 0 && (
           <Alert
@@ -141,6 +159,7 @@ function WorkflowEditor({ open, workflow, prefill, hint, missing = [], agents, o
                   <StageFields
                     name={stage.name}
                     projects={projects}
+                    agents={agents}
                     agentFields={<AgentItems stageName={stage.name} stepIndex={si} agentOptions={agentOptions} />}
                   />
                 </section>

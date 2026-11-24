@@ -10,8 +10,28 @@ each active run it watches the current stage and:
     exit code decides (see `_gate_main`). A retry command, when set, runs once
     after a failed full run, then the full run once more.
   * approval stage (phase 5a): the run pauses until someone approves or rejects.
+An agent stage item may declare typed `outputs` (phase 5c): the task's prompt asks for a
+final ```json block, and once every task of the attempt has completed the values are
+parsed and checked (outside the lock) and stored on tasks.outputs, or the task fails
+with "outputs invalid: <reason>". Later prompts read them as {{stageN.name}} and
+{{prev.name}}. stage_state[i].expects maps task id -> declared names.
 Any stage may carry `before` pre-flight lines; an unmet line holds the stage
 (the run stays running) and is checked again on every tick.
+Phase 5c also adds:
+  * auto-retry once: an agent stage with `auto_retry: true` whose attempt failed (no task
+    cancelled; siblings finished) starts one new attempt by itself, through the same
+    mechanics as a manual Retry (`_new_attempt`). stage_state[i].auto_retried records it.
+  * a per-run budget cap (run.budget_usd): before an agent stage (or auto-retry) starts,
+    `_budget_ok` sums total_cost_usd over all of the run's tasks; with less than 0.01 left
+    the run pauses (stage status "budget", `_budget_hold`) and resumes on the next advance
+    once `raise_budget` lifts the cap. Each new task's cap is min(agent cap, remaining).
+  * a fix-it loop: a gate with `fix: {"agent", "rounds"}` whose check failed with a real exit
+    code (never a guard refusal, timeout, cancel or internal error) goes `fixing` (fix_round
+    k, fix_check = the failed gate row). The next advance builds the fix prompt (gates/fixloop,
+    outside the lock) and creates one task for the fixer agent in the gate's project at the
+    gate's stage_index and attempt, tagged workflow+fix (fix_task). Completed -> a new hand-out
+    runs the gate again; failed/cancelled -> the run fails. Short on budget -> status "budget"
+    with fix_pending = k, and the raise starts the fix task, not the gate.
 
 Stage shape (on the workflow / run snapshot):
     [{"name": "Develop", "items": [{"agent": "<id|name>", "prompt": "..."}]},
@@ -28,19 +48,21 @@ the stage's {{prev}} text for gate and approval stages.
 
 import asyncio
 import logging
+import re
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
-from sqlalchemy import delete, select, update
+from sqlalchemy import delete, func, select, update
 
 from .constants import Status
 from .database import SessionLocal
 from . import tiers
-from .gates import codestate, executor, preflight, runlog, totals
+from .gates import codestate, executor, fixloop, outputs as typed_outputs, preflight, runlog, totals
 from .gates.spec import stage_kind
+from .gates.test_results import TestResult
 from .models import Agent, Project, Task, WorkflowGateRun, WorkflowRun
-from .redaction import clean_text
+from .redaction import clean_text, env_values
 from .task_service import build_task
 
 RUN_PENDING = "pending"
@@ -55,35 +77,55 @@ LOGS_KEEP = 5  # gate log files kept per run stage
 SUMMARY_NAMES = 10  # failing / flaky names in a gate summary
 FLAKY_WORDS = "a flaky test is not a fixed test"
 GATE_ERROR_WORDS = "the gate could not run (internal error)"
+FIXER_GONE_WORDS = "the fixer agent is not available"
+FIX_UNFINISHED_WORDS = "the fix did not finish"
 UNCHANGED_WORDS = "failed then passed unchanged"
 GATE_LIVE = ("waiting", "running")  # gate states that want a live process
+BUDGET_MIN = 0.01  # below this remainder a capped run pauses instead of starting work
+BUDGET_MAX = 10000.0
 
 log = logging.getLogger(__name__)
 
 
-def substitute(prompt: str, run_input: str, stage_outputs: dict[int, str]) -> str:
-    """Fill placeholders in a stage prompt:
-      {{input}}   -> the run's input
-      {{prev}}    -> the previous stage's combined output
-      {{stageN}}  -> stage N's combined output (N is 1-based, matching the UI)
-    If no {{input}} placeholder exists, the input is appended (back-compat).
-    """
-    import re
+_PLACEHOLDER = re.compile(r"\{\{(input|prev|stage(\d+))(?:\.([a-z][a-z0-9_]{0,39}))?\}\}")
 
+
+def substitute(prompt: str, run_input: str, stage_outputs: dict[int, str],
+               named_outputs: dict[int, dict[str, str]] | None = None) -> str:
+    """Fill placeholders in a stage prompt:
+      {{input}}        -> the run's input
+      {{prev}}         -> the previous stage's combined output
+      {{stageN}}       -> stage N's combined output (N is 1-based, matching the UI)
+      {{prev.name}}    -> the previous stage's typed output `name`
+      {{stageN.name}}  -> stage N's typed output `name` (current attempt)
+    An unknown stage or name gives "". Single pass: the template is tokenised once, so
+    a substituted value that itself holds `{{...}}` is never expanded again.
+    If no {{input}} and no stage placeholder exists, the input is appended (back-compat).
+    """
+    named = named_outputs or {}
     p = prompt or ""
-    had_input = "{{input}}" in p
-    p = p.replace("{{input}}", run_input or "")
-    # {{prev}} = highest-numbered available stage output.
-    prev = ""
-    if stage_outputs:
-        prev = stage_outputs[max(stage_outputs)]
-    p = p.replace("{{prev}}", prev)
-    # {{stageN}} (1-based)
-    def _stage_sub(m):
-        n = int(m.group(1))
-        return stage_outputs.get(n - 1, "")
-    p = re.sub(r"\{\{stage(\d+)\}\}", _stage_sub, p)
-    if not had_input and run_input and "{{prev}}" not in (prompt or "") and not re.search(r"\{\{stage\d+\}\}", prompt or ""):
+    seen = {idx for idx in stage_outputs} | {idx for idx in named}
+    prev_idx = max(seen) if seen else None  # {{prev}} = highest-numbered available stage
+    had_input = had_stage = False
+
+    def _sub(m):
+        nonlocal had_input, had_stage
+        head, num, name = m.group(1), m.group(2), m.group(3)
+        if head == "input":
+            if name:
+                return m.group(0)  # {{input.x}} is not a placeholder
+            had_input = True
+            return run_input or ""
+        had_stage = True
+        idx = prev_idx if head == "prev" else int(num) - 1
+        if idx is None:
+            return ""
+        if name:
+            return (named.get(idx) or {}).get(name, "")
+        return stage_outputs.get(idx, "")
+
+    p = _PLACEHOLDER.sub(_sub, p)
+    if not had_input and run_input and not had_stage:
         p = f"{p}\n\n{run_input}"
     return p
 
@@ -147,9 +189,13 @@ def gate_status_text(stage: dict, state: dict, live: dict | None) -> str:
     return status
 
 
-async def _stage_outputs(s, run: WorkflowRun, up_to_stage: int) -> dict[int, str]:
+async def _stage_outputs(s, run: WorkflowRun, up_to_stage: int,
+                         named: dict[int, dict[str, str]] | None = None) -> dict[int, str]:
     """Output per stage index for stages < up_to_stage: agent stages give the combined
-    result_text of the CURRENT attempt's tasks; gate and approval stages give their summary."""
+    result_text of the CURRENT attempt's tasks; gate and approval stages give their summary.
+    When `named` is given it is filled with the current attempt's typed outputs per stage
+    ({stage index: {name: value}}); several items with the same name are joined with a
+    blank line."""
     rows = (
         await s.execute(
             select(Task).where(Task.workflow_run_id == run.id, Task.stage_index < up_to_stage)
@@ -166,6 +212,11 @@ async def _stage_outputs(s, run: WorkflowRun, up_to_stage: int) -> dict[int, str
             continue
         if (t.stage_attempt or 0) != _attempt(run, idx):
             continue
+        if named is not None and isinstance(t.outputs, dict):
+            got = named.setdefault(idx, {})
+            for k, v in t.outputs.items():
+                if isinstance(k, str) and isinstance(v, str):
+                    got[k] = f"{got[k]}\n\n{v}" if k in got else v
         if t.result_text:
             out.setdefault(idx, "")
             out[idx] += (("\n\n" if out[idx] else "") + t.result_text)
@@ -179,6 +230,64 @@ async def _stage_outputs(s, run: WorkflowRun, up_to_stage: int) -> dict[int, str
         if len(text) > cap:
             out[idx] = text[:cap] + f"\n\n…[truncated, {len(text) - cap} chars omitted]"
     return out
+
+
+async def _spent(s, run) -> float:
+    """Sum of total_cost_usd over every task of the run (every attempt); None counts as 0."""
+    v = (
+        await s.execute(
+            select(func.coalesce(func.sum(Task.total_cost_usd), 0.0)).where(Task.workflow_run_id == run.id)
+        )
+    ).scalar()
+    return float(v or 0.0)
+
+
+async def _budget_ok(s, run) -> tuple[bool, float | None, float | None]:
+    """(ok, spent, remaining) for starting new paid work on the run. A run without
+    budget_usd is always ok: (True, None, None). Otherwise ok is remaining >= 0.01."""
+    budget = run.budget_usd
+    if budget is None:
+        return True, None, None
+    spent = await _spent(s, run)
+    remaining = round(float(budget) - spent, 6)
+    return remaining >= BUDGET_MIN, spent, remaining
+
+
+def _budget_cap(own: float | None, remaining: float | None) -> float | None:
+    """A new task's max_budget_usd: min(own cap, remaining), or own when the run is uncapped."""
+    if remaining is None:
+        return own
+    return remaining if own is None else min(own, remaining)
+
+
+def _budget_hold(run, i: int, st: dict, spent: float) -> None:
+    """Pause the run at stage i because the budget is used up: stage status "budget" and the
+    fixed log line (once per spent/budget pair). The run resumes on the next advance after
+    the cap is raised."""
+    reason = f"budget reached (${spent:.2f} of ${float(run.budget_usd or 0):.2f})"
+    if st.get("status") != "budget" or st.get("reason") != reason:
+        runlog.append(run, f"Step {_stage_name(run, i)} held: {reason}")
+    _put_state(run, i, {**st, "status": "budget", "reason": reason})
+    run.status = RUN_PAUSED
+
+
+def _new_attempt(run, i: int, auto: bool = False) -> int:
+    """Begin a new attempt of stage i (manual Retry or auto-retry): bump the attempt, keep
+    log_seq and auto_retried, set the run running and log it. Earlier tasks are kept; the
+    caller then starts the stage. Returns the new attempt."""
+    old = get_state(run, i)
+    fresh = {"attempt": _attempt(run, i) + 1}
+    for k in ("log_seq", "auto_retried"):
+        if k in old:
+            fresh[k] = old[k]
+    if auto:
+        fresh["auto_retried"] = True
+    _put_state(run, i, fresh)
+    run.status = RUN_RUNNING
+    name = _stage_name(run, i)
+    runlog.append(run, f"Step {name} retried automatically" if auto
+                  else f"Step {name} retried (attempt {fresh['attempt'] + 1})")
+    return fresh["attempt"]
 
 
 async def _preflight(lines) -> str | None:
@@ -228,6 +337,15 @@ async def _start_stage(s, run: WorkflowRun, stage_index: int, worker, pre: dict 
     old = get_state(run, stage_index)
     attempt = _attempt(run, stage_index)
 
+    remaining = None
+    if kind == "agent":
+        ok, spent, remaining = await _budget_ok(s, run)
+        if not ok:
+            _budget_hold(run, stage_index, old, spent)
+            return []
+        if old.get("status") == "budget" and run.status == RUN_PAUSED:
+            run.status = RUN_RUNNING  # the cap was raised: resume
+
     lines = list(stage.get("before") or [])
     reason = None
     if lines:
@@ -239,8 +357,11 @@ async def _start_stage(s, run: WorkflowRun, stage_index: int, worker, pre: dict 
         return []
 
     st: dict = {"attempt": attempt, "started_at": _iso()}
-    if "log_seq" in old:
-        st["log_seq"] = old["log_seq"]
+    # fix_round survives a pre-flight hold within the attempt (a new attempt drops it in
+    # _new_attempt), so a held re-run after a fix cannot reset the round count.
+    for k in ("log_seq", "auto_retried", "fix_round", "fix_task"):
+        if k in old:
+            st[k] = old[k]
     name = _stage_name(run, stage_index)
 
     if kind == "gate":
@@ -256,23 +377,31 @@ async def _start_stage(s, run: WorkflowRun, stage_index: int, worker, pre: dict 
 
     st["status"] = "running"
     _put_state(run, stage_index, st)
+    from .config import settings
+
     agents = (await s.execute(select(Agent))).scalars().all()
     by_id = {a.id: a for a in agents}
     by_name = {a.name: a for a in agents}
     # Prior stages' outputs so a stage can build on what came before (e.g. a lead
     # planning stage feeding the dev stages via {{prev}}).
-    outputs = await _stage_outputs(s, run, stage_index) if stage_index > 0 else {}
+    named: dict[int, dict[str, str]] = {}
+    outputs = await _stage_outputs(s, run, stage_index, named) if stage_index > 0 else {}
     submits = []
+    expects: dict[str, list[str]] = {}  # task id -> declared output names
     for item in stage.get("items") or []:
         agent = by_id.get(item.get("agent")) or by_name.get(item.get("agent"))
         if agent is None:
-            # Unknown agent -> fail the run rather than silently skip.
-            st.update(status="failed", reason=f"unknown agent {item.get('agent')}")
+            # Unknown agent -> fail the run rather than silently skip. A new dict: an
+            # earlier item's build_task flushed `st`, so an in-place change would not persist.
+            st = {**st, "status": "failed", "reason": f"unknown agent {item.get('agent')}"}
             _put_state(run, stage_index, st)
             runlog.append(run, f"Step {name} failed: unknown agent {item.get('agent')}")
             run.status = RUN_FAILED
             return []
-        prompt = substitute(item.get("prompt", ""), run.input, outputs)
+        prompt = substitute(item.get("prompt", ""), run.input, outputs, named)
+        names = [n for n in (item.get("outputs") or []) if isinstance(n, str)]
+        if names:
+            prompt = f"{prompt}\n\n{typed_outputs.suffix(names)}"
         task = await build_task(
             s,
             prompt=prompt,
@@ -280,7 +409,10 @@ async def _start_stage(s, run: WorkflowRun, stage_index: int, worker, pre: dict 
             project_id=agent.project_id,
             model=await tiers.agent_model(s, agent),
             max_turns=agent.max_turns,
-            max_budget_usd=agent.max_budget_usd,
+            max_budget_usd=_budget_cap(
+                agent.max_budget_usd if agent.max_budget_usd is not None else settings.default_task_budget_usd,
+                remaining,
+            ),
             priority=agent.priority,
             tags=(agent.tags or []) + ["workflow"],
             agent_id=agent.id,
@@ -293,7 +425,13 @@ async def _start_stage(s, run: WorkflowRun, stage_index: int, worker, pre: dict 
             created_by=run.created_by,
         )
         task.stage_attempt = attempt
+        if names:
+            expects[task.id] = names
         submits.append(task)
+    if expects:
+        # A new dict: build_task flushed the earlier state, so mutating `st` in place
+        # would look unchanged to SQLAlchemy.
+        _put_state(run, stage_index, {**st, "expects": expects})
     return submits
 
 
@@ -330,12 +468,68 @@ def _counts(res) -> str:
 
 
 
+def _fix_rounds(stage: dict) -> int:
+    fix = stage.get("fix") if isinstance(stage, dict) else None
+    if not isinstance(fix, dict):
+        return 0
+    try:
+        return int(fix.get("rounds") or 1)
+    except (TypeError, ValueError):
+        return 0
+
+
+def _fix_due(stage: dict, st: dict, out) -> bool:
+    """A fix round starts only for a check that failed with a real exit code (not a guard
+    refusal, a timeout, a cancel or an internal error) when the gate has `fix` and rounds
+    are left."""
+    return (out.outcome == "failed" and out.exit_code is not None
+            and int(st.get("fix_round") or 0) < _fix_rounds(stage))
+
+
+async def _fix_agent(s, ref, project_id) -> Agent | None:
+    """The gate's fixer agent. `ref` is the agent id (stored since the fix round 1 of 5c
+    task 4) or, for an older saved stage, a name looked up ONLY inside the gate's project,
+    so a same-named agent elsewhere cannot break the gate. The agent must still be in the
+    gate's project. None when missing, ambiguous within the project, or moved."""
+    if not isinstance(ref, str) or not ref or not project_id:
+        return None
+    agent = await s.get(Agent, ref)
+    if agent is not None:
+        return agent if agent.project_id == project_id else None
+    inside = (
+        await s.execute(select(Agent).where(Agent.name == ref, Agent.project_id == project_id))
+    ).scalars().all()
+    return inside[0] if len(inside) == 1 else None
+
+
+@dataclass
+class _Fix:
+    """A gate stage in fix round `round` whose fix task is not created yet. The prompt (log
+    tail read) is built outside the run lock; the task is created under it after re-checking
+    that the run, stage, hand-out and round are unchanged."""
+
+    index: int
+    handout: str | None
+    round: int
+
+
 @dataclass
 class _Post:
     """Work to do after a locked section has committed and released the lock."""
 
     results: list = field(default_factory=list)  # (task id, priority, created_at, status)
     spawns: list = field(default_factory=list)  # (stage index, hand-out)
+
+
+@dataclass
+class _Verify:
+    """A stage whose tasks all completed but whose typed outputs are not checked yet. The
+    checks (parse, file system, git) run outside the run lock; the result is written
+    under it after re-checking the stage and attempt."""
+
+    index: int
+    attempt: int
+    items: list = field(default_factory=list)  # (task id, names, result_text, project dir)
 
 
 def _next_cmd(stage: dict, st: dict):
@@ -516,13 +710,7 @@ class WorkflowRunner:
                 i = run.current_stage
                 if not (0 <= i < len(run.stages or [])):
                     return None
-                old = get_state(run, i)
-                fresh = {"attempt": _attempt(run, i) + 1}
-                if "log_seq" in old:
-                    fresh["log_seq"] = old["log_seq"]
-                _put_state(run, i, fresh)
-                run.status = RUN_RUNNING
-                runlog.append(run, f"Step {_stage_name(run, i)} retried (attempt {fresh['attempt'] + 1})")
+                _new_attempt(run, i)
                 return await self._start_and_commit(s, run, i, pre)
 
         post = await self._locked(run_id, fn)
@@ -569,6 +757,36 @@ class WorkflowRunner:
 
         await self._locked(run_id, fn)
 
+    async def raise_budget(self, run_id: str, budget_usd: float, user) -> None:
+        """Set the run's budget cap to `budget_usd` (must be more than spent, 0.01..10000,
+        run active). Under the run lock, so it cannot interleave a tick or a cancel; the
+        run then advances (a run held on "budget" resumes)."""
+        try:
+            new = float(budget_usd)
+        except (TypeError, ValueError):
+            raise ValueError("the budget must be a number") from None
+        if not BUDGET_MIN <= new <= BUDGET_MAX:
+            raise ValueError("the budget must be between 0.01 and 10000")
+
+        async def fn(pre):
+            async with SessionLocal() as s:
+                run = await s.get(WorkflowRun, run_id)
+                if run is None:
+                    raise ValueError("run not found")
+                if run.status not in ACTIVE_RUN:
+                    raise ValueError("the run is not active")
+                spent = await _spent(s, run)
+                if not new > spent:
+                    raise ValueError(f"the budget must be more than the ${spent:.2f} already spent")
+                if new - spent < BUDGET_MIN:
+                    raise ValueError("the new limit must leave at least $0.01 to spend")
+                run.budget_usd = new
+                runlog.append(run, f"Budget raised to ${new:.2f} by {_user_name(user)}")
+                await s.commit()
+
+        await self._locked(run_id, fn)
+        await self._advance(run_id)
+
     async def allow_gate(self, run_id: str, i: int, user) -> None:
         """Allow this hand-out's guard-flagged commands to run ("Allow and run")."""
 
@@ -611,8 +829,69 @@ class WorkflowRunner:
                 self._ended.pop(key, None)
 
     async def _advance(self, run_id: str, first: bool = False):
-        post = await self._locked(run_id, lambda pre: self._advance_locked(run_id, pre))
+        post = None
+        for _ in range(4):
+            post = await self._locked(run_id, lambda pre: self._advance_locked(run_id, pre))
+            if isinstance(post, _Fix):
+                post = await self._start_fix(run_id, post)
+                break
+            if not isinstance(post, _Verify):
+                break
+            await self._check_outputs(run_id, post)
+            post = None
         await self._run_post(run_id, post)
+
+    async def _check_outputs(self, run_id: str, v: _Verify) -> None:
+        """Parse and verify the typed outputs of a finished agent stage (outside the run
+        lock), then store them, or fail the task with "outputs invalid: <reason>"
+        (under the lock, only when the stage and attempt are unchanged)."""
+        results = []
+        for tid, names, text, project_dir in v.items:
+            try:
+                values = typed_outputs.parse(text, names)
+                await typed_outputs.verify(values, project_dir)
+            except ValueError as e:
+                results.append((tid, None, str(e) or "invalid"))
+            except Exception:  # noqa: BLE001 - a check that cannot answer fails the outputs
+                log.exception("workflow runner: checking outputs of task %s failed", tid)
+                results.append((tid, None, "the outputs could not be checked"))
+            else:
+                results.append((tid, values, None))
+
+        async def fn(pre):
+            flipped: list[tuple[str, str]] = []
+            async with SessionLocal() as s:
+                run = await s.get(WorkflowRun, run_id)
+                if (run is None or run.status not in ACTIVE_RUN or run.current_stage != v.index
+                        or _attempt(run, v.index) != v.attempt):
+                    return flipped
+                for tid, values, reason in results:
+                    t = await s.get(Task, tid)
+                    if (t is None or t.status != Status.COMPLETED or t.outputs is not None
+                            or t.stage_index != v.index or (t.stage_attempt or 0) != v.attempt):
+                        continue
+                    if reason is None:
+                        t.outputs = values
+                    else:
+                        t.status = Status.FAILED
+                        t.error = f"outputs invalid: {reason}"
+                        t.outputs = None
+                        flipped.append((tid, t.error))
+                await s.commit()
+                return flipped
+
+        flipped = await self._locked(run_id, fn) or []
+        # After the lock: tell live views the task ended failed, as the worker does at
+        # its own terminal points (an `error`, then `completed` with the status).
+        emit = getattr(self.worker, "emit_offline", None)
+        if emit is None:
+            return
+        for tid, error in flipped:
+            for etype, payload in (("error", {"message": error}), ("completed", {"status": Status.FAILED})):
+                try:
+                    await emit(tid, etype, payload)
+                except Exception:  # noqa: BLE001 - an event failure never blocks advancing
+                    log.exception("workflow runner: emitting %s for task %s failed", etype, tid)
 
     async def _advance_locked(self, run_id: str, pre: dict) -> "_Post | None":
         async with SessionLocal() as s:
@@ -648,7 +927,14 @@ class WorkflowRunner:
             st = get_state(run, i)
             status = st.get("status")
 
-            if status == "held":
+            if kind == "gate" and status == "budget" and st.get("fix_pending"):
+                # A fix round held on the budget: once it is raised, start the FIX TASK
+                # (not the gate again). While still short, stay held without re-reading logs.
+                ok, _, _ = await _budget_ok(s, run)
+                if not ok:
+                    return None
+                return _Fix(i, st.get("handout"), int(st.get("fix_pending") or 0))
+            if status in ("held", "budget"):
                 return await self._start_and_commit(s, run, i, pre)
 
             if kind == "gate":
@@ -668,6 +954,8 @@ class WorkflowRunner:
                         runlog.append(run, f"Step {_stage_name(run, i)} (gate) resumed after a server restart")
                         await s.commit()
                     return _Post(spawns=[(i, st.get("handout"))])
+                elif status == "fixing":
+                    return await self._fix_watch(s, run, i, st)
                 elif status is None:
                     return await self._start_and_commit(s, run, i, pre)
                 return None
@@ -700,7 +988,13 @@ class WorkflowRunner:
             if not tasks:
                 return None
             statuses = [t.status for t in tasks]
-            if any(x in (Status.FAILED, Status.CANCELLED) for x in statuses):
+            bad = any(x in (Status.FAILED, Status.CANCELLED) for x in statuses)
+            if bad and self._auto_retry_due(run, i, st, statuses):
+                if not any(x in Status.ACTIVE for x in statuses):
+                    _new_attempt(run, i, auto=True)
+                    return await self._start_and_commit(s, run, i, pre)
+                bad = False  # wait for the siblings to end, then retry
+            if bad:
                 run.status = RUN_FAILED
                 if status != "failed":
                     n = sum(1 for x in statuses if x in (Status.FAILED, Status.CANCELLED))
@@ -714,12 +1008,178 @@ class WorkflowRunner:
                 await s.commit()
                 return None
             if all(x == Status.COMPLETED for x in statuses):
+                expects = st.get("expects") or {}
+                todo = [t for t in tasks if t.id in expects and t.outputs is None]
+                if todo:
+                    pids = {t.project_id for t in todo if t.project_id}
+                    dirs = {p.id: p.directory for p in (
+                        await s.execute(select(Project).where(Project.id.in_(pids)))
+                    ).scalars().all()} if pids else {}
+                    return _Verify(i, _attempt(run, i), [
+                        (t.id, list(expects[t.id]), (t.result_text or "")[-typed_outputs.SCAN_BYTES:],
+                         dirs.get(t.project_id)) for t in todo
+                    ])
                 return await self._next_stage(s, run, i, pre, finish_agent=True)
             # Otherwise still running — make sure the run reflects that.
             if run.status == RUN_PAUSED:
                 run.status = RUN_RUNNING
                 await s.commit()
             return None
+
+    async def _fix_watch(self, s, run, i: int, st: dict) -> "_Fix | _Post | None":
+        """A gate stage in `fixing`: create the round's fix task (via _Fix) or follow it.
+        Completed -> a new hand-out and the gate runs again; failed/cancelled (or gone) ->
+        the run fails; awaiting approval -> the run pauses; otherwise wait."""
+        tid = st.get("fix_task")
+        if not tid:
+            return _Fix(i, st.get("handout"), int(st.get("fix_round") or 0))
+        t = await s.get(Task, tid)
+        tstatus = t.status if t is not None else Status.FAILED
+        if tstatus == Status.COMPLETED:
+            handout = uuid.uuid4().hex
+            st.update(status="waiting", handout=handout, round="full", passed_cmds=[], allowed=False,
+                      hits=[], reason=None)
+            _put_state(run, i, st)
+            run.status = RUN_RUNNING
+            await s.commit()
+            return _Post(spawns=[(i, handout)])
+        if tstatus in (Status.FAILED, Status.CANCELLED):
+            name = _stage_name(run, i)
+            st.update(status="failed", reason=FIX_UNFINISHED_WORDS,
+                      summary=f"Gate {name} failed: {FIX_UNFINISHED_WORDS}.")
+            _put_state(run, i, st)
+            run.status = RUN_FAILED
+            runlog.append(run, f"Step {name} (gate) failed: {FIX_UNFINISHED_WORDS}")
+            await s.commit()
+            return None
+        want = RUN_PAUSED if tstatus == Status.AWAITING_APPROVAL else RUN_RUNNING
+        if run.status != want:
+            run.status = want
+            await s.commit()
+        return None
+
+    async def _start_fix(self, run_id: str, fx: "_Fix") -> "_Post | None":
+        """Create (and hand back for submit) the fix task of round `fx.round`. The prompt is
+        built here, outside the run lock (the log tail is read in a thread); the task is
+        created under the lock only after re-checking that the run is still active, on the
+        same stage, hand-out and round, with no fix task yet. A cancel that got the lock
+        first therefore wins: no task is created on a failed run."""
+
+        def same(run, st) -> bool:
+            if run is None or run.status not in ACTIVE_RUN or run.current_stage != fx.index:
+                return False
+            if not (0 <= fx.index < len(run.stages or [])) or stage_kind(run.stages[fx.index]) != "gate":
+                return False
+            if st.get("handout") != fx.handout or int(st.get("fix_round") or 0) != fx.round or fx.round < 1:
+                return False
+            if st.get("status") == "fixing":
+                return not st.get("fix_task")
+            return st.get("status") == "budget" and int(st.get("fix_pending") or 0) == fx.round
+
+        # Phase 1: read, no lock.
+        async with SessionLocal() as s:
+            run = await s.get(WorkflowRun, run_id)
+            st = get_state(run, fx.index) if run is not None else {}
+            if not same(run, st):
+                return None
+            stage = run.stages[fx.index]
+            g = await s.get(WorkflowGateRun, st["fix_check"]) if st.get("fix_check") else None
+            project = await s.get(Project, stage.get("project")) if stage.get("project") else None
+        secrets = env_values([project.env]) if project is not None else []
+        path = None
+        if g is not None and g.log_name:
+            try:
+                path = executor._run_dir(run_id) / g.log_name
+            except ValueError:
+                path = None
+        tail = await asyncio.to_thread(fixloop.read_tail, path) if path is not None else ""
+        if g is not None:
+            res = TestResult(g.runner, g.passed, g.failed, g.skipped, None, tuple(g.failing or ()))
+            text = fixloop.prompt(g.command, g.exit_code, res, tail, secrets)
+        else:
+            # The gate row was pruned or lost: the stage's commands are all that is known.
+            text = fixloop.prompt(", ".join(stage.get("run") or []), None, None, tail, secrets)
+
+        # Phase 2: create under the lock, on a fresh read.
+        async def fn(pre):
+            async with SessionLocal() as s:
+                run = await s.get(WorkflowRun, run_id)
+                st = get_state(run, fx.index) if run is not None else {}
+                if not same(run, st):
+                    return None
+                i = fx.index
+                stage = run.stages[i]
+                name = _stage_name(run, i)
+                agent = await _fix_agent(s, (stage.get("fix") or {}).get("agent"), stage.get("project"))
+                if agent is None:
+                    st.pop("fix_pending", None)
+                    st.update(status="failed", reason=FIXER_GONE_WORDS,
+                              summary=f"Gate {name} failed: {FIXER_GONE_WORDS}.")
+                    _put_state(run, i, st)
+                    run.status = RUN_FAILED
+                    runlog.append(run, f"Step {name} (gate) failed: {FIXER_GONE_WORDS}")
+                    await s.commit()
+                    return None
+                ok, spent, remaining = await _budget_ok(s, run)
+                if not ok:
+                    # Remember what failed: the hold's own reason replaces it on screen.
+                    fr = st.get("fail_reason") if st.get("status") == "budget" else st.get("reason")
+                    _budget_hold(run, i, {**st, "fix_pending": fx.round, "fail_reason": fr}, spent)
+                    await s.commit()
+                    return None
+                from .config import settings
+
+                task = await build_task(
+                    s,
+                    prompt=text,
+                    title=f"[{name}] {agent.name}: fix round {fx.round}",
+                    project_id=stage.get("project"),
+                    model=await tiers.agent_model(s, agent),
+                    max_turns=agent.max_turns,
+                    max_budget_usd=_budget_cap(
+                        agent.max_budget_usd if agent.max_budget_usd is not None
+                        else settings.default_task_budget_usd,
+                        remaining,
+                    ),
+                    priority=agent.priority,
+                    tags=[x for x in (agent.tags or []) if x not in ("workflow", "fix")] + ["workflow", "fix"],
+                    agent_id=agent.id,
+                    system_prompt=agent.system_prompt or None,
+                    requires_approval=agent.requires_approval,
+                    allow_remote=agent.allow_remote,
+                    read_only=agent.read_only,
+                    workflow_run_id=run.id,
+                    stage_index=i,
+                    created_by=run.created_by,
+                    # The fixed head's own "do not merge or push" must not gate the task;
+                    # the check's output (data) is still classified.
+                    risk_text=text[len(fixloop.HEAD):] if text.startswith(fixloop.HEAD) else text,
+                )
+                task.stage_attempt = _attempt(run, i)
+                st.pop("fix_pending", None)
+                # A new dict: build_task flushed, so an in-place change would look unchanged.
+                # Drop "budget reached" but keep the stage's failure reason ("What failed").
+                reason = st.get("reason")
+                if st.get("status") == "budget":
+                    reason = st.get("fail_reason")
+                st.pop("fail_reason", None)
+                _put_state(run, i, {**st, "status": "fixing", "fix_task": task.id, "reason": reason})
+                if run.status == RUN_PAUSED:
+                    run.status = RUN_RUNNING  # the cap was raised: resume
+                await s.commit()
+                await s.refresh(task)
+                return _Post(results=[(task.id, task.priority, task.created_at, task.status)])
+
+        return await self._locked(run_id, fn)
+
+    @staticmethod
+    def _auto_retry_due(run, i: int, st: dict, statuses: list) -> bool:
+        """An agent stage with auto_retry that has not used it yet, whose current attempt has
+        a failed task (an "outputs invalid" one included) and no cancelled one."""
+        stage = run.stages[i] if 0 <= i < len(run.stages or []) else None
+        return (isinstance(stage, dict) and stage.get("auto_retry") is True
+                and not st.get("auto_retried") and st.get("status") != "failed"
+                and Status.FAILED in statuses and Status.CANCELLED not in statuses)
 
     async def _start_and_commit(self, s, run, i: int, pre: dict) -> _Post:
         """Start stage i in this session and commit (a held stage is checked again).
@@ -1082,14 +1542,15 @@ class WorkflowRunner:
                             if fname not in flaky:
                                 flaky.append(fname)
 
-            s.add(WorkflowGateRun(
+            row = WorkflowGateRun(
                 run_id=run_id, stage_index=i, attempt=step["attempt"], handout=handout, command=cmd,
                 kind=step["kind"], started_at=out.started_at, finished_at=out.finished_at,
                 duration_ms=out.duration_ms, exit_code=out.exit_code, outcome=out.outcome,
                 runner=res.runner, passed=res.passed, failed=res.failed, skipped=res.skipped,
                 failing=list(res.failing or ()), flaky=flaky, code_state=step.get("code_state"),
                 log_name=step["log_name"],
-            ))
+            )
+            s.add(row)
             await s.flush()
             await self._prune_rows(s, run_id, i)
             if out.log_error:
@@ -1116,7 +1577,8 @@ class WorkflowRunner:
 
             if result == "passed":
                 text = f"Gate {name} passed: {', '.join(stage.get('run') or [])}{_counts(res)}."
-                line = f"Step {name} (gate) passed"
+                fixes = int(st.get("fix_round") or 0)
+                line = f"Step {name} (gate) passed" + (f" after {fixes} fix round(s)" if fixes else "")
                 if flaky is not None:
                     st["flaky"] = flaky
                     text += f" {_flaky_text(flaky)}."
@@ -1125,6 +1587,18 @@ class WorkflowRunner:
                 _put_state(run, i, st)
                 t = await totals.compute(s, run)
                 runlog.append(run, f"{line}. {totals.line(t)}")
+            elif result == "failed" and _fix_due(stage, st, out):
+                # A real exit code and rounds left: hand the check to the fixer agent. The
+                # fix task is created by the next advance (outside this lock), which then
+                # watches it; `fix_check` points at the gate row the prompt is built from.
+                detail = _gate_detail(cmd, out, res, step.get("timeout_min"))
+                k, n = int(st.get("fix_round") or 0) + 1, _fix_rounds(stage)
+                st.pop("fix_task", None)
+                st.pop("fix_pending", None)
+                st.update(status="fixing", fix_round=k, fix_check=row.id, reason=detail,
+                          summary=f"Gate {name} failed: {detail}.")
+                _put_state(run, i, st)
+                runlog.append(run, f"Step {name} (gate) failed, fixing (round {k} of {n})")
             elif result == "failed":
                 detail = _gate_detail(cmd, out, res, step.get("timeout_min"))
                 st.update(status="failed", reason=detail, summary=f"Gate {name} failed: {detail}.")

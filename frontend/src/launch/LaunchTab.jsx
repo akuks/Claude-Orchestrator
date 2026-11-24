@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from 'react'
-import { Alert, Button, Empty, Input, Popconfirm, Space, Tag, Typography } from 'antd'
+import { Alert, Button, Empty, Input, Popconfirm, Space, Switch, Tag, Typography } from 'antd'
 import { api } from '../api'
 import { revealHidden } from '../guard/guard'
 import { ACTION_STATUS, STALE_MSG, bySection, rowActions } from './launch'
@@ -135,6 +135,17 @@ export default function LaunchTab({ project, canEdit }) {
       true,
     )
 
+  // Saved at once with the stored date and paths (not the unsaved drafts).
+  const setRaiseRisk = (on) =>
+    guard(() =>
+      api.saveLaunch(pid, {
+        launch_date: data?.launch?.launch_date ?? null,
+        critical_paths: data?.launch?.critical_paths || [],
+        version: data?.launch?.version ?? null,
+        raise_risk: on,
+      }),
+    )
+
   if (!data) return error ? <Alert type="error" showIcon message={error} data-testid="launch-error" /> : null
   const items = data.items || []
   const linked = data.all_linked_done || {}
@@ -159,6 +170,17 @@ export default function LaunchTab({ project, canEdit }) {
             <div>{(data.launch?.critical_paths || []).map((p) => <code key={p} style={{ marginRight: 6 }}>{revealHidden(p).text}</code>)}</div>
           )}
         </div>
+        {canEdit && (
+          <div style={{ marginTop: 12 }}>
+            <label style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+              <Switch size="small" checked={!!data.launch?.raise_risk} onChange={setRaiseRisk} data-testid="launch-raise-risk" />
+              <Typography.Text strong>Treat tasks that mention a critical file as high risk</Typography.Text>
+            </label>
+            <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+              Such tasks are marked critical, which can require approval.
+            </Typography.Text>
+          </div>
+        )}
       </div>
       <Section title="Before launch" section="before" items={items} canEdit={canEdit} linked={linked} act={act} add={add} />
       <Section title="After launch" section="after" items={items} canEdit={canEdit} linked={linked} act={act} add={add} />

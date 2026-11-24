@@ -22,6 +22,8 @@ vi.mock('../api', () => ({
     streamUrl: (id, seq) => `ws://test/tasks/${id}/stream?after=${seq}`,
     reportUrl: () => '#',
     artifactUrl: () => '#',
+    getLaunch: vi.fn(async () => ({ items: [] })),
+    setTaskLaunchItem: vi.fn(),
   },
   notifyUnauthorized: vi.fn(),
   STATUS_COLORS: {},
@@ -428,5 +430,108 @@ describe('TaskDetail: brief', () => {
     const text = view.container.textContent
     expect(text).toContain('Outside the task brief')
     expect(text).toContain('Brief: 2 CANNOT folders also guarded for shell commands')
+  })
+})
+
+describe('TaskDetail: launch item and risk', () => {
+  let view
+  const RealWS = globalThis.WebSocket
+  beforeAll(() => {
+    window.matchMedia ||= () => ({ matches: false, addListener() {}, removeListener() {}, addEventListener() {}, removeEventListener() {} })
+  })
+  afterEach(async () => {
+    await view?.unmount()
+    view = null
+    globalThis.WebSocket = RealWS
+    FakeSocket.all = []
+    api.getTask.mockReset()
+    api.getTask.mockImplementation(async (id) => ({ id, title: `Task ${id}`, status: 'running', prompt: 'p' }))
+  })
+  const send = (ev) => act(async () => FakeSocket.all.at(-1).onmessage({ data: JSON.stringify(ev) }))
+  const items = [
+    { id: 'i1', number: 1, title: 'Billing page', status: 'open' },
+    { id: 'i2', number: 2, title: 'Emails', status: 'started' },
+    { id: 'i3', number: 3, title: 'Old thing', status: 'done' },
+  ]
+  const task = (over = {}) => ({ id: 'a', title: 'T', status: 'running', prompt: 'p', project_id: 'p1', project: 'Proj', can_manage: true, launch_item_id: null, ...over })
+  const openSelect = async () => {
+    await act(async () => {
+      view.container.querySelector('[data-testid="task-launch-item"] .ant-select-selector').dispatchEvent(new MouseEvent('mousedown', { bubbles: true }))
+    })
+    await flush()
+  }
+  const pick = async (label) => {
+    const opt = [...document.body.querySelectorAll('.ant-select-item-option')].find((o) => o.textContent === label)
+    await act(async () => opt.dispatchEvent(new MouseEvent('click', { bubbles: true })))
+    await flush()
+  }
+
+  it('lists open and started items plus None, and PATCHes the link', async () => {
+    globalThis.WebSocket = FakeSocket
+    api.getTask.mockImplementation(async () => task())
+    api.getLaunch.mockResolvedValue({ items })
+    api.setTaskLaunchItem.mockResolvedValue(task({ launch_item_id: 'i2' }))
+    view = await render(<TaskDetail inline taskId="a" />)
+    await flush()
+    expect(api.getLaunch).toHaveBeenCalledWith('p1')
+    await openSelect()
+    const labels = [...document.body.querySelectorAll('.ant-select-item-option')].map((o) => o.textContent)
+    expect(labels).toEqual(['None', '#1 Billing page', '#2 Emails'])
+    await pick('#2 Emails')
+    expect(api.setTaskLaunchItem).toHaveBeenCalledWith('a', 'i2')
+    expect(view.container.querySelector('[data-testid="task-launch-item"]').textContent).toContain('#2 Emails')
+  })
+
+  it('None unlinks; a refusal shows the server reason', async () => {
+    globalThis.WebSocket = FakeSocket
+    api.getTask.mockImplementation(async () => task({ launch_item_id: 'i1' }))
+    api.getLaunch.mockResolvedValue({ items })
+    api.setTaskLaunchItem.mockRejectedValue(Object.assign(new Error("launch_item_id must be an open or started item of the task's project"), { status: 422 }))
+    view = await render(<TaskDetail inline taskId="a" />)
+    await flush()
+    await openSelect()
+    await pick('None')
+    expect(api.setTaskLaunchItem).toHaveBeenCalledWith('a', null)
+    expect(view.container.querySelector('[data-testid="task-launch-item-error"]').textContent).toContain('must be an open or started item')
+  })
+
+  it("the task's creator gets the select even without can_manage", async () => {
+    globalThis.WebSocket = FakeSocket
+    api.getTask.mockImplementation(async () => task({ can_manage: false, created_by: 'u1' }))
+    api.getLaunch.mockResolvedValue({ items })
+    api.setTaskLaunchItem.mockResolvedValue(task({ can_manage: false, created_by: 'u1', launch_item_id: 'i1' }))
+    view = await render(<TaskDetail inline taskId="a" currentUser={{ id: 'u1' }} />)
+    await flush()
+    await openSelect()
+    await pick('#1 Billing page')
+    expect(api.setTaskLaunchItem).toHaveBeenCalledWith('a', 'i1')
+    await view.unmount()
+    view = await render(<TaskDetail inline taskId="a" currentUser={{ id: 'u2' }} />)
+    await flush()
+    expect(view.container.querySelector('[data-testid="task-launch-item"]')).toBeNull()
+  })
+
+  it('hidden from people who cannot change it, and for tasks without a project', async () => {
+    globalThis.WebSocket = FakeSocket
+    api.getTask.mockImplementationOnce(async () => task({ can_manage: false }))
+    view = await render(<TaskDetail inline taskId="a" />)
+    await flush()
+    expect(view.container.querySelector('[data-testid="task-launch-item"]')).toBeNull()
+    await view.unmount()
+    api.getTask.mockImplementationOnce(async () => task({ project_id: null }))
+    view = await render(<TaskDetail inline taskId="a" />)
+    await flush()
+    expect(view.container.querySelector('[data-testid="task-launch-item"]')).toBeNull()
+  })
+
+  it('renders the risk event as a plain line', async () => {
+    expect(renderLine({ type: 'risk', payload: { risk: 'critical', risk_reason: 'critical path src/billing' } }).text).toBe(
+      'Marked critical: critical path src/billing',
+    )
+    globalThis.WebSocket = FakeSocket
+    view = await render(<TaskDetail inline taskId="a" />)
+    await flush()
+    await send({ seq: 1, type: 'risk', payload: { risk: 'critical', risk_reason: 'critical path src/billing' } })
+    expect(view.container.querySelector('.co-terminal').textContent).toContain('Marked critical: critical path src/billing')
   })
 })

@@ -261,6 +261,7 @@ def _bodies(world) -> dict:
         ("POST", "/tasks/{task_id}/questions"): {"question": "x?"},
         ("POST", "/questions/{question_id}/answer"): {"answer": "x"},
         ("POST", "/tasks/{task_id}/followup"): {"prompt": "x"},
+        ("PATCH", "/tasks/{task_id}/launch-item"): {"launch_item_id": None},
         ("POST", "/projects"): {"name": f"cov-new-{_uid()}"},
         ("POST", "/projects/import"): {"directories": ["/tmp"]},
         ("PATCH", "/projects/{project_id}"): {"name": f"cov-hijack-{_uid()}"},
@@ -281,6 +282,7 @@ def _bodies(world) -> dict:
         ("POST", "/tasks/{task_id}/decision-proposals"): {"title": "hijack"},
         ("POST", "/approvals/{task_id}/reject"): {},
         ("POST", "/workflows/runs/{run_id}/stages/{i}/reject"): {"reason": "x"},
+        ("POST", "/workflows/runs/{run_id}/budget"): {"budget_usd": 5.0},
         # co-guard: filing/reporting name P's task in the body (agent tokens only).
         ("POST", "/guard/approvals"): {"task_id": i["task_id"], "rule_ids": ["git-reset-hard"], "tool": "Bash"},
         ("POST", "/guard/report"): {"task_id": i["task_id"], "event": "PreToolUse", "decision": "deny"},

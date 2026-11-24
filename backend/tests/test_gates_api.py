@@ -212,7 +212,8 @@ def test_gate_output_hidden_for_other_project(client, monkeypatch):
     state = {
         "0": {"status": "passed", "summary": "Gate A ok", "reason": None},
         "1": {"status": "failed", "summary": "Gate B failed: y, 2 failed: secret_test", "reason": "y, exit 1: secret_test",
-              "hits": ["touches /etc"], "flaky": ["secret_test"], "handout": "h"},
+              "hits": ["touches /etc"], "flaky": ["secret_test"], "handout": "h",
+              "fix_task": "ft-1", "fix_check": "fc-1", "fix_pending": 1, "fix_round": 1},
     }
     rid = _run(pa, stages=stages, state=state, current=1)
     async def addpid():
@@ -232,7 +233,7 @@ def test_gate_output_hidden_for_other_project(client, monkeypatch):
     assert j["live"] is None
     s1 = j["stage_state"]["1"]
     assert s1["hidden"] is True and s1["status"] == "failed" and "status_text" in s1
-    for k in ("summary", "hits", "reason", "others", "flaky"):
+    for k in ("summary", "hits", "reason", "others", "flaky", "fix_task", "fix_check", "fix_pending", "fix_round"):
         assert k not in s1
     assert "secret_test" not in str(j)
     assert j["stage_state"]["0"]["summary"] == "Gate A ok" and "hidden" not in j["stage_state"]["0"]
@@ -318,6 +319,27 @@ def test_log_tail_redacts_and_caps(client, monkeypatch):
     # a gate row of another run is a 404
     other = _run(pid)
     assert client.get(f"/workflows/runs/{other}/gate-runs/{gid}/log").status_code == 404
+
+
+def test_log_tail_masks_secret_split_by_zero_width(client):
+    pid = _project(client)
+    secret = "zw-secret-value-42"
+
+    async def setenv():
+        async with SessionLocal() as s:
+            pr = await s.get(Project, pid)
+            pr.env = {"API": secret}
+            await s.commit()
+
+    asyncio.run(setenv())
+    rid = _run(pid)
+    d = executor._run_dir(rid)
+    d.mkdir(parents=True, exist_ok=True)
+    (d / "stage0-1.log").write_text("token zw-secr\u200bet-value-42 end\n")
+    gid = _gate_row(rid, log_name="stage0-1.log")
+    out = client.get(f"/workflows/runs/{rid}/gate-runs/{gid}/log").json()
+    txt = "\n".join(out["lines"])
+    assert "zw-secr" not in txt and "value-42" not in txt and "[redacted]" in txt
 
 
 def test_log_invisible_run_404(client):
