@@ -57,7 +57,7 @@ import TokensPanel from '../usage/TokensPanel'
 import { ThreadQuestions } from '../questions/QuestionsSection'
 import { usageLine, useUsage } from '../usage/usage'
 import AskCard from '../asks/AskCard'
-import { decisionNoteLine, decisionReviewLine } from '../decisions/decisions'
+import { decisionNoteLine, decisionReviewLine, displayId } from '../decisions/decisions'
 import { criticalPathsLine } from '../launch/launch'
 
 // co-guard lines in the run log: one icon per kind (guard.js guardLine).
@@ -119,6 +119,7 @@ const EVENT_STYLE = {
   error: { color: 'var(--co-terminal-error)', prefix: '✖' },
   completed: { color: 'var(--co-terminal-success)', prefix: '✔' },
   decision_note: { color: 'var(--co-terminal-muted)', prefix: '·' },
+  code_map: { color: 'var(--co-terminal-muted)', prefix: '·' },
   decision_review: { color: 'var(--co-terminal-muted)', prefix: '·' },
   test_result: { color: 'var(--co-terminal-muted)', prefix: '·' },
   critical_paths: { color: 'var(--co-terminal-muted)', prefix: '·' },
@@ -135,6 +136,13 @@ export function testResultLine(p) {
   const names = Array.isArray(p.failing) ? p.failing.filter((n) => typeof n === 'string' && n) : []
   if (names.length) text += ` (${names.join(', ')})`
   return text
+}
+
+// "Code map answer: current · showed D-012": a `code_map` event {fresh: true|false|null, decisions: [n]}.
+export function codeMapLine(p) {
+  const fresh = p.fresh === true ? 'current' : p.fresh === false ? 'may be out of date' : 'freshness unknown'
+  const ids = (Array.isArray(p.decisions) ? p.decisions : []).filter((n) => Number.isInteger(n) && n > 0)
+  return `Code map answer: ${fresh}${ids.length ? ` · showed ${ids.map(displayId).join(', ')}` : ''}`
 }
 
 export function renderLine(ev) {
@@ -170,6 +178,9 @@ export function renderLine(ev) {
       break
     case 'decision_note':
       text = decisionNoteLine(p)
+      break
+    case 'code_map':
+      text = codeMapLine(p)
       break
     case 'decision_review':
       text = decisionReviewLine(p)
