@@ -1849,6 +1849,90 @@ recorded decisions for the files an answer names, and labels for old code.
 - **A separate copy.** The freshness line reports on the project folder, even when a
   task works in a separate copy of it.
 
+## Database tab
+
+A project's **Database** tab shows its tables as cards: the columns, a key mark on the
+primary-key columns, and the links between tables as small "→ customers" chips (click
+a chip to jump to that table). It is worked out by reading the project's SQL migration
+files in order. It never connects to a database and never runs anything. With more than
+8 tables a search box appears.
+
+- **Where it reads.** Inside the project folder only: `migrations/`, `db/migrations/`,
+  `supabase/migrations/` and `prisma/migrations/` (each `<name>/migration.sql`), each
+  folder on its own. Down and undo files are skipped. At most 5,000 files and 5 MB are
+  read; at most 60 tables, 200 columns per table and 50 links per table are shown, and a
+  limit that was hit is said on the tab. Links (symbolic links) are never followed.
+- **What it understands.** CREATE TABLE, ALTER TABLE (add, drop, rename column; add,
+  drop constraint), DROP TABLE and RENAME TABLE. A statement it cannot read is counted
+  ("3 statements were not understood"), never guessed. A table changed inside a `DO`
+  block or a function body is marked "May differ from what is shown". File positions,
+  the commit and the decisions that cover a table are under the collapsed **Details**.
+- **Who and how.** Any project member (`GET /projects/{id}/schema`, optional `?table=`).
+  A task may read its own project's answer with its `CO_API_TOKEN`. Work runs in the
+  background with a 10-second limit; over that the tab says "Reading the migration files
+  took too long." with **Try again**. Nothing is stored; answers are kept in memory
+  until the files change.
+
+### To know
+
+- Migrations written as code (Alembic, Django, Rails, Prisma schema files) are not read.
+  Only SQL files.
+- The schema is what the files say, not what a live database holds.
+- Someone with two deliberately slow projects can make the tab answer "took too long"
+  for a short while.
+- Supabase projects show a high "not understood" count: security and ownership
+  statements are counted, not applied.
+- A very large single statement can run a few seconds past the time limit.
+- In a folder with more than 5,000 entries, a file listed after that point is missed.
+
+## Recommended tools for projects with a user interface
+
+A project that has a user interface (a front-end dependency such as `react`, `next`,
+`vue`, `svelte`, `vite` in `package.json`, or `.html`, `.tsx`, `.jsx`, `.vue` or `.svelte`
+files in the folder, `src/`, `frontend/` or `frontend/src/`) gets a **Recommended** tab.
+Projects without one do not show it (`GET /projects/{id}/recommended` says `has_ui`).
+
+- **The list.** Browser (Playwright), Browser inspector (DevTools), Interface parts
+  (shadcn, React projects only) and the frontend-design skill. Each shows **Added** or,
+  for an admin, **Add** with a question first ("Add <name> to this project?"). Add
+  creates a connected tool for this project only, switched off and starting in the
+  private folder, through the same call as the **Connected tools** page. Non-admins see
+  "Ask an admin to add this". The skill is added under **Skills**. Nothing is installed
+  without a click.
+- **Design skills text.** A maintainer can switch **Tell agents to use the design
+  skills** (on by default) and name a brand skill (letters, digits, `.`, `_`, `:`, `-`;
+  up to 120). When on, and the project has a user interface, one paragraph is added to
+  the main session's ground rules and to every helper's start text, asking it to load the
+  frontend-design skill and a brand skill if it has them.
+
+### To know
+
+- The two new presets (Chrome DevTools `chrome-devtools-mcp@1.13.0`, shadcn
+  `shadcn@4.23.0 mcp`) were taken from the npm registry on 2026-11-24 and have not been
+  run. Chrome DevTools needs Node 20.19 or newer.
+- None of this has been run against the real `claude` CLI.
+
+## Published outside the project
+
+When a run puts something somewhere else (a page, a document, a pull request), the task
+page shows a card, **Published outside the project**: the title, the link, and either
+"Copy in the project: <file>" or an amber **No copy in the project**. The card is hidden
+when there is nothing. A new ground rule, **Keep a copy in the project** (on by default,
+under Settings, Agent guard, Ground rules), tells agents to keep the source of anything
+they publish inside the project.
+
+- **How it is found.** The guard notes a tool whose name contains `create`, `publish`,
+  `upload`, `post`, `share`, `deploy` or `send` and whose answer holds a web link, and
+  `gh pr create`, `gh gist create`, `gh release create` and `gh issue create`. At most
+  20 per task; the same link is listed once. The link is stored without its query string,
+  fragment or password.
+
+### To know
+
+- A tool that publishes without returning a link is missed, and a link in a `create`
+  answer that is not a publication is listed.
+- Published links whose path looks like a secret are not listed.
+
 ---
 
 ## REST API
