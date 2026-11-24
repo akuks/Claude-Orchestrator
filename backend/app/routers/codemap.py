@@ -1,6 +1,7 @@
 """Code map routes (phase 6b): status, refresh (maintainers) and the log tail."""
 
 import os
+import re
 
 from fastapi import APIRouter, HTTPException, Request
 
@@ -52,10 +53,12 @@ def _hide_folder(lines: list[str], directory: str | None) -> list[str]:
         except OSError:
             pass
     spellings = sorted((x for x in spellings if len(x) > 1), key=len, reverse=True)
+    # only a whole path: not part of a longer one (/app2/x, /apple) and not inside another path (/x/app)
+    pats = [re.compile(r"(?<![\w./-])" + re.escape(sp) + r"(?=/|\s|['\"`:]|$)") for sp in spellings]
     out = []
     for ln in lines:
-        for sp in spellings:
-            ln = ln.replace(sp, "<project folder>")
+        for pat in pats:
+            ln = pat.sub("<project folder>", ln)
         out.append(ln)
     return out
 

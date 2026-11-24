@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import {
   Alert,
   Badge,
@@ -441,19 +441,30 @@ export function ProjectDrawer({ project, tab, onTab, currentUser, onClose, onSav
   const [pendingProposals, setPendingProposals] = useState(0)
   const projectId = project?.id
   // One cheap look per project at whether it has a user interface, to know whether to show "Recommended".
-  const [rec, setRec] = useState(null)
+  // undefined = still loading (no tab yet), null = the check failed (tab shows a retry), else the answer.
+  const [rec, setRec] = useState(undefined)
+  const recFor = useRef(null) // only the latest project's answer may land
   const loadRec = useCallback(async () => {
     if (!projectId) return
+    recFor.current = projectId
     try {
-      setRec(await api.getRecommended(projectId))
+      const r = await api.getRecommended(projectId)
+      if (recFor.current === projectId) setRec(r)
     } catch (_) {
-      setRec(null)
+      if (recFor.current === projectId) setRec(null)
     }
   }, [projectId])
   useEffect(() => {
-    setRec(null)
+    setRec(undefined)
     loadRec()
+    return () => {
+      recFor.current = null
+    }
   }, [loadRec])
+  // The open tab vanished (the project has no user interface): go back to the first tab.
+  useEffect(() => {
+    if (tab === 'recommended' && rec && !rec.has_ui) onTab('members')
+  }, [tab, rec]) // eslint-disable-line react-hooks/exhaustive-deps
   useEffect(() => {
     let live = true
     setPendingProposals(0)
@@ -550,7 +561,7 @@ export function ProjectDrawer({ project, tab, onTab, currentUser, onClose, onSav
               ),
               children: <DatabaseSection key={project.id} active={tab === 'database'} project={project} />,
             },
-            ...(rec?.has_ui
+            ...(rec === null || rec?.has_ui
               ? [
                   {
                     key: 'recommended',
@@ -559,7 +570,7 @@ export function ProjectDrawer({ project, tab, onTab, currentUser, onClose, onSav
                         <BulbOutlined /> Recommended
                       </span>
                     ),
-                    children: (
+                    children: rec ? (
                       <RecommendedSection
                         key={project.id}
                         project={project}
@@ -568,6 +579,13 @@ export function ProjectDrawer({ project, tab, onTab, currentUser, onClose, onSav
                         canEdit={canEditGuard(project, currentUser)}
                         isAdmin={currentUser?.role === 'admin'}
                       />
+                    ) : (
+                      <div data-testid="rec-failed">
+                        Could not check this project.{' '}
+                        <Button size="small" onClick={loadRec} data-testid="rec-retry">
+                          Try again
+                        </Button>
+                      </div>
                     ),
                   },
                 ]

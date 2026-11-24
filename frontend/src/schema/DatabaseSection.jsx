@@ -1,11 +1,18 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Button, Input, Spin, Tag, Typography } from 'antd'
 import { KeyOutlined } from '@ant-design/icons'
 import { api } from '../api'
 import { sha7 } from '../codemap/codemap'
+import { plainError } from '../plainError'
 import './database.css'
 
 export const SEARCH_ABOVE = 8
+const RETRY_NOTE = /took too long|could not be read/i
+// "migrations/001.sql:3" -> "migrations/001.sql, line 3"
+export const where = (s) => {
+  const m = /^(.*):(\d+)$/.exec(s || '')
+  return m ? `${m[1]}, line ${m[2]}` : s || ''
+}
 const plural = (n, one, many) => (n === 1 ? one : many)
 
 // Which columns of a table link to another table: column name -> [target table, ...].
@@ -33,16 +40,18 @@ function TableCard({ table, root, tableRef, hit, onJump, known }) {
               {c.primary_key && <KeyOutlined className="co-db-key" data-testid="db-key" title="Primary key" aria-label="Primary key" />}
             </span>
             <span className="co-db-colname">{c.name}</span>
-            <span className="co-db-type">{c.type}</span>
-            {(byCol[c.name] || []).map((to) =>
-              known.has(`${root}\u0000${to}`) ? (
-                <button type="button" key={to} className="co-db-chip" data-testid="db-link-chip" aria-label={`links to ${to}`} onClick={() => onJump(root, to)}>
-                  → {to}
-                </button>
-              ) : (
-                <span key={to} className="co-db-chip co-db-chip-off" data-testid="db-link-chip" aria-label={`links to ${to}`}>→ {to}</span>
-              ),
-            )}
+            <span className="co-db-right">
+              <span className="co-db-type">{c.type}</span>
+              {(byCol[c.name] || []).map((to) =>
+                known.has(`${root}\u0000${to}`) ? (
+                  <button type="button" key={to} className="co-db-chip" data-testid="db-link-chip" aria-label={`links to ${to}`} onClick={() => onJump(root, to)}>
+                    → {to}
+                  </button>
+                ) : (
+                  <span key={to} className="co-db-chip co-db-chip-off" data-testid="db-link-chip" aria-label={`links to ${to}`}>→ {to}</span>
+                ),
+              )}
+            </span>
           </li>
         ))}
       </ul>
@@ -65,15 +74,16 @@ export default function DatabaseSection({ project, active = true }) {
     try {
       setData(await api.getSchema(project.id))
     } catch (e) {
-      setErr(String(e?.message || 'Something went wrong'))
+      setErr(plainError(e))
     } finally {
       setLoading(false)
     }
   }, [project.id])
 
+  // Look again each time the tab is opened (not on every render).
   useEffect(() => {
-    if (active && !data && !loading && !err) load()
-  }, [active]) // eslint-disable-line react-hooks/exhaustive-deps
+    if (active) load()
+  }, [active, load])
   useEffect(() => () => clearTimeout(timer.current), [])
 
   const known = useMemo(() => {
@@ -105,8 +115,9 @@ export default function DatabaseSection({ project, active = true }) {
   if (!data.found || roots.length === 0) {
     return (
       <div className="co-db-empty" data-testid="db-empty">
-        <p>{data.note}</p>
-        {data.found && <Button size="small" onClick={load} loading={loading} data-testid="db-retry">Try again</Button>}
+        <p className="co-db-empty-note">{data.note}</p>
+        <p>Migrations written as code (for example Alembic or Django) are not read.</p>
+        {RETRY_NOTE.test(data.note || '') && <Button size="small" onClick={load} loading={loading} data-testid="db-retry">Try again</Button>}
       </div>
     )
   }
@@ -125,7 +136,7 @@ export default function DatabaseSection({ project, active = true }) {
         const tables = r.tables.filter((t) => !q || t.name.toLowerCase().includes(q))
         return (
           <div key={r.root} className="co-db-root">
-            {roots.length > 1 && <div className="co-db-roothead">From {r.root}/</div>}
+            {roots.length > 1 && <div className="co-db-roothead">Group {roots.indexOf(r) + 1}</div>}
             {tables.length === 0 && <div className="co-db-sub">No tables match.</div>}
             <div className="co-db-grid">
               {tables.map((t) => {
@@ -148,24 +159,45 @@ export default function DatabaseSection({ project, active = true }) {
       )}
       <details className="co-db-details" data-testid="db-details">
         <summary>Details</summary>
-        {data.as_of && <div>Read at: {sha7(data.as_of)}</div>}
-        {roots.map((r) => (
-          <div key={r.root}>
-            <div className="co-db-roothead">{r.root}/ ({r.files} {plural(r.files, 'file', 'files')})</div>
-            {r.tables.map((t) => (
-              <div key={t.name} className="co-db-detail-table">
-                <div>{t.name}: {t.defined_at}</div>
-                {t.links.map((l, i) => (
-                  <div key={i}>&nbsp;&nbsp;{l.columns.join(', ')} → {l.to_table} ({l.to_columns.join(', ')}): {l.defined_at}</div>
-                ))}
-                {t.decisions.map((d) => (
-                  <div key={d.id}>&nbsp;&nbsp;Decision {d.id}: {d.title}</div>
-                ))}
-              </div>
-            ))}
-          </div>
-        ))}
-        {nu.samples.length > 0 && <div>Not understood at: {nu.samples.join(', ')}</div>}
+        <div className="co-db-dh">Files read</div>
+        <dl className="co-db-dl">
+          {data.as_of && (<><dt>Read at</dt><dd>{sha7(data.as_of)}</dd></>)}
+          {roots.map((r, i) => (
+            <Fragment key={r.root}>
+              <dt>{roots.length > 1 ? `Group ${i + 1}` : 'Folder'}: {r.root}/</dt>
+              <dd>{r.files} {plural(r.files, 'file', 'files')}</dd>
+            </Fragment>
+          ))}
+        </dl>
+        <div className="co-db-dh">Where each table is defined</div>
+        <dl className="co-db-dl">
+          {roots.flatMap((r) => r.tables.map((t) => (
+            <Fragment key={`${r.root}\u0000${t.name}`}>
+              <dt>{t.name}</dt>
+              <dd>{where(t.defined_at)}</dd>
+              {t.links.map((l, i) => (
+                <Fragment key={i}>
+                  <dt className="co-db-indent">{l.columns.join(', ')} → {l.to_table}</dt>
+                  <dd>{where(l.defined_at)}</dd>
+                </Fragment>
+              ))}
+              {t.decisions.map((d) => (
+                <Fragment key={d.id}>
+                  <dt className="co-db-indent">Decision {d.id}</dt>
+                  <dd className="co-db-plain">{d.title}</dd>
+                </Fragment>
+              ))}
+            </Fragment>
+          )))}
+        </dl>
+        {nu.samples.length > 0 && (
+          <>
+            <div className="co-db-dh">Not understood</div>
+            <dl className="co-db-dl">
+              {nu.samples.map((x, i) => (<Fragment key={i}><dt>Statement</dt><dd>{where(x)}</dd></Fragment>))}
+            </dl>
+          </>
+        )}
       </details>
     </div>
   )

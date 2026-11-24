@@ -61,9 +61,18 @@ describe('RecommendedSection', () => {
     await click(document.querySelector('.ant-popconfirm .ant-btn-primary'))
     await flush()
     expect(api.createServer).toHaveBeenCalledWith(expect.objectContaining({
-      name: 'Browser (Playwright)', transport: 'stdio', command: 'npx', args: ['-y', '@playwright/mcp@0.0.86'], scope: 'project', project: 'Shop',
+      name: 'Browser (Playwright) (Shop)', transport: 'stdio', command: 'npx', args: ['-y', '@playwright/mcp@0.0.86'], scope: 'project', project: 'Shop',
     }))
     expect(reload).toHaveBeenCalled()
+  })
+  it('names the tool per project and says plainly when it is already added', async () => {
+    api.createServer.mockRejectedValue(Object.assign(new Error("MCP server 'x' already exists"), { status: 409 }))
+    await mount()
+    await click(q('rec-add-browser-playwright'))
+    await click(document.querySelector('.ant-popconfirm .ant-btn-primary'))
+    await flush()
+    expect(q('rec-item-browser-playwright').textContent).toContain('This tool is already added.')
+    expect(q('rec-item-browser-playwright').textContent).not.toContain('MCP server')
   })
   it('the switch saves ui_skills through updateProject', async () => {
     await mount()
@@ -87,7 +96,15 @@ describe('RecommendedSection', () => {
     await type('bad name')
     await click(q('rec-brand-save'))
     await flush()
-    expect(q('rec-brand-error').textContent).toContain('use letters and digits only')
+    expect(q('rec-brand-error').textContent).toBe('Use letters, numbers, dots, dashes, underscores or colons only (up to 120).')
+  })
+  it('a 403 reads as a plain sentence', async () => {
+    api.updateProject.mockRejectedValue(Object.assign(new Error('403 Forbidden'), { status: 403 }))
+    await mount()
+    await click(q('rec-ui-skills'))
+    await flush()
+    expect(document.body.textContent).toContain("You don't have permission to change this.")
+    expect(document.body.textContent).not.toContain('403')
   })
   it('read-only for people who cannot edit', async () => {
     await mount({ canEdit: false })

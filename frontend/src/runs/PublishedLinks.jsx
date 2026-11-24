@@ -11,14 +11,14 @@ export const toolWords = (tool) => {
   return last.replace(/[_-]+/g, ' ').trim() || 'Something'
 }
 
-export const publishedName = (p) => p?.title || toolWords(p?.tool)
+export const publishedName = (p) => (typeof p?.title === 'string' && p.title) || toolWords(typeof p?.tool === 'string' ? p.tool : '')
 
 // The "Published outside the project" card on the task page. Hidden when the run published nothing.
 export default function PublishedLinks({ events }) {
-  const items = (events || []).filter((e) => e?.type === 'output' && e.payload).map((e) => e.payload)
+  const items = (events || []).filter((e) => e?.type === 'output' && e.payload && typeof e.payload.link === 'string').map((e) => e.payload)
   if (!items.length) return null
   return (
-    <div className="co-surface co-published" data-testid="published-links">
+    <div className="co-published" data-testid="published-links">
       <div className="co-published-title">
         <LinkOutlined /> Published outside the project
       </div>
@@ -32,7 +32,7 @@ export default function PublishedLinks({ events }) {
               <span>{p.link}</span>
             )}
           </div>
-          {p.local_file ? (
+          {typeof p.local_file === 'string' && p.local_file ? (
             <div className="co-published-copy" data-testid="published-copy">Copy in the project: {p.local_file}</div>
           ) : (
             <Tag color="orange" data-testid="published-nocopy">No copy in the project</Tag>

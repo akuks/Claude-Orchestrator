@@ -1,8 +1,8 @@
-/* "Published outside the project" card on the task page. Colours come from the --co-* variables only. */
-.co-published { margin: 12px 0; padding: 10px 14px; }
-.co-published-title { font-weight: 600; margin-bottom: 6px; color: var(--co-text); }
+/* "Published outside the project" card on the task page. Same card look as "Where it stands". */
+.co-published { margin: 12px 0; padding: 8px 12px; border: 1px solid var(--co-border); border-radius: var(--co-radius); background: var(--co-surface); }
+.co-published-title { font-weight: 600; margin-bottom: 4px; padding-bottom: 6px; color: var(--co-text); border-bottom: 1px solid var(--co-border); }
 .co-published-row { padding: 6px 0; border-top: 1px solid var(--co-border); }
-.co-published-row:first-of-type { border-top: 0; }
+.co-published-title + .co-published-row { border-top: 0; }
 .co-published-name { color: var(--co-text); }
 .co-published-link { word-break: break-all; font-size: 13px; }
 .co-published-copy { color: var(--co-text-secondary); font-size: 13px; }

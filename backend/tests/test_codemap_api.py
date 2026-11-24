@@ -150,3 +150,12 @@ def test_log_hides_the_project_folder(client, tmp_path):
     text = "\n".join(lines)
     assert real not in text and str(d) not in text
     assert "indexing <project folder>/src" in text and "unrelated line" in text
+
+
+def test_hide_folder_only_whole_paths():
+    from app.routers.codemap import _hide_folder
+
+    out = _hide_folder(["in /app/x and /app2/x and /apple and /app: ok", "at /srv/app/y", "/app"], "/app")
+    assert out[0] == "in <project folder>/x and /app2/x and /apple and <project folder>: ok"
+    assert out[1] == "at /srv/app/y"
+    assert out[2] == "<project folder>"

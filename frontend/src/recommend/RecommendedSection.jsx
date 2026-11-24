@@ -1,11 +1,13 @@
 import { useState } from 'react'
 import { Button, Input, Popconfirm, Space, Switch, Tag, Typography } from 'antd'
 import { api } from '../api'
+import { plainError } from '../plainError'
 import './recommended.css'
 
 // Admins add a tool; the item's own pinned preset is posted as a connected tool for this project only.
+const NAME_MAX = 120 // the server's limit on a tool's name
 const toServer = (preset, projectName) => ({
-  name: preset.name,
+  name: `${preset.name} (${projectName})`.slice(0, NAME_MAX), // tool names are unique across the server
   transport: preset.transport || 'stdio',
   command: preset.command,
   args: preset.args || [],
@@ -23,14 +25,14 @@ function Item({ it, project, isAdmin, reload }) {
       await api.createServer(toServer(it.preset, project.name))
       await reload?.()
     } catch (e) {
-      setErr(String(e?.message || 'Could not add it'))
+      setErr(e?.status === 409 ? 'This tool is already added.' : plainError(e))
     } finally {
       setBusy(false)
     }
   }
   let action
   if (it.present) action = <Tag color="green" data-testid="rec-added">Added</Tag>
-  else if (it.kind === 'skill') action = <span className="co-rec-muted">Add it under Skills</span>
+  else if (it.kind === 'skill') action = <a href="#/automation" data-testid="rec-skills-link">Add it under Skills</a>
   else if (isAdmin) {
     action = (
       <Popconfirm title={`Add ${it.name} to this project?`} okText="Add" cancelText="Cancel" onConfirm={add}>
@@ -57,14 +59,14 @@ export default function RecommendedSection({ project, data, reload, canEdit, isA
   const [err, setErr] = useState('')
   if (!data?.has_ui) return null
 
-  const save = async (patch, onFail) => {
+  const save = async (patch, onFail, opts) => {
     setBusy(true)
     try {
       await api.updateProject(project.id, patch)
       await reload?.()
       return true
     } catch (e) {
-      onFail(String(e?.message || 'Could not save'))
+      onFail(plainError(e, opts))
       return false
     } finally {
       setBusy(false)
@@ -76,7 +78,7 @@ export default function RecommendedSection({ project, data, reload, canEdit, isA
   }
   const saveBrand = async () => {
     setBrandErr('')
-    await save({ brand_skill: brand.trim() || null }, setBrandErr)
+    await save({ brand_skill: brand.trim() || null }, setBrandErr, { brand: true })
   }
   return (
     <div data-testid="rec-section">

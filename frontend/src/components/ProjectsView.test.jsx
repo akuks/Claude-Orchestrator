@@ -195,4 +195,34 @@ describe('project drawer tabs: Database and Recommended', () => {
     await open()
     expect(tabs().some((t) => t.includes('Recommended'))).toBe(true)
   })
+  it('keeps the tab with a retry when the check fails, and shows it only after loading', async () => {
+    let fail
+    api.getRecommended.mockImplementation(() => new Promise((_, rej) => { fail = rej }))
+    await open()
+    expect(tabs().some((t) => t.includes('Recommended'))).toBe(false) // still loading
+    await act(async () => fail(new Error('x')))
+    await flush()
+    expect(tabs().some((t) => t.includes('Recommended'))).toBe(true)
+  })
+  it('goes back to the first tab when the open Recommended tab disappears', async () => {
+    api.getRecommended.mockResolvedValue({ has_ui: false, items: [] })
+    const onTab = vi.fn()
+    view = await render(<ProjectDrawer project={{ id: 'p1', name: 'Shop', my_role: 'maintainer' }} tab="recommended" onTab={onTab} currentUser={{ id: 'u', role: 'admin' }} onClose={() => {}} onSaved={() => {}} />)
+    await flush()
+    await flush()
+    expect(onTab).toHaveBeenCalledWith('members')
+  })
+  it('ignores a slow answer for the project that was switched away from', async () => {
+    const waits = {}
+    api.getRecommended.mockImplementation((id) => new Promise((res) => { waits[id] = res }))
+    const el = (id) => <ProjectDrawer project={{ id, name: id, my_role: 'maintainer' }} tab="members" onTab={() => {}} currentUser={{ id: 'u', role: 'admin' }} onClose={() => {}} onSaved={() => {}} />
+    view = await render(el('pA'))
+    await view.rerender(el('pB'))
+    await act(async () => waits.pA({ has_ui: true, items: [] }))
+    await flush()
+    expect(tabs().some((t) => t.includes('Recommended'))).toBe(false)
+    await act(async () => waits.pB({ has_ui: true, items: [] }))
+    await flush()
+    expect(tabs().some((t) => t.includes('Recommended'))).toBe(true)
+  })
 })

@@ -40,4 +40,8 @@ describe('PublishedLinks', () => {
     expect(c.querySelector('a')).toBeNull()
     expect(c.textContent).toContain('javascript:alert(1)')
   })
+  it('skips events whose link is not text, without throwing', async () => {
+    const c = await mount([ev({ link: { a: 1 } }), ev({ link: null }), ev({ link: 'https://ok.io/x' })])
+    expect(c.querySelectorAll('[data-testid="published-row"]')).toHaveLength(1)
+  })
 })
