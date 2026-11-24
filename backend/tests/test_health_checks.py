@@ -419,8 +419,44 @@ def test_real_run_has_no_home_path_and_is_complete(client):
 
 
 def test_code_map(db):
+    """Independent of rows other test files leave in the shared database: every code map project and enabled
+    server already there is set aside for the test (and put back after), so the check sees only its own."""
+    from sqlalchemy import select
+
     from app.models import McpServer, Project, ProjectIndex
 
+    async def set_aside():
+        async with db() as s:
+            projects = (await s.execute(select(Project).where(Project.code_map.is_(True)))).scalars().all()
+            servers = (await s.execute(select(McpServer).where(McpServer.enabled.is_(True)))).scalars().all()
+            aside = ([p.id for p in projects], [m.id for m in servers])
+            for p in projects:
+                p.code_map = False
+            for m in servers:
+                m.enabled = False
+            await s.commit()
+        return aside
+
+    async def put_back(aside):
+        async with db() as s:
+            for pid in aside[0]:
+                p = await s.get(Project, pid)
+                if p is not None:
+                    p.code_map = True
+            for mid in aside[1]:
+                m = await s.get(McpServer, mid)
+                if m is not None:
+                    m.enabled = True
+            await s.commit()
+
+    aside = run(set_aside())
+    try:
+        _code_map_cases(db, McpServer, Project, ProjectIndex)
+    finally:
+        run(put_back(aside))
+
+
+def _code_map_cases(db, McpServer, Project, ProjectIndex):
     async def go(tool, projects):
         ids = []
         async with db() as s:
