@@ -101,6 +101,7 @@ export default function CodeMapSection({ project, canEdit, active = true }) {
             <div>Built at: {sha7(st.sha) || '—'}</div>
             <div>Last built: {st.indexed_at || '—'}</div>
             {st.next_try_at && <div>Next try: {st.next_try_at}</div>}
+            {st.status === 'failed' && st.error && <div data-testid="codemap-reason">Reason: {revealHidden(st.error).text}</div>}
             {lines.length > 0 && <pre>{lines.map((l) => revealHidden(l).text).join('\n')}</pre>}
           </details>
         </>

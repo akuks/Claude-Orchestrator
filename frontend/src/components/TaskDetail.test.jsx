@@ -395,6 +395,13 @@ describe('code_map run-log line', () => {
     expect(line({ fresh: null, decisions: [12, 15] })).toBe('Code map answer: freshness unknown · showed D-012, D-015')
     expect(line({})).toBe('Code map answer: freshness unknown')
   })
+  it('says when some recorded decisions were not checked', () => {
+    const line = (type, payload) => renderLine({ type, payload }).text
+    expect(line('code_map', { fresh: true, decisions: [12], partial: true })).toBe('Code map answer: current · showed D-012 · some recorded decisions were not checked')
+    expect(line('code_map', { fresh: null, decisions: [], partial: 'yes' })).toBe('Code map answer: freshness unknown')
+    expect(line('decision_note', { ids: [3], path: 'src/a.py', partial: true })).toBe('Showed D-003 before editing src/a.py · some recorded decisions were not checked')
+    expect(line('decision_note', { ids: [3], path: 'src/a.py' })).toBe('Showed D-003 before editing src/a.py')
+  })
 })
 
 describe('critical_paths run-log line', () => {

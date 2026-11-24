@@ -61,10 +61,13 @@ describe('CodeMapSection polling', () => {
     expect(api.getCodeMap).toHaveBeenCalledTimes(2)
     delete document.hidden
   })
-  it('reveals hidden characters in the reason', async () => {
-    api.getCodeMap.mockResolvedValue(st({ status: 'failed', error: 'bad\u202Etxt' }))
+  it('keeps the raw reason under Details, hidden characters revealed', async () => {
+    api.getCodeMap.mockResolvedValue(st({ status: 'failed', failure: 'error', error: 'exited with code 1: bad\u202Etxt' }))
     await mount()
-    expect(q('codemap-line').textContent).toContain('⟦U+202E⟧')
+    expect(q('codemap-line').textContent).toBe('Last refresh failed — the tool stopped with an error')
+    expect(q('codemap-reason').textContent).toContain('⟦U+202E⟧')
+    expect(q('codemap-reason').textContent).toContain('exited with code 1')
+    expect(q('codemap-details').contains(q('codemap-reason'))).toBe(true)
   })
 })
 

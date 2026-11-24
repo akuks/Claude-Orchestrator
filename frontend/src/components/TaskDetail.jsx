@@ -138,11 +138,15 @@ export function testResultLine(p) {
   return text
 }
 
+// Added to a decision note or code map line when co-guard's matching was cut short (`partial: true`).
+export const PARTIAL_NOTE = ' · some recorded decisions were not checked'
+const partialNote = (p) => (p.partial === true ? PARTIAL_NOTE : '')
+
 // "Code map answer: current · showed D-012": a `code_map` event {fresh: true|false|null, decisions: [n]}.
 export function codeMapLine(p) {
   const fresh = p.fresh === true ? 'current' : p.fresh === false ? 'may be out of date' : 'freshness unknown'
   const ids = (Array.isArray(p.decisions) ? p.decisions : []).filter((n) => Number.isInteger(n) && n > 0)
-  return `Code map answer: ${fresh}${ids.length ? ` · showed ${ids.map(displayId).join(', ')}` : ''}`
+  return `Code map answer: ${fresh}${ids.length ? ` · showed ${ids.map(displayId).join(', ')}` : ''}${partialNote(p)}`
 }
 
 export function renderLine(ev) {
@@ -177,7 +181,7 @@ export function renderLine(ev) {
       text = `knowledge base — ${p.docs} doc(s) indexed (~${p.index_approx_tokens} tokens): ${(p.paths || []).join(', ')}`
       break
     case 'decision_note':
-      text = decisionNoteLine(p)
+      text = decisionNoteLine(p) + partialNote(p)
       break
     case 'code_map':
       text = codeMapLine(p)
