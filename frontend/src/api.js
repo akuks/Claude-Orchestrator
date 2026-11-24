@@ -289,6 +289,7 @@ export const api = {
   updateGuardRule: (id, payload) => req('PATCH', `/guard/rules/${encodeURIComponent(id)}`, payload),
   deleteGuardRule: (id) => req('DELETE', `/guard/rules/${encodeURIComponent(id)}`),
   guardBuiltins: () => req('GET', '/guard/builtins'),
+  exportRules: (projectId) => reqText(`/guard/export.md${qs({ project_id: projectId })}`),
   guardOrgSettings: () => req('GET', '/guard/org-settings'),
   guardHealth: () => req('GET', '/guard/health'),
   // admin: the system health checks (refresh skips the server's 30 s cache)

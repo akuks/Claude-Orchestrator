@@ -3,6 +3,7 @@ import { Alert, Button, Card, Checkbox, Input, Select, Space, Switch, Tag, Toolt
 import { LockOutlined, SafetyOutlined } from '@ant-design/icons'
 import { api } from '../api'
 import { DEFAULT_TIERS, TIER_OPTIONS, isModelId } from '../agents/tiers'
+import DownloadRules from './DownloadRules'
 import RuleTable from './RuleTable'
 import { DEV_DB_HELP, LOCKED_HELP, RM_RF_DISABLE_HELP, hookErrorsLine, ruleName } from './guard'
 import './guard.css'
@@ -309,6 +310,9 @@ export default function OrgGuardView({ isAdmin = false }) {
         dev. Projects add their own rules, trust and read-only folders in their Guard tab; MCP servers have an
         environment and a default action in MCP Servers.
       </Typography.Paragraph>
+      <div style={{ marginBottom: 16 }}>
+        <DownloadRules />
+      </div>
       {!isAdmin && (
         <Alert type="info" showIcon style={{ marginBottom: 16 }} message="Only admins can change the org's guard settings." />
       )}
