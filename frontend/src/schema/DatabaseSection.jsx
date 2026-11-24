@@ -4,6 +4,7 @@ import { KeyOutlined } from '@ant-design/icons'
 import { api } from '../api'
 import { sha7 } from '../codemap/codemap'
 import { plainError } from '../plainError'
+import { breakable } from './breakable'
 import './database.css'
 
 export const SEARCH_ABOVE = 8
@@ -29,7 +30,7 @@ function TableCard({ table, root, tableRef, hit, onJump, known }) {
   return (
     <div ref={tableRef} className={`co-surface co-db-card${hit ? ' co-db-hit' : ''}`} data-testid="db-table">
       <div className="co-db-card-head">
-        <span className="co-db-name">{table.name}</span>
+        <span className="co-db-name">{breakable(table.name)}</span>
         {table.uncertain && <Tag color="orange" bordered={false}>May differ from what is shown</Tag>}
       </div>
       {out.length > 0 && <div className="co-db-sub">Links to {out.join(', ')}</div>}
@@ -39,16 +40,16 @@ function TableCard({ table, root, tableRef, hit, onJump, known }) {
             <span className="co-db-keyslot">
               {c.primary_key && <KeyOutlined className="co-db-key" data-testid="db-key" title="Primary key" aria-label="Primary key" />}
             </span>
-            <span className="co-db-colname">{c.name}</span>
+            <span className="co-db-colname">{breakable(c.name)}</span>
             <span className="co-db-right">
               <span className="co-db-type">{c.type}</span>
               {(byCol[c.name] || []).map((to) =>
                 known.has(`${root}\u0000${to}`) ? (
                   <button type="button" key={to} className="co-db-chip" data-testid="db-link-chip" aria-label={`links to ${to}`} onClick={() => onJump(root, to)}>
-                    → {to}
+                    → {breakable(to)}
                   </button>
                 ) : (
-                  <span key={to} className="co-db-chip co-db-chip-off" data-testid="db-link-chip" aria-label={`links to ${to}`}>→ {to}</span>
+                  <span key={to} className="co-db-chip co-db-chip-off" data-testid="db-link-chip" aria-label={`links to ${to}`}>→ {breakable(to)}</span>
                 ),
               )}
             </span>
@@ -173,11 +174,11 @@ export default function DatabaseSection({ project, active = true }) {
         <dl className="co-db-dl">
           {roots.flatMap((r) => r.tables.map((t) => (
             <Fragment key={`${r.root}\u0000${t.name}`}>
-              <dt>{t.name}</dt>
+              <dt>{breakable(t.name)}</dt>
               <dd>{where(t.defined_at)}</dd>
               {t.links.map((l, i) => (
                 <Fragment key={i}>
-                  <dt className="co-db-indent">{l.columns.join(', ')} → {l.to_table}</dt>
+                  <dt className="co-db-indent">{breakable(l.columns.join(', '))} → {breakable(l.to_table)}</dt>
                   <dd>{where(l.defined_at)}</dd>
                 </Fragment>
               ))}

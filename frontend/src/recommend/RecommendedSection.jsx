@@ -25,7 +25,7 @@ function Item({ it, project, isAdmin, reload }) {
       await api.createServer(toServer(it.preset, project.name))
       await reload?.()
     } catch (e) {
-      setErr(e?.status === 409 ? 'This tool is already added.' : plainError(e))
+      setErr(e?.status === 409 ? 'A tool with this name already exists under Connected tools. Switch it on there.' : plainError(e))
     } finally {
       setBusy(false)
     }

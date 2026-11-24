@@ -71,7 +71,7 @@ describe('RecommendedSection', () => {
     await click(q('rec-add-browser-playwright'))
     await click(document.querySelector('.ant-popconfirm .ant-btn-primary'))
     await flush()
-    expect(q('rec-item-browser-playwright').textContent).toContain('This tool is already added.')
+    expect(q('rec-item-browser-playwright').textContent).toContain('A tool with this name already exists under Connected tools. Switch it on there.')
     expect(q('rec-item-browser-playwright').textContent).not.toContain('MCP server')
   })
   it('the switch saves ui_skills through updateProject', async () => {
