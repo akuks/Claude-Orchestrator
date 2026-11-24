@@ -12,7 +12,7 @@ from sqlalchemy.orm import Session
 from app import models
 from app.database import _alembic_cfg, _baseline_metadata, run_migrations
 
-HEAD = "0018"  # the latest revision
+HEAD = "0019"  # the latest revision
 
 
 def _tables(db) -> set[str]:
@@ -639,3 +639,34 @@ def test_migration_0018_upgrade_downgrade(scratch_url):
         return sc.exec_driver_sql("SELECT version_num FROM alembic_version").scalar()
 
     assert _inspect(url, check_down) == "0017"
+
+
+def test_migration_0019_upgrade_downgrade(scratch_url):
+    from alembic import command
+
+    url = scratch_url
+    command.upgrade(_alembic_cfg(url), "0018")
+
+    def old_rows(sc, insp):  # a connected tool from before 0019 (every NOT NULL column without a default)
+        sc.exec_driver_sql(
+            "INSERT INTO mcp_servers (id, name, transport, scope, command, args, enabled, status, tools, created_at)"
+            " VALUES ('m19', 'old-tool', 'stdio', 'team', 'npx', '[]', true, 'unknown', '[]', CURRENT_TIMESTAMP)")
+
+    _inspect(url, old_rows)
+    command.upgrade(_alembic_cfg(url), "0019")
+
+    def check(sc, insp):
+        assert "start_in_project" in {c["name"] for c in insp.get_columns("mcp_servers")}
+        return (sc.exec_driver_sql("SELECT start_in_project FROM mcp_servers WHERE id='m19'").scalar(),
+                sc.exec_driver_sql("SELECT version_num FROM alembic_version").scalar())
+
+    in_project, ver = _inspect(url, check)
+    assert in_project is not None and not in_project and ver == "0019"
+    command.downgrade(_alembic_cfg(url), "0018")
+
+    def check_down(sc, insp):
+        assert "start_in_project" not in {c["name"] for c in insp.get_columns("mcp_servers")}
+        return (sc.exec_driver_sql("SELECT name FROM mcp_servers WHERE id='m19'").scalar(),
+                sc.exec_driver_sql("SELECT version_num FROM alembic_version").scalar())
+
+    assert _inspect(url, check_down) == ("old-tool", "0018")

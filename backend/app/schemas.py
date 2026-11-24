@@ -195,6 +195,7 @@ class McpServerCreate(BaseModel):
     # co-guard: dev | prod | unknown; action for tools with no policy row
     environment: str = "unknown"
     default_action: str = "require_approval"
+    start_in_project: bool = False
 
 
 class McpServerUpdate(BaseModel):
@@ -208,6 +209,7 @@ class McpServerUpdate(BaseModel):
     enabled: Optional[bool] = None
     environment: Optional[str] = None
     default_action: Optional[str] = None
+    start_in_project: Optional[bool] = None
 
 
 class McpToolInfo(BaseModel):
@@ -232,6 +234,7 @@ class McpServerOut(BaseModel):
     has_headers: bool = False
     environment: str = "unknown"
     default_action: str = "require_approval"
+    start_in_project: bool = False
     last_checked_at: Optional[datetime]
     created_at: datetime
 

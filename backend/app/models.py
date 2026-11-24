@@ -706,6 +706,9 @@ class McpServer(Base):
     default_action: Mapped[str] = mapped_column(
         String(20), default="require_approval", server_default="auto_approve"
     )
+    # "Start in the project folder" (0019): off (the default, and every server
+    # from before 0019) starts a stdio tool from a private, empty folder.
+    start_in_project: Mapped[bool] = mapped_column(Boolean, default=False, server_default=false())
 
     policies: Mapped[list["McpToolPolicy"]] = relationship(
         back_populates="server", cascade="all, delete-orphan"

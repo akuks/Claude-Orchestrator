@@ -43,3 +43,16 @@ describe('presets', () => {
     expect(document.querySelector('[data-testid="preset-row"]')).toBeNull()
   })
 })
+
+describe('start in the project folder tag', () => {
+  it('shows on tools with the switch on only', async () => {
+    api.listServers.mockResolvedValueOnce([
+      { id: 'a', name: 'one', transport: 'stdio', scope: 'team', enabled: true, status: 'ok', tools: [], start_in_project: true },
+      { id: 'b', name: 'two', transport: 'stdio', scope: 'team', enabled: true, status: 'ok', tools: [], start_in_project: false },
+    ])
+    view = await render(<McpRegistry />)
+    await flush()
+    const tags = [...document.querySelectorAll('.ant-tag')].filter((t) => t.textContent === 'Starts in the project folder')
+    expect(tags.length).toBe(1)
+  })
+})

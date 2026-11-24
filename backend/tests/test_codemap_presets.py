@@ -18,7 +18,8 @@ def test_presets_exact(client):
     assert (br["transport"], br["command"], br["args"], br["pinned"]) == (
         "stdio", "npx", ["-y", "@playwright/mcp@0.0.86"], "0.0.86")
     for p in (cm, br):
-        assert set(p) == {"key", "name", "description", "transport", "command", "args", "pinned"}
+        assert set(p) == {"key", "name", "description", "transport", "command", "args", "pinned", "start_in_project"}
+        assert p["start_in_project"] is False
 
 
 def test_presets_open_to_members_not_anonymous(client):

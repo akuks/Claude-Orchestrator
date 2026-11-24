@@ -268,13 +268,11 @@ def orchestrator_paths(project_dir: str, cwd: str) -> list[str]:
     for r in roots:
         if not any(k == r or _is_within(r, k) for k in keep):
             out += _protect_except(r, keep)
-    # the core always, unless it holds the task's own project / cwd (a project
-    # that IS the orchestrator checkout still cannot touch the running server)
-    work = keep[3:]
+    # the core always, even when the task's project folder resolves inside it
+    # (such folders are refused at save time; a folder swapped for a symlink
+    # into the core afterwards must not switch its protection off)
     for n in ("app", "migrations", "alembic.ini", ".env", ".venv", "requirements.txt"):
-        c = backend / n
-        if not any(_is_within(w, c) for w in work):
-            out.append(str(c))
+        out.append(str(backend / n))
     url = settings.database_url
     if url.startswith("sqlite") and ":///" in url:
         db = Path(url.split(":///", 1)[1]).expanduser()
@@ -282,6 +280,57 @@ def orchestrator_paths(project_dir: str, cwd: str) -> list[str]:
         out += [str(db), str(db) + "-wal", str(db) + "-shm", str(db) + "-journal"]
     out.append(str(Path(settings.secret_key_file).resolve()))
     return out
+
+
+# Files and folders that npm/npx, pnpm, yarn, uv or bun look for in every folder
+# above the one they start in (project root, workspaces glob, config, and the
+# node_modules/.bin npm puts on PATH for every ancestor).
+WALKUP_MARKERS = ("package.json", "package-lock.json", "node_modules", ".npmrc", "pnpm-workspace.yaml",
+                  ".pnpmfile.cjs", "uv.toml", "bunfig.toml", ".yarnrc.yml", "pyproject.toml")
+
+
+def launch_roots() -> list[Path]:
+    """The folders under which the server starts connected tools and the code
+    map build (their per-task / per-project folders are below these)."""
+    ws = settings.workspaces_dir
+    roots = [ws / "_mcp_configs", ws / "_codemap" / "run"]
+    from ..config import tool_folders_root
+
+    if tool_folders_root() is not None:
+        roots.append(tool_folders_root())
+    return roots
+
+
+def _ancestors(p: Path) -> list[str]:
+    out, cur = [], p.parent
+    while True:
+        out.append(str(cur))
+        if cur.parent == cur:
+            return out
+        cur = cur.parent
+
+
+def walkup_marker_paths(project_dir: str | None) -> list[str]:
+    """``WALKUP_MARKERS`` in every ancestor of the launch roots, up to /, in
+    normalised and real form, so no agent can plant a launcher-control file
+    that a tool or the code map build would find above its own folder. An
+    ancestor that is the task's own project folder, or inside it, is left out:
+    those files are that project's own work (the orchestrator checkout as a
+    project keeps its root package.json, node_modules, ... writable)."""
+    dirs: list[str] = []
+    for root in launch_roots():
+        for form in {os.path.normpath(os.path.abspath(str(root))), os.path.realpath(str(root))}:
+            dirs += _ancestors(Path(form))
+    own: list[Path] = []
+    if project_dir:
+        own = [Path(f) for f in {os.path.normpath(os.path.abspath(project_dir)), os.path.realpath(project_dir)}]
+    out: list[str] = []
+    for d in dict.fromkeys(dirs):
+        dp = Path(d)
+        if any(dp == o or _is_within(dp, o) for o in own):
+            continue
+        out += [str(dp / n) for n in WALKUP_MARKERS]
+    return list(dict.fromkeys(out))
 
 
 def build_policy(*, task_id: str, project, workspace: Path, cwd: Path, claude_config_dir: str | None,
@@ -304,7 +353,16 @@ def build_policy(*, task_id: str, project, workspace: Path, cwd: Path, claude_co
         str(workspaces / "_tasks"), str(workspaces / "_users"), str(workspaces / "_mcp_configs"),
         str(workspaces / "_gates"),  # gate run logs
         str(workspaces / "_codemap"),  # code map index logs
+        str(workspaces / "_mcp_cache"),  # connected tools' own package cache and global folder
     ]
+    from ..config import tool_folders_root
+
+    if tool_folders_root() is not None:  # the admin's place for tool start folders (not the whole setting)
+        protected.append(str(tool_folders_root()))
+    # npm / pnpm / uv / bun look upward from a tool's start folder (and npm puts
+    # every ancestor's node_modules/.bin on PATH): their names, in every folder
+    # above the tool and code map folders, except the task's own project's
+    protected += walkup_marker_paths(project_dir)
     if claude_config_dir:
         protected.append(str(claude_config_dir))
     protected += orchestrator_paths(project_dir, cwd_s)

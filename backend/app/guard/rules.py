@@ -171,7 +171,8 @@ HARD (never approvable):
   ``split`` prefixes, ``tar -c -f``, ``zip`` archives, ``patch`` targets /
   ``-d`` / ``-o`` (no target: the cwd), ``install -d``, ``pip install
   --target|-t|--prefix|--root``, ``npm|pnpm|yarn|bun --prefix|--dir|--cwd|-C``
-  for a non-read subcommand, ``make -C``/``-f`` folders, ``openssl -out|-keyout``,
+  for a non-read subcommand (and an install/add/ci/link/update as a write to
+  ``<target or cwd>/node_modules``, ``package.json`` and ``package-lock.json``), ``make -C``/``-f`` folders, ``openssl -out|-keyout``,
   ``ssh-keygen -f`` (when it writes), ``setfacl``, ``xattr -w|-d|-c``,
   ``vim``/``ex``/``emacs``/``ed`` given commands (``-c``, ``+cmd``, ``-s``,
   ``-es``, ``--batch``, ``--eval`` ...); ``find ROOT -exec|-execdir`` and
@@ -1025,7 +1026,10 @@ class _Ctx:
                 if is_glob and not _GLOB.search(posixpath.dirname(v)):
                     self.glob_dirs.add(posixpath.dirname(v))
         # text naming a protected path (for inline interpreter code)
-        self.mentions = sorted({posixpath.dirname(v) if g else v for v, g in self.protected} - {"", "/"})
+        # (a protected entry directly under / - the walk-up names such as /package.json - is left out: as text
+        # it would match every path that merely ends in that name, and / is not the server user's to write)
+        self.mentions = sorted({posixpath.dirname(v) if g else v for v, g in self.protected
+                                if g or posixpath.dirname(v) != "/"} - {"", "/"})
         self.hits = []
         self.words = {}  # Ruling P12: de-quoted argv texts of every simple command (custom rules)
         self.start = self.project  # the call's cwd (evaluate sets it)
@@ -1479,6 +1483,7 @@ _FD_HOLDERS = ("{}", "{/}", "{//}", "{.}", "{/.}")
 
 
 _JS_RUN = frozenset({"npx", "pnpx", "bunx"})
+_COREPACK_PMS = frozenset({"npm", "npx", "pnpm", "pnpx", "yarn"})
 
 
 def _unrun(argv, dyn):
@@ -1491,6 +1496,8 @@ def _unrun(argv, dyn):
         i = 1
     elif name in ("pnpm", "yarn", "bun", "npm") and len(argv) > 1 and argv[1] in ("exec", "dlx", "x"):
         i = 2
+    elif name == "corepack" and len(argv) > 1 and re.sub(r"@.*$", "", argv[1]) in _COREPACK_PMS:
+        return [re.sub(r"@.*$", "", argv[1]), *argv[2:]], dyn[1:len(argv)]  # corepack pnpm@9 add x
     if i is None:
         return argv, dyn[:len(argv)]
     while i < len(argv) and argv[i].startswith("-"):
@@ -2255,6 +2262,40 @@ def _inside_repo(ctx, word, dynamic, cwd, folder=None):
         return any(_inside_repo(ctx, word, dynamic, b, folder) for b in ctx.bases(None))
     p = ctx.path(word, cwd, dynamic)
     return p is None or _within(p.lower(), project.lower())
+
+
+# Package-manager subcommands that install into <target>/node_modules (aliases included).
+_PM_INSTALL_SUBS = {
+    "npm": frozenset("install i in ins inst insta instal isnt isnta isntal isntall add ci clean-install ic "
+                     "install-clean isntall-clean install-test it install-ci-test cit link ln update up upgrade "
+                     "udpate rebuild rb".split()),
+    "pnpm": frozenset("install i add link ln update up upgrade import rebuild rb".split()),
+    "yarn": frozenset("install add link upgrade up".split()),
+    "bun": frozenset("install i add a link update".split()),
+}
+_PM_INSTALL_WRITES = ("node_modules", "package.json", "package-lock.json")
+
+
+def _pm_installs(name, sub, args) -> bool:
+    """npm/pnpm/yarn/bun installing into a local node_modules (bare ``yarn``
+    installs). A global install (-g/--global/--location=global) is left to the
+    tools' own npm prefix (they never see the server user's global folder)."""
+    if any(a in ("-g", "--global", "--location=global") for a in args):
+        return False
+    if name == "yarn" and not sub:
+        return not any(a in ("-v", "--version", "-h", "--help") for a in args)
+    return sub in _PM_INSTALL_SUBS.get(name, ())
+
+
+_PM_MANIFEST_SUBS = {"npm": frozenset({"init", "innit", "create"}), "pnpm": frozenset({"init", "create"}),
+                     "yarn": frozenset({"init", "create"}), "bun": frozenset({"init", "create", "c"})}
+
+
+def _pm_writes_manifest(name, sub, rest) -> bool:
+    """init/create (a package.json in the target), and npm pkg set|delete|fix."""
+    if sub in _PM_MANIFEST_SUBS.get(name, ()):
+        return True
+    return name == "npm" and sub == "pkg" and bool(rest) and rest[0] in ("set", "delete", "fix")
 
 
 def _subcommand_of(args):
@@ -3126,10 +3167,54 @@ class _Bash:
                 else:
                     self.readonly_write(w, p, "edit", cwd)
 
+    def pm_package_writes(self, name, args, dargs, cwd):
+        """npm/pnpm/yarn/bun writing a package root: an install writes
+        <target>/node_modules (its .bin goes on npm's PATH for every folder
+        below) and package.json / package-lock.json; init/create and npm pkg
+        set|delete|fix write <target>/package.json (which then makes a later
+        plain install land there). The normal write check for each, so the
+        folders above the tool folders stay closed while the task's own
+        folders stay writable. Target: --prefix/--dir/--cwd/-C, else the cwd."""
+        sub, _rest = _subcommand_of(args)
+        writes = _PM_INSTALL_WRITES if _pm_installs(name, sub, args) else (
+            ("package.json",) if _pm_writes_manifest(name, sub, _rest) else ())
+        if not writes:
+            return
+        targets = []
+        for i, a in enumerate(args):
+            key, eq, val = a.partition("=")
+            if key in ("--prefix", "--dir", "--cwd"):
+                if eq:
+                    targets.append((val, dargs[i]))
+                elif i + 1 < len(args):
+                    targets.append((args[i + 1], dargs[i + 1]))
+            elif len(a) >= 2 and a[:2] == "-C":
+                if len(a) > 2:
+                    targets.append((a[2:], dargs[i]))
+                elif i + 1 < len(args):
+                    targets.append((args[i + 1], dargs[i + 1]))
+        for a, d in targets or [(".", False)]:
+            for n in writes:
+                self.check_write(posixpath.join(a, n) if a else n, d, "copydir", cwd)
+
     def direct_writes(self, name, args, dargs, cwd):
         """Other common writers of the files they name (all write rules:
         readonly-source, agent-config, self-protect, secret-files ...)."""
         ctx = self.ctx
+        if name in _JS_RUN or name == "corepack" or (
+                name in ("npm", "pnpm", "yarn", "bun") and args[:1] and args[0] in ("exec", "dlx", "x")):
+            # a package manager run through a runner (npx npm i, npm exec -- npm i, pnpm dlx npm i,
+            # corepack pnpm add): the same package-root writes for the command it runs
+            run, rdyn = [name, *args], [False, *dargs]
+            for _ in range(3):
+                inner, idyn = _unrun(run, rdyn)
+                if inner == run or not inner:
+                    break
+                run, rdyn = inner, idyn
+                rname = _sh.command_name(run[0])
+                if rname in ("npm", "pnpm", "yarn", "bun"):
+                    self.pm_package_writes(rname, run[1:], list(rdyn[1:]) + [False] * len(run), cwd)
+                    break
         pos = [(a, d) for a, d in zip(args, dargs) if not a.startswith("-")]
 
         def opt(longs, letters=""):  # values of --x V / --x=V (also -out V) / -X V / -XV
@@ -3222,6 +3307,7 @@ class _Bash:
             if not sub or sub not in _READONLY_SUBS[name]:
                 for a, d in opt(("--prefix", "--dir", "--cwd"), "C"):
                     self.readonly_write(a, ctx.path(a, cwd, d), "copydir", cwd)
+            self.pm_package_writes(name, args, dargs, cwd)
         elif name in ("make", "gmake"):
             if not any(_MAKE_DRY.fullmatch(a) for a in args):
                 for a, d in opt(("--directory",), "C"):

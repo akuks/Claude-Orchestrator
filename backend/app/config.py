@@ -11,6 +11,11 @@ class Settings(BaseSettings):
     # Disable connection pooling (tests: asyncpg connections can't cross event loops).
     db_null_pool: bool = False
     workspaces_dir: Path = Path("./workspaces")
+    # Where connected tools' per-task start folders go (CO_TOOL_RUN_DIR). Unset:
+    # workspaces/_mcp_configs/<task>/cwd. Set it to a folder whose parent folders
+    # the server user cannot write (e.g. under /var/lib), so nothing can be planted
+    # above a tool folder at all.
+    tool_run_dir: Path | None = None
 
     # Claude Code worker
     claude_bin: str = "claude"
@@ -131,11 +136,23 @@ class Settings(BaseSettings):
     ]
 
 
+# The folder made inside CO_TOOL_RUN_DIR for the tools' per-task start folders:
+# the configured folder itself is never swept or protected as a whole.
+TOOL_FOLDERS_SUBDIR = "co-tool-folders"
+
+
+def tool_folders_root() -> Path | None:
+    """CO_TOOL_RUN_DIR/co-tool-folders, or None when the setting is unset."""
+    return settings.tool_run_dir / TOOL_FOLDERS_SUBDIR if settings.tool_run_dir is not None else None
+
+
 settings = Settings()
 # Absolute paths so workspace/MCP-config paths are unambiguous regardless of cwd.
 settings.workspaces_dir = settings.workspaces_dir.resolve()
 settings.projects_dir = settings.projects_dir.resolve()
 settings.skillpacks_dir = settings.skillpacks_dir.resolve()
+if settings.tool_run_dir is not None:
+    settings.tool_run_dir = settings.tool_run_dir.expanduser().resolve()
 settings.workspaces_dir.mkdir(parents=True, exist_ok=True)
 settings.projects_dir.mkdir(parents=True, exist_ok=True)
 settings.skillpacks_dir.mkdir(parents=True, exist_ok=True)

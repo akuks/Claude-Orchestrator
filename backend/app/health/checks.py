@@ -309,13 +309,17 @@ async def check_mcp(s) -> Result:
     async with s() as sess:
         servers = (await sess.execute(select(McpServer).where(McpServer.enabled.is_(True)).order_by(McpServer.name))).scalars().all()
     if not servers:
-        return Result(OK, "No tools are connected", {"servers": []})
+        return Result(OK, "No tools are connected", {"servers": [], "start_in_project": 0})
     listing = [{"name": m.name, "status": m.status} for m in servers]
+    # an admin's choice, so never attention by itself; the summary names it
+    in_project = sum(1 for m in servers if m.transport == "stdio" and getattr(m, "start_in_project", False))
+    detail = {"servers": listing, "start_in_project": in_project}
+    note = f"; {in_project} start(s) in the project folder" if in_project else ""
     bad = [m.name for m in servers if m.status not in ("healthy", "unknown")]
     if bad:
-        return Result(ATTENTION, f"{len(bad)} of {len(servers)} connected tool{'s' if len(servers) != 1 else ''} not responding: {', '.join(bad)}",
-                      {"servers": listing}, "Open MCP Servers and test the connection.")
-    return Result(OK, f"{len(servers)} connected tool{'s' if len(servers) != 1 else ''} working", {"servers": listing})
+        return Result(ATTENTION, f"{len(bad)} of {len(servers)} connected tool{'s' if len(servers) != 1 else ''} not responding: {', '.join(bad)}{note}",
+                      detail, "Open MCP Servers and test the connection.")
+    return Result(OK, f"{len(servers)} connected tool{'s' if len(servers) != 1 else ''} working{note}", detail)
 
 
 async def check_skill_packs(s) -> Result:

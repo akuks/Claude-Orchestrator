@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react'
 import {
   Alert,
   Button,
+  Collapse,
   Form,
   Input,
   Modal,
@@ -48,12 +49,15 @@ export default function McpServerModal({ open, server, preset, onClose, onSaved 
   const [form] = Form.useForm()
   const [transport, setTransport] = useState('stdio')
   const [saving, setSaving] = useState(false)
+  const [moreOpen, setMoreOpen] = useState(false)
+  const startInProject = Form.useWatch('start_in_project', form)
   const isEdit = !!server
 
   useEffect(() => {
     if (!open) return
     if (server) {
       setTransport(server.transport)
+      setMoreOpen(!!server.start_in_project)
       form.setFieldsValue({
         name: server.name,
         transport: server.transport,
@@ -63,6 +67,7 @@ export default function McpServerModal({ open, server, preset, onClose, onSaved 
         args: (server.args || []).join(' '),
         url: server.url,
         enabled: server.enabled,
+        start_in_project: !!server.start_in_project,
         environment: server.environment || 'unknown',
         default_action: server.default_action || 'require_approval',
         env: '', // secrets are never returned; leave blank unless changing
@@ -71,8 +76,10 @@ export default function McpServerModal({ open, server, preset, onClose, onSaved 
     } else {
       form.resetFields()
       setTransport('stdio')
+      setMoreOpen(false)
       form.setFieldsValue({
         transport: 'stdio',
+        start_in_project: false,
         scope: 'team',
         enabled: true,
         environment: 'unknown',
@@ -103,6 +110,7 @@ export default function McpServerModal({ open, server, preset, onClose, onSaved 
           environment: v.environment,
           default_action: v.default_action,
         }
+        if (transport === 'stdio') patch.start_in_project = !!v.start_in_project
         if (v.env?.trim()) patch.env = textToObj(v.env)
         if (v.headers?.trim()) patch.headers = textToObj(v.headers)
         await api.updateServer(server.id, patch)
@@ -120,13 +128,20 @@ export default function McpServerModal({ open, server, preset, onClose, onSaved 
           enabled: v.enabled,
           environment: v.environment,
           default_action: v.default_action,
+          ...(transport === 'stdio' && v.start_in_project ? { start_in_project: true } : {}),
         })
       }
       message.success(isEdit ? 'Server updated' : 'Server added')
       onSaved?.()
       onClose()
     } catch (e) {
-      message.error(e.message)
+      if (/Start in the project folder/.test(e.message || '')) {
+        // The server's refusal belongs under the command field.
+        setMoreOpen(true)
+        form.setFields([{ name: 'command', errors: [e.message] }])
+      } else {
+        message.error(e.message)
+      }
     } finally {
       setSaving(false)
     }
@@ -221,6 +236,30 @@ export default function McpServerModal({ open, server, preset, onClose, onSaved 
             >
               <Input.TextArea rows={3} placeholder="GITHUB_TOKEN=ghp_..." />
             </Form.Item>
+            <Collapse
+              ghost
+              size="small"
+              style={{ marginBottom: 12 }}
+              activeKey={moreOpen || startInProject ? ['more'] : []}
+              onChange={(keys) => setMoreOpen(keys.length > 0)}
+              items={[
+                {
+                  key: 'more',
+                  label: 'More options',
+                  forceRender: true,
+                  children: (
+                    <Form.Item
+                      name="start_in_project"
+                      label="Start in the project folder"
+                      valuePropName="checked"
+                      extra="Only for tools that must start inside the project. The project's own files can then change what the tool runs."
+                    >
+                      <Switch data-testid="mcp-start-in-project" />
+                    </Form.Item>
+                  ),
+                },
+              ]}
+            />
           </>
         ) : (
           <>
