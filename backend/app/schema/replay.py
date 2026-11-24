@@ -187,7 +187,9 @@ def _parse(sql: str, deadline: float | None = None):
 
 
 def _ident(node) -> str:
-    return node.name if node is not None else ""
+    if node is None:
+        return ""
+    return node if isinstance(node, str) else node.name
 
 
 def table_key(schema: str | None, name: str) -> str:
@@ -210,6 +212,7 @@ class _Replay:
         self.s = RootSchema()
         self.deadline = deadline
         self.idx: dict[str, str] = {}  # lowercase -> table key
+        self.counted = False
 
     # ---- table lookup
     def get(self, name: str) -> Table | None:
@@ -226,6 +229,9 @@ class _Replay:
             self.s.tables.pop(k, None)
 
     def bad(self, where: str):
+        if self.counted:  # a statement counts once, however many parts of it were not understood
+            return
+        self.counted = True
         self.s.not_understood_count += 1
         if len(self.s.not_understood_samples) < SAMPLES:
             self.s.not_understood_samples.append(where)
@@ -238,7 +244,14 @@ class _Replay:
             for sql, line in split_statements(text, self.deadline):
                 if self.deadline is not None and time.monotonic() > self.deadline:
                     raise TimeoutError("schema replay over budget")
-                self.statement(sql, rel, f"{rel}:{line}")
+                at = f"{rel}:{line}"
+                self.counted = False
+                try:
+                    self.statement(sql, rel, at)
+                except TimeoutError:
+                    raise
+                except Exception:  # a statement we cannot handle never breaks the answer
+                    self.bad(at)
         return self.s
 
     def statement(self, sql: str, rel: str, at: str):
@@ -254,9 +267,6 @@ class _Replay:
                     self.put(t)
                 elif t is not None:
                     t.uncertain = True
-            return
-        if len(sql) > MAX_STATEMENT:
-            self.bad(at)
             return
         parsed = _parse(sql, self.deadline)
         if parsed is None:

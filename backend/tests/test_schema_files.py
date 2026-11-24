@@ -152,3 +152,45 @@ def test_root_swapped_for_link_after_listing_is_not_followed(tmp_path, monkeypat
 
     monkeypatch.setattr(files, "_after_list", swap)
     assert [f for r in files.collect(str(proj)).roots for f in r.files] == []
+
+
+def test_changed_size_is_rescanned_once(tmp_path, monkeypatch):
+    p = _w(tmp_path, "migrations/1.sql", "create table a (id int);")
+    calls = []
+
+    def grow():
+        calls.append(1)
+        if len(calls) == 1:
+            p.write_text("create table a (id int);\ncreate table b (id int);")
+
+    monkeypatch.setattr(files, "_after_list", grow)
+    c = files.collect(str(tmp_path))
+    assert "table b" in _names(c, "migrations")[0][1] and c.limits == []
+
+
+def test_still_changing_file_is_read_and_named(tmp_path, monkeypatch):
+    p = _w(tmp_path, "migrations/1.sql", "x")
+    n = []
+
+    def grow():
+        n.append(1)
+        p.write_text("create table a (id int);" + " " * len(n))
+
+    monkeypatch.setattr(files, "_after_list", grow)
+    c = files.collect(str(tmp_path))
+    assert len(_names(c, "migrations")) == 1
+    assert "migrations/1.sql changed while it was being read." in c.limits
+
+
+def test_project_folder_is_not_reopened_by_path(tmp_path, monkeypatch):
+    proj, out = tmp_path / "proj", tmp_path / "outside"
+    _w(proj, "migrations/1.sql", "create table fine (id int);")
+    _w(out, "migrations/1.sql", "create table LEAKED (id int);")
+
+    def swap():
+        os.rename(proj, tmp_path / "moved")
+        os.symlink(out, proj)
+
+    monkeypatch.setattr(files, "_after_list", swap)
+    c = files.collect(str(proj))
+    assert [f[1] for f in _names(c, "migrations")] == ["create table fine (id int);"]

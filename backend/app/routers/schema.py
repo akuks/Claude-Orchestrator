@@ -5,6 +5,7 @@ files' path/size/mtime signature). Any project member; a task may read its own p
 """
 
 import asyncio
+import logging
 import os
 import threading
 import time
@@ -23,6 +24,7 @@ from ..schema import files as schema_files
 from ..schema import replay as schema_replay
 from ..skillpacks.update import current_sha_fast
 
+log = logging.getLogger(__name__)
 router = APIRouter(prefix="/projects/{project_id}/schema", tags=["schema"])
 
 BUDGET_SECONDS = 10.0
@@ -30,6 +32,7 @@ MAX_TABLES, MAX_COLUMNS, MAX_LINKS, MAX_DECISIONS = 60, 200, 50, 3
 NOTE_NONE = ("No SQL migration files found. Looked in migrations/, db/migrations/, "
              "supabase/migrations/ and prisma/migrations/.")
 NOTE_SLOW = "Reading the migration files took too long."
+NOTE_FAILED = "The migration files could not be read."
 NOTE_OK = "Worked out by reading the SQL migration files in order. Nothing was run and no database was contacted."
 WORKERS = 2
 _CACHE_MAX = 32
@@ -39,7 +42,7 @@ _TIMEOUT_MEMORY = 60.0
 _pool = ThreadPoolExecutor(max_workers=WORKERS, thread_name_prefix="schema")
 _lock = threading.Lock()  # guards everything below
 _slots = threading.Semaphore(WORKERS)
-_inflight: set[str] = set()  # folders being read right now: one job each
+_inflight: dict = {}  # real folder path -> the running job's future (shared by overlapping requests)
 _cache: "OrderedDict[tuple, tuple[list, int]]" = OrderedDict()
 _cache_bytes = 0
 _timed_out: dict[tuple, float] = {}  # (folder, signature) -> remembered until (monotonic)
@@ -93,8 +96,14 @@ def _work(directory: str, deadline: float):
         hit = _cache_get(key)
         if hit is None:
             collected = schema_files.read(sc, deadline)
-            hit = [(rf.root, len(rf.files), schema_replay.replay(rf.files, deadline=deadline))
-                   for rf in collected.roots]
+            if collected.changed:  # a file changed since the listing: list again once, then take it as it is
+                sc.close()
+                sc = schema_files.scan(directory, deadline)
+                key = (sc.base, sc.signature)
+                collected = schema_files.read(sc, deadline, accept_changed=True)
+            results = [(rf.root, len(rf.files), schema_replay.replay(rf.files, deadline=deadline))
+                       for rf in collected.roots]
+            hit = (collected.limits, results)
             _cache_put(key, hit, sum(f[1] for f in sc.signature) + 1024)
     except TimeoutError:
         if sc is not None and sc.signature:  # ran out during the listing: nothing to remember it by
@@ -103,8 +112,11 @@ def _work(directory: str, deadline: float):
                 for k in [k for k, v in _timed_out.items() if v < time.monotonic()]:
                     _timed_out.pop(k, None)
         return None
+    finally:
+        if sc is not None:
+            sc.close()
     sha = current_sha_fast(directory)
-    return (sc.limits, hit, sha[:7] if sha else None)
+    return (hit[0], hit[1], sha[:7] if sha else None)
 
 
 def _job(directory: str, key: str, deadline: float):
@@ -112,24 +124,30 @@ def _job(directory: str, key: str, deadline: float):
         return _work(directory, deadline)
     finally:
         with _lock:
-            _inflight.discard(key)
+            _inflight.pop(key, None)
         _slots.release()
 
 
-def _submit(directory: str, deadline: float):
-    """Start a job, or None when this folder is already being read or both workers are busy."""
-    key = os.path.normpath(directory)
-    with _lock:
-        if key in _inflight or not _slots.acquire(blocking=False):
-            return None
-        _inflight.add(key)
-    try:
-        return _pool.submit(_job, directory, key, deadline)
-    except BaseException:
+async def _submit(directory: str, deadline: float):
+    """The running job for this folder (shared), or a new one. Waits for a free worker within the budget;
+    None when the budget runs out first."""
+    key = os.path.realpath(directory)
+    while True:
         with _lock:
-            _inflight.discard(key)
-        _slots.release()
-        raise
+            fut = _inflight.get(key)
+            if fut is not None:
+                return fut
+            if _slots.acquire(blocking=False):
+                try:
+                    fut = _pool.submit(_job, directory, key, deadline)
+                except BaseException:
+                    _slots.release()
+                    raise
+                _inflight[key] = fut
+                return fut
+        if time.monotonic() >= deadline:
+            return None
+        await asyncio.sleep(0.02)
 
 
 async def _check_agent(s, request: Request, project_id: str) -> None:
@@ -186,13 +204,16 @@ async def get_schema(project_id: str, request: Request, table: str | None = None
             decisions = await asyncio.wait_for(decision_snapshot.snapshot(s, project), max(0.0, deadline - time.monotonic()))
         except (asyncio.TimeoutError, TimeoutError):
             return _slow()
-    fut = _submit(directory, deadline)
+    fut = await _submit(directory, deadline)
     if fut is None:
         return _slow()
     try:
         got = await asyncio.wait_for(asyncio.shield(asyncio.wrap_future(fut)), max(0.0, deadline - time.monotonic()))
     except (asyncio.TimeoutError, TimeoutError):
         return _slow()
+    except Exception:
+        log.exception("schema: reading the migration files failed")
+        return _empty(NOTE_FAILED, found=True)
     if got is None:
         return _slow()
     scan_limits, results, sha = got

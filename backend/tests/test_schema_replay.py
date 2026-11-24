@@ -197,3 +197,27 @@ def test_other_alter_actions_are_counted():
 def test_alter_on_unknown_table_is_counted():
     s = run("ALTER TABLE ghost ADD COLUMN x int;")
     assert s.not_understood_count == 1 and s.not_understood_samples == ["m/1.sql:1"]
+
+
+def test_crafted_table_name_is_counted_not_a_crash():
+    s = run("CREATE TABLE ok (id int);\nCREATE TABLE public. . a AS SELECT 1;\nCREATE TABLE ok2 (id int);")
+    assert list(s.tables) == ["ok", "a", "ok2"] and s.tables["a"].uncertain  # read as a table of unknown columns
+    assert s.not_understood_count == 0
+
+
+def test_any_exception_in_a_statement_counts_that_statement(monkeypatch):
+    import app.schema.replay as r
+
+    def boom(self, *a, **k):
+        raise AttributeError("x")
+
+    monkeypatch.setattr(r._Replay, "create", boom)
+    s = run("CREATE TABLE a (id int);\nALTER TABLE a ADD COLUMN x int;\nDROP TABLE a;")
+    assert s.not_understood_count == 2 and s.not_understood_samples[0] == "m/1.sql:1"
+
+
+def test_statement_counted_once():
+    s = run("CREATE TABLE a (x int);", "ALTER TABLE a ALTER COLUMN x SET DEFAULT 1, ALTER COLUMN x SET DEFAULT 2;")
+    assert s.not_understood_count == 1
+    s = run("CREATE TABLE a (x int);\nALTER TABLE a ALTER COLUMN x SET DEFAULT 1; ALTER TABLE a OWNER TO b;")
+    assert s.not_understood_count == 2

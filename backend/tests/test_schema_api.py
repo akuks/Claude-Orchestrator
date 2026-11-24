@@ -127,30 +127,87 @@ def test_real_deadline_stops_real_slow_parse(client, tmp_path, monkeypatch):
     assert client.get(f"/projects/{p['id']}/schema").json()["note"] == schema_router.NOTE_SLOW
 
 
-def test_busy_answers_at_once(client, tmp_path, monkeypatch):
+def _overlap(client, pid, n, calls, monkeypatch):
+    import threading
+
+    real = schema_router.schema_replay.replay
+
+    def slowish(files, deadline=None):
+        calls.append(1)
+        time.sleep(0.4)
+        return real(files, deadline=deadline)
+
+    monkeypatch.setattr(schema_router.schema_replay, "replay", slowish)
+    out = []
+
+    def go():
+        out.append(client.get(f"/projects/{pid}/schema").json())
+
+    ts = [threading.Thread(target=go) for _ in range(n)]
+    [t.start() for t in ts]
+    [t.join() for t in ts]
+    return out
+
+
+def test_overlapping_requests_share_one_read(client, tmp_path, monkeypatch):
+    for n in (2, 10):
+        p, d = _project(client, tmp_path)
+        _sql(d, "1.sql", "CREATE TABLE a (id int);")
+        calls = []
+        out = _overlap(client, p["id"], n, calls, monkeypatch)
+        assert len(out) == n and all(o["found"] and o["roots"][0]["tables"][0]["name"] == "a" for o in out)
+        assert len(calls) == 1  # the parse ran once
+
+
+def test_waits_for_a_free_worker_within_budget(client, tmp_path, monkeypatch):
+    import threading
+
     p, d = _project(client, tmp_path)
     _sql(d, "1.sql", "CREATE TABLE a (id int);")
-    import os as _os
-    key = _os.path.normpath(str(d))
-    with schema_router._lock:
-        schema_router._inflight.add(key)  # this folder is being read already
-    try:
-        j = client.get(f"/projects/{p['id']}/schema").json()
-    finally:
-        with schema_router._lock:
-            schema_router._inflight.discard(key)
-    assert j["note"] == schema_router.NOTE_SLOW and j["found"] is True and j["roots"] == []
+    held = 0
+    while schema_router._slots.acquire(blocking=False):
+        held += 1
+    threading.Timer(0.3, lambda: [schema_router._slots.release() for _ in range(held)]).start()
+    t0 = time.monotonic()
+    j = client.get(f"/projects/{p['id']}/schema").json()
+    assert 0.25 < time.monotonic() - t0 < 3 and j["roots"][0]["tables"][0]["name"] == "a"
+    # budget runs out while both workers stay busy: only then "took too long"
+    p2, d2 = _project(client, tmp_path)
+    _sql(d2, "1.sql", "CREATE TABLE b (id int);")
     held = 0
     try:
-        while schema_router._slots.acquire(blocking=False):  # both workers busy
+        while schema_router._slots.acquire(blocking=False):
             held += 1
-        t0 = time.monotonic()
-        assert client.get(f"/projects/{p['id']}/schema").json()["note"] == schema_router.NOTE_SLOW
-        assert time.monotonic() - t0 < 0.5
+        monkeypatch.setattr(schema_router, "BUDGET_SECONDS", 0.3)
+        j = client.get(f"/projects/{p2['id']}/schema").json()
     finally:
         for _ in range(held):
             schema_router._slots.release()
+    assert j["note"] == schema_router.NOTE_SLOW and j["found"] is True and j["roots"] == []
+
+
+def test_unexpected_error_is_a_plain_answer(client, tmp_path, monkeypatch):
+    p, d = _project(client, tmp_path)
+    _sql(d, "1.sql", "CREATE TABLE a (id int);")
+    real = schema_router.schema_replay.replay
+
+    def boom(files, deadline=None):
+        raise ValueError("boom")
+
+    monkeypatch.setattr(schema_router.schema_replay, "replay", boom)
+    r = client.get(f"/projects/{p['id']}/schema")
+    assert r.status_code == 200
+    j = r.json()
+    assert j["found"] is True and j["roots"] == [] and j["note"] == "The migration files could not be read."
+    monkeypatch.setattr(schema_router.schema_replay, "replay", real)
     assert client.get(f"/projects/{p['id']}/schema").json()["roots"][0]["tables"][0]["name"] == "a"
+
+
+def test_crafted_statement_does_not_break_the_tab(client, tmp_path):
+    p, d = _project(client, tmp_path)
+    _sql(d, "1.sql", "CREATE TABLE ok (id int);\nCREATE TABLE public. . a AS SELECT 1;\n")
+    r = client.get(f"/projects/{p['id']}/schema")
+    assert r.status_code == 200 and r.json()["roots"][0]["tables"][0]["name"] == "ok"
 
 
 def test_big_single_statement_and_garbage_answer(client, tmp_path):
