@@ -256,6 +256,7 @@ export default function McpRegistry({ isAdmin = false }) {
           {!row.enabled && <Tag>disabled</Tag>}
           {row.environment === 'dev' && <Tag color="green">dev DB</Tag>}
           {row.environment === 'prod' && <Tag color="red">prod DB</Tag>}
+          {row.start_in_project && <Tag color="orange">Starts in the project folder</Tag>}
         </Space>
       ),
     },

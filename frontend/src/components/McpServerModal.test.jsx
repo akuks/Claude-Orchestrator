@@ -71,3 +71,60 @@ describe('McpServerModal: co-guard fields', () => {
     expect(api.updateServer).toHaveBeenCalledWith('s1', expect.objectContaining({ environment: 'prod', default_action: 'block' }))
   })
 })
+
+describe('McpServerModal: start in the project folder', () => {
+  const sw = () => document.querySelector('[data-testid="mcp-start-in-project"]')
+  const fillNew = async () => {
+    await type(document.querySelector('input[placeholder="e.g. github"]'), 'db')
+    await type(document.querySelector('input[placeholder="e.g. npx"]'), 'npx')
+  }
+  it('is under a collapsed More options and not sent when off', async () => {
+    view = await render(<McpServerModal open server={null} onClose={() => {}} />)
+    await flush()
+    expect(document.body.textContent).toContain('More options')
+    expect(document.body.textContent).toContain('Start in the project folder')
+    expect(document.body.textContent).toContain("The project's own files can then change what the tool runs.")
+    expect(document.querySelector('.ant-collapse-item-active')).toBeNull()
+    await fillNew()
+    await click(btn('Add'))
+    await flush()
+    expect(api.createServer.mock.calls[0][0]).not.toHaveProperty('start_in_project')
+  })
+  it('sends true when on', async () => {
+    view = await render(<McpServerModal open server={null} onClose={() => {}} />)
+    await flush()
+    await fillNew()
+    await click(sw())
+    await click(btn('Add'))
+    await flush()
+    expect(api.createServer).toHaveBeenCalledWith(expect.objectContaining({ start_in_project: true }))
+  })
+  it('is hidden for http tools', async () => {
+    view = await render(<McpServerModal open server={{ ...server, transport: 'http', command: null, url: 'https://x.test/sse' }} onClose={() => {}} />)
+    await flush()
+    expect(sw()).toBeNull()
+    expect(document.body.textContent).not.toContain('More options')
+  })
+  it('opens on its own when on, and edit sends false when turned off', async () => {
+    view = await render(<McpServerModal open server={{ ...server, start_in_project: true }} onClose={() => {}} />)
+    await flush()
+    expect(document.querySelector('.ant-collapse-item-active')).not.toBeNull()
+    await click(sw())
+    await click(btn('Save'))
+    await flush()
+    expect(api.updateServer).toHaveBeenCalledWith('s1', expect.objectContaining({ start_in_project: false }))
+  })
+  it('shows the refusal under the command field', async () => {
+    api.createServer.mockRejectedValueOnce(new Error("A command that starts with ./ needs 'Start in the project folder'"))
+    view = await render(<McpServerModal open server={null} onClose={() => {}} />)
+    await flush()
+    await type(document.querySelector('input[placeholder="e.g. github"]'), 'db')
+    await type(document.querySelector('input[placeholder="e.g. npx"]'), './bin/x')
+    await click(btn('Add'))
+    await flush()
+    for (let i = 0; i < 20 && !document.querySelector('.ant-form-item-explain-error'); i++) await flush()
+    expect(document.querySelector('#command').closest('.ant-form-item').textContent).toContain(
+      "A command that starts with ./ needs 'Start in the project folder'",
+    )
+  })
+})
