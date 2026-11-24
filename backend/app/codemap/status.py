@@ -8,7 +8,7 @@ import re
 
 from sqlalchemy import select
 
-from .. import gitsafe, redaction
+from .. import gitsafe, mcp_manager, redaction
 from ..models import McpServer, Project, ProjectIndex
 from ..skillpacks.update import current_sha_fast
 from . import indexer
@@ -23,6 +23,18 @@ def is_code_map_server(server) -> bool:
     """The code map tool: the command (or its arguments, or the name) contains `codebase-memory`."""
     hay = " ".join([server.name or "", server.command or "", *[str(a) for a in (server.args or [])]])
     return SERVER_MARK in hay.lower()
+
+
+def code_map_server(servers):
+    """The code map server among `servers` (enabled ones first), or None."""
+    found = [m for m in servers if is_code_map_server(m)]
+    found.sort(key=lambda m: not getattr(m, "enabled", True))
+    return found[0] if found else None
+
+
+def tool_prefix(server) -> str:
+    """The prefix of this server's tool names, as the worker's --mcp-config names it."""
+    return f"mcp__{mcp_manager.mcp_server_prefix(server.name)}__"
 
 
 async def server_registered(s, project) -> bool:
