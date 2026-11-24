@@ -2,7 +2,10 @@
 
 Org settings (``GuardOrgSettings.ground_rules``, admin-only to change):
 ``{"grounding": bool, "short_answers": bool, "usage_care": bool, "notes": bool, "questions": bool, "decisions": bool,
-"extra": str}``.
+"local_first": bool, "extra": str}``.
+
+``local_first`` (phase 6c, F105; main session and helpers): keep a copy in the project of anything published
+elsewhere. Settings stored before it existed read it as on (``normalized``).
 
 ``decisions`` (phase 4a) adds no text here: when on, an own project's decisions go into the policy and the run's
 system prompt gets their index (``policy_inputs.gather``); ``included`` leaves it out.
@@ -25,10 +28,11 @@ from ..guard.co_hook import DATA_LINE, NOTES_LINE
 from ..redaction import clean_text
 
 GROUND_EXTRA_MAX = 2000
-SWITCHES = ("grounding", "short_answers", "usage_care", "notes", "questions", "decisions")
+SWITCHES = ("grounding", "short_answers", "usage_care", "notes", "questions", "decisions", "local_first")
 DEFAULTS = {"grounding": True, "short_answers": True, "usage_care": True, "notes": True, "questions": True,
-            "decisions": True, "extra": ""}
-TEXT_SWITCHES = ("grounding", "short_answers", "usage_care", "notes", "questions")  # the switches with a rule text
+            "decisions": True, "local_first": True, "extra": ""}
+# the switches with a rule text
+TEXT_SWITCHES = ("grounding", "short_answers", "usage_care", "notes", "questions", "local_first")
 
 GROUNDING = (
     "co-orchestrator grounding rule:\n"
@@ -76,6 +80,11 @@ PRECEDENCE_LINE = (
     "start, do what co-orchestrator's lines say first (show where the work stands, check a cut-off session), then use "
     "superpowers' skills for the work. If the two still disagree: the user's own instruction, then co-orchestrator's "
     "block list and grounding rule, then superpowers."
+)
+# phase 6c (F105): the spec's sentence, verbatim. Main session and helpers.
+LOCAL_FIRST = (
+    "Nothing you make may live only outside the project folder. If you publish a page, document or file somewhere "
+    "else, keep its source file in the project too."
 )
 PLUGIN_JSON_MAX = 65536
 
@@ -148,6 +157,7 @@ def main_text(cfg: dict) -> str:
              USAGE_CARE_MAIN if cfg["usage_care"] else None,
              NOTES_RULE if cfg["notes"] else None,
              QUESTIONS_RULE if cfg["questions"] else None,
+             LOCAL_FIRST if cfg["local_first"] else None,
              cfg["extra"].strip()]
     return "\n\n".join(p for p in parts if p)
 
@@ -157,5 +167,6 @@ def helper_text(cfg: dict, external: bool) -> str:
     parts = [DATA_LINE if external else None,
              GROUNDING if cfg["grounding"] else None,
              USAGE_CARE_HELPER if cfg["usage_care"] else None,
+             LOCAL_FIRST if cfg["local_first"] else None,
              cfg["extra"].strip()]
     return "\n\n".join(p for p in parts if p)

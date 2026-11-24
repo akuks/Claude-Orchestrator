@@ -30,6 +30,7 @@ from urllib.parse import quote, urlsplit
 from urllib.request import ProxyHandler, build_opener
 
 from ..config import settings
+from . import co_hook
 from .co_hook import APPROVAL_WAIT_MAX
 
 # Help text for the project's guard settings (shown by the UI in Task 5).
@@ -472,6 +473,32 @@ def read_spool_raw(task_id: str) -> list[dict]:
     except OSError:
         pass
     return out
+
+
+OUTPUT_EVENT = "output"
+
+
+def output_payload(rec) -> dict | None:
+    """An ``Output`` spool line -> the ``output`` task event's payload ``{link, tool, title, local_file, kept}``,
+    or None. The spool is written inside the task's folder, so the line is checked again with the hook's own
+    rules: an http(s) link, cleaned and at most 500 chars; ``tool`` (required) and ``title`` single-line and
+    capped; ``local_file`` a relative path without ``..`` or null. Anything else -> None."""
+    if not isinstance(rec, dict) or rec.get("event") != "Output":
+        return None
+    link = co_hook.clean_link(rec.get("link"))
+    tool = co_hook.clean_label(rec.get("tool"), co_hook.OUTPUT_TOOL_MAX)
+    title, local = rec.get("title"), rec.get("local_file")
+    if link is None or tool is None or not (title is None or isinstance(title, str)) \
+            or not (local is None or isinstance(local, str)):
+        return None
+    title = co_hook.clean_label(title, co_hook.OUTPUT_TITLE_MAX) if title is not None else None
+    if local is not None:
+        bad = (not local or len(local) > co_hook.OUTPUT_PATH_LEN or any(c in local for c in "\0\\\n\t")
+               or co_hook.HIDDEN_CHARS.search(local) or local != local.strip() or local.startswith("/")
+               or ".." in local.split("/") or co_hook.redact(local, None) != local)
+        if bad:
+            return None
+    return {"link": link, "tool": tool, "title": title, "local_file": local, "kept": bool(local)}
 
 
 def read_spool(task_id: str) -> list[dict]:

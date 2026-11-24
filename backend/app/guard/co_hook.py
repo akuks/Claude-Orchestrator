@@ -81,6 +81,11 @@ Final wave:
 * Every spool line is fsynced (and the task dir when the line created the
   file).
 
+Phase 6c (F105): a PostToolUse of a publishing call (an MCP tool whose name's last part says create, publish,
+upload, post, share, deploy or send, or Bash running ``gh pr|gist|release|issue create``) whose answer holds an
+http(s) link spools ``{"event": "Output", "link", "tool", "title", "local_file"}`` - the link without its query,
+fragment or user:password, at most 20 per task, each link once (``outputs.json``). No network, no text.
+
 ConfigChange (unverified with a real CLI): exit 2 blocks a settings change
 that sets ``disableAllHooks`` / ``allowManagedHooksOnly`` or disables the
 co-guard plugin.
@@ -1654,6 +1659,174 @@ def _code_map_note(policy, payload):
     return text
 
 
+# --- phase 6c (F105): what a run published outside the project (the worker checks each line again with
+# clean_link / clean_output, imported from here) ---
+OUTPUT_WORDS = ("create", "publish", "upload", "post", "share", "deploy", "send")
+_OUTPUT_GH = re.compile(r"(?<![\w-])gh\s+(?:pr|gist|release|issue)\s+create(?![\w-])")
+OUTPUTS_FILE = "outputs.json"  # the links this task's run already spooled
+OUTPUTS_MAX = 20  # Output records per task
+OUTPUT_LINK_MAX = 500
+OUTPUT_TITLE_MAX = 120
+OUTPUT_TOOL_MAX = 200
+OUTPUT_SCAN_MAX = 64 * 1024  # characters of the response searched for the link
+OUTPUT_PATHS_MAX = 20  # input strings looked up on disk for local_file
+OUTPUT_PATH_LEN = 4096
+_OUTPUT_LINK = re.compile(r"https?://[^\s<>\"'`]+", re.IGNORECASE)
+_OUTPUT_TRIM = ").,;:!?]}>*'\""
+_OUTPUT_HOST = re.compile(r"^(?:[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\.)*[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\.?$|^[0-9a-f:.]+$")
+
+
+def _output_tool(payload):
+    """True for a publishing call: an MCP tool whose name's last part holds one of OUTPUT_WORDS, or Bash running
+    ``gh pr|gist|release|issue create``."""
+    tool = payload.get("tool_name")
+    if not isinstance(tool, str):
+        return False
+    if tool.startswith("mcp__"):
+        parts = tool.split("__")
+        last = parts[-1].lower() if len(parts) >= 3 else ""
+        return any(w in last for w in OUTPUT_WORDS)
+    if tool == "Bash":
+        ti = payload.get("tool_input")
+        cmd = ti.get("command") if isinstance(ti, dict) else None
+        return isinstance(cmd, str) and _OUTPUT_GH.search(cmd[:100000]) is not None
+    return False
+
+
+def clean_link(raw):
+    """``scheme://host[:port]/path`` of an http(s) link (query, fragment and user:password removed), or None when
+    it is not one, holds a control/hidden character or a secret, or is longer than OUTPUT_LINK_MAX."""
+    import urllib.parse
+
+    if not isinstance(raw, str) or len(raw) > 8 * OUTPUT_LINK_MAX or HIDDEN_CHARS.search(raw) \
+            or any(c.isspace() for c in raw):
+        return None
+    raw = raw.rstrip(_OUTPUT_TRIM)
+    try:
+        u = urllib.parse.urlsplit(raw)
+        host, port = u.hostname, u.port
+    except ValueError:
+        return None
+    scheme = u.scheme.lower()
+    if scheme not in ("http", "https") or not host or not _OUTPUT_HOST.match(host):
+        return None
+    if ":" in host:
+        host = f"[{host}]"
+    link = urllib.parse.urlunsplit((scheme, host + (f":{port}" if port is not None else ""), u.path, "", ""))
+    if len(link) > OUTPUT_LINK_MAX or redact(link, None) != link:
+        return None
+    return link
+
+
+def clean_label(value, cap):
+    """Single-line plain text (hidden characters removed, secrets masked), at most ``cap`` characters; None when
+    empty or not text."""
+    if not isinstance(value, str) or len(value) > 100000:
+        return None
+    return redact(_one_line(value), None)[:cap].strip() or None
+
+
+def _output_title(ti):
+    for k in ("title", "name", "subject"):
+        v = clean_label(ti.get(k), OUTPUT_TITLE_MAX) if isinstance(ti, dict) else None
+        if v:
+            return v
+    return None
+
+
+def _input_strings(value):
+    """The strings of a tool input, depth first in order (bounded)."""
+    stack, steps = [value], 0
+    while stack and steps < 2000:
+        steps += 1
+        v = stack.pop()
+        if isinstance(v, str):
+            yield v
+        elif isinstance(v, dict):
+            stack.extend(reversed(list(v.values())[:200]))
+        elif isinstance(v, (list, tuple)):
+            stack.extend(reversed(v[:200]))
+
+
+def _output_local_file(policy, payload):
+    """The first string of the tool input (for Bash, then each word of the command) that names an existing
+    regular file - not a link, its real path inside the project folder or the task workspace - relative to that
+    folder; None otherwise. A ``..`` segment is never followed; an absolute path must first be lexically inside
+    one of them, so other places are never looked up. At most OUTPUT_PATHS_MAX lookups."""
+    roots = []
+    for key in ("project_dir", "cwd"):
+        r = policy.get(key)
+        if isinstance(r, str) and os.path.isabs(r) and "\0" not in r:
+            roots.append((os.path.normpath(r), os.path.realpath(r)))
+    if not roots:
+        return None
+    base = roots[-1][0]  # a relative string is read from the task workspace (the run's cwd)
+    ti = payload.get("tool_input")
+    cands = list(_input_strings(ti))
+    if payload.get("tool_name") == "Bash" and isinstance(ti, dict) and isinstance(ti.get("command"), str):
+        cands += [w.strip("'\"") for w in ti["command"][:OUTPUT_PATH_LEN].split() if not w.startswith("-")]
+    checked = 0
+    for s in cands:
+        if checked >= OUTPUT_PATHS_MAX:
+            break
+        if not s or len(s) > OUTPUT_PATH_LEN or any(c in s for c in "\0\n\t") or HIDDEN_CHARS.search(s) \
+                or ".." in s.replace(os.sep, "/").split("/"):
+            continue
+        path = os.path.normpath(s if os.path.isabs(s) else os.path.join(base, s))
+        if not any(_inside(path, given) is not None or _inside(path, real) is not None for given, real in roots):
+            continue
+        checked += 1
+        try:
+            if not stat.S_ISREG(os.lstat(path).st_mode):
+                continue  # a link, a folder, a device
+            real = os.path.realpath(path)
+        except (OSError, ValueError):
+            continue
+        for _given, rroot in roots:
+            rel = _inside(real, rroot)
+            if rel is not None:
+                return rel
+    return None
+
+
+def _outputs_seen(path):
+    try:
+        with open(path, encoding="utf-8") as f:
+            data = json.load(f)
+        links = data.get("links") if isinstance(data, dict) else None
+        return [x for x in links if isinstance(x, str)] if isinstance(links, list) else []
+    except (OSError, ValueError):
+        return []
+
+
+def _output_record(policy, payload):
+    """Spool ``{"event":"Output","link","tool","title","local_file"}`` for a publishing call whose answer holds an
+    http(s) link: the first one, cleaned (``clean_link``; a bad first link records nothing); at most OUTPUTS_MAX
+    per task and each link once (the ``outputs.json`` state file, under the task lock, so the spool is never
+    scanned for it). Spool only: no network, nothing shown to the agent."""
+    if not _output_tool(payload):
+        return
+    resp = payload.get("tool_response", payload.get("tool_result"))
+    m = _OUTPUT_LINK.search(_response_text(resp, OUTPUT_SCAN_MAX))
+    link = clean_link(m.group(0)) if m else None
+    if link is None:
+        return
+    state = os.path.join(os.environ["CO_TASK_DIR"], OUTPUTS_FILE)
+    with _TaskLock():
+        seen = _outputs_seen(state)
+        if link in seen or len(seen) >= OUTPUTS_MAX:
+            return
+        rec = {"event": "Output", "link": link, "tool": clean_label(payload["tool_name"], OUTPUT_TOOL_MAX),
+               "title": _output_title(payload.get("tool_input")),
+               "local_file": _output_local_file(policy, payload)}
+        _spool_strict(rec)
+        tmp = state + ".tmp"
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            json.dump({"links": seen + [link]}, f)
+        os.replace(tmp, state)
+
+
 def post_tool_use(payload, policy):
     """The additionalContext text of a PostToolUse (parts joined by a blank line), or None. Run after the
     ``done`` write, so the count includes this call. Never changes a decision. Every shown nudge spools the
@@ -1670,6 +1843,10 @@ def post_tool_use(payload, policy):
     try:  # phase 6b: how fresh a code map answer is, its files' decisions, old code
         parts.append(_code_map_note(policy, payload))
     except Exception as exc:  # noqa: BLE001 - a note never fails the other nudges
+        guard_error("PostToolUse", exc)
+    try:  # phase 6c: a link the call published outside the project (spool only)
+        _output_record(policy, payload)
+    except Exception as exc:  # noqa: BLE001 - never fails the call or the nudges
         guard_error("PostToolUse", exc)
     return "\n\n".join(p for p in parts if p) or None
 

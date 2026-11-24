@@ -100,11 +100,13 @@ def test_main_text_uses_hook_notes_line():
     src = pathlib.Path(gr.__file__).read_text()
     assert "Start with the lines" not in src and "--data-binary" not in src
     off = gr.main_text(gr.DEFAULTS | {"grounding": False, "short_answers": False, "usage_care": False,
-                                      "notes": False, "questions": False, "extra": "  be kind  "})
+                                      "notes": False, "questions": False, "local_first": False,
+                                      "extra": "  be kind  "})
     assert off == "be kind"
-    assert gr.included(gr.DEFAULTS) == ["grounding", "short_answers", "usage_care", "notes", "questions"]
+    assert gr.included(gr.DEFAULTS) == ["grounding", "short_answers", "usage_care", "notes", "questions",
+                                        "local_first"]
     assert gr.included(gr.DEFAULTS | {"usage_care": False, "extra": "x"}) == [
-        "grounding", "short_answers", "notes", "questions", "extra"]
+        "grounding", "short_answers", "notes", "questions", "local_first", "extra"]
 
 
 def test_helper_text():
@@ -114,7 +116,7 @@ def test_helper_text():
     assert ext.index(gr.GROUNDING) < ext.index(gr.USAGE_CARE_HELPER) < ext.index("ask first")
     assert co_hook.DATA_LINE not in gr.helper_text(cfg, False)
     assert gr.SHORT_ANSWERS not in ext and co_hook.NOTES_LINE not in ext
-    assert gr.helper_text(cfg | {"usage_care": False, "grounding": False}, False) == "ask first"
+    assert gr.helper_text(cfg | {"usage_care": False, "grounding": False, "local_first": False}, False) == "ask first"
 
 
 # ---- org settings -------------------------------------------------------------------------------
@@ -179,11 +181,12 @@ def test_system_prompt_gets_enabled_rules(client, ground_restored):
     assert "keep short notes" in sp
     assert gr.QUESTIONS_RULE in sp
     assert _events(done["id"], "ground_rules") == [
-        {"included": ["grounding", "short_answers", "notes", "questions", "extra"]}]
+        {"included": ["grounding", "short_answers", "notes", "questions", "local_first", "extra"]}]
 
 
 def test_all_rules_off_adds_nothing(client, ground_restored):
-    _set_ground({"grounding": False, "short_answers": False, "usage_care": False, "notes": False, "questions": False})
+    _set_ground({"grounding": False, "short_answers": False, "usage_care": False, "notes": False, "questions": False,
+                 "local_first": False})
     key = env_probe_key()
     done = wait_task(client, client.post("/tasks", json={"prompt": f"hi [env-probe:{key}]"}).json()["id"])
     assert done["status"] == "completed", done.get("error")
@@ -192,7 +195,7 @@ def test_all_rules_off_adds_nothing(client, ground_restored):
 
 
 def test_policy_helper_context(client, ground_restored):
-    _set_ground({"usage_care": True, "grounding": False, "notes": False, "extra": "Ask first."})
+    _set_ground({"usage_care": True, "grounding": False, "notes": False, "local_first": False, "extra": "Ask first."})
 
     async def go():
         async with SessionLocal() as s:
@@ -286,6 +289,52 @@ def test_precedence_line_only_with_superpowers(client, ground_restored, tmp_path
         sp = _system_prompt(read_probe_args(key))
         assert gr.PRECEDENCE_LINE in sp and sp.index(gr.GROUNDING) < sp.index(gr.PRECEDENCE_LINE)
         assert _events(done["id"], "ground_rules") == [
-            {"included": ["grounding", "short_answers", "usage_care", "notes", "questions", "precedence"]}]
+            {"included": ["grounding", "short_answers", "usage_care", "notes", "questions", "local_first",
+                          "precedence"]}]
     finally:
         _drop_pack(pid)
+
+
+# ---- phase 6c: keep a copy in the project (F105) ------------------------------------------------
+
+LOCAL_FIRST = ("Nothing you make may live only outside the project folder. If you publish a page, document or file "
+               "somewhere else, keep its source file in the project too.")
+
+
+def test_local_first_on_by_default_with_the_exact_text():
+    assert gr.LOCAL_FIRST == LOCAL_FIRST
+    assert "local_first" in gr.SWITCHES and gr.DEFAULTS["local_first"] is True
+    assert LOCAL_FIRST in gr.main_text(gr.DEFAULTS)
+    for external in (False, True):
+        assert LOCAL_FIRST in gr.helper_text(gr.DEFAULTS, external)
+    assert "local_first" in gr.included(gr.DEFAULTS)
+    # after the questions rule, before the extra text
+    text = gr.main_text(gr.DEFAULTS | {"extra": "zz"})
+    assert text.index(gr.QUESTIONS_RULE) < text.index(LOCAL_FIRST) < text.index("zz")
+    helper = gr.helper_text(gr.DEFAULTS | {"extra": "zz"}, False)
+    assert helper.index(gr.USAGE_CARE_HELPER) < helper.index(LOCAL_FIRST) < helper.index("zz")
+
+
+def test_local_first_off_removes_it():
+    cfg = gr.DEFAULTS | {"local_first": False}
+    assert LOCAL_FIRST not in gr.main_text(cfg)
+    assert LOCAL_FIRST not in gr.helper_text(cfg, True) and LOCAL_FIRST not in gr.helper_text(cfg, False)
+    assert "local_first" not in gr.included(cfg)
+    assert gr.validate({"local_first": False})["local_first"] is False
+    with pytest.raises(ValueError):
+        gr.validate({"local_first": "no"})
+
+
+def test_old_stored_settings_without_the_key_read_as_on(client, ground_restored):
+    old = {"grounding": True, "short_answers": False, "usage_care": True, "notes": True, "questions": True,
+           "decisions": True, "extra": ""}
+    assert gr.normalized(old)["local_first"] is True
+    assert LOCAL_FIRST in gr.main_text(old)
+    _set_ground(old)
+    got = client.get("/guard/org-settings").json()["ground_rules"]
+    assert got["local_first"] is True and got["short_answers"] is False
+    # a PUT from a screen that does not know the switch yet keeps it on
+    assert client.put("/guard/org-settings", json={"ground_rules": old}).status_code == 200
+    assert client.get("/guard/org-settings").json()["ground_rules"]["local_first"] is True
+    assert client.put("/guard/org-settings", json={"ground_rules": {"local_first": False}}).status_code == 200
+    assert client.get("/guard/org-settings").json()["ground_rules"]["local_first"] is False
