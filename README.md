@@ -1654,17 +1654,27 @@ agent guard.
   instead of looking for one in the folders above. There is deliberately no
   `package.json` (one would let a `package.json` higher up adopt the folder as a
   workspace).
-- **Nothing to plant above.** npm also puts the `node_modules/.bin` of every folder above
-  on the tool's PATH, and no marker can stop that. So the agent guard refuses, in every
-  folder above the tool folders and the Code map build folder (up to `/`), the creation
-  of the files that steer launchers: `package.json`, `package-lock.json`,
-  `node_modules`, `.npmrc`, `pnpm-workspace.yaml`, `.pnpmfile.cjs`, `uv.toml`,
-  `bunfig.toml`, `.yarnrc.yml` and `pyproject.toml`. The task's own project folder is the
-  exception (see below).
-- **Own package cache.** Tools use their own npm cache, `workspaces/_mcp_cache/npm`
-  (owner-only, agents cannot write it), instead of the server user's `~/.npm`, unless
-  the tool's own settings set `npm_config_cache`. The Code map build already had its own
-  (under `_codemap/_home/`).
+- **The folders above.** npm also puts the `node_modules/.bin` of every folder above on
+  the tool's PATH, and no marker can stop that. So the agent guard refuses direct writes
+  and package-manager installs (`npm`/`pnpm`/`yarn`/`bun` install, add, ci, link, with
+  `--prefix`, `--dir`, `--cwd`, `-C` or after a `cd`) that would create the files that
+  steer launchers in any folder above the tool folders and the Code map build folder
+  (up to `/`): `package.json`, `package-lock.json`, `node_modules`, `.npmrc`,
+  `pnpm-workspace.yaml`, `.pnpmfile.cjs`, `uv.toml`, `bunfig.toml`, `.yarnrc.yml` and
+  `pyproject.toml`. The task's own project folder is the exception (see below).
+- **Own package cache and global folder.** Tools use their own npm cache,
+  `workspaces/_mcp_cache/npm`, and their own empty npm global folder,
+  `workspaces/_mcp_cache/npm-global` (both owner-only; agents cannot write them),
+  instead of the server user's `~/.npm` and global packages, unless the tool's own
+  settings set `npm_config_cache` / `npm_config_prefix`. So a package an agent installs
+  with `npm install -g` is not picked up by `npx`. The Code map build has its own cache
+  (under `_codemap/_home/`) and uses the same empty global folder.
+- **A stricter setup.** `CO_TOOL_RUN_DIR` (unset by default) puts the tools' per-task
+  start folders in a folder of the admin's choice instead of under `workspaces/`. Point
+  it at a folder whose parent folders the server user cannot write (for example one an
+  administrator creates under `/var/lib` and hands to the server user); then nothing can
+  be planted above a tool folder at all, whatever the guard sees. It gets the same
+  protection and cleanup.
 - **The switch.** On a tool's form, under **More options**, **Start in the project
   folder** (admins only, stdio tools only, off by default). Use it only for a tool that
   must start inside the project; the project's own files can then change what the tool
@@ -1685,10 +1695,14 @@ agent guard.
 - **This has not been run against the real `claude` command-line tool or real connected
   tools.** The change is a plain change of folder followed by the tool's command. If a
   tool stops working, turn its **Start in the project folder** switch on.
-- **This is not a sandbox.** A tool can still read the project: it is told where it is
-  and runs as the same user, with the same credentials as before. The change stops
-  agents from choosing which code runs as a tool through the folder it starts in, the
-  folders above it, or the package cache.
+- **The guard is a seatbelt, not a sandbox.** A tool can still read the project: it is
+  told where it is and runs as the same user, with the same credentials as before. The
+  folder a tool starts in, its package cache and its global folder are out of agents'
+  reach. The folders above it are protected only as far as the agent guard sees the
+  write: archive and tree-copy tools (`tar -C`, `unzip`, `rsync`, `cp -r` into a parent),
+  inline scripts and paths hidden behind unknown variables are known limits, as they are
+  for the rest of the guard. Use `CO_TOOL_RUN_DIR` (above) to close this without relying
+  on the guard.
 - **A project whose folder contains the workspaces folder** (the orchestrator checkout
   itself, used as a project) keeps its own `package.json`, `node_modules`, `.npmrc` and
   the like writable, because they are its own work. Its agents can therefore still
@@ -1813,10 +1827,14 @@ recorded decisions for the files an answer names, and labels for old code.
 - **The tool when a task starts it.** A task starts the Code map tool from a private
   folder that holds only a few inert marker files, like every connected tool now (see
   "Where connected tools start"), unless its **Start in the project folder** switch is
-  on. The build always runs from its own private folder with the same marker files, and
-  agents cannot plant launcher files in the folders above it. The limits listed under
-  "Where connected tools start" apply here too: the orchestrator checkout used as a
-  project, and settings in a project's env, can still influence the build.
+  on. The build always runs from its own private folder with the same marker files, its
+  own package cache and an empty npm global folder, and the agent guard refuses direct
+  writes and package installs that would put launcher files in the folders above it.
+  The limits listed under "Where connected tools start" apply here too: the guard is a
+  seatbelt (archives, tree copies and inline scripts are known limits), the
+  orchestrator checkout used as a project, and settings in a project's env, can still
+  influence the build. (`CO_TOOL_RUN_DIR` moves only the connected tools' folders, not
+  the build's.)
 - **"How far behind" is not told to the agent.** Only the three lines above are.
 - **No index of our own.** The app does not build or store a map; it depends on the
   outside tool.

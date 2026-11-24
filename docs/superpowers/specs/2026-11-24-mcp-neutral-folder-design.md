@@ -62,7 +62,9 @@ truly needs to start in the project folder. Applies to **all projects**.
 - The environment the tool gets (credentials are unchanged — the tool is the admin's chosen code; the change stops
   the *project* from replacing that code), except two additions: `CO_PROJECT_DIR`, and *(amended)*
   `npm_config_cache=workspaces/_mcp_cache/npm` (0700, guard-protected, made on demand) unless the tool's own env
-  sets `npm_config_cache`/`NPM_CONFIG_CACHE` — tools no longer share the agent-writable `~/.npm/_npx`. The code
+  sets `npm_config_cache`/`NPM_CONFIG_CACHE` — tools no longer share the agent-writable `~/.npm/_npx` — and
+  `npm_config_prefix=workspaces/_mcp_cache/npm-global` (an empty global folder, also for the code map build) unless
+  the tool's own env sets it. An optional `CO_TOOL_RUN_DIR` moves the per-task tool folders out of `workspaces/`. The code
   map build keeps its own private cache under `_codemap/_home/`.
 - Tool names and prefixes, policies, the guard.
 
