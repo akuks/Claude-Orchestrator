@@ -1895,8 +1895,9 @@ Projects without one do not show it (`GET /projects/{id}/recommended` says `has_
 - **The list.** Browser (Playwright), Browser inspector (DevTools), Interface parts
   (shadcn, React projects only) and the frontend-design skill. Each shows **Added** or,
   for an admin, **Add** with a question first ("Add <name> to this project?"). Add
-  creates a connected tool for this project only, switched off and starting in the
-  private folder, through the same call as the **Connected tools** page. Non-admins see
+  creates a connected tool for this project only, named "<tool> (<project>)", switched
+  on (it is an admin's explicit click) and starting in the private folder, not in the
+  project folder, through the same call as the **Connected tools** page. Non-admins see
   "Ask an admin to add this". The skill is added under **Skills**. Nothing is installed
   without a click.
 - **Design skills text.** A maintainer can switch **Tell agents to use the design
