@@ -798,12 +798,17 @@ seen by that run). co-guard shows notes right before an agent edits a file with
 decision's touches (an exact path, a folder, or a glob). Edits made through the
 shell (`sed`, `echo >`, and so on) get **no** notes. Each note is the title, the
 kind and date, the why, and the see path. At most 3 notes per edit, most
-specific match first (exact, then folder, then glob), then newest, and a
+specific match first (exact, then folder, then glob; a decision ranks by its
+best-matching touches entry), then newest, and a
 decision is shown **once per conversation and per helper**; after a context
 compaction they can be shown again. The notes are data, not orders, and tell the
 agent: if the change would contradict one, do not make it, file a question with
 your recommendation and end the turn. Each showing is logged on the run as
-*Showed D-012, D-015 before editing path*.
+*Showed D-012, D-015 before editing path*. The matching is time-boxed (0.15 s and
+4000 pattern checks per note), so a pile of very costly glob patterns cannot slow an
+edit down. Decisions are checked newest first; when the time box runs out the older
+ones are not checked, and the run-log line ends with *· some recorded decisions were
+not checked*.
 
 **The run-start index.** The same runs also get a short index (the header, then
 one-line `D-n title` lines, at most 150 words and 1500 characters, with "and N
@@ -1638,7 +1643,7 @@ this function used?" instead of reading many files. An outside tool,
 itself. What the app adds around it is freshness (how current each answer is),
 recorded decisions for the files an answer names, and labels for old code.
 
-- **Setting it up.**
+- **Setting it up.** Nothing is built until both steps are done.
   1. An admin opens **Connected tools** and adds the **Code map** tool from the preset
      list (`npx -y codebase-memory-mcp@0.12.1`, a pinned version). The preset only
      fills in the form; nothing installs until the admin saves it.
@@ -1646,6 +1651,10 @@ recorded decisions for the files an answer names, and labels for old code.
      **Keep a map of this project's code**. The project needs a folder that exists. For
      a project whose trust is `external` (outside code), only an admin can switch it on;
      the server answers 403 to anyone else. Nothing switches it on by itself.
+
+  Until a code map tool is added (and enabled) for the project, no build runs: not after
+  a task, not in the 10-minute pass, and **Refresh now** answers 409 "Add the Code map
+  tool first".
 - **When it refreshes.** A map is rebuilt when a task of the project finishes and the
   project folder's commit differs from the one the map was built at; every 10 minutes
   (a server-wide pass over switched-on projects whose commit differs); and when a
@@ -1654,10 +1663,18 @@ recorded decisions for the files an answer names, and labels for old code.
   doubles with each failure in a row); **Refresh now** ignores that wait. A build is
   stopped after 15 minutes. Only one build per project runs at a time, and at most two
   run across the server. A build left "running" by a server restart is marked failed.
+  A folder with no saved changes history (not a git folder, a branch with no commit
+  yet, or a folder whose commit the app cannot read without git, such as a linked
+  worktree) has no commit to compare, so the automatic refresh rebuilds it at most once
+  a day; **Refresh now** always works.
 - **How the build runs.** The command is `npx -y codebase-memory-mcp@0.12.1 cli
-  index_repository` followed by the project's folder. It runs without credentials, in
-  the same clean, private environment command gates use (no `CO_` settings, no ssh
-  agent, a private home folder). It runs from a private empty folder under the
+  index_repository` followed by the project's folder. It runs without credentials: no
+  API keys or tokens (no Claude, GitHub or `CO_` values) and no ssh agent. The
+  project's own settings values (the project env) **are** passed, as for command
+  gates. The home folder is a private one of its own (`_codemap/_home/`, owner-only),
+  not the one command gates share. Git's repo-local `core.fsmonitor` and
+  `core.hooksPath` settings are switched off for every git the tool runs, so a
+  repository's own git config cannot run commands during the build. It runs from a private empty folder under the
   workspaces folder (`_codemap/run/<project id>/`), not from the project folder. This
   is on purpose: `npx` reads the `.npmrc` of the folder it runs in and prefers that
   folder's own `node_modules`, so a hostile repository could otherwise swap in its own
@@ -1676,7 +1693,8 @@ recorded decisions for the files an answer names, and labels for old code.
   file) and never runs git, so it can say the map "may be out of date" but not by how
   much. The project's **Code map** tab shows how many changes behind it is. These lines
   never change a guard decision, and the run log gets a line, "Code map answer:
-  current", "may be out of date" or "freshness unknown".
+  current", "may be out of date" or "freshness unknown". A map built from a folder with
+  no saved changes history always gets "freshness unknown".
 - **Decisions and old code.** The guard looks for file names in the answer (at most 20
   checked, and only files that exist inside the project folder). For those files it adds
   up to 3 of the project's recorded decisions, framed as data, not instructions. Each
@@ -1686,15 +1704,20 @@ recorded decisions for the files an answer names, and labels for old code.
   at 2000 characters. For a project that has read-only reference projects, a map
   answer that names files inside a reference folder (a reference project that has its
   own code map switched on and built) gets `Old code: these files are from a read-only
-  reference (built at <commit>). Never edit them.`
+  reference (built at <commit>). Never edit them.` The decision matching is time-boxed
+  as for the note before an edit; when it runs out, the run-log line ends with "· some
+  recorded decisions were not checked".
 - **Where to look.** The project's **Code map** tab shows a plain status line ("Up to
-  date", "3 changes behind — refreshing soon", "Last refresh failed — <reason>", "Not
-  built yet", "Add the Code map tool first"), **Refresh now**, and a collapsed
-  **Details** with commits, times and the last 50 log lines
+  date", "3 changes behind — refreshing soon", "Built — this folder has no saved changes
+  history, so freshness can't be checked", "Last refresh failed — the tool stopped with
+  an error" (or "the tool took too long", "the tool could not start"), "Not built yet",
+  "Add the Code map tool first"), **Refresh now**, and a collapsed **Details** with
+  commits, times, the exact failure reason and the last 50 log lines
   (`GET /projects/{id}/code-map/log`). The **System health** page has a **Code map** card:
   how many projects keep a map, and it asks for attention if any refresh is failing or
   the tool is missing while a project has it switched on. Status is
-  `GET /projects/{id}/code-map`.
+  `GET /projects/{id}/code-map` (after a failed build, `failure` is `error`, `timeout`
+  or `start`, and `error` holds the exact reason).
 
 ### Not covered
 
