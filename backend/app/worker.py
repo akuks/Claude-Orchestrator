@@ -247,6 +247,8 @@ class WorkerManager:
     # ---- lifecycle -------------------------------------------------------
 
     async def start(self) -> None:
+        # MCP config folders (vault secrets, tool start folders) a crash left behind
+        await mcp_manager.sweep_stale_configs()
         self._dispatcher = asyncio.create_task(self._dispatch_loop())
         await self._requeue_pending()
         self._sweeper = asyncio.create_task(self._sweep_loop())

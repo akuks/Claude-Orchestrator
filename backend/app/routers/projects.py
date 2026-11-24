@@ -2,6 +2,7 @@ import asyncio
 import json
 import os
 import re
+import sys
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -110,6 +111,40 @@ def _covers(folder: str, path: str) -> bool:
     """`folder` is `path` or one of its ancestors (case-folded, R9)."""
     f, x = folder.casefold(), path.casefold()
     return f == "/" or x == f or x.startswith(f.rstrip("/") + "/")
+
+
+ORCHESTRATOR_FOLDER = "That folder is part of the orchestrator itself"
+# workspaces/ internals that are never a project's (others starting with "_" count too)
+_WORKSPACE_INTERNALS = ("_tasks", "_users", "_mcp_configs", "_gates", "_codemap", "_system", "_context")
+
+
+def _orchestrator_folders() -> set[str]:
+    """The server's own code, migrations and venv, and every workspaces/_* folder
+    (normalised and real forms). The guard stops protecting a core folder that
+    holds the task's project, so a project there could change the server."""
+    from ..guard.runtime import BACKEND_DIR
+
+    paths = [BACKEND_DIR / "app", BACKEND_DIR / "migrations", BACKEND_DIR / ".venv", Path(sys.prefix)]
+    ws = Path(settings.workspaces_dir)
+    names = set(_WORKSPACE_INTERNALS)
+    try:
+        names |= {c.name for c in ws.iterdir() if c.name.startswith("_")}
+    except OSError:
+        pass
+    paths += [ws / n for n in names]
+    out: set[str] = set()
+    for p in paths:
+        out |= {os.path.normpath(os.path.abspath(str(p))), os.path.realpath(str(p))}
+    return out
+
+
+def _refuse_orchestrator_folder(directory) -> None:
+    """422 when `directory` is, holds or sits inside one of the orchestrator's own folders."""
+    d = str(directory)
+    forms = {os.path.normpath(os.path.abspath(d)), os.path.realpath(d)}
+    for o in _orchestrator_folders():
+        if any(_covers(f, o) or _covers(o, f) for f in forms):
+            raise HTTPException(422, ORCHESTRATOR_FOLDER)
 
 
 _CONTROL = re.compile("[\x00-\x1f\x7f-\x9f]")
@@ -244,6 +279,7 @@ async def create_project(payload: ProjectCreate, request: Request):
         ).scalar_one_or_none()
         if dup:
             raise HTTPException(409, f"A project with slug '{slug}' already exists")
+        _refuse_orchestrator_folder(directory)  # before anything is created there
         try:
             directory.mkdir(parents=True, exist_ok=True)
         except OSError as exc:
@@ -416,6 +452,7 @@ async def import_projects(payload: ImportRequest, request: Request):
             d = os.path.normpath(str(Path(raw).expanduser()))
             if d in existing_dirs:
                 continue
+            _refuse_orchestrator_folder(d)
             name = Path(d).name or d
             if name in existing_names:
                 raise HTTPException(409, f"A project named '{name}' already exists")
@@ -500,6 +537,7 @@ async def update_project(project_id: str, payload: ProjectUpdate, request: Reque
             await _require_unique_name(s, data["name"], exclude_id=project_id)
         if "directory" in data and data["directory"]:
             d = Path(data.pop("directory")).expanduser()
+            _refuse_orchestrator_folder(d)  # before anything is created there
             try:
                 d.mkdir(parents=True, exist_ok=True)
             except OSError as exc:

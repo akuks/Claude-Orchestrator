@@ -4,6 +4,7 @@ The "tool" is a tiny script these tests write; no real MCP server runs."""
 
 import json
 import os
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -133,4 +134,23 @@ def test_main_is_importable_and_callable_shape():
     src = Path(LAUNCHER).read_text()
     # stdlib only
     imports = [ln.split()[1] for ln in src.splitlines() if ln.startswith(("import ", "from "))]
-    assert set(imports) <= {"os", "sys"}
+    assert set(imports) <= {"os", "signal", "sys"}
+
+
+def test_tool_gets_default_sigpipe(tmp_path):
+    """Python ignores SIGPIPE and an ignored signal survives exec; the launcher
+    resets it. With the default, `yes` dies of SIGPIPE (128+13) when `head`
+    closes the pipe; ignored, it gets EPIPE and exits 1."""
+    bash, yes = shutil.which("bash"), shutil.which("yes")
+    if not bash or not yes:
+        import pytest
+
+        pytest.skip("bash and yes are needed")
+    neutral = _neutral(tmp_path)
+    script = 'yes | head -n1 >/dev/null; echo "${PIPESTATUS[0]}"'
+    direct_from_python = subprocess.run([bash, "-c", script], capture_output=True, text=True, timeout=20,
+                                        restore_signals=False)
+    assert direct_from_python.stdout.strip() != "141"  # the inherited ignore, without the launcher's reset
+    r = _launch(neutral, bash, "-c", script, cwd=tmp_path)
+    assert r.returncode == 0, r.stderr
+    assert r.stdout.strip() == "141"

@@ -4,7 +4,8 @@ Run as ``<server python> -I mcp_launch.py <neutral_dir> -- <command> [args...]``
 It changes into ``neutral_dir``, sets ``PWD`` to it, drops ``INIT_CWD`` and
 ``OLDPWD`` (which would still name the project folder), and replaces itself
 with ``command`` (looked up on PATH as usual). Nothing else in the environment
-changes, and it never opens anything in the project.
+changes, and it never opens anything in the project. SIGPIPE and SIGXFSZ go
+back to their defaults (Python ignores them, and that would survive the exec).
 
 Stdlib only, and run with ``-I``, so nothing from the working folder, the user
 site or PYTHON* variables is imported. On any failure it prints one plain line
@@ -12,6 +13,7 @@ to stderr and exits 127.
 """
 
 import os
+import signal
 import sys
 
 _USAGE = "mcp_launch: usage: mcp_launch.py <folder> -- <command> [args...]"
@@ -39,6 +41,15 @@ def main(argv):
     os.environ["PWD"] = folder
     os.environ.pop("INIT_CWD", None)
     os.environ.pop("OLDPWD", None)
+    # CPython ignores SIGPIPE and SIGXFSZ at startup, and an ignored signal
+    # survives exec: give the tool the default dispositions it would have had.
+    for name in ("SIGPIPE", "SIGXFSZ"):
+        sig = getattr(signal, name, None)
+        if sig is not None:
+            try:
+                signal.signal(sig, signal.SIG_DFL)
+            except (OSError, ValueError):
+                pass
     try:
         os.execvp(command, [command, *args])
     except OSError as e:

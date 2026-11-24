@@ -6,6 +6,7 @@ daemons. Health checks validate connectivity on demand and periodically.
 """
 
 import json
+import os
 import re
 import shutil
 import sys
@@ -80,11 +81,13 @@ def launcher_path() -> str:
     return str(_LAUNCHER)
 
 
-def neutral_dir(task_cwd_root: Path, server, taken: set[Path] | None = None) -> Path:
+def neutral_dir(task_cwd_root: Path, server, taken: set[str] | None = None) -> Path:
     """The private start folder of one tool in one task:
     ``<task_cwd_root>/<server prefix>`` (the same sanitised prefix as its tool
-    names). Two tools of one task whose prefixes match get "-2", "-3", ...
-    (``taken``). Always a direct child of ``task_cwd_root``."""
+    names). Two tools of one task whose prefixes match, ignoring case (a
+    case-insensitive filesystem would merge them), get "-2", "-3", ...
+    (``taken``: the casefolded names already used). Always a direct child of
+    ``task_cwd_root``."""
     root = Path(task_cwd_root).resolve()
     base = mcp_server_prefix(getattr(server, "name", server) or "") or "_"
     name, n = base, 1
@@ -92,7 +95,7 @@ def neutral_dir(task_cwd_root: Path, server, taken: set[Path] | None = None) -> 
         d = (root / name).resolve()
         if d.parent != root:  # the prefix has no separators or dots; check anyway
             raise ValueError(f"unsafe folder name for connected tool {base!r}")
-        if not taken or d not in taken:
+        if not taken or d.name.casefold() not in taken:
             return d
         n += 1
         name = f"{base}-{n}"
@@ -107,22 +110,53 @@ def _fresh_private_dir(d: Path) -> None:
     d.chmod(0o700)  # whatever the umask
 
 
+# Inert marker files that end the launchers' search for a project above the
+# folder: npm/npx take the nearest ancestor holding node_modules or package.json
+# as the project (and read its .npmrc, and prefer its node_modules); uv reads the
+# nearest uv.toml. Without them the search climbs to workspaces/, which agents
+# can write.
+STOPPER_FILES = {"package.json": "{}\n", ".npmrc": "", "uv.toml": ""}
+STOPPER_DIRS = ("node_modules",)
+
+
+def place_stoppers(d: Path) -> None:
+    """Write the marker files into ``d`` (fresh each time: exact content, 0600;
+    ``node_modules/`` empty, 0700). Never follows a link already there."""
+    d = Path(d)
+    for name in (*STOPPER_FILES, *STOPPER_DIRS):
+        p = d / name
+        if p.is_symlink() or (p.exists() and not p.is_dir()):
+            p.unlink()
+        elif p.is_dir():
+            shutil.rmtree(p)
+    for name, text in STOPPER_FILES.items():
+        fd = os.open(d / name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0), 0o600)
+        with os.fdopen(fd, "w") as f:
+            f.write(text)
+        os.chmod(d / name, 0o600)
+    for name in STOPPER_DIRS:
+        (d / name).mkdir(mode=0o700)
+        os.chmod(d / name, 0o700)
+
+
 def build_config(servers: list[McpServer], *, task_cwd_root: Path | None = None,
                  project_dir: str | None = None) -> dict:
     """The --mcp-config for these servers. With ``task_cwd_root`` (a task's
     run), each stdio server whose "Start in the project folder" switch is off
-    starts through the launcher from its own new, empty folder under it, and
+    starts through the launcher from its own new, private folder under it
+    (holding only the inert ``place_stoppers`` markers), and
     gets ``CO_PROJECT_DIR`` when ``project_dir`` is given. Without it (or with
     the switch on) the entry is exactly ``{"command", "args"[, "env"]}``."""
     cfg: dict = {}
-    taken: set[Path] = set()
+    taken: set[str] = set()
     for srv in servers:
         sec = decrypt_json(srv.secrets_encrypted)
         if srv.transport == "stdio":
             if task_cwd_root is not None and not getattr(srv, "start_in_project", False):
                 d = neutral_dir(task_cwd_root, srv, taken)
-                taken.add(d)
+                taken.add(d.name.casefold())
                 _fresh_private_dir(d)
+                place_stoppers(d)
                 env = dict(sec.get("env") or {})
                 if project_dir:
                     env["CO_PROJECT_DIR"] = str(project_dir)
@@ -153,6 +187,44 @@ def cleanup_task(task_id: str) -> None:
     shutil.rmtree(task_config_dir(task_id), ignore_errors=True)
 
 
+async def sweep_stale_configs() -> int:
+    """At boot: remove every ``_mcp_configs/<id>`` whose task is not queued or
+    running (a crash skipped its cleanup). Returns how many went; never raises."""
+    from .constants import Status
+    from .models import Task
+
+    try:
+        root = settings.workspaces_dir / "_mcp_configs"
+        if not root.is_dir():
+            return 0
+        entries = list(root.iterdir())
+        if not entries:
+            return 0
+        async with SessionLocal() as s:
+            live = set((await s.execute(
+                select(Task.id).where(Task.id.in_([e.name for e in entries]),
+                                      Task.status.in_([Status.QUEUED, Status.RUNNING]))
+            )).scalars().all())
+        gone = 0
+        for e in entries:
+            if e.name in live:
+                continue
+            try:
+                if e.is_symlink() or not e.is_dir():
+                    e.unlink()
+                else:
+                    shutil.rmtree(e)
+                gone += 1
+            except OSError:
+                continue
+        return gone
+    except Exception:  # noqa: BLE001 - a boot sweep never stops the boot
+        import logging
+
+        logging.getLogger(__name__).warning("mcp config sweep failed", exc_info=True)
+        return 0
+
+
 async def prepare_for_task(project: str | None, config_dir: Path,
                            project_dir: str | None = None) -> dict | None:
     """Write a per-task MCP config and resolve allow/deny tool lists from policy.
@@ -169,14 +241,16 @@ async def prepare_for_task(project: str | None, config_dir: Path,
     path, so the file does not need to live in the cwd.
 
     Each stdio tool (switch off) starts from ``config_dir/cwd/<prefix>/``, a
-    new, empty 0700 folder made here; ``project_dir`` reaches it as
+    new 0700 folder made here that holds only the inert marker files; ``project_dir`` reaches it as
     ``CO_PROJECT_DIR``. All of it goes with ``cleanup_task``.
     """
     servers = await servers_for_task(project)
     if not servers:
         return None
 
-    config_dir.mkdir(parents=True, exist_ok=True)
+    config_dir.parent.mkdir(parents=True, exist_ok=True)
+    config_dir.mkdir(mode=0o700, exist_ok=True)
+    config_dir.chmod(0o700)
     cwd_root = config_dir / "cwd"
     _fresh_private_dir(cwd_root)
     cfg = build_config(servers, task_cwd_root=cwd_root, project_dir=project_dir)

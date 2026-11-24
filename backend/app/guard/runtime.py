@@ -284,6 +284,11 @@ def orchestrator_paths(project_dir: str, cwd: str) -> list[str]:
     return out
 
 
+# Files and folders that make npm, uv or bun treat a folder as a project root.
+WALKUP_MARKERS = ("node_modules", "package.json", "package-lock.json", ".npmrc", "uv.toml", "pyproject.toml",
+                  "bunfig.toml")
+
+
 def build_policy(*, task_id: str, project, workspace: Path, cwd: Path, claude_config_dir: str | None,
                  mcp_tools: dict | None, extra: dict | None = None) -> dict:
     """The per-task policy (rules.py module docstring). ``extra`` (the Phase 2
@@ -305,6 +310,9 @@ def build_policy(*, task_id: str, project, workspace: Path, cwd: Path, claude_co
         str(workspaces / "_gates"),  # gate run logs
         str(workspaces / "_codemap"),  # code map index logs
     ]
+    # npm / uv / bun look for a project upward from a tool's start folder; a
+    # marker planted directly in workspaces/ would be found from every one of them
+    protected += [str(workspaces / n) for n in WALKUP_MARKERS]
     if claude_config_dir:
         protected.append(str(claude_config_dir))
     protected += orchestrator_paths(project_dir, cwd_s)

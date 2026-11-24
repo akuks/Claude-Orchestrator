@@ -3,8 +3,9 @@ environment, with a timeout that kills the process group, a capped private log, 
 `code_map_max_jobs` at once. The row ends `ok` (sha = HEAD read before the run) or `failed` with back-off.
 
 The command never runs inside the project folder: `npx` would read that folder's `.npmrc` and prefer its own
-`node_modules`, so a hostile repository could swap the indexer for its own code. It runs from a private, empty
-folder (`workspaces/_codemap/run/<project_id>/`) with npm's user/global config switched off, and the project's
+`node_modules`, so a hostile repository could swap the indexer for its own code. It runs from a private
+folder (`workspaces/_codemap/run/<project_id>/`, holding only inert marker files that stop npm and uv from
+looking further up) with npm's user/global config switched off, and the project's
 real absolute path is only the last argument."""
 
 from __future__ import annotations
@@ -64,7 +65,9 @@ def log_path(project_id: str) -> Path:
 
 
 def run_dir(project_id: str) -> Path:
-    """The neutral, empty, private folder the index command runs from."""
+    """The neutral, private folder the index command runs from. It holds only
+    inert marker files (mcp_manager.place_stoppers), so npm/uv do not climb out
+    of it to a node_modules / package.json / .npmrc / uv.toml in workspaces/."""
     if not _SAFE_ID.match(str(project_id)):
         raise ValueError("bad project id")
     root = codemap_root()
@@ -72,6 +75,9 @@ def run_dir(project_id: str) -> Path:
     for x in (root, root / "run", d):
         x.mkdir(parents=True, exist_ok=True, mode=0o700)
         os.chmod(x, 0o700)
+    from ..mcp_manager import place_stoppers
+
+    place_stoppers(d)
     return d
 
 
