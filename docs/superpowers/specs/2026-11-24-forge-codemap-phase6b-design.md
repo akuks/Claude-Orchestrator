@@ -24,14 +24,14 @@ project's **recorded decisions** to the files an answer names, and labels answer
   (same detection forge uses for the tool prefix).
 
 ### Per-project switch and index record (F53, F57)
-- `projects.code_map` (bool, default false), set by maintainers. Only projects with a directory can turn it on.
+- `projects.code_map` (bool, default false), set by maintainers; for an `external`-trust project only an admin may turn it on. Only projects with a directory can turn it on.
 - `ProjectIndex` (table `project_indexes`, migration **0018**): `project_id` (PK, FK cascade), `sha` (String(64),
   nullable — the commit the index was built at), `indexed_at`, `status` (`never` | `running` | `ok` | `failed`),
   `error` (String(500), nullable, scrubbed), `fail_count` int, `next_try_at` (nullable), `started_at` (nullable).
 - **Index job** (`app/codemap/indexer.py`): runs `settings.code_map_index_command` (a list; default
   `["npx", "-y", "codebase-memory-mcp@0.12.1", "cli", "index_repository"]`) with the project directory appended as
   the last argument, argv only, in the gate-style clean environment (5a `gate_env`: no credentials, private HOME),
-  cwd = the project directory, a 15-minute timeout that kills the process group, output to a capped log
+  cwd = a private empty folder `workspaces/_codemap/run/<project_id>/` (never the project folder: from there `npx` would read the project's `.npmrc` and prefer its `node_modules`; forge F107 "launcher children in a neutral cwd"), npm user/global config pointed at `/dev/null`, a 15-minute timeout that kills the process group, output to a capped log
   (`workspaces/_codemap/<project_id>.log`, 1 MB, 0600). One job per project at a time (per-project asyncio lock);
   at most 2 jobs at once server-wide. Exit 0 → `ok`, `sha` = the directory's HEAD read **before** the run started;
   otherwise `failed` with a scrubbed one-line error and back-off: `next_try_at` = now + min(2^fail_count, 60) min.
