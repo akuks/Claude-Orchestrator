@@ -144,3 +144,35 @@ def test_env_value_masked_in_rule_reason(client):
                                              "pattern": "zz", "reason": "uses hunter22x"}).status_code == 201
     text = client.get("/guard/export.md", params={"project_id": pid}).text
     assert "hunter22x" not in text and "uses [redacted]" in text
+
+
+def test_custom_rules_cap_says_how_many_more(client):
+    from app.models import ActionRule
+    pid, _ = _project(client)
+
+    async def go():
+        async with SessionLocal() as s:
+            for n in range(503):
+                s.add(ActionRule(scope="project", project_id=pid, slug=f"r{n:04d}", kind="confirm",
+                                 match="text", pattern=f"pat-{n:04d}", reason="", enabled=True))
+            await s.commit()
+    asyncio.run(go())
+    text = client.get("/guard/export.md", params={"project_id": pid}).text
+    assert "(and 3 more not shown)" in text
+    assert "pat-0499" in text and "pat-0500" not in text
+
+
+def test_decisions_cap_says_how_many_more(client):
+    from app.models import ProjectDecision
+    pid, _ = _project(client, trust="own")
+
+    async def go():
+        async with SessionLocal() as s:
+            for n in range(1, 106):
+                s.add(ProjectDecision(project_id=pid, number=n, title=f"dec{n}", touches=[], status="active",
+                                      kind="decision", why=""))
+            await s.commit()
+    asyncio.run(go())
+    text = client.get("/guard/export.md", params={"project_id": pid}).text
+    assert "(and 5 more not shown)" in text
+    assert "D-100 dec100" in text and "D-101" not in text

@@ -325,12 +325,16 @@ async def check_skill_packs(s) -> Result:
         packs = (await sess.execute(select(SkillPack).order_by(SkillPack.name))).scalars().all()
     if not packs:
         return Result(OK, "No skill packs installed", {"packs": []})
+    from ..skillpacks import update as pack_update
+
     listing, updates = [], 0
     for p in packs:
         latest = getattr(p, "latest_sha", None)  # filled by the update check (migration 0017)
-        has_update = bool(latest and p.version and not latest.startswith(p.version) and not p.version.startswith(latest))
+        current = await asyncio.to_thread(pack_update.current_sha_fast, p.local_path)
+        has_update = bool(current and latest and current != latest)
         updates += has_update
-        listing.append({"name": p.name, "pinned": (p.version or "")[:7] or None, "update_known": has_update})
+        listing.append({"name": p.name, "pinned": current[:7] if current else None, "version": p.version,
+                        "update_known": has_update})
     summary = f"{len(packs)} skill pack{'s' if len(packs) != 1 else ''}" + (f", {updates} with an update" if updates else "")
     return Result(OK, summary, {"packs": listing})
 

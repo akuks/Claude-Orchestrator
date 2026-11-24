@@ -311,3 +311,36 @@ def test_install_with_local_path_and_pin_is_400(client, tmp_path):
     r = client.post("/skills", json={"name": f"lp-{uuid.uuid4().hex[:6]}", "local_path": str(tmp_path),
                                     "pinned_sha": "a" * 40})
     assert r.status_code == 400 and "needs a repository address" in r.json()["detail"]
+
+
+def test_current_sha_fast_matches_git(rig):
+    assert update.current_sha_fast(rig.dir) == git(rig.dir, "rev-parse", "HEAD")
+    assert update.current_sha_fast(rig.tmp / "nope") is None
+    git(rig.dir, "pack-refs", "--all")
+    assert update.current_sha_fast(rig.dir) == git(rig.dir, "rev-parse", "HEAD")
+
+
+def test_plugin_json_fifo_symlink_returns_promptly(tmp_path):
+    from pathlib import Path
+
+    from app.routers.skills import _plugin_meta
+
+    d = tmp_path / ".claude-plugin"
+    d.mkdir()
+    fifo = tmp_path / "fifo"
+    os.mkfifo(fifo)
+    (d / "plugin.json").symlink_to(fifo)
+    t0 = time.time()
+    assert _plugin_meta(Path(tmp_path)) == (None, None)
+    assert time.time() - t0 < 2
+
+
+def test_plugin_json_read_and_capped(tmp_path):
+    from app.routers.skills import _plugin_meta
+
+    d = tmp_path / ".claude-plugin"
+    d.mkdir()
+    (d / "plugin.json").write_text('{"name": "n", "version": "1.2.3"}')
+    assert _plugin_meta(tmp_path) == ("n", "1.2.3")
+    (d / "plugin.json").write_text('{"name": "n", "pad": "' + "x" * 70000 + '"}')
+    assert _plugin_meta(tmp_path) == (None, None)

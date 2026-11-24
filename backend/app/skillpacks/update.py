@@ -15,6 +15,7 @@ import logging
 import os
 import re
 import signal
+import stat
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -210,6 +211,47 @@ async def current_sha(pack, allow_protocols=DEFAULT_PROTOCOLS) -> str | None:
     except ValueError:
         return None
     return sha if _HEX.match(sha) else None
+
+
+def _read_small(path: str, cap: int = 4096) -> str | None:
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    except OSError:
+        return None
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            return None
+        return os.read(fd, cap).decode("utf-8", errors="replace")
+    except OSError:
+        return None
+    finally:
+        os.close(fd)
+
+
+def current_sha_fast(path) -> str | None:
+    """The checked-out commit, read from .git/HEAD and its ref file. No git is
+    run, nothing is followed through a symlink, and every read is bounded."""
+    if not path:
+        return None
+    git_dir = os.path.join(str(path), ".git")
+    head = _read_small(os.path.join(git_dir, "HEAD"))
+    if head is None:
+        return None
+    head = head.strip()
+    if head.startswith("ref:"):
+        ref = head[4:].strip()
+        if not re.match(r"^refs/[A-Za-z0-9._/-]+$", ref) or ".." in ref:
+            return None
+        val = _read_small(os.path.join(git_dir, *ref.split("/")))
+        if val is None:
+            packed = _read_small(os.path.join(git_dir, "packed-refs"), 1 << 20) or ""
+            for line in packed.splitlines():
+                parts = line.split(" ")
+                if len(parts) == 2 and parts[1] == ref:
+                    val = parts[0]
+                    break
+        head = (val or "").strip()
+    return head if _HEX.match(head) else None
 
 
 async def _remote_head(url: str, cwd, allow_protocols) -> str:

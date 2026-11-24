@@ -234,12 +234,23 @@ def test_mcp(db):
         run(rm(i))
 
 
-def test_skill_packs(db):
+def test_skill_packs(db, tmp_path):
+    import subprocess
+
     from app.models import SkillPack
+
+    repo = tmp_path / "pack"
+    repo.mkdir()
+    env = {"GIT_CONFIG_GLOBAL": "/dev/null", "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t",
+           "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@t", "PATH": os.environ["PATH"]}
+    for args in (["init", "-q", "-b", "main"], ["commit", "-q", "--allow-empty", "-m", "x"]):
+        subprocess.run(["git", *args], cwd=repo, env=env, check=True, capture_output=True)
+    sha = subprocess.run(["git", "rev-parse", "HEAD"], cwd=repo, env=env, check=True, capture_output=True,
+                         text=True).stdout.strip()
 
     async def go(**kw):
         async with db() as s:
-            p = SkillPack(name="hc-pack", local_path="/x", version="abcdef1234", **kw)
+            p = SkillPack(name="hc-pack", local_path=str(repo), version="7.0.2", **kw)
             s.add(p)
             await s.commit()
             return p.id
@@ -249,11 +260,31 @@ def test_skill_packs(db):
             await s.delete(await s.get(SkillPack, i))
             await s.commit()
 
-    i = run(go())  # pre-0017 shaped row: no latest_sha is fine
-    try:
+    def listing():
         r = run(by_id("skill_packs").fn(db))
         assert r.status == OK
-        assert {"name": "hc-pack", "pinned": "abcdef1", "update_known": False} in r.detail["packs"]
+        return r, r.detail["packs"]
+
+    i = run(go())  # no latest_sha: nothing to compare
+    try:
+        r, packs = listing()
+        assert {"name": "hc-pack", "pinned": sha[:7], "version": "7.0.2", "update_known": False} in packs
+    finally:
+        run(rm(i))
+
+    i = run(go(latest_sha=sha))  # current equals latest: no update
+    try:
+        r, packs = listing()
+        assert [p for p in packs if p["name"] == "hc-pack"][0]["update_known"] is False
+        assert "with an update" not in r.summary
+    finally:
+        run(rm(i))
+
+    i = run(go(latest_sha="b" * 40))
+    try:
+        r, packs = listing()
+        assert [p for p in packs if p["name"] == "hc-pack"][0]["update_known"] is True
+        assert "1 with an update" in r.summary
     finally:
         run(rm(i))
 

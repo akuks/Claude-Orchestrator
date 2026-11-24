@@ -82,8 +82,9 @@ async def skill_template():
 _TOO_BIG = object()
 
 
-def _read_capped(path: str):
+def _read_capped(path: str, cap: int | None = None):
     """Read a regular, non-symlink file; None if it is over the cap or not a file."""
+    cap = skills_lint.MAX_BYTES if cap is None else cap
     try:
         if not stat.S_ISREG(os.lstat(path).st_mode):
             return None
@@ -94,10 +95,10 @@ def _read_capped(path: str):
         if not stat.S_ISREG(os.fstat(fd).st_mode):
             return None
         with os.fdopen(fd, "rb", closefd=False) as f:
-            data = f.read(skills_lint.MAX_BYTES + 1)
+            data = f.read(cap + 1)
     finally:
         os.close(fd)
-    if len(data) > skills_lint.MAX_BYTES:
+    if len(data) > cap:
         return _TOO_BIG
     return data.decode("utf-8", errors="replace")
 
@@ -156,14 +157,21 @@ def _slug(name: str) -> str:
 
 def _plugin_meta(path: Path) -> tuple[str | None, str | None]:
     """Read name/version from a cloned plugin's .claude-plugin/plugin.json."""
-    mf = path / ".claude-plugin" / "plugin.json"
-    if mf.exists():
+    text = _read_capped(str(path / ".claude-plugin" / "plugin.json"), PLUGIN_JSON_MAX)
+    if isinstance(text, str):
         try:
-            d = json.loads(mf.read_text())
+            d = json.loads(text)
             return d.get("name"), d.get("version")
         except Exception:
             pass
     return None, None
+
+
+PLUGIN_JSON_MAX = 64 * 1024
+
+
+async def _plugin_meta_async(path: Path) -> tuple[str | None, str | None]:
+    return await asyncio.to_thread(_plugin_meta, path)
 
 
 def _clone_env() -> dict[str, str]:
@@ -240,7 +248,7 @@ async def update_pack(pack_id: str):
         res = await pack_update.apply(pack)
     except ValueError as e:
         raise HTTPException(400, str(e))
-    _, version = _plugin_meta(Path(pack.local_path))
+    _, version = await _plugin_meta_async(Path(pack.local_path))
     async with SessionLocal() as s:
         row = await s.get(SkillPack, pack_id)
         if row is not None:
@@ -279,7 +287,7 @@ async def install_skillpack(payload: SkillPackCreate):
                 shutil.rmtree(path, ignore_errors=True)
                 raise HTTPException(400, str(e))
 
-    pname, version = _plugin_meta(path)
+    pname, version = await _plugin_meta_async(path)
     name = payload.name or pname or name
 
     async with SessionLocal() as s:
