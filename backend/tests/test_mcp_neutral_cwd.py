@@ -56,17 +56,16 @@ def _drop(*names):
     asyncio.run(go())
 
 
-STOPPERS = [".npmrc", "node_modules", "package.json", "uv.toml"]
+STOPPERS = [".npmrc", "node_modules", "uv.toml"]  # no package.json: an ancestor "workspaces" glob would adopt it
 
 
 def _assert_only_stoppers(d: Path):
     """The folder holds exactly the inert marker files, private, with their fixed content."""
     d = Path(d)
     assert sorted(os.listdir(d)) == STOPPERS
-    assert (d / "package.json").read_text().strip() == "{}"
     assert (d / ".npmrc").read_text() == "" and (d / "uv.toml").read_text() == ""
     assert (d / "node_modules").is_dir() and os.listdir(d / "node_modules") == []
-    for n in (".npmrc", "package.json", "uv.toml"):
+    for n in (".npmrc", "uv.toml"):
         assert stat.S_IMODE((d / n).stat().st_mode) == 0o600, n
         assert not (d / n).is_symlink()
     assert stat.S_IMODE((d / "node_modules").stat().st_mode) == 0o700
@@ -85,16 +84,44 @@ def test_switch_off_wraps_with_the_launcher(tmp_path):
     assert cfg == {"mcpServers": {"tool-a": {
         "command": sys.executable,
         "args": ["-I", mcp_manager.launcher_path(), str(d), "--", "npx", "-y", "some-mcp@1.2.3", "a b"],
-        "env": {"TOKEN": "t", "CO_PROJECT_DIR": "/proj/x"},
+        "env": {"TOKEN": "t", "CO_PROJECT_DIR": "/proj/x", "npm_config_cache": str(mcp_manager.npm_cache_dir())},
     }}}
     assert d == (root / "tool-a").resolve()
+
+
+def test_tools_get_their_own_npm_cache(tmp_path):
+    cache = mcp_manager.npm_cache_dir()
+    assert cache == settings.workspaces_dir / "_mcp_cache" / "npm"
+    assert stat.S_IMODE(cache.stat().st_mode) == 0o700
+    assert stat.S_IMODE(cache.parent.stat().st_mode) == 0o700
+    # the tool's own setting wins, in either spelling
+    for key in ("npm_config_cache", "NPM_CONFIG_CACHE"):
+        srv = _srv(f"own-{key}", command="npx", secrets_encrypted=encrypt_json({"env": {key: "/mine"}}))
+        env = mcp_manager.build_config([srv], task_cwd_root=tmp_path)["mcpServers"][srv.name]["env"]
+        assert env == {key: "/mine"}, key
+    # a tool that starts in the project, and the old call, are left exactly as they were
+    on = _srv("on", command="npx", start_in_project=True)
+    assert mcp_manager.build_config([on], task_cwd_root=tmp_path)["mcpServers"]["on"] == {"command": "npx",
+                                                                                         "args": []}
+
+
+def test_codemap_build_keeps_its_own_private_npm_cache():
+    """The code map build already has a private HOME (so ~/.npm is its own) under
+    the guard-protected _codemap folder; nothing points it at the shared cache."""
+    from app.codemap import indexer
+
+    env = indexer.index_env(None)
+    home = Path(env["HOME"])
+    assert home == settings.workspaces_dir / "_codemap" / "_home"
+    assert not any(k.lower() == "npm_config_cache" for k in env)
 
 
 def test_switch_off_without_env_or_project_dir(tmp_path):
     srv = _srv("tool-b", command="uvx", args=["thing"])
     cfg = mcp_manager.build_config([srv], task_cwd_root=tmp_path)
     entry = cfg["mcpServers"]["tool-b"]
-    assert "env" not in entry and entry["command"] == sys.executable
+    assert entry["env"] == {"npm_config_cache": str(mcp_manager.npm_cache_dir())}
+    assert entry["command"] == sys.executable
     assert entry["args"][-3:] == ["--", "uvx", "thing"]
 
 
@@ -347,21 +374,126 @@ def test_codemap_run_folder_has_the_stoppers(client):
         assert stat.S_IMODE(d.stat().st_mode) == 0o700
         (d / "node_modules" / "planted").mkdir()
         (d / ".npmrc").write_text("registry=https://evil.invalid/\n")
+        (d / "package.json").write_text("{}")  # the stopper an earlier version wrote
         _assert_only_stoppers(indexer.run_dir(pid))  # each run puts them back exactly
     finally:
         shutil.rmtree(d, ignore_errors=True)
 
 
-def test_guard_protects_walkup_markers_in_workspaces(tmp_path):
+MARKERS = ("package.json", "package-lock.json", "node_modules", ".npmrc", "pnpm-workspace.yaml", ".pnpmfile.cjs",
+           "uv.toml", "bunfig.toml", ".yarnrc.yml")
+
+
+def _ancestor_dirs(*roots):
+    out = []
+    for r in roots:
+        for form in {os.path.normpath(os.path.abspath(str(r))), os.path.realpath(str(r))}:
+            cur = Path(form).parent
+            while True:
+                out.append(cur)
+                if cur.parent == cur:
+                    break
+                cur = cur.parent
+    return list(dict.fromkeys(out))
+
+
+def _policy(project_dir, workspace):
+    import types
+
     from app.guard import runtime
 
-    ws = settings.workspaces_dir.resolve()
-    pol = runtime.build_policy(task_id="t-walkup", project=None, workspace=tmp_path, cwd=tmp_path,
-                               claude_config_dir=None, mcp_tools=None)
+    proj = types.SimpleNamespace(directory=str(project_dir)) if project_dir else None
+    return runtime.build_policy(task_id=f"t-{_uid()}", project=proj, workspace=Path(workspace),
+                                cwd=Path(project_dir or workspace), claude_config_dir=None, mcp_tools=None)
+
+
+def _prod_layout(monkeypatch):
+    """workspaces inside backend/, as in production (the tests keep it in a temp dir)."""
+    from app.guard.runtime import BACKEND_DIR
+
+    monkeypatch.setattr(settings, "workspaces_dir", BACKEND_DIR / "workspaces")
+    return BACKEND_DIR / "workspaces"
+
+
+def test_guard_protects_walkup_names_above_tool_folders_adhoc(tmp_path):
+    ws = settings.workspaces_dir
+    pol = _policy(None, ws / f"t{_uid()}")
     prot = set(pol["protected_paths"])
-    for n in ("node_modules", "package.json", "package-lock.json", ".npmrc", "uv.toml", "pyproject.toml",
-              "bunfig.toml"):
-        assert str(ws / n) in prot, n
+    anc = _ancestor_dirs(ws / "_mcp_configs", ws / "_codemap" / "run")
+    assert Path("/") in anc and ws.resolve() in anc
+    for a in anc:
+        for n in MARKERS:
+            assert str(a / n) in prot, (a, n)
+    assert str(ws.resolve() / "_mcp_cache") in prot
+
+
+def test_guard_protects_walkup_names_in_every_ancestor_for_a_normal_project(tmp_path, monkeypatch):
+    from app.guard import rules, runtime
+
+    ws = _prod_layout(monkeypatch)
+    checkout = runtime.BACKEND_DIR.parent
+    home = Path(runtime.real_home())
+    proj = tmp_path / "proj"
+    proj.mkdir()
+    pol = _policy(proj, proj)
+    prot = set(pol["protected_paths"])
+    anc = _ancestor_dirs(ws / "_mcp_configs", ws / "_codemap" / "run")
+    for must in (ws, runtime.BACKEND_DIR, checkout, Path("/")):
+        assert must.resolve() in [a.resolve() for a in anc], must
+    if checkout.resolve().is_relative_to(home):
+        assert home in anc or home.resolve() in anc
+    for a in anc:
+        for n in MARKERS:
+            assert str(a / n) in prot, (a, n)
+    # the rule engine: planting the npm PATH escape or a workspaces glob is not allowed
+    for target in (checkout / "node_modules" / ".bin" / "node", checkout / "package.json",
+                   runtime.BACKEND_DIR / "node_modules" / ".bin" / "node", runtime.BACKEND_DIR / "pnpm-workspace.yaml",
+                   home / "node_modules" / ".bin" / "node", home / "package.json"):
+        v = rules.evaluate("Write", {"file_path": str(target), "content": "x"}, pol, str(proj))
+        assert v.decision != "allow", target
+    # the project's own package files stay its own
+    assert rules.evaluate("Write", {"file_path": str(proj / "package.json"), "content": "{}"},
+                          pol, str(proj)).decision == "allow"
+
+
+def test_checkout_root_project_keeps_its_own_package_files(monkeypatch):
+    """The owner's orchestrator project (its folder is the checkout, which holds
+    workspaces/): its own root names stay writable (the stated residual); the
+    names above it are protected."""
+    from app.guard import runtime
+
+    ws = _prod_layout(monkeypatch)
+    checkout = runtime.BACKEND_DIR.parent.resolve()
+    pol = _policy(checkout, checkout)
+    prot = set(pol["protected_paths"])
+    for inside in (checkout, runtime.BACKEND_DIR.resolve(), ws.resolve()):
+        for n in MARKERS:
+            assert str(inside / n) not in prot, (inside, n)
+    for a in _ancestor_dirs(checkout / "x"):  # every folder above the checkout
+        if a == checkout:
+            continue
+        for n in MARKERS:
+            assert str(a / n) in prot, (a, n)
+    # the core is still protected for it
+    assert str(runtime.BACKEND_DIR / "app") in prot
+
+
+def test_core_is_protected_even_if_the_project_folder_resolves_inside_it(tmp_path):
+    """A project folder swapped for a symlink into backend/app after the save-time
+    check must not switch the core's protection off."""
+    from app.guard import rules, runtime
+
+    link = tmp_path / "proj-link"
+    link.symlink_to(runtime.BACKEND_DIR / "app")
+    pol = _policy(link, link)
+    prot = set(pol["protected_paths"])
+    for n in ("app", "migrations", "alembic.ini", ".env", ".venv", "requirements.txt"):
+        assert str(runtime.BACKEND_DIR / n) in prot, n
+    v = rules.evaluate("Write", {"file_path": str(runtime.BACKEND_DIR / "app" / "mcp_launch.py"), "content": "x"},
+                       pol, str(link))
+    assert v.decision == "deny"
+    assert str(runtime.BACKEND_DIR / "app") in runtime.orchestrator_paths(
+        str(runtime.BACKEND_DIR / "app" / "x"), str(runtime.BACKEND_DIR / "app" / "x"))
 
 
 def test_guard_blocks_writing_a_marker_into_workspaces(tmp_path):
@@ -505,3 +637,77 @@ def test_resaving_an_unchanged_folder_is_never_refused(client):
         assert r.status_code == 422 and r.json()["detail"] == ORCH
     finally:
         client.delete(f"/projects/{pid}")
+
+
+def test_npm_escapes_from_ancestors_have_no_effect(tmp_path, monkeypatch):
+    """The re-review's escapes, in a scratch copy of the production layout:
+    (A) an ancestor package.json whose "workspaces" glob matches the tool folder
+    cannot adopt it, because the folder has no package.json; (B) npm puts every
+    ancestor's node_modules/.bin on PATH, which no marker can stop, so the guard
+    must protect node_modules in every ancestor. Only local npm commands run
+    (prefix, ls, exec -c without a package, --offline)."""
+    from app.guard import rules, runtime
+
+    repo = tmp_path / "repo"
+    ws = repo / "backend" / "workspaces"
+    root = ws / "_mcp_configs" / "t1" / "cwd"
+    root.mkdir(parents=True)
+    cfg = mcp_manager.build_config([_srv("tool", command="npx", args=["-y", "some-mcp@1.2.3"])],
+                                   task_cwd_root=root)
+    d = Path(cfg["mcpServers"]["tool"]["args"][2])
+    _assert_only_stoppers(d)
+    # the guard side of (B), for this layout: no agent can create these
+    monkeypatch.setattr(settings, "workspaces_dir", ws)
+    pol = _policy(None, ws / "tadhoc")
+    prot = set(pol["protected_paths"])
+    for a in (repo, repo / "backend", ws):
+        assert str(a.resolve() / "node_modules") in prot and str(a.resolve() / "package.json") in prot, a
+        v = rules.evaluate("Write", {"file_path": str(a / "node_modules" / ".bin" / "node"), "content": "x"},
+                           pol, str(ws / "tadhoc"))
+        assert v.decision != "allow", a
+    npm = shutil.which("npm")
+    if not npm:
+        import pytest
+
+        pytest.skip("npm is not on PATH (the markers and the guard are checked above)")
+    # plant what the re-review planted
+    (repo / "package.json").write_text(json.dumps({"name": "planted", "workspaces": ["**"]}))
+    (repo / ".npmrc").write_text("registry=https://evil2.invalid/\n")
+    mod = repo / "node_modules" / "some-mcp"
+    mod.mkdir(parents=True)
+    (mod / "package.json").write_text(json.dumps({"name": "some-mcp", "version": "1.2.3"}))
+    binx = repo / "node_modules" / ".bin"
+    binx.mkdir()
+    (binx / "node").write_text("#!/bin/sh\necho planted\n")
+    (binx / "node").chmod(0o755)
+    # control for (A): a folder with the old package.json stopper is adopted by the glob
+    old = root / "old"
+    old.mkdir()
+    (old / "node_modules").mkdir()
+    (old / "package.json").write_text("{}")
+    assert os.path.realpath(_npm(npm, old, "prefix")) == os.path.realpath(repo)
+    # (A) the tool folder stays its own project: not adopted, planted registry and module unseen
+    assert os.path.realpath(_npm(npm, d, "prefix")) == os.path.realpath(d)
+    assert "evil2.invalid" not in _npm(npm, d, "config", "get", "registry")
+    ls = subprocess.run([npm, "ls", "--json"], cwd=d, capture_output=True, text=True, timeout=60,
+                        env=dict(os.environ, npm_config_update_notifier="false"))
+    assert "some-mcp" not in ls.stdout
+    # (B) is real: npm's PATH reaches the ancestor .bin (hence the guard protection above)
+    r = subprocess.run([npm, "exec", "--offline", "-c", "command -v node"], cwd=d, capture_output=True,
+                       text=True, timeout=60, env=dict(os.environ, npm_config_update_notifier="false"))
+    assert r.returncode == 0, r.stderr
+    assert os.path.realpath(r.stdout.strip()) == os.path.realpath(binx / "node")
+
+
+def test_inline_code_naming_package_files_is_not_self_protect(tmp_path):
+    """The walk-up names under / are protected, but code that merely names a
+    package.json or node_modules path is not treated as touching the guard."""
+    from app.guard import rules
+
+    proj = tmp_path / "proj"
+    proj.mkdir()
+    pol = _policy(proj, proj)
+    for cmd in ("python3 -c \"import json; print(json.load(open('frontend/package.json')))\"",
+                "node -e \"require('./node_modules/x')\""):
+        v = rules.evaluate("Bash", {"command": cmd}, pol, str(proj))
+        assert not any(h.rule_id == "self-protect" for h in v.hits), cmd

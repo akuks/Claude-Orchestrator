@@ -111,19 +111,23 @@ def _fresh_private_dir(d: Path) -> None:
 
 
 # Inert marker files that end the launchers' search for a project above the
-# folder: npm/npx take the nearest ancestor holding node_modules or package.json
-# as the project (and read its .npmrc, and prefer its node_modules); uv reads the
-# nearest uv.toml. Without them the search climbs to workspaces/, which agents
-# can write.
-STOPPER_FILES = {"package.json": "{}\n", ".npmrc": "", "uv.toml": ""}
+# folder: npm/npx take the nearest ancestor holding node_modules (or
+# package.json) as the project (and read its .npmrc, and prefer its
+# node_modules); uv reads the nearest uv.toml. No package.json on purpose: with
+# one, an ancestor package.json whose "workspaces" glob matches the folder
+# would adopt it as a workspace. What a marker cannot stop (npm puts every
+# ancestor's node_modules/.bin on PATH) the guard covers: agents cannot create
+# these names in any folder above (guard.runtime.walkup_marker_paths).
+STOPPER_FILES = {".npmrc": "", "uv.toml": ""}
 STOPPER_DIRS = ("node_modules",)
+_STALE_MARKERS = ("package.json",)  # written by an earlier version; removed
 
 
 def place_stoppers(d: Path) -> None:
     """Write the marker files into ``d`` (fresh each time: exact content, 0600;
     ``node_modules/`` empty, 0700). Never follows a link already there."""
     d = Path(d)
-    for name in (*STOPPER_FILES, *STOPPER_DIRS):
+    for name in (*STOPPER_FILES, *STOPPER_DIRS, *_STALE_MARKERS):
         p = d / name
         if p.is_symlink() or (p.exists() and not p.is_dir()):
             p.unlink()
@@ -139,13 +143,26 @@ def place_stoppers(d: Path) -> None:
         os.chmod(d / name, 0o700)
 
 
+def npm_cache_dir() -> Path:
+    """The connected tools' own npm cache (not the agent-writable ~/.npm, whose
+    _npx trees npx reuses without re-checking): 0700, made on demand, and
+    guard-protected (workspaces/_mcp_cache)."""
+    root = settings.workspaces_dir / "_mcp_cache"
+    d = root / "npm"
+    for x in (root, d):
+        x.mkdir(parents=True, exist_ok=True, mode=0o700)
+        x.chmod(0o700)
+    return d
+
+
 def build_config(servers: list[McpServer], *, task_cwd_root: Path | None = None,
                  project_dir: str | None = None) -> dict:
     """The --mcp-config for these servers. With ``task_cwd_root`` (a task's
     run), each stdio server whose "Start in the project folder" switch is off
     starts through the launcher from its own new, private folder under it
     (holding only the inert ``place_stoppers`` markers), and
-    gets ``CO_PROJECT_DIR`` when ``project_dir`` is given. Without it (or with
+    gets ``CO_PROJECT_DIR`` when ``project_dir`` is given and its own npm cache
+    (``npm_config_cache``, unless its env sets one). Without it (or with
     the switch on) the entry is exactly ``{"command", "args"[, "env"]}``."""
     cfg: dict = {}
     taken: set[str] = set()
@@ -160,6 +177,8 @@ def build_config(servers: list[McpServer], *, task_cwd_root: Path | None = None,
                 env = dict(sec.get("env") or {})
                 if project_dir:
                     env["CO_PROJECT_DIR"] = str(project_dir)
+                if not any(k.lower() == "npm_config_cache" for k in env):  # the tool's own setting wins
+                    env["npm_config_cache"] = str(npm_cache_dir())
                 entry = {"command": sys.executable,
                          "args": ["-I", launcher_path(), str(d), "--", srv.command, *(srv.args or [])]}
                 if env:

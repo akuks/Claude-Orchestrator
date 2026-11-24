@@ -1025,7 +1025,10 @@ class _Ctx:
                 if is_glob and not _GLOB.search(posixpath.dirname(v)):
                     self.glob_dirs.add(posixpath.dirname(v))
         # text naming a protected path (for inline interpreter code)
-        self.mentions = sorted({posixpath.dirname(v) if g else v for v, g in self.protected} - {"", "/"})
+        # (a protected entry directly under / - the walk-up names such as /package.json - is left out: as text
+        # it would match every path that merely ends in that name, and / is not the server user's to write)
+        self.mentions = sorted({posixpath.dirname(v) if g else v for v, g in self.protected
+                                if g or posixpath.dirname(v) != "/"} - {"", "/"})
         self.hits = []
         self.words = {}  # Ruling P12: de-quoted argv texts of every simple command (custom rules)
         self.start = self.project  # the call's cwd (evaluate sets it)

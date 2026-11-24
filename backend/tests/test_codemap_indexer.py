@@ -203,7 +203,7 @@ def test_neutral_folder_and_npm_config_off(mock, tmp_path, monkeypatch):
     seen = __import__("json").loads((mdir / "argv.json").read_text())
     env = seen["env"]
     assert os.path.samefile(seen["cwd"], indexer.run_dir(pid))
-    assert sorted(os.listdir(seen["cwd"])) == [".npmrc", "node_modules", "package.json", "uv.toml"]  # inert markers only
+    assert sorted(os.listdir(seen["cwd"])) == [".npmrc", "node_modules", "uv.toml"]  # inert markers only
     assert env["npm_config_userconfig"] == "/dev/null" and env["npm_config_globalconfig"] == "/dev/null"
     assert env["NPM_CONFIG_UPDATE_NOTIFIER"] == "false"
     assert env["npm_config_fund"] == "false" and env["npm_config_audit"] == "false"

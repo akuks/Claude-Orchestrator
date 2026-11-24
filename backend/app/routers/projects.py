@@ -115,7 +115,8 @@ def _covers(folder: str, path: str) -> bool:
 
 ORCHESTRATOR_FOLDER = "That folder is part of the orchestrator itself"
 # workspaces/ internals that are never a project's (others starting with "_" count too)
-_WORKSPACE_INTERNALS = ("_tasks", "_users", "_mcp_configs", "_gates", "_codemap", "_system", "_context")
+_WORKSPACE_INTERNALS = ("_tasks", "_users", "_mcp_configs", "_mcp_cache", "_gates", "_codemap", "_system",
+                        "_context")
 
 
 def _orchestrator_folders() -> set[str]:
