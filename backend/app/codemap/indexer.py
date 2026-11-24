@@ -30,6 +30,13 @@ log = logging.getLogger(__name__)
 
 LOG_CAP = 1024 * 1024
 MAX_BACKOFF_MIN = 60
+# a folder with no commit to compare (not a git folder, an unborn branch, a worktree whose `.git` is a file):
+# the automatic refresh re-runs at most this often; a manual refresh always runs
+NO_COMMIT_REFRESH = timedelta(days=1)
+# the failure reasons the job stores (status.failure_kind turns them into plain words)
+ERR_TIMEOUT = "Timed out after"
+ERR_START = "could not start the index command"
+ERR_EXIT = "The index command exited with code"
 _SAFE_ID = re.compile(r"^[A-Za-z0-9._-]{1,64}$")
 
 _inflight: set[str] = set()  # projects with a job claimed (running or waiting for a slot)
@@ -68,11 +75,33 @@ def run_dir(project_id: str) -> Path:
     return d
 
 
+def home_dir() -> Path:
+    """The index jobs' own HOME (npm's cache lives here), apart from the gates' shared one."""
+    root = codemap_root()
+    home = root / "_home"
+    for x in (root, home):
+        x.mkdir(parents=True, exist_ok=True, mode=0o700)
+        os.chmod(x, 0o700)
+    return home
+
+
 def index_env(project) -> dict[str, str]:
+    """The gate env (no credentials; the project's own env values are passed) with its own HOME, npm's
+    user/global config off and the repo-local git config's command hooks switched off for every git the tool
+    runs (the flags `gitsafe` passes)."""
     env = gx.gate_env(project)
     env.pop("INIT_CWD", None)
     env.pop("PWD", None)
+    home = home_dir()
     env.update({
+        "HOME": str(home),
+        "XDG_CONFIG_HOME": str(home / ".config"),
+        "XDG_CACHE_HOME": str(home / ".cache"),
+        "GIT_CONFIG_COUNT": "2",
+        "GIT_CONFIG_KEY_0": "core.fsmonitor",
+        "GIT_CONFIG_VALUE_0": "false",
+        "GIT_CONFIG_KEY_1": "core.hooksPath",
+        "GIT_CONFIG_VALUE_1": "/dev/null",
         "npm_config_userconfig": "/dev/null",
         "npm_config_globalconfig": "/dev/null",
         "NPM_CONFIG_UPDATE_NOTIFIER": "false",
@@ -121,7 +150,7 @@ async def _run_argv(argv, *, cwd, env, path: Path, timeout_s: float) -> tuple[st
                 *argv, cwd=str(cwd), env=env, stdin=asyncio.subprocess.DEVNULL,
                 stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT, start_new_session=True)
         except (OSError, ValueError) as e:
-            return f"error:could not start the index command ({type(e).__name__})", None
+            return f"error:{ERR_START} ({type(e).__name__})", None
         state: dict = {"written": 0, "error": None}
         pump = asyncio.ensure_future(gx._pump(proc, fd, state, LOG_CAP))
         outcome = "failed"
@@ -235,12 +264,12 @@ async def _job_locked(project_id: str) -> str:
         await _finish_row(project_id, "ok", None, sha_before)
         return "ok"
     if outcome == "timed_out":
-        err = f"Timed out after {max(1, round(settings.code_map_timeout_seconds / 60))} minutes"
+        err = f"{ERR_TIMEOUT} {max(1, round(settings.code_map_timeout_seconds / 60))} minutes"
     elif outcome.startswith("error:"):
         err = outcome[6:]
     else:
         last = _scrub(_tail_line(path), env_project)[:300]
-        err = f"The index command exited with code {code}" + (f": {last}" if last else "")
+        err = f"{ERR_EXIT} {code}" + (f": {last}" if last else "")
     await _finish_row(project_id, "failed", _scrub(err, env_project), None)
     return "failed"
 
@@ -297,17 +326,28 @@ async def shutdown() -> None:
         await asyncio.gather(*list(_tasks), return_exceptions=True)
 
 
-def _due(project: Project, row: ProjectIndex | None) -> bool:
-    if not project.code_map or project.archived or not project.directory:
+def _due(project: Project, row: ProjectIndex | None, registered: bool) -> bool:
+    """Whether the automatic refresh should index `project` now. Never without a registered code map server.
+    With no commit to compare (HEAD unreadable), an `ok` index is re-run at most once per NO_COMMIT_REFRESH."""
+    if not registered or not project.code_map or project.archived or not project.directory:
         return False
     if project.id in _inflight or (row is not None and row.status == "running" and not _stale(row)):
         return False
     head = current_sha_fast(project.directory)
-    if head is None:
-        return False
-    if row is not None and row.sha == head and row.status == "ok":
-        return False
+    if row is not None and row.status == "ok":
+        if head is not None and row.sha == head:
+            return False
+        if head is None:
+            built = _aware(row.indexed_at)
+            if built is not None and _now() - built < NO_COMMIT_REFRESH:
+                return False
     return not _in_backoff(row)
+
+
+async def _registered(s, project) -> bool:
+    from . import status  # lazy: status imports this module
+
+    return await status.server_registered(s, project)
 
 
 def _stale(row: ProjectIndex) -> bool:
@@ -316,15 +356,16 @@ def _stale(row: ProjectIndex) -> bool:
 
 
 async def maybe_refresh(project_id: str) -> None:
-    """After a task: start a refresh when the project is switched on, HEAD differs from the index and the
-    back-off has passed. Never raises."""
+    """After a task: start a refresh when the project is switched on, a code map server is registered for it,
+    HEAD differs from the index and the back-off has passed. Never raises."""
     try:
         async with SessionLocal() as s:
             project = await s.get(Project, project_id)
             if project is None:
                 return
             row = await s.get(ProjectIndex, project_id)
-        if _due(project, row):
+            registered = await _registered(s, project)
+        if _due(project, row, registered):
             start(project_id)
     except Exception as e:  # noqa: BLE001
         log.warning("codemap: maybe_refresh failed for %s: %s", project_id, e)
@@ -351,14 +392,18 @@ async def reset_stale(*, all_running: bool = False) -> int:
 
 
 async def scan_once(*, startup: bool = False) -> None:
-    """The scheduler pass: reset stale `running` rows, then refresh every due switched-on project."""
+    """The scheduler pass: reset stale `running` rows, then refresh every due switched-on project that has a
+    code map server registered."""
+    from . import status  # lazy: status imports this module
+
     await reset_stale(all_running=startup)
     async with SessionLocal() as s:
         projects = (await s.execute(select(Project).where(Project.code_map.is_(True)))).scalars().all()
         rows = {r.project_id: r for r in (await s.execute(select(ProjectIndex))).scalars().all()}
+        servers = await status.enabled_servers(s)
     for p in projects:
         try:
-            if _due(p, rows.get(p.id)):
+            if _due(p, rows.get(p.id), status.registered_for(servers, p)):
                 start(p.id)
         except Exception as e:  # noqa: BLE001
             log.warning("codemap: scan failed for %s: %s", p.id, e)

@@ -1160,7 +1160,8 @@ class CodeMapOut(BaseModel):
     sha: Optional[str] = None
     indexed_at: Optional[datetime] = None
     behind: Optional[int] = None  # commits between sha and HEAD; null when unknown
-    error: Optional[str] = None
+    error: Optional[str] = None  # the raw reason: shown under Details only
+    failure: Optional[str] = None  # failed: error | timeout | start (the status line's plain words)
     next_try_at: Optional[datetime] = None
     server_registered: bool = False
 

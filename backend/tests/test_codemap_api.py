@@ -9,7 +9,7 @@ from app.codemap import status as cm_status
 from app.database import SessionLocal
 from app.models import McpServer, Project, ProjectIndex
 from conftest import login_as
-from test_codemap_indexer import commit_more, make_repo, mock  # noqa: F401 - fixture
+from test_codemap_indexer import add_server, commit_more, make_repo, mock  # noqa: F401 - fixture
 
 
 def _project(client, tmp_path, name=None):
@@ -40,7 +40,7 @@ def test_old_project_reads_off(client, tmp_path):
     assert r.status_code == 200
     body = r.json()
     assert body == {"enabled": False, "status": "never", "sha": None, "indexed_at": None, "behind": None,
-                    "error": None, "next_try_at": None, "server_registered": False}
+                    "error": None, "failure": None, "next_try_at": None, "server_registered": False}
 
 
 def test_switch_on_needs_a_directory(client, tmp_path):
@@ -77,12 +77,18 @@ def test_refresh_and_log_and_behind(client, tmp_path, mock):  # noqa: F811
     # refresh needs the switch
     assert client.post(f"/projects/{p['id']}/code-map/refresh").status_code == 409
     client.patch(f"/projects/{p['id']}", json={"code_map": True})
+    # refresh needs the tool
+    r = client.post(f"/projects/{p['id']}/code-map/refresh")
+    assert r.status_code == 409 and r.json()["detail"] == "Add the Code map tool first"
+    assert client.get(f"/projects/{p['id']}/code-map").json()["status"] == "never"
+    asyncio.run(add_server(p["name"]))
     set_mode("fail")
     r = client.post(f"/projects/{p['id']}/code-map/refresh")
     assert r.status_code == 200 and r.json()["status"] == "running"
     _wait(client, p['id'])
     body = client.get(f"/projects/{p['id']}/code-map").json()
     assert body["status"] == "failed" and "code 3" in body["error"] and body["next_try_at"]
+    assert body["failure"] == "error"
     lines = client.get(f"/projects/{p['id']}/code-map/log").json()["lines"]
     assert any("boom" in ln for ln in lines) and not any("ghp_abcdefghijkl" in ln for ln in lines)
     # manual refresh ignores back-off

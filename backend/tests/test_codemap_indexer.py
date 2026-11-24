@@ -11,9 +11,10 @@ from datetime import datetime, timedelta, timezone
 import pytest
 
 from app.codemap import indexer
+from app.codemap import status as cm_status
 from app.config import settings
 from app.database import SessionLocal
-from app.models import Project, ProjectIndex
+from app.models import McpServer, Project, ProjectIndex
 
 MOCK = r'''
 import os, sys, time, subprocess, json
@@ -53,7 +54,32 @@ def mock(client, tmp_path, monkeypatch):
         (tmp_path / "mode").write_text(m)
 
     set_mode("ok")
-    return tmp_path, set_mode
+    yield tmp_path, set_mode
+
+    async def drop():  # the code map servers this test registered
+        async with SessionLocal() as s:
+            for mid in _servers:
+                row = await s.get(McpServer, mid)
+                if row is not None:
+                    await s.delete(row)
+            await s.commit()
+        _servers.clear()
+
+    asyncio.run(drop())
+
+
+_servers: list[str] = []
+
+
+async def add_server(project_name):
+    """A code map server for one project (scope project: other tests never see it); dropped by `mock`."""
+    async with SessionLocal() as s:
+        m = McpServer(name=f"Code map {uuid.uuid4().hex[:8]}", scope="project", project=project_name, command="npx",
+                      args=["-y", "codebase-memory-mcp@0.12.1"], enabled=True)
+        s.add(m)
+        await s.commit()
+        _servers.append(m.id)
+        return m.id
 
 
 def _git(d, *a):
@@ -78,13 +104,16 @@ def commit_more(d, n="2"):
     return subprocess.run(["git", "-C", str(d), "rev-parse", "HEAD"], capture_output=True, text=True).stdout.strip()
 
 
-async def _mk_project(directory, code_map=True, env=None):
+async def _mk_project(directory, code_map=True, env=None, server=True):
     async with SessionLocal() as s:
         p = Project(name=f"cm-{uuid.uuid4().hex[:8]}", slug=f"cm-{uuid.uuid4().hex[:8]}", directory=str(directory),
                     code_map=code_map, env=env or {})
         s.add(p)
         await s.commit()
-        return p.id
+        pid, name = p.id, p.name
+    if server:
+        await add_server(name)
+    return pid
 
 
 async def _row(pid):
@@ -181,6 +210,45 @@ def test_neutral_folder_and_npm_config_off(mock, tmp_path, monkeypatch):
     assert str(repo) not in env.get("PATH", "")
 
 
+def test_git_config_hooks_are_switched_off(mock, tmp_path):
+    """Every git the tool runs ignores the repo-local core.fsmonitor and core.hooksPath (gitsafe's flags)."""
+    mdir, _ = mock
+    repo = tmp_path / "repo-git"
+    make_repo(repo)
+
+    async def go():
+        await indexer.refresh(await _mk_project(repo))
+
+    asyncio.run(go())
+    env = __import__("json").loads((mdir / "argv.json").read_text())["env"]
+    assert env["GIT_CONFIG_COUNT"] == "2"
+    assert (env["GIT_CONFIG_KEY_0"], env["GIT_CONFIG_VALUE_0"]) == ("core.fsmonitor", "false")
+    assert (env["GIT_CONFIG_KEY_1"], env["GIT_CONFIG_VALUE_1"]) == ("core.hooksPath", "/dev/null")
+    assert env["GIT_CONFIG_NOSYSTEM"] == "1" and env["GIT_CONFIG_GLOBAL"] == os.devnull
+    # a repo-local fsmonitor command is not run by git under this env
+    marker = tmp_path / "fsmonitor-ran"
+    _git(repo, "config", "core.fsmonitor", f"touch {marker}; false")
+    subprocess.run(["git", "-C", str(repo), "status", "--porcelain"], env=env, capture_output=True)
+    assert not marker.exists()
+
+
+def test_index_jobs_have_their_own_home(mock, tmp_path):
+    mdir, _ = mock
+    repo = tmp_path / "repo-home"
+    make_repo(repo)
+
+    async def go():
+        await indexer.refresh(await _mk_project(repo))
+
+    asyncio.run(go())
+    env = __import__("json").loads((mdir / "argv.json").read_text())["env"]
+    home = indexer.codemap_root() / "_home"
+    assert env["HOME"] == str(home) and env["XDG_CONFIG_HOME"] == str(home / ".config")
+    assert env["XDG_CACHE_HOME"] == str(home / ".cache")
+    assert "_gates" not in env["HOME"]
+    assert os.stat(home).st_mode & 0o777 == 0o700
+
+
 def test_failure_scrubbed_with_growing_capped_backoff(mock, tmp_path):
     mdir, set_mode = mock
     repo = tmp_path / "repo4"
@@ -193,6 +261,7 @@ def test_failure_scrubbed_with_growing_capped_backoff(mock, tmp_path):
         r = await _row(pid)
         assert r.status == "failed" and r.fail_count == 1 and "\n" not in r.error
         assert "ghp_abcdefgh" not in r.error and "code 3" in r.error
+        assert cm_status.failure_kind(r.error) == "error"
         nxt = r.next_try_at.replace(tzinfo=timezone.utc)
         assert timedelta(minutes=1) < nxt - datetime.now(timezone.utc) <= timedelta(minutes=2)
         await indexer.refresh(pid, manual=True)
@@ -218,6 +287,7 @@ def test_hang_is_killed_with_children(mock, tmp_path, monkeypatch):
         assert time.monotonic() - t0 < 20
         r = await _row(pid)
         assert "Timed out" in r.error and r.status == "failed"
+        assert cm_status.failure_kind(r.error) == "timeout"
 
     asyncio.run(go())
     child = int((mdir / "child.pid").read_text())
@@ -361,6 +431,7 @@ def test_missing_command_fails_cleanly(mock, tmp_path, monkeypatch):
         pid = await _mk_project(repo)
         assert await indexer.refresh(pid) == "failed"
         assert "could not start" in (await _row(pid)).error
+        assert cm_status.failure_kind((await _row(pid)).error) == "start"
 
     asyncio.run(go())
 
@@ -440,5 +511,87 @@ def test_finish_hook_triggers_and_survives_a_raise(mock, tmp_path, monkeypatch):
         await w._finish(tids[1], "completed")  # a raising hook never fails the finish
         async with SessionLocal() as s:
             assert (await s.get(Task, tids[1])).status == "completed"
+
+    asyncio.run(go())
+
+
+def test_failure_kinds():
+    assert cm_status.failure_kind(None) is None
+    assert cm_status.failure_kind("The project folder is missing") == "start"
+    assert cm_status.failure_kind("Interrupted (the server restarted)") == "error"
+    assert cm_status.failure_kind("The index job crashed (ValueError)") == "error"
+
+
+def test_no_server_no_automatic_job(mock, tmp_path):
+    """Without a registered code map server the scheduler and a task finish run nothing."""
+    mdir, _ = mock
+    repo = tmp_path / "repo-noserver"
+    make_repo(repo)
+    runs = mdir / "runs"
+    runs.unlink(missing_ok=True)
+
+    async def go():
+        pid = await _mk_project(repo, server=False)
+        await indexer.maybe_refresh(pid)
+        await indexer.scan_once()
+        await indexer.wait_idle()
+        assert not runs.exists() and await _row(pid) is None
+        async with SessionLocal() as s:
+            p = await s.get(Project, pid)
+        assert indexer._due(p, None, False) is False and indexer._due(p, None, True) is True
+        # a disabled server does not count
+        sid = await add_server(p.name)
+        async with SessionLocal() as s:
+            (await s.get(McpServer, sid)).enabled = False
+            await s.commit()
+        await indexer.maybe_refresh(pid)
+        await indexer.wait_idle()
+        assert not runs.exists()
+        async with SessionLocal() as s:
+            (await s.get(McpServer, sid)).enabled = True
+            await s.commit()
+        await indexer.maybe_refresh(pid)
+        await indexer.wait_idle()
+        assert runs.read_text().count("x") == 1
+
+    asyncio.run(go())
+
+
+def test_no_commit_folder_refreshes_once_a_day(mock, tmp_path):
+    """A folder with no commit to compare: built, `ok` with no sha; the automatic refresh re-runs it at most once
+    a day; a manual refresh always runs."""
+    mdir, _ = mock
+    folder = tmp_path / "plain"
+    folder.mkdir()
+    (folder / "a.txt").write_text("1")
+    runs = mdir / "runs"
+    runs.unlink(missing_ok=True)
+
+    async def go():
+        pid = await _mk_project(folder)
+        await indexer.scan_once()
+        await indexer.wait_idle()
+        r = await _row(pid)
+        assert (r.status, r.sha) == ("ok", None) and runs.read_text().count("x") == 1
+        await indexer.maybe_refresh(pid)
+        await indexer.scan_once()
+        await indexer.wait_idle()
+        assert runs.read_text().count("x") == 1  # built today: nothing
+        assert await indexer.refresh(pid, manual=True) == "ok"
+        assert runs.read_text().count("x") == 2  # manual: always
+        async with SessionLocal() as s:
+            (await s.get(ProjectIndex, pid)).indexed_at = datetime.now(timezone.utc) - timedelta(hours=25)
+            await s.commit()
+        await indexer.maybe_refresh(pid)
+        await indexer.wait_idle()
+        assert runs.read_text().count("x") == 3  # a day later: once
+        await indexer.maybe_refresh(pid)
+        await indexer.wait_idle()
+        assert runs.read_text().count("x") == 3
+        # the folder gets a first commit: the sha (None) differs from HEAD, so it is due at once
+        make_repo(folder)
+        await indexer.maybe_refresh(pid)
+        await indexer.wait_idle()
+        assert runs.read_text().count("x") == 4 and (await _row(pid)).sha is not None
 
     asyncio.run(go())

@@ -37,9 +37,29 @@ def tool_prefix(server) -> str:
     return f"mcp__{mcp_manager.mcp_server_prefix(server.name)}__"
 
 
+async def enabled_servers(s) -> list:
+    return list((await s.execute(select(McpServer).where(McpServer.enabled.is_(True)))).scalars().all())
+
+
+def registered_for(servers, project) -> bool:
+    """An enabled code map server in `project`'s scope among `servers` (the check status, policy and jobs share)."""
+    return any(is_code_map_server(m) and (m.scope != "project" or m.project == project.name) for m in servers
+               if getattr(m, "enabled", True))
+
+
 async def server_registered(s, project) -> bool:
-    rows = (await s.execute(select(McpServer).where(McpServer.enabled.is_(True)))).scalars().all()
-    return any(is_code_map_server(m) and (m.scope != "project" or m.project == project.name) for m in rows)
+    return registered_for(await enabled_servers(s), project)
+
+
+def failure_kind(error: str | None) -> str | None:
+    """A failed job's reason in one plain word for the status line: `timeout`, `start` or `error`."""
+    if not error:
+        return None
+    if error.startswith(indexer.ERR_TIMEOUT):
+        return "timeout"
+    if indexer.ERR_START in error or error == "The project folder is missing":
+        return "start"
+    return "error"
 
 
 def _behind(directory: str, sha: str) -> int | None:
@@ -66,6 +86,7 @@ async def for_project(s, project: Project) -> dict:
         "indexed_at": row.indexed_at if row is not None else None,
         "behind": behind,
         "error": row.error if row is not None and status == "failed" else None,
+        "failure": failure_kind(row.error) if row is not None and status == "failed" else None,
         "next_try_at": row.next_try_at if row is not None else None,
         "server_registered": await server_registered(s, project),
     }

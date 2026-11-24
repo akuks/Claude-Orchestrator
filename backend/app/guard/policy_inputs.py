@@ -166,18 +166,21 @@ def _iso(dt) -> str | None:
     return dt.isoformat()
 
 
-async def _ok_index(s, project_id: str):
+async def _ok_index(s, project_id: str, *, need_sha: bool = True):
+    """The project's `ok` index row, or None. A reference's needs a sha (the old-code line prints it); the
+    project's own may have none (no commit to compare: the hook says "freshness unknown")."""
     row = await s.get(ProjectIndex, project_id)
-    return row if row is not None and row.status == "ok" and row.sha else None
+    return row if row is not None and row.status == "ok" and (row.sha or not need_sha) else None
 
 
 async def _code_map(s, project, ref_projects: list) -> dict:
     """Phase 6b: ``code_map`` {sha, indexed_at, prefix} and ``code_map_refs`` [{dir, sha}] for co-guard's code
-    map answers, only when the project is switched on, its index is ``ok`` with a sha and a code map server is
-    registered for it (an old project: nothing). A reference is listed only with its own ``ok`` index."""
+    map answers, only when the project is switched on, its index is ``ok`` (with or without a sha: none means
+    freshness unknown) and a code map server is registered for it (an old project: nothing). A reference is
+    listed only with its own ``ok`` index and a sha."""
     if project is None or getattr(project, "code_map", False) is not True:
         return {}
-    row = await _ok_index(s, project.id)
+    row = await _ok_index(s, project.id, need_sha=False)
     if row is None:
         return {}
     from ..codemap import status as cm_status  # lazy: the code map package pulls in the job runner
