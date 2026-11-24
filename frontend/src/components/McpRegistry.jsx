@@ -26,6 +26,8 @@ import {
   ThunderboltOutlined,
 } from '@ant-design/icons'
 import { api, MCP_STATUS_COLORS } from '../api'
+import { presetDraft } from '../codemap/codemap'
+import '../codemap/codemap.css'
 import McpServerModal, { DEFAULT_ACTION_LABEL, ENVIRONMENT_LABEL } from './McpServerModal'
 
 function ObservabilityPanel({ obs }) {
@@ -161,7 +163,32 @@ function PolicyDrawer({ server, onClose }) {
   )
 }
 
-export default function McpRegistry() {
+export function PresetCards({ presets, onAdd }) {
+  if (!presets?.length) return null
+  return (
+    <div data-testid="preset-row">
+      <Typography.Text type="secondary">Add from a preset</Typography.Text>
+      <div className="co-preset-row" style={{ marginTop: 6 }}>
+        {presets.map((p) => (
+          <div key={p.key} className="co-surface co-preset-card" data-testid={`preset-${p.key}`}>
+            <b>{p.name}</b>
+            <p>{p.description}</p>
+            <Button size="small" onClick={() => onAdd(p)} data-testid={`preset-add-${p.key}`}>Add</Button>
+            <details className="co-codemap-details">
+              <summary>Details</summary>
+              <div>Version {p.pinned}</div>
+              <div>{[p.command, ...(p.args || [])].join(' ')}</div>
+            </details>
+          </div>
+        ))}
+      </div>
+    </div>
+  )
+}
+
+export default function McpRegistry({ isAdmin = false }) {
+  const [presets, setPresets] = useState([])
+  const [preset, setPreset] = useState(null)
   const [servers, setServers] = useState([])
   const [obs, setObs] = useState(null)
   const [loading, setLoading] = useState(false)
@@ -186,6 +213,13 @@ export default function McpRegistry() {
   useEffect(() => {
     refresh()
   }, [refresh])
+
+  useEffect(() => {
+    if (!isAdmin) return
+    Promise.resolve(api.listMcpPresets())
+      .then((p) => setPresets(Array.isArray(p) ? p : []))
+      .catch(() => {})
+  }, [isAdmin])
 
   const test = async (id) => {
     setTestingId(id)
@@ -299,6 +333,16 @@ export default function McpRegistry() {
   return (
     <>
       <ObservabilityPanel obs={obs} />
+      {isAdmin && (
+        <PresetCards
+          presets={presets}
+          onAdd={(p) => {
+            setEditing(null)
+            setPreset(presetDraft(p))
+            setModalOpen(true)
+          }}
+        />
+      )}
 
       <Space style={{ marginBottom: 12 }}>
         <Button
@@ -306,6 +350,7 @@ export default function McpRegistry() {
           icon={<PlusOutlined />}
           onClick={() => {
             setEditing(null)
+            setPreset(null)
             setModalOpen(true)
           }}
         >
@@ -328,6 +373,7 @@ export default function McpRegistry() {
       <McpServerModal
         open={modalOpen}
         server={editing}
+        preset={preset}
         onClose={() => setModalOpen(false)}
         onSaved={refresh}
       />
