@@ -39,6 +39,7 @@ import relativeTime from 'dayjs/plugin/relativeTime'
 import { api } from '../api'
 import ProjectMembers from './ProjectMembers'
 import ProjectCards from '../projects/ProjectCards'
+import LicenceBadge from '../projects/LicenceBadge'
 import GuardSettings from '../guard/GuardSettings'
 import { canEditGuard } from '../guard/guard'
 import DecisionsPane from '../decisions/DecisionsPane'
@@ -362,6 +363,39 @@ function MemoryPane({ project, canEdit, onSaved }) {
   )
 }
 
+// Drawer line under the title: what the licence check found, and (maintainers) a way to run it again.
+export function LicenceCheck({ project, canEdit, onSaved }) {
+  const [busy, setBusy] = useState(false)
+  if (!project) return null
+  const again = async () => {
+    setBusy(true)
+    try {
+      await api.refreshLicence(project.id)
+      onSaved?.()
+    } catch (e) {
+      message.error(String(e?.message || 'Could not check the licence'))
+    } finally {
+      setBusy(false)
+    }
+  }
+  return (
+    <div style={{ marginBottom: 12 }} data-testid="licence-line">
+      <Typography.Text type="secondary">Licence: </Typography.Text>
+      <LicenceBadge project={project} />
+      {!project.licence_badge && (
+        <Typography.Text type="secondary">
+          {project.licence?.id && project.licence.kind !== 'unknown' ? String(project.licence.id) : 'not shown for your own code'}
+        </Typography.Text>
+      )}
+      {canEdit && (
+        <Typography.Link onClick={busy ? undefined : again} data-testid="licence-check-again" style={{ marginLeft: 8 }}>
+          {busy ? 'Checking…' : 'Check again'}
+        </Typography.Link>
+      )}
+    </div>
+  )
+}
+
 // Per-project drawer: Members, Memory and Guard tabs.
 // "No commits yet": a bad edit cannot be undone with git until the first commit.
 export function GitStateWarning({ projectId }) {
@@ -410,7 +444,15 @@ export function ProjectDrawer({ project, tab, onTab, currentUser, onClose, onSav
   const [ruleDraft, setRuleDraft] = useState(null) // "Make this a rule": opens the project rule editor pre-filled
 
   return (
-    <Drawer open={!!project} onClose={onClose} width={680} title={project?.name || ''} destroyOnHidden>
+    <Drawer open={!!project} onClose={onClose} width={680} title={
+        <Space>
+          {project?.name || ''}
+          <LicenceBadge project={project} />
+        </Space>
+      }
+      destroyOnHidden
+    >
+      {project && <LicenceCheck project={project} canEdit={canEdit} onSaved={onSaved} />}
       {project && <GitStateWarning projectId={project.id} />}
       {project && (
         <Tabs
@@ -694,6 +736,7 @@ export default function ProjectsView({ currentUser, onProjectsChanged }) {
           {row.guard_enabled === false && <Tag color="warning">guard off</Tag>}
           {row.trust === 'external' && <Tag color="purple">external</Tag>}
           {row.quarantine && <Tag color="orange">quarantine</Tag>}
+          <LicenceBadge project={row} />
         </Space>
       ),
     },

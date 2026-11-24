@@ -152,6 +152,7 @@ export const api = {
   discoverProjects: () => req('GET', '/projects/discover'),
   importProjects: (directories) => req('POST', '/projects/import', { directories }),
   updateProject: (id, payload) => req('PATCH', `/projects/${id}`, payload),
+  refreshLicence: (id) => req('POST', `/projects/${id}/licence/refresh`),
   deleteProject: (id) => req('DELETE', `/projects/${id}`),
   listProjectServers: (id) => req('GET', `/projects/${id}/servers`),
   saveProjectServers: (id, servers) => req('PUT', `/projects/${id}/servers`, servers),
