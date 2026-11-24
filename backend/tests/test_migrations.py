@@ -680,7 +680,7 @@ def test_migration_0020_upgrade_downgrade(scratch_url):
 
     def old_rows(sc, insp):  # a project from before 0020
         sc.exec_driver_sql("INSERT INTO projects (id, name, slug, directory, default_model, env, memory, memory_enabled, archived, auto_review_prs, created_at)"
-            " VALUES ('p20', 'old-p', 'old-p', '/x', 'sonnet', '{}', '', 1, 0, 0, CURRENT_TIMESTAMP)")
+            " VALUES ('p20', 'old-p', 'old-p', '/x', 'sonnet', '{}', '', true, false, false, CURRENT_TIMESTAMP)")
 
     _inspect(url, old_rows)
     command.upgrade(_alembic_cfg(url), "0020")
