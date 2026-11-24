@@ -144,6 +144,8 @@ export const api = {
   getCodeMap: (id) => req('GET', `/projects/${id}/code-map`),
   refreshCodeMap: (id) => req('POST', `/projects/${id}/code-map/refresh`),
   getCodeMapLog: (id) => req('GET', `/projects/${id}/code-map/log`),
+  getSchema: (id, table) => req('GET', `/projects/${id}/schema${table ? `?table=${encodeURIComponent(table)}` : ''}`),
+  getRecommended: (id) => req('GET', `/projects/${id}/recommended`),
   testServer: (id) => req('POST', `/mcp/servers/${id}/test`),
   getPolicies: (id) => req('GET', `/mcp/servers/${id}/policies`),
   setPolicies: (id, policies) => req('PUT', `/mcp/servers/${id}/policies`, policies),

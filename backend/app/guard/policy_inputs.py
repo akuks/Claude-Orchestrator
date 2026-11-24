@@ -200,6 +200,20 @@ async def _code_map(s, project, ref_projects: list) -> dict:
             "code_map_refs": refs}
 
 
+async def _ui_skills(project) -> str | None:
+    """Phase 6c: the design-skills paragraph for a project that has a user interface and the switch on; the folder
+    is looked at off the event loop. Never raises (a failure means no paragraph)."""
+    if project is None or getattr(project, "ui_skills", True) is not True or not getattr(project, "directory", None):
+        return None
+    from ..recommend import detect as ui_detect, panel as ui_panel  # lazy
+
+    try:
+        found = await asyncio.wait_for(asyncio.to_thread(ui_detect.detect, project.directory), ui_detect.TIMEOUT)
+        return ui_panel.ui_skills_text(project, found)
+    except Exception:
+        return None
+
+
 async def gather(s, *, task, project, owner_id: str | None, mcp: dict | None) -> PolicyInputs:
     events: list[dict] = []
     if project is None:
@@ -258,6 +272,13 @@ async def gather(s, *, task, project, owner_id: str | None, mcp: dict | None) ->
             policy["decisions"] = snap
             policy["decisions_index"] = index
     policy.update(await _code_map(s, project, ref_projects))
+    main_text, helper_text = ground_rules.main_text(ground), policy["helper_context"]
+    ui_text = await _ui_skills(project)
+    included = list(ground_rules.included(ground))
+    if ui_text:  # phase 6c: after the ground rules, for the main session and for every helper
+        main_text = "\n\n".join(filter(None, [main_text, ui_text]))
+        policy["helper_context"] = "\n\n".join(filter(None, [helper_text, ui_text]))
+        included.append("ui_skills")
     brief = getattr(task, "brief", None)  # JSON null reads as None: falsy is no brief
     brief_text = brief_layers = None
     if brief:
@@ -268,5 +289,5 @@ async def gather(s, *, task, project, owner_id: str | None, mcp: dict | None) ->
         brief_text = render.brief_text(brief, bounds)
         brief_layers = scope.layers(task.id, brief, bounds)
     return PolicyInputs(policy=policy, brief_text=brief_text, brief_layers=brief_layers or [], add_dirs=refs, data_line=DATA_LINE if trust == "external" else None,
-                        events=events, main_text=ground_rules.main_text(ground),
-                        ground_included=ground_rules.included(ground), decisions_index=index)
+                        events=events, main_text=main_text,
+                        ground_included=included, decisions_index=index)

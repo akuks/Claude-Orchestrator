@@ -12,7 +12,7 @@ from sqlalchemy.orm import Session
 from app import models
 from app.database import _alembic_cfg, _baseline_metadata, run_migrations
 
-HEAD = "0019"  # the latest revision
+HEAD = "0020"  # the latest revision
 
 
 def _tables(db) -> set[str]:
@@ -670,3 +670,35 @@ def test_migration_0019_upgrade_downgrade(scratch_url):
                 sc.exec_driver_sql("SELECT version_num FROM alembic_version").scalar())
 
     assert _inspect(url, check_down) == ("old-tool", "0018")
+
+
+def test_migration_0020_upgrade_downgrade(scratch_url):
+    from alembic import command
+
+    url = scratch_url
+    command.upgrade(_alembic_cfg(url), "0019")
+
+    def old_rows(sc, insp):  # a project from before 0020
+        sc.exec_driver_sql("INSERT INTO projects (id, name, slug, directory, default_model, env, memory, memory_enabled, archived, auto_review_prs, created_at)"
+            " VALUES ('p20', 'old-p', 'old-p', '/x', 'sonnet', '{}', '', true, false, false, CURRENT_TIMESTAMP)")
+
+    _inspect(url, old_rows)
+    command.upgrade(_alembic_cfg(url), "0020")
+
+    def check(sc, insp):
+        cols = {c["name"] for c in insp.get_columns("projects")}
+        assert {"ui_skills", "brand_skill"} <= cols
+        return (sc.exec_driver_sql("SELECT ui_skills, brand_skill FROM projects WHERE id='p20'").one(),
+                sc.exec_driver_sql("SELECT version_num FROM alembic_version").scalar())
+
+    (ui, brand), ver = _inspect(url, check)
+    assert ui is not None and bool(ui) is True and brand is None and ver == "0020"
+    command.downgrade(_alembic_cfg(url), "0019")
+
+    def check_down(sc, insp):
+        cols = {c["name"] for c in insp.get_columns("projects")}
+        assert not ({"ui_skills", "brand_skill"} & cols)
+        return (sc.exec_driver_sql("SELECT name FROM projects WHERE id='p20'").scalar(),
+                sc.exec_driver_sql("SELECT version_num FROM alembic_version").scalar())
+
+    assert _inspect(url, check_down) == ("old-p", "0019")

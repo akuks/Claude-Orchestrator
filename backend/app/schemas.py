@@ -342,6 +342,9 @@ class ProjectUpdate(BaseModel):
     fresh_session_tokens: Optional[int] = Field(None, ge=50000, le=900000)
     # code map (phase 6b, maintainer-editable): needs a project directory
     code_map: Optional[bool] = None
+    # design skills (phase 6c, maintainer-editable); brand_skill goes into prompts, so a strict pattern
+    ui_skills: Optional[bool] = None
+    brand_skill: Optional[str] = Field(None, pattern=r"^[A-Za-z0-9_.:-]{1,120}$")
 
 
 class ReadonlyPathIn(BaseModel):
@@ -380,6 +383,8 @@ class ProjectOut(BaseModel):
     # create/import only: why suggest_trust chose `trust`
     trust_reason: Optional[str] = None
     code_map: bool = False
+    ui_skills: bool = True
+    brand_skill: Optional[str] = None
     licence: Optional[dict] = None
     licence_badge: Optional[dict] = None  # {label, tone}, computed by the server
     task_count: int = 0

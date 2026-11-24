@@ -49,6 +49,7 @@ import { guardLine, revealHidden, waitingLine } from '../guard/guard'
 import '../guard/guard.css'
 import BriefPanel from '../briefs/BriefPanel'
 import HandoffCard from '../resume/HandoffCard'
+import PublishedLinks, { publishedName } from '../runs/PublishedLinks'
 import ContinueButton from '../resume/ContinueButton'
 import RunNotices from '../resume/RunNotices'
 import UsageChips from '../usage/UsageChips'
@@ -197,6 +198,9 @@ export function renderLine(ev) {
       break
     case 'risk':
       text = p.risk_reason ? `Marked critical: ${p.risk_reason}` : 'Marked critical'
+      break
+    case 'output':
+      text = `Published: ${publishedName(p)}`
       break
     default:
       text = JSON.stringify(p)
@@ -729,6 +733,7 @@ export default function TaskDetail({ taskId, onClose, onChanged, onOpenTask, onO
       />
       <AskCard taskId={taskId} />
       <HandoffCard taskId={taskId} onHandoff={setHandoff} canManage={task?.can_manage === true} status={task?.status} />
+      <PublishedLinks events={events} />
 
       <Typography.Title level={5}>Live Output</Typography.Title>
       <div

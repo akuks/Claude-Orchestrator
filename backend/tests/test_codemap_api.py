@@ -136,3 +136,26 @@ def test_external_trust_needs_an_admin(client, tmp_path):
     q, _ = _project(client, tmp_path)
     _grant(client, q["id"], maint.user_id, "maintainer")
     assert maint.patch(f"/projects/{q['id']}", json={"code_map": True}).status_code == 200
+
+
+def test_log_hides_the_project_folder(client, tmp_path):
+    from app.codemap import indexer
+
+    p, d = _project(client, tmp_path)
+    real = str(d.resolve())
+    log = indexer.log_path(p["id"])
+    log.parent.mkdir(parents=True, exist_ok=True)
+    log.write_text(f"indexing {real}/src\nalso {d}/lib\nunrelated line\n")
+    lines = client.get(f"/projects/{p['id']}/code-map/log").json()["lines"]
+    text = "\n".join(lines)
+    assert real not in text and str(d) not in text
+    assert "indexing <project folder>/src" in text and "unrelated line" in text
+
+
+def test_hide_folder_only_whole_paths():
+    from app.routers.codemap import _hide_folder
+
+    out = _hide_folder(["in /app/x and /app2/x and /apple and /app: ok", "at /srv/app/y", "/app"], "/app")
+    assert out[0] == "in <project folder>/x and /app2/x and /apple and <project folder>: ok"
+    assert out[1] == "at /srv/app/y"
+    assert out[2] == "<project folder>"

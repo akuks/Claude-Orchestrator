@@ -1413,9 +1413,15 @@ class WorkerManager:
         try:
             await self._ingest_usage_spool(task_id, emit)  # bands + injected, before the spool goes
             await self._spend_spool_grants(task_id)  # every granted line, durably (retries wipe the spool)
+            outputs = None  # (links of the task's `output` events, its folders), read once on the first Output line
             for rec in guard_runtime.read_spool(task_id):
                 if rec.get("seen") is True:
                     continue  # watchdog bookkeeping, not an event
+                if rec.get("event") == "Output":  # phase 6c: published outside the project, never a guard event
+                    if outputs is None:
+                        outputs = (await self._output_links(task_id), await self._output_roots(task_id))
+                    await self._ingest_output(task_id, rec, *outputs, emit)
+                    continue
                 payload = self.guard_payload(rec, self._run_secrets.get(task_id))
                 if not payload:
                     continue
@@ -1428,6 +1434,37 @@ class WorkerManager:
                 await emit("guard", payload)
         finally:
             guard_runtime.remove_task_dir(task_id)
+
+    @staticmethod
+    async def _output_links(task_id: str) -> set:
+        """The links of the task's stored `output` events (every step of the task counts)."""
+        async with SessionLocal() as s:
+            rows = await s.execute(select(TaskEvent.payload).where(TaskEvent.task_id == task_id,
+                                                                   TaskEvent.type == guard_runtime.OUTPUT_EVENT))
+            return {p["link"] for p in rows.scalars() if isinstance(p, dict) and isinstance(p.get("link"), str)}
+
+    @staticmethod
+    async def _output_roots(task_id: str) -> list[str]:
+        """The folders a kept copy may be in: the task's project folder (when it has one) and its workspace."""
+        async with SessionLocal() as s:
+            t = await s.get(Task, task_id)
+            if t is None:
+                return []
+            proj = await s.get(Project, t.project_id) if t.project_id else None
+            roots = [getattr(proj, "directory", None), t.workspace_dir or str(settings.workspaces_dir / task_id)]
+        return [str(r) for r in roots if r]
+
+    async def _ingest_output(self, task_id: str, rec: dict, links: set, roots: list[str], emit) -> None:
+        """One ``Output`` spool line -> an `output` event, checked again (``output_payload``, which also checks
+        the kept copy on disk): at most OUTPUTS_MAX per task, each link once, never a link a run secret would
+        change. Malformed -> ignored."""
+        payload = guard_runtime.output_payload(rec, roots)
+        if payload is None or len(links) >= guard_co_hook.OUTPUTS_MAX or payload["link"] in links:
+            return
+        if redact_obj(payload, self._run_secrets.get(task_id) or []) != payload:
+            return
+        links.add(payload["link"])
+        await emit(guard_runtime.OUTPUT_EVENT, payload)
 
     @staticmethod
     async def _spend_spool_grants(task_id: str, strict: bool = False) -> None:

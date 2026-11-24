@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import {
   Alert,
   Badge,
@@ -24,6 +24,8 @@ import {
 } from 'antd'
 import {
   ApiOutlined,
+  BulbOutlined,
+  DatabaseOutlined,
   DeleteOutlined,
   EditOutlined,
   PlusOutlined,
@@ -46,6 +48,8 @@ import { canEditGuard } from '../guard/guard'
 import DecisionsPane from '../decisions/DecisionsPane'
 import LaunchTab from '../launch/LaunchTab'
 import CodeMapSection from '../codemap/CodeMapSection'
+import DatabaseSection from '../schema/DatabaseSection'
+import RecommendedSection from '../recommend/RecommendedSection'
 import { FRESH_SUGGEST, freshSessionError } from '../usage/usage'
 
 dayjs.extend(relativeTime)
@@ -436,6 +440,31 @@ export function ProjectDrawer({ project, tab, onTab, currentUser, onClose, onSav
   const canEdit = project?.my_role === 'maintainer'
   const [pendingProposals, setPendingProposals] = useState(0)
   const projectId = project?.id
+  // One cheap look per project at whether it has a user interface, to know whether to show "Recommended".
+  // undefined = still loading (no tab yet), null = the check failed (tab shows a retry), else the answer.
+  const [rec, setRec] = useState(undefined)
+  const recFor = useRef(null) // only the latest project's answer may land
+  const loadRec = useCallback(async () => {
+    if (!projectId) return
+    recFor.current = projectId
+    try {
+      const r = await api.getRecommended(projectId)
+      if (recFor.current === projectId) setRec(r)
+    } catch (_) {
+      if (recFor.current === projectId) setRec(null)
+    }
+  }, [projectId])
+  useEffect(() => {
+    setRec(undefined)
+    loadRec()
+    return () => {
+      recFor.current = null
+    }
+  }, [loadRec])
+  // The open tab vanished (the project has no user interface): go back to the first tab.
+  useEffect(() => {
+    if (tab === 'recommended' && rec && !rec.has_ui) onTab('members')
+  }, [tab, rec]) // eslint-disable-line react-hooks/exhaustive-deps
   useEffect(() => {
     let live = true
     setPendingProposals(0)
@@ -523,6 +552,44 @@ export function ProjectDrawer({ project, tab, onTab, currentUser, onClose, onSav
               ),
               children: <CodeMapSection key={project.id} active={tab === 'codemap'} project={project} canEdit={canEditGuard(project, currentUser)} />,
             },
+            {
+              key: 'database',
+              label: (
+                <span>
+                  <DatabaseOutlined /> Database
+                </span>
+              ),
+              children: <DatabaseSection key={project.id} active={tab === 'database'} project={project} />,
+            },
+            ...(rec === null || rec?.has_ui
+              ? [
+                  {
+                    key: 'recommended',
+                    label: (
+                      <span>
+                        <BulbOutlined /> Recommended
+                      </span>
+                    ),
+                    children: rec ? (
+                      <RecommendedSection
+                        key={project.id}
+                        project={project}
+                        data={rec}
+                        reload={loadRec}
+                        canEdit={canEditGuard(project, currentUser)}
+                        isAdmin={currentUser?.role === 'admin'}
+                      />
+                    ) : (
+                      <div data-testid="rec-failed">
+                        Could not check this project.{' '}
+                        <Button size="small" onClick={loadRec} data-testid="rec-retry">
+                          Try again
+                        </Button>
+                      </div>
+                    ),
+                  },
+                ]
+              : []),
             {
               key: 'guard',
               label: (

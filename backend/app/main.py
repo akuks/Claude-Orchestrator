@@ -37,8 +37,10 @@ from .routers import (
     mcp,
     projects,
     questions,
+    recommend as recommend_router,
     asks,
     schedules,
+    schema as schema_router,
     skills,
     stream,
     tasks,
@@ -148,6 +150,7 @@ async def lifespan(app: FastAPI):
         await scheduler.stop()
         await worker.stop()
         await codemap_indexer.shutdown()  # after the worker: its last finishes may start jobs
+        schema_router.shutdown()
 
 
 app = FastAPI(title="Claude Orchestrator", version="0.1.0", lifespan=lifespan)
@@ -191,6 +194,8 @@ for _r in (
     decisions.router,
     launch.router,
     codemap_router.router,
+    recommend_router.router,
+    schema_router.router,
     templates.router,
     schedules.router,
     approvals.router,

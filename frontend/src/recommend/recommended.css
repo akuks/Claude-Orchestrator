@@ -1,0 +1,12 @@
+/* Recommended tab. Colours come from the --co-* variables only. */
+.co-rec-explain { color: var(--co-text-secondary); margin: 0 0 12px; }
+.co-rec-list { display: flex; flex-direction: column; gap: 10px; }
+.co-rec-item, .co-rec-settings { padding: 10px 14px; }
+.co-rec-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.co-rec-name { font-weight: 600; color: var(--co-text); }
+.co-rec-why { color: var(--co-text-secondary); font-size: 13px; margin-top: 2px; }
+.co-rec-muted { color: var(--co-text-secondary); font-size: 13px; }
+.co-rec-settings { margin-top: 14px; }
+.co-rec-brand { margin-top: 12px; }
+.co-rec-brand label { display: block; margin-bottom: 4px; color: var(--co-text); }
+.co-rec-err { margin-top: 4px; font-size: 13px; }
