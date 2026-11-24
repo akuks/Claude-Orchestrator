@@ -84,7 +84,8 @@ def test_switch_off_wraps_with_the_launcher(tmp_path):
     assert cfg == {"mcpServers": {"tool-a": {
         "command": sys.executable,
         "args": ["-I", mcp_manager.launcher_path(), str(d), "--", "npx", "-y", "some-mcp@1.2.3", "a b"],
-        "env": {"TOKEN": "t", "CO_PROJECT_DIR": "/proj/x", "npm_config_cache": str(mcp_manager.npm_cache_dir())},
+        "env": {"TOKEN": "t", "CO_PROJECT_DIR": "/proj/x", "npm_config_cache": str(mcp_manager.npm_cache_dir()),
+                "npm_config_prefix": str(mcp_manager.npm_global_dir())},
     }}}
     assert d == (root / "tool-a").resolve()
 
@@ -98,7 +99,14 @@ def test_tools_get_their_own_npm_cache(tmp_path):
     for key in ("npm_config_cache", "NPM_CONFIG_CACHE"):
         srv = _srv(f"own-{key}", command="npx", secrets_encrypted=encrypt_json({"env": {key: "/mine"}}))
         env = mcp_manager.build_config([srv], task_cwd_root=tmp_path)["mcpServers"][srv.name]["env"]
-        assert env == {key: "/mine"}, key
+        assert env == {key: "/mine", "npm_config_prefix": str(mcp_manager.npm_global_dir())}, key
+    for key in ("npm_config_prefix", "NPM_CONFIG_PREFIX"):
+        srv = _srv(f"own-{key}", command="npx", secrets_encrypted=encrypt_json({"env": {key: "/g"}}))
+        env = mcp_manager.build_config([srv], task_cwd_root=tmp_path)["mcpServers"][srv.name]["env"]
+        assert env == {key: "/g", "npm_config_cache": str(mcp_manager.npm_cache_dir())}, key
+    glob = mcp_manager.npm_global_dir()
+    assert glob == settings.workspaces_dir / "_mcp_cache" / "npm-global"
+    assert stat.S_IMODE(glob.stat().st_mode) == 0o700
     # a tool that starts in the project, and the old call, are left exactly as they were
     on = _srv("on", command="npx", start_in_project=True)
     assert mcp_manager.build_config([on], task_cwd_root=tmp_path)["mcpServers"]["on"] == {"command": "npx",
@@ -114,13 +122,15 @@ def test_codemap_build_keeps_its_own_private_npm_cache():
     home = Path(env["HOME"])
     assert home == settings.workspaces_dir / "_codemap" / "_home"
     assert not any(k.lower() == "npm_config_cache" for k in env)
+    assert env["npm_config_prefix"] == str(mcp_manager.npm_global_dir())  # not the server user's global folder
 
 
 def test_switch_off_without_env_or_project_dir(tmp_path):
     srv = _srv("tool-b", command="uvx", args=["thing"])
     cfg = mcp_manager.build_config([srv], task_cwd_root=tmp_path)
     entry = cfg["mcpServers"]["tool-b"]
-    assert entry["env"] == {"npm_config_cache": str(mcp_manager.npm_cache_dir())}
+    assert entry["env"] == {"npm_config_cache": str(mcp_manager.npm_cache_dir()),
+                            "npm_config_prefix": str(mcp_manager.npm_global_dir())}
     assert entry["command"] == sys.executable
     assert entry["args"][-3:] == ["--", "uvx", "thing"]
 
@@ -711,3 +721,89 @@ def test_inline_code_naming_package_files_is_not_self_protect(tmp_path):
                 "node -e \"require('./node_modules/x')\""):
         v = rules.evaluate("Bash", {"command": cmd}, pol, str(proj))
         assert not any(h.rule_id == "self-protect" for h in v.hits), cmd
+
+
+# ---- package-manager installs count as writes to <target>/node_modules -------
+
+DENIED_INSTALLS = ["npm install --prefix .. ./evil", "npm install --prefix=.. ./evil", "cd ~ && npm i ./evil",
+                   "cd .. && npm install", "pnpm add --dir ~ x", "pnpm -C ~ add x", "yarn --cwd ~ add x",
+                   "cd ~ && yarn", "bun add --cwd ~ x", "npm ci --prefix ~", "npm link --prefix ~ ./evil"]
+ALLOWED_INSTALLS = ["npm install", "npm i left-pad", "npm install --prefix ./sub", "pnpm add x", "yarn add x",
+                    "npm ls", "npm run build", "npm view x --prefix ~"]
+
+
+def _bash(pol, cmd, cwd):
+    from app.guard import rules
+
+    return rules.evaluate("Bash", {"command": cmd}, pol, str(cwd))
+
+
+def test_installs_above_tool_folders_are_denied_adhoc(monkeypatch):
+    ws = _prod_layout(monkeypatch)
+    cwd = ws / "tadhoc"
+    pol = _policy(None, cwd)
+    for cmd in DENIED_INSTALLS:
+        v = _bash(pol, cmd, cwd)
+        assert v.decision == "deny" and any(h.rule_id == "self-protect" for h in v.hits), cmd
+    for cmd in ALLOWED_INSTALLS:
+        v = _bash(pol, cmd, cwd)
+        assert not any(h.rule_id == "self-protect" for h in v.hits), cmd
+
+
+def test_installs_above_tool_folders_are_denied_for_a_project(tmp_path, monkeypatch):
+    from app.guard import runtime
+
+    _prod_layout(monkeypatch)
+    proj = tmp_path / "proj"
+    (proj / "sub").mkdir(parents=True)
+    pol = _policy(proj, proj)
+    checkout = runtime.BACKEND_DIR.parent
+    for cmd in DENIED_INSTALLS[2:] + [f"cd {checkout} && npm i x", f"npm i --prefix {runtime.BACKEND_DIR} x"]:
+        if cmd.startswith(("cd .. ", "npm install --prefix ..", "npm install --prefix=..")):
+            continue  # the folder above this temp project is not above a tool folder
+        v = _bash(pol, cmd, proj)
+        assert v.decision == "deny" and any(h.rule_id == "self-protect" for h in v.hits), cmd
+    for cmd in ALLOWED_INSTALLS + ["cd sub && npm install"]:
+        v = _bash(pol, cmd, proj)
+        assert not any(h.rule_id == "self-protect" for h in v.hits), cmd
+
+
+def test_global_installs_are_left_to_the_tools_own_prefix(monkeypatch):
+    """-g is not judged as a local install; tools never see the server user's global folder (npm_config_prefix)."""
+    ws = _prod_layout(monkeypatch)
+    cwd = ws / "tadhoc"
+    v = _bash(_policy(None, cwd), "npm install -g x", cwd)
+    assert not any(h.rule_id == "self-protect" for h in v.hits)
+
+
+# ---- CO_TOOL_RUN_DIR ----------------------------------------------------------
+
+
+def test_tool_run_dir_setting(client, tmp_path, monkeypatch):
+    from app.guard import runtime
+
+    runs = (tmp_path / "runs").resolve()
+    monkeypatch.setattr(settings, "tool_run_dir", runs)
+    name = f"trd-{_uid()}"
+    _add(_srv(name, command="npx", args=["-y", "x@1"]))
+    tid = f"t{_uid()}"
+    try:
+        cdir, entry = _prepare(name, tid)
+        d = Path(entry["args"][2])
+        assert d.parent == runs / tid and d.is_dir()
+        _assert_only_stoppers(d)
+        assert stat.S_IMODE((runs / tid).stat().st_mode) == 0o700
+        assert not (cdir / "cwd").exists()
+        w = settings.workspaces_dir / f"t{_uid()}"
+        pol = runtime.build_policy(task_id="t-trd", project=None, workspace=w, cwd=w,
+                                   claude_config_dir=None, mcp_tools=None)
+        prot = set(pol["protected_paths"])
+        assert str(runs) in prot and str(runs.parent / "node_modules") in prot
+        (runs / "stale-task").mkdir()
+        mcp_manager.cleanup_task(tid)
+        assert not (runs / tid).exists() and not cdir.exists()
+        assert asyncio.run(mcp_manager.sweep_stale_configs()) >= 1
+        assert not (runs / "stale-task").exists()
+    finally:
+        _drop(name)
+        mcp_manager.cleanup_task(tid)

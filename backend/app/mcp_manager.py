@@ -143,16 +143,27 @@ def place_stoppers(d: Path) -> None:
         os.chmod(d / name, 0o700)
 
 
-def npm_cache_dir() -> Path:
-    """The connected tools' own npm cache (not the agent-writable ~/.npm, whose
-    _npx trees npx reuses without re-checking): 0700, made on demand, and
-    guard-protected (workspaces/_mcp_cache)."""
+def _cache_subdir(name: str) -> Path:
     root = settings.workspaces_dir / "_mcp_cache"
-    d = root / "npm"
+    d = root / name
     for x in (root, d):
         x.mkdir(parents=True, exist_ok=True, mode=0o700)
         x.chmod(0o700)
     return d
+
+
+def npm_cache_dir() -> Path:
+    """The connected tools' own npm cache (not the agent-writable ~/.npm, whose
+    _npx trees npx reuses without re-checking): 0700, made on demand, and
+    guard-protected (workspaces/_mcp_cache)."""
+    return _cache_subdir("npm")
+
+
+def npm_global_dir() -> Path:
+    """An empty npm global prefix for tools and the code map build: npx falls
+    back to a matching global install, and the server user's own global folder
+    (nvm, Homebrew) may be one an agent's ``npm install -g`` can write."""
+    return _cache_subdir("npm-global")
 
 
 def build_config(servers: list[McpServer], *, task_cwd_root: Path | None = None,
@@ -179,6 +190,8 @@ def build_config(servers: list[McpServer], *, task_cwd_root: Path | None = None,
                     env["CO_PROJECT_DIR"] = str(project_dir)
                 if not any(k.lower() == "npm_config_cache" for k in env):  # the tool's own setting wins
                     env["npm_config_cache"] = str(npm_cache_dir())
+                if not any(k.lower() == "npm_config_prefix" for k in env):
+                    env["npm_config_prefix"] = str(npm_global_dir())
                 entry = {"command": sys.executable,
                          "args": ["-I", launcher_path(), str(d), "--", srv.command, *(srv.args or [])]}
                 if env:
@@ -202,21 +215,24 @@ def task_config_dir(task_id: str) -> Path:
 
 def cleanup_task(task_id: str) -> None:
     """Remove a task's MCP config folder: the config (vault secrets) and every
-    tool's start folder under ``cwd/``."""
+    tool's start folder (under ``cwd/``, or under ``CO_TOOL_RUN_DIR``)."""
     shutil.rmtree(task_config_dir(task_id), ignore_errors=True)
+    if settings.tool_run_dir is not None and task_id:
+        shutil.rmtree(Path(settings.tool_run_dir) / task_id, ignore_errors=True)
 
 
 async def sweep_stale_configs() -> int:
-    """At boot: remove every ``_mcp_configs/<id>`` whose task is not queued or
-    running (a crash skipped its cleanup). Returns how many went; never raises."""
+    """At boot: remove every ``_mcp_configs/<id>`` (and ``CO_TOOL_RUN_DIR/<id>``)
+    whose task is not queued or running (a crash skipped its cleanup). Returns
+    how many went; never raises."""
     from .constants import Status
     from .models import Task
 
     try:
-        root = settings.workspaces_dir / "_mcp_configs"
-        if not root.is_dir():
-            return 0
-        entries = list(root.iterdir())
+        roots = [settings.workspaces_dir / "_mcp_configs"]
+        if settings.tool_run_dir is not None:
+            roots.append(Path(settings.tool_run_dir))
+        entries = [e for r in roots if r.is_dir() for e in r.iterdir()]
         if not entries:
             return 0
         async with SessionLocal() as s:
@@ -271,6 +287,10 @@ async def prepare_for_task(project: str | None, config_dir: Path,
     config_dir.mkdir(mode=0o700, exist_ok=True)
     config_dir.chmod(0o700)
     cwd_root = config_dir / "cwd"
+    if settings.tool_run_dir is not None:  # the admin's stricter place
+        run_root = Path(settings.tool_run_dir)
+        run_root.mkdir(parents=True, exist_ok=True, mode=0o700)
+        cwd_root = run_root / config_dir.name
     _fresh_private_dir(cwd_root)
     cfg = build_config(servers, task_cwd_root=cwd_root, project_dir=project_dir)
     path = (config_dir / ".mcp-config.json").resolve()

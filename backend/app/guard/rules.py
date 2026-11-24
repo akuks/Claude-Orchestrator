@@ -171,7 +171,8 @@ HARD (never approvable):
   ``split`` prefixes, ``tar -c -f``, ``zip`` archives, ``patch`` targets /
   ``-d`` / ``-o`` (no target: the cwd), ``install -d``, ``pip install
   --target|-t|--prefix|--root``, ``npm|pnpm|yarn|bun --prefix|--dir|--cwd|-C``
-  for a non-read subcommand, ``make -C``/``-f`` folders, ``openssl -out|-keyout``,
+  for a non-read subcommand (and an install/add/ci/link/update as a write to
+  ``<target or cwd>/node_modules``, ``package.json`` and ``package-lock.json``), ``make -C``/``-f`` folders, ``openssl -out|-keyout``,
   ``ssh-keygen -f`` (when it writes), ``setfacl``, ``xattr -w|-d|-c``,
   ``vim``/``ex``/``emacs``/``ed`` given commands (``-c``, ``+cmd``, ``-s``,
   ``-es``, ``--batch``, ``--eval`` ...); ``find ROOT -exec|-execdir`` and
@@ -2260,6 +2261,29 @@ def _inside_repo(ctx, word, dynamic, cwd, folder=None):
     return p is None or _within(p.lower(), project.lower())
 
 
+# Package-manager subcommands that install into <target>/node_modules (aliases included).
+_PM_INSTALL_SUBS = {
+    "npm": frozenset("install i in ins inst insta instal isnt isnta isntal isntall add ci clean-install ic "
+                     "install-clean isntall-clean install-test it install-ci-test cit link ln update up upgrade "
+                     "udpate rebuild rb".split()),
+    "pnpm": frozenset("install i add link ln update up upgrade import rebuild rb".split()),
+    "yarn": frozenset("install add link upgrade up".split()),
+    "bun": frozenset("install i add a link update".split()),
+}
+_PM_INSTALL_WRITES = ("node_modules", "package.json", "package-lock.json")
+
+
+def _pm_installs(name, sub, args) -> bool:
+    """npm/pnpm/yarn/bun installing into a local node_modules (bare ``yarn``
+    installs). A global install (-g/--global/--location=global) is left to the
+    tools' own npm prefix (they never see the server user's global folder)."""
+    if any(a in ("-g", "--global", "--location=global") for a in args):
+        return False
+    if name == "yarn" and not sub:
+        return not any(a in ("-v", "--version", "-h", "--help") for a in args)
+    return sub in _PM_INSTALL_SUBS.get(name, ())
+
+
 def _subcommand_of(args):
     i = 0
     while i < len(args):
@@ -3225,6 +3249,13 @@ class _Bash:
             if not sub or sub not in _READONLY_SUBS[name]:
                 for a, d in opt(("--prefix", "--dir", "--cwd"), "C"):
                     self.readonly_write(a, ctx.path(a, cwd, d), "copydir", cwd)
+            if _pm_installs(name, sub, args):
+                # an install writes <target>/node_modules (its .bin goes on npm's PATH for every folder
+                # below) and package.json / package-lock.json: the normal write check for each, so the
+                # folders above the tool folders stay closed. Target: --prefix/--dir/--cwd/-C, else the cwd.
+                for a, d in opt(("--prefix", "--dir", "--cwd"), "C") or [(".", False)]:
+                    for n in _PM_INSTALL_WRITES:
+                        self.check_write(posixpath.join(a, n) if a else n, d, "copydir", cwd)
         elif name in ("make", "gmake"):
             if not any(_MAKE_DRY.fullmatch(a) for a in args):
                 for a, d in opt(("--directory",), "C"):

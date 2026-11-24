@@ -114,6 +114,10 @@ def index_env(project) -> dict[str, str]:
         "npm_config_fund": "false",
         "npm_config_audit": "false",
     })
+    if not any(k.lower() == "npm_config_prefix" for k in env):  # npx's global fallback: an empty folder
+        from ..mcp_manager import npm_global_dir
+
+        env["npm_config_prefix"] = str(npm_global_dir())
     return env
 
 
