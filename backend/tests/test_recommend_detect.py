@@ -172,4 +172,5 @@ def test_no_descriptor_leak(tmp_path):
         detect(str(proj))
         detect(str(tmp_path / "gone"))
         detect(str(out))
-    assert count() == before
+    # process-wide count: another thread may close one of its own meanwhile, so only growth is a leak
+    assert count() <= before
