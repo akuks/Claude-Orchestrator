@@ -325,6 +325,7 @@ function WorkflowEditor({ open, workflow, prefill, hint, missing = [], agents, o
             type="error"
             showIcon
             data-testid="workflow-errors"
+            className="co-wf-errors"
             message={error.map((line, i) => (
               <div key={i}>{line}</div>
             ))}

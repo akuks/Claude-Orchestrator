@@ -15,6 +15,7 @@ import {
   isRunActive,
   runStages,
   earlierAttemptTasks,
+  failedStepIndex,
   splitStageTitle,
   stageAttempt,
   tasksOfStage,
@@ -227,7 +228,12 @@ export default function RunView({ id, user, projects = [], navigate, onOpenCrede
   const stagesKey = JSON.stringify(freshStages)
   // eslint-disable-next-line react-hooks/exhaustive-deps
   const stages = useMemo(() => freshStages, [stagesKey])
-  const head = useMemo(() => timelineComet(stages).headIndex, [stages])
+  const cometHead = useMemo(() => timelineComet(stages).headIndex, [stages])
+  // A failed run opens on the step that failed, not one only cancelled with it.
+  const head = useMemo(() => {
+    const failed = run?.status === 'failed' ? failedStepIndex(run, tasks, sstate) : -1
+    return failed >= 0 ? failed : cometHead
+  }, [run, tasks, sstate, cometHead])
   // Each box's status on the canvas: a step's own, each agent's current task.
   const boxStatus = useMemo(() => runBoxStatuses({ stages: run?.stages, states: stages, sstate, tasks }), [run?.stages, stages, sstate, tasks])
   const statusOf = useCallback(

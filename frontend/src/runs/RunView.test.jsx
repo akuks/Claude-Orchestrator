@@ -26,7 +26,7 @@ vi.mock('../components/TaskDetail', () => ({
 
 import { api } from '../api'
 import RunView, { totalsLine } from './RunView'
-import { canManageRun, defaultTaskFor, earlierAttemptTasks, runStages, stageState, tasksOfStage } from './runStages'
+import { canManageRun, defaultTaskFor, failedStepIndex, earlierAttemptTasks, runStages, stageState, tasksOfStage } from './runStages'
 
 const err = (status, msg = 'x') => Object.assign(new Error(msg), { status })
 const t = (id, stage_index, status, extra = {}) => ({ id, stage_index, status, title: id, ...extra })
@@ -739,5 +739,33 @@ describe('RunView: steps side by side', () => {
     expect(runStages(r, [t('x', 0, 'running'), t('y', 2, 'queued')], {}).map((s) => s.state)).toEqual(['current', 'next', 'current'])
     const g = { current_stage: 0, status: 'running', stages: [{ name: 'A', items: [] }, { name: 'G', kind: 'gate', run: ['x'] }] }
     expect(runStages(g, [t('x', 0, 'running')], { 1: { status: 'running' } }).map((s) => s.state)).toEqual(['current', 'current'])
+  })
+})
+
+describe('RunView: a failed run opens on the step that failed', () => {
+  it('failedStepIndex skips a step only cancelled with it', () => {
+    const r = { current_stage: 1, status: 'failed', stages: [{ name: 'A', items: [] }, { name: 'W', items: [] }, { name: 'T', kind: 'gate', run: ['x'] }] }
+    expect(failedStepIndex(r, [t('w', 1, 'cancelled')], { 2: { status: 'failed' } })).toBe(2)
+    expect(failedStepIndex(r, [t('w', 1, 'failed')], {})).toBe(1)
+    expect(failedStepIndex(r, [t('w', 1, 'cancelled')], {})).toBe(-1)
+    expect(failedStepIndex(r, [], { 2: { status: 'rejected' } })).toBe(2)
+  })
+  it('selects it by default', async () => {
+    const stages = [
+      { name: 'Build', items: [{ agent: 'a', prompt: 'x' }] },
+      { name: 'Write docs', items: [{ agent: 'a', prompt: 'x' }], after: [0] },
+      { name: 'Test', kind: 'gate', run: ['pytest'], project: 'p1', after: [0] },
+    ]
+    api.getWorkflowRun.mockImplementation(async () => ({
+      run: run({ stages, status: 'failed', current_stage: 1 }),
+      tasks: [t('a', 0, 'completed'), t('b', 1, 'cancelled')],
+      stage_state: { 0: { status: 'done' }, 2: { status: 'failed' } },
+    }))
+    const v = await render(<RunView id="r1" user={{ id: 'u1', role: 'member' }} projects={[{ id: 'p1', name: 'Canonizer', my_role: 'contributor' }]} navigate={() => {}} />)
+    await flush()
+    await flush()
+    const boxes = [...v.container.querySelectorAll('[data-testid="flow-box"]')]
+    expect(boxes.map((b) => b.getAttribute('aria-pressed'))).toEqual(['false', 'false', 'true'])
+    await v.unmount()
   })
 })

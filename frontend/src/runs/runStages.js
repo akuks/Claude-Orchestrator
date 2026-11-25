@@ -106,3 +106,17 @@ export function splitStageTitle(title) {
   const m = s.match(/^\[[^\]]*\]\s*([^:]+):\s*(.*)$/s)
   return m ? { agent: m[1].trim(), text: m[2] } : { agent: null, text: s }
 }
+
+// The step that really failed (a check failed or rejected, an agent task failed), not
+// one only cancelled because another branch failed. -1 when there is none.
+export function failedStepIndex(run, tasks, sstate) {
+  const list = Array.isArray(run?.stages) ? run.stages : []
+  const all = Array.isArray(tasks) ? tasks : []
+  for (let i = 0; i < list.length; i++) {
+    const own = sstate?.[String(i)]?.status
+    if (own === 'failed' || own === 'rejected') return i
+    const attempt = stageAttempt(sstate, i)
+    if (all.some((t) => t?.stage_index === i && (t.stage_attempt || 0) === attempt && t.status === 'failed')) return i
+  }
+  return -1
+}

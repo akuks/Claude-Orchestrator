@@ -343,3 +343,39 @@ describe('steps side by side: guards', () => {
     expect(insertStep(diamond, 3, 'gate')).toHaveLength(5)
   })
 })
+
+describe('side lines stay inside the picture', () => {
+  const nums = (d) => d.match(/-?\d+(\.\d+)?/g).map(Number)
+  const cases = {
+    skip: [{ name: 'A' }, { name: 'B' }, { name: 'C', after: [0, 1] }],
+    diamondSkip: [
+      { name: 'A' },
+      { name: 'B', after: [0] },
+      { name: 'C', after: [0] },
+      { name: 'T', after: [1] },
+      { name: 'R', after: [2, 3] },
+    ],
+  }
+  it.each(Object.keys(cases))('every point of every line is within the computed height (%s)', (key) => {
+    const steps = cases[key]
+    for (const mode of ['view', 'edit', 'run']) {
+      const plan = flowPlan(steps, flowModel(steps, []), { mode })
+      expect(plan.lanes).toBeGreaterThan(0)
+      for (let k = 0; k <= plan.count; k++) {
+        for (const sh of connectorShapes(plan, k, 72)) {
+          for (const d of sh.lines) {
+            const v = nums(d)
+            for (let i = 1; i < v.length; i += 2) {
+              expect(v[i]).toBeGreaterThanOrEqual(-plan.top)
+              expect(v[i]).toBeLessThanOrEqual(plan.geo.height)
+            }
+          }
+        }
+      }
+    }
+  })
+  it('a plain line reserves no lane', () => {
+    const plan = flowPlan(STEPS, flowModel(STEPS, AGENTS))
+    expect([plan.lanes, plan.top, plan.laneRoom]).toEqual([0, 0, 0])
+  })
+})

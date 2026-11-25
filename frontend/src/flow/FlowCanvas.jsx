@@ -105,11 +105,18 @@ function Box({ aheadMark, word, kind, title, sub, mono, retry, handsOver, output
   )
 }
 
-function Connector({ shapes, height, width, state, addAt, onAdd, plusY, pulse, openAt, setOpenAt }) {
+function Connector({ shapes, height, width, top = 0, state, addAt, onAdd, plusY, pulse, openAt, setOpenAt }) {
   const cls = ['co-flow-link', state && `co-flow-link-${state}`].filter(Boolean).join(' ')
   return (
     <div className={cls} style={{ width, height }} data-testid="flow-link">
-      <svg width={width} height={height} viewBox={`0 0 ${width} ${height}`} aria-hidden="true" focusable="false">
+      <svg
+        width={width}
+        height={height + top}
+        viewBox={`0 ${-top} ${width} ${height + top}`}
+        style={top ? { position: 'absolute', left: 0, top: -top } : undefined}
+        aria-hidden="true"
+        focusable="false"
+      >
         {shapes.map((sh, n) => (
           <g key={n} className={sh.state ? `co-flow-link-${sh.state}` : undefined}>
             {sh.lines.map((d, i) => (
@@ -333,6 +340,7 @@ export default function FlowCanvas({
         shapes={shapes}
         height={geo.height}
         width={linkW}
+        top={plan.top}
         state={states.size === 1 ? [...states][0] : null}
         addAt={last ? model.length : plan.groups[k][0]}
         onAdd={showAdd ? onInsert : null}
@@ -440,7 +448,7 @@ export default function FlowCanvas({
       aria-label={label}
       data-testid="flow-canvas"
     >
-      <div className="co-flow-track" style={mini ? undefined : { paddingTop: 14 + geo.padTop, paddingBottom: 14 + geo.padBottom + (run && usageOf ? 22 : 0) }} data-testid="flow-track">
+      <div className="co-flow-track" style={mini ? (plan.top ? { paddingTop: 2 + plan.top } : undefined) : { paddingTop: 14 + geo.padTop + plan.laneRoom, paddingBottom: 14 + geo.padBottom + (run && usageOf ? 22 : 0) }} data-testid="flow-track">
         {input ? (
           <Tooltip title={`Running on: ${input}`}>
             <span className="co-flow-pill-wrap" tabIndex={0} aria-label={`Start, running on: ${input}`}>

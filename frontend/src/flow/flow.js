@@ -227,7 +227,13 @@ export function flowPlan(steps, model, { size = 'full', mode = 'view' } = {}) {
   const ys = stepYs(model, groups, geo.height, { size, mode })
   const groupOf = []
   groups.forEach((g, k) => g.forEach((i) => (groupOf[i] = k)))
-  return { groups, groupOf, geo, ys, edges: flowEdges(steps), mid: geo.height / 2, count: groups.length }
+  const edges = flowEdges(steps)
+  const gof = (n) => (n === 'start' ? -1 : n === 'end' ? groups.length : groupOf[n])
+  const lanes = edges.filter((e) => gof(e.to) - gof(e.from) > 1).length
+  // Lines that skip a column run along a lane above everything, inside the canvas.
+  const unit = size === 'mini' ? 3 : 6
+  const laneRoom = lanes ? unit + unit * lanes : 0
+  return { groups, groupOf, geo, ys, edges, mid: geo.height / 2, count: groups.length, lanes, unit, laneRoom, top: lanes ? geo.padTop + laneRoom : 0 }
 }
 
 // SVG paths of a connector from a column of nLeft boxes to one of nRight
@@ -276,27 +282,40 @@ export function connectorShapes(plan, k, width, size = 'full') {
   const { groupOf, ys, edges, mid, count } = plan
   const at = (n) => (n === 'start' || n === 'end' ? { center: mid, boxes: [mid] } : ys[n])
   const col = (n) => (n === 'start' ? -1 : n === 'end' ? count : groupOf[n])
-  const top = size === 'mini' ? -1 : -6
   let lane = 0
   const out = []
+  const cx = width / 2
+  // Rounded corners: down/up along x = cx between the lane and a box line.
+  const corner = (dy) => Math.max(1, Math.min(8, cx - 2, Math.abs(dy) - 1))
   for (const e of edges) {
     const gf = col(e.from)
     const gt = col(e.to)
     const skip = gt - gf > 1
-    const my = skip ? top - 4 * lane++ : 0
+    const my = skip ? -(plan.geo.padTop + plan.unit + plan.unit * lane++) : 0
     if (k < gf + 1 || k > gt) continue
     const src = at(e.from)
     const dst = at(e.to)
-    const cx = width / 2
     if (!skip) {
       out.push({ ...e, kind: 'direct', ...directShape(src, dst, width, size), y: (src.center + dst.center) / 2 })
     } else if (k === gf + 1) {
-      out.push({ ...e, kind: 'exit', lines: src.boxes.map((y) => `M0 ${y} C${cx} ${y} ${cx} ${my} ${width} ${my}`), arrows: [], y: my })
+      out.push({
+        ...e,
+        kind: 'exit',
+        lines: src.boxes.map((y) => {
+          const r = corner(y - my)
+          return `M0 ${y} L${cx - r} ${y} Q${cx} ${y} ${cx} ${y - r} L${cx} ${my + r} Q${cx} ${my} ${cx + r} ${my} L${width} ${my}`
+        }),
+        arrows: [],
+        y: my,
+      })
     } else if (k === gt) {
       out.push({
         ...e,
         kind: 'enter',
-        lines: dst.boxes.map((y) => `M0 ${my} C${cx} ${my} ${cx} ${y} ${width - TIP} ${y}`),
+        lines: dst.boxes.map((y) => {
+          const r = corner(y - my)
+          return `M0 ${my} L${cx - r} ${my} Q${cx} ${my} ${cx} ${my + r} L${cx} ${y - r} Q${cx} ${y} ${cx + r} ${y} L${width - TIP} ${y}`
+        }),
         arrows: dst.boxes.map((y) => `${width - TIP},${y - 4} ${width},${y} ${width - TIP},${y + 4}`),
         y: my,
       })
