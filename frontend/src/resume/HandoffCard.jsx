@@ -47,12 +47,16 @@ function TempDoc({ taskId, path, canManage }) {
   }
   return (
     <div data-testid="handoff-temp-doc">
-      <span className="co-resume-mono">{clean(path)}</span>
+      <span className="co-resume-mono" data-testid="handoff-temp-name">{clean(name)}</span>
       {canManage && !done && !open && (
         <Button size="small" type="link" onClick={() => setOpen(true)} data-testid="handoff-copy-open">
           Copy into project
         </Button>
       )}
+      <details className="co-resume-meta" data-testid="handoff-temp-path">
+        <summary>Details</summary>
+        <span className="co-resume-mono">{clean(path)}</span>
+      </details>
       {done && (
         <div className="co-resume-meta" data-testid="handoff-copy-done">
           Copied to {clean(done)}

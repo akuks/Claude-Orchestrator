@@ -65,6 +65,8 @@ describe('HandoffCard', () => {
     expect(q(c, 'handoff-waiting').textContent).toContain('approval for rm')
     expect(q(c, 'handoff-files').textContent).toContain('src/a.js')
     expect(q(c, 'handoff-temp').textContent).toContain('may vanish')
+    expect(q(c, 'handoff-temp-name').textContent).toBe('plan.md')
+    expect(q(c, 'handoff-temp-path').textContent).toContain('/tmp/plan.md')
     expect(q(c, 'handoff-commits').textContent).toContain('abc123 fix x')
     expect(q(c, 'handoff-notes-at').textContent).toContain(when(H.content.notes.at).format('MMM D, HH:mm'))
     expect(onHandoff).toHaveBeenCalledWith(H)
