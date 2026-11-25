@@ -64,8 +64,10 @@ TOKEN_SHAPES = re.compile(
         )
     )
 )
-# user:password in URL-style values (postgres://u:p@host, https://x:tok@github.com).
-URL_USERINFO = re.compile(r"://[^/\s:@]+:[^/\s@]+@")
+# user:password in URL-style values (postgres://u:p@host, https://x:tok@github.com), also an empty user
+# (redis://:pw@host) and a raw @ in the password (up to the last @ before the host). co_hook.py keeps a copy.
+URL_USERINFO = re.compile(r"://[^/\s:@]*:[^\s/]*@")
+_URL_HAS_USERINFO = re.compile(r"://[^/\s@]+@")  # any userinfo: user:password@ or a DSN key@
 # Labelled secrets: the label (group 1) stays, the value becomes MASK.
 # Forge's LABELLED set, widened to keys that CONTAIN a secret word
 # (DB_PASSWORD=, aws_secret_access_key:, accessToken:) but not where the word
@@ -166,6 +168,9 @@ DOTENV_MAX_CHARS = 16 * 1024
 DOTENV_SKIP_SUFFIXES = (".example", ".sample", ".template", ".dist")
 _DOTENV_LINE = re.compile(r"^\s*(?:export\s+)?([A-Za-z_][A-Za-z0-9_.\-]*)\s*=\s*(.*)$")
 _PLAIN_WORD = re.compile(r"^[A-Za-z][A-Za-z_\-]*$")
+_PLACEHOLDER = re.compile(r"^(?:your|change|replace|example|placeholder|insert|enter|put)[_\-]?", re.IGNORECASE)
+DOTENV_LONG_WORD = 12  # under a secret-named key a plain word this long counts (ADMIN_PASSWORD=adminadminadmin)
+DOTENV_FIRST = (".env", ".env.local")  # read first: the real ones
 _HOST_OR_IP = re.compile(r"^[A-Za-z0-9\-]+(?:\.[A-Za-z0-9\-]+)+(?::\d{1,5})?$")
 _NUMBER = re.compile(r"^[+-]?[\d.,_]+$")
 _ANY_URL = re.compile(r"^[A-Za-z][A-Za-z0-9+.\-]{0,30}://")
@@ -181,10 +186,12 @@ def _dotenv_value(raw: str) -> str:
 
 
 def _not_a_secret(v: str) -> bool:
-    """Paths, plain words, hostnames, IPs, URLs without user:password@, booleans and numbers."""
-    return (v.lower() in _NOT_SECRET or v.startswith(("/", "./", "../", "~")) or bool(_PLAIN_WORD.match(v))
+    """Paths, plain words shorter than 12 characters or placeholders (your-secret-here), hostnames, IPs, URLs without userinfo, booleans and
+    numbers."""
+    return (v.lower() in _NOT_SECRET or v.startswith(("/", "./", "../", "~"))
+            or (bool(_PLAIN_WORD.match(v)) and (len(v) < DOTENV_LONG_WORD or bool(_PLACEHOLDER.match(v))))
             or bool(_HOST_OR_IP.match(v)) or bool(_NUMBER.match(v))
-            or (bool(_ANY_URL.match(v)) and not URL_USERINFO.search(v)))
+            or (bool(_ANY_URL.match(v)) and not _URL_HAS_USERINFO.search(v)))
 
 
 def _dotenv_secret(key: str, v: str) -> bool:
@@ -208,12 +215,11 @@ def dotenv_values(folder) -> list[str]:
 
     if not folder:
         return []
-    vals: dict[str, None] = {}
-    total = 0
-    capped = False
+    found: dict[str, bool] = {}  # value -> its key is secret-named (in reading order)
     try:
-        entries = sorted(e.name for e in os.scandir(folder) if e.name.startswith(".env")
-                         and e.name != ".envrc" and not e.name.lower().endswith(DOTENV_SKIP_SUFFIXES))
+        entries = sorted((e.name for e in os.scandir(folder) if e.name.startswith(".env")
+                          and e.name != ".envrc" and not e.name.lower().endswith(DOTENV_SKIP_SUFFIXES)),
+                         key=lambda n: (DOTENV_FIRST.index(n) if n in DOTENV_FIRST else len(DOTENV_FIRST), n))
     except OSError:
         return []
     for name in entries[:DOTENV_MAX_FILES]:
@@ -238,13 +244,18 @@ def dotenv_values(folder) -> list[str]:
             if not m:
                 continue
             v = _dotenv_value(m.group(2))
-            if v in vals or not _dotenv_secret(m.group(1), v):
-                continue
-            if len(vals) >= DOTENV_MAX_VALUES or total + len(v) > DOTENV_MAX_CHARS:
-                capped = True
-                continue
-            vals[v] = None
-            total += len(v)
+            if _dotenv_secret(m.group(1), v):
+                found[v] = found.get(v, False) or is_sensitive_name(m.group(1))
+    # the cap keeps secret-named keys' values first, then the rest (each in reading order: .env, .env.local, ...)
+    vals: list[str] = []
+    total = 0
+    capped = False
+    for v in [v for v, named in found.items() if named] + [v for v, named in found.items() if not named]:
+        if len(vals) >= DOTENV_MAX_VALUES or total + len(v) > DOTENV_MAX_CHARS:
+            capped = True
+            continue
+        vals.append(v)
+        total += len(v)
     if capped:
         logging.getLogger(__name__).warning("dotenv values: cap reached in %s (%d values kept)", folder, len(vals))
     return sorted(vals, key=len, reverse=True)

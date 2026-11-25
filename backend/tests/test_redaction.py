@@ -148,10 +148,16 @@ def test_url_userinfo_masked():
             "DATABASE=postgres://***:***@db.local:5432/x",
         "remote https://x-access-token:abc123def@github.com/o/r.git ok":
             "remote https://***:***@github.com/o/r.git ok",
-        "redis://:onlypass@cache:6379": "redis://:onlypass@cache:6379",  # no user: kept
+        # final review I2: an empty user and raw @ in the password are masked too
+        "redis://:onlypass@cache:6379": "redis://***:***@cache:6379",
+        "REDIS_URL=redis://:R3disPassw0rd@redis:6379/0": "REDIS_URL=redis://***:***@redis:6379/0",
+        "git clone https://deploy:Pa@55@w0rd@git.example.com/r.git":
+            "git clone https://***:***@git.example.com/r.git",
+        "a https://u:p@h/x?e=a@b.com b": "a https://***:***@h/x?e=a@b.com b",
     }
     for raw, want in cases.items():
         assert redaction.redact(raw, []) == want, raw
+        assert co_hook.redact(raw, None) == want, raw
 
 
 def test_finish_redacts_and_tolerates_non_str_result(client):
@@ -572,8 +578,29 @@ def test_dotenv_ordinary_values_are_not_secrets(tmp_path):
     (tmp_path / ".env").write_text(
         "DB_USER=postgres\nDB_PASSWORD=password\nDB_HOST=postgres\nAPP_DIR=frontend\nHOST=db.internal.example\n"
         "BIND=0.0.0.0\nAPI_URL=http://localhost:8000\nSECRET_PATH=/opt/Projects_UI/canonizer\nAPI_TOKEN=changeme\n"
-        "SECRET_KEY=your-secret-here\nAUTH_PORT=127.0.0.1:5432\nTOKEN_TTL=3600000\nDEBUG_TOKEN=false\n")
+        "SECRET_KEY=your-secret-here\nAPI_SECRET=change_me_please_now\nAUTH_PORT=127.0.0.1:5432\nTOKEN_TTL=3600000\nDEBUG_TOKEN=false\n")
     assert redaction.dotenv_values(tmp_path) == []
+
+
+def test_dotenv_final_review_cases(tmp_path):
+    """Final review I2/M6: an empty-user Redis URL, a long plain word under a secret key, a DSN with a key in its
+    userinfo count; a short plain word and a DSN-less URL do not."""
+    (tmp_path / ".env").write_text(
+        "REDIS_URL=redis://:R3disPassw0rd@redis:6379\nADMIN_PASSWORD=adminadminadmin\n"
+        "SENTRY_DSN=https://abc123key@o1.ingest.sentry.io/1\nDB_PASSWORD=adminadmin\n"
+        "API_URL=https://api.example.com/v1\nAPP_NAME=averylongappname\n")
+    assert set(redaction.dotenv_values(tmp_path)) == {
+        "redis://:R3disPassw0rd@redis:6379", "adminadminadmin", "https://abc123key@o1.ingest.sentry.io/1"}
+
+
+def test_dotenv_cap_ranks_real_files_and_secret_keys_first(tmp_path):
+    """Final review M7: junk in a committed .env.0 cannot push .env / .env.local secrets out of the cap."""
+    (tmp_path / ".env.0").write_text("".join(f"X{i}=ghp_{i:036d}\n" for i in range(300)))
+    (tmp_path / ".env.local").write_text("LOCAL_TOKEN=local-token-9\n")
+    (tmp_path / ".env").write_text("NOTE=ghp_" + "n" * 36 + "\nAPI_KEY=abc123xyz789\n")
+    vals = redaction.dotenv_values(tmp_path)
+    assert len(vals) == redaction.DOTENV_MAX_VALUES
+    assert "local-token-9" in vals and "abc123xyz789" in vals and "ghp_" + "n" * 36 in vals
 
 
 def test_dotenv_caps(tmp_path):

@@ -240,7 +240,7 @@ _TOKEN_SHAPES = re.compile("|".join((
     r"\beyJ[A-Za-z0-9_\-]+\.eyJ[A-Za-z0-9_\-]+\.[A-Za-z0-9_\-]*",
     r"-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----[\s\S]*?(?:-----END [A-Z0-9 ]*PRIVATE KEY-----|\Z)",
 )))
-_URL_USERINFO = re.compile(r"://[^/\s:@]+:[^/\s@]+@")
+_URL_USERINFO = re.compile(r"://[^/\s:@]*:[^\s/]*@")
 _VALUE_END = r"""[\s&;'",]"""
 # The value after a label: quoted -> everything to the closing quote (any
 # length, but not a bare $VAR / $( reference); unquoted -> at least 8
