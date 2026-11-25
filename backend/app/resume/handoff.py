@@ -724,6 +724,8 @@ async def _gather(s, task, since, ending=None):
         "children": dict(children), "workspace": workspace, "project_dir": project_dir, "sources": source_dirs,
         "waiting": waiting, "others": others, "trust": trust, "base": base, "policy": policy, "own": own_texts,
         "prev": prev,
+        # the thread's latest run start (Continue, Retry and follow-ups set it when their run starts)
+        "started": max((a for a in (_aware(t.started_at) for t in thread) if a), default=None),
     }
 
 
@@ -780,13 +782,54 @@ async def snapshot(task_id: str, reason: str, *, secrets=None, since=None, endin
                     row.version = (row.version or 0) + 1
                 row.task_id = g["described"].id
                 row.content, row.text, row.reason, row.saved_at = content, text, reason, now
-                row.status, row.closed_at, row.closed_by = "open", None, None
+                if _reopens(row, reason, g["started"]):
+                    row.status, row.closed_at, row.closed_by = "open", None, None
                 await s.commit()
                 return row
         except IntegrityError:
             if attempt == 2:
                 raise
     return None
+
+
+def _reopens(row, reason: str, started) -> bool:
+    """A closed handoff stays closed (its content still updates) until a new run of the thread: a run that
+    started after the close, or a person's Continue (whose snapshot is taken just before its step is queued)."""
+    if row.status != "closed":
+        return True
+    if reason == "continue":
+        return True
+    closed_at = _aware(row.closed_at)
+    return closed_at is None or (started is not None and started > closed_at)
+
+
+async def auto_close(task_id: str) -> bool:
+    """Close the thread's handoff (closed_by "system") when this main-line step completed and nothing is left
+    open: no open question in the thread, no active step, no open todo for the step. Notes are kept. True when
+    it closed the handoff; a handoff already closed (by a person or earlier) is left as it is."""
+    from ..constants import Status
+    from ..database import SessionLocal
+    from ..models import Task, TaskHandoff, TaskQuestion
+
+    async with SessionLocal() as s:
+        task = await s.get(Task, task_id)
+        if task is None or task.status != Status.COMPLETED or task.origin == "agent":
+            return False
+        root = task.root_id or task.id
+        row = (await s.execute(select(TaskHandoff).where(TaskHandoff.root_id == root))).scalar_one_or_none()
+        if row is None or row.status == "closed":
+            return False
+        asked = (await s.execute(select(TaskQuestion.id).where(
+            TaskQuestion.root_id == root, TaskQuestion.status == "open").limit(1))).first()
+        if asked is not None:
+            return False
+        active = (await s.execute(select(Task.id).where(
+            or_(Task.root_id == root, Task.id == root), Task.status.in_(Status.ACTIVE)).limit(1))).first()
+        if active is not None or open_todo(row.content, task_id):
+            return False
+        row.status, row.closed_at, row.closed_by = "closed", datetime.now(timezone.utc), "system"
+        await s.commit()
+        return True
 
 
 def open_todo(content: dict, task_id: str) -> bool:

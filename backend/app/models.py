@@ -151,7 +151,7 @@ class TaskEvent(Base):
     seq: Mapped[int] = mapped_column(Integer)
     type: Mapped[str] = mapped_column(String(32))
     payload: Mapped[dict] = mapped_column(JSON, default=dict)
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now, index=True)
 
     task: Mapped["Task"] = relationship(back_populates="events")
 
@@ -333,7 +333,8 @@ class ActionRule(Base):
 
 class GuardOrgSettings(Base):
     """The org's co-guard settings (a single row, id 1): built-ins switched
-    off (only rules.DISABLEABLE) and dev database patterns."""
+    off (only rules.DISABLEABLE) and dev database patterns; also the org's
+    model tiers and (phase 7d) the tidying switch."""
 
     __tablename__ = "guard_org_settings"
 
@@ -342,6 +343,8 @@ class GuardOrgSettings(Base):
     dev_db_patterns: Mapped[list] = mapped_column(JSON, default=list, server_default="[]")
     ground_rules: Mapped[dict] = mapped_column(JSON, default=dict, server_default="{}")
     model_tiers: Mapped[dict] = mapped_column(JSON, default=dict, server_default="{}")
+    # phase 7d: tidying old run history ({"enabled", "days", "last_run", "last_count"}; app.retention)
+    retention: Mapped[dict] = mapped_column(JSON, default=dict, server_default="{}")
     updated_by: Mapped[str | None] = mapped_column(String(32), nullable=True)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now, onupdate=_now)
 

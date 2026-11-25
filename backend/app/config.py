@@ -69,6 +69,10 @@ class Settings(BaseSettings):
     # Approvals (Phase 5): auto-reject pending approvals older than this.
     approval_timeout_seconds: int = 86400  # 24h; 0 disables auto-reject
     approval_check_interval_seconds: int = 60
+    # Tidying old run history (phase 7d; off until an admin switches it on): the first check after start,
+    # then how often the daily job checks whether a pass is due
+    retention_first_delay_seconds: int = 600
+    retention_check_interval_seconds: int = 3600
     # Crash recovery: how often RUNNING rows with no live worker are swept
     # (app.resume.recovery.SWEEP_SECONDS).
     recovery_sweep_seconds: int = 60

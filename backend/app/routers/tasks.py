@@ -866,7 +866,7 @@ async def refresh_handoff(task_id: str, request: Request):
 
 @router.post("/{task_id}/handoff/close")
 async def close_handoff(task_id: str, request: Request):
-    """Mark the thread's handoff done; the next snapshot reopens it."""
+    """Mark the thread's handoff done; it stays closed until a new run of the thread (phase 7d)."""
     p = request.state.principal
     async with SessionLocal() as s:
         task = await require_task(s, p, task_id)

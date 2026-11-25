@@ -8,7 +8,7 @@ from datetime import datetime, timedelta, timezone
 
 from sqlalchemy import select
 
-from . import mcp_manager
+from . import mcp_manager, retention
 from . import auth as auth_mod
 from .codemap import indexer as codemap_indexer
 from .asks.service import fail_interrupted_asks
@@ -120,6 +120,17 @@ async def _approval_timeout_loop():
             continue
 
 
+async def _retention_loop():
+    """Tidy old run history once a day when an admin has switched it on (app.retention)."""
+    await asyncio.sleep(settings.retention_first_delay_seconds)
+    while True:
+        try:
+            await retention.run_if_due()
+        except Exception:  # noqa: BLE001
+            pass
+        await asyncio.sleep(settings.retention_check_interval_seconds)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     await init_db()
@@ -141,12 +152,14 @@ async def lifespan(app: FastAPI):
     health_task = asyncio.create_task(_mcp_health_loop())
     approval_task = asyncio.create_task(_approval_timeout_loop())
     codemap_task = asyncio.create_task(_codemap_scan_loop())
+    retention_task = asyncio.create_task(_retention_loop())
     try:
         yield
     finally:
         health_task.cancel()
         approval_task.cancel()
         codemap_task.cancel()
+        retention_task.cancel()
         await workflow_runner.stop()
         await scheduler.stop()
         await worker.stop()

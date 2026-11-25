@@ -2254,6 +2254,12 @@ class WorkerManager:
                 log.warning("codemap: refresh trigger failed for %s: %s", task_id, e)
         # token care: a step that crossed the fresh-session threshold continues in a fresh session
         await self._maybe_auto_continue(task_id)
+        # phase 7d: a step that completed with nothing left open closes its thread's handoff (after the
+        # automatic Continue, whose queued step keeps it open)
+        try:
+            await handoff.auto_close(task_id)
+        except Exception as e:  # noqa: BLE001 - never breaks a finish
+            log.warning("handoff: auto close failed for %s: %s", task_id, e)
 
     AUTO_CONTINUE_MAX = 3  # automatic continues in a row per thread
 
