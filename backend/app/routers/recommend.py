@@ -3,11 +3,13 @@
 import asyncio
 
 from fastapi import APIRouter, HTTPException, Request
+from sqlalchemy import select
 
 from .. import ui_checks
 from ..access import require_project_role
 from ..database import SessionLocal
-from ..models import Project
+from ..constants import Status
+from ..models import Project, Task
 from ..recommend import detect as detect_mod
 from ..recommend import panel
 from ..schemas import TaskCreate, TaskOut
@@ -42,6 +44,11 @@ async def setup_ui_checks(project_id: str, request: Request):
         await require_project_role(s, request.state.principal, project_id, "maintainer")
         if await s.get(Project, project_id) is None:
             raise HTTPException(404, "Not found")
+        busy = (await s.execute(select(Task.id).where(
+            Task.project_id == project_id, Task.title == ui_checks.SETUP_TITLE,
+            Task.status.in_(Status.ACTIVE)).limit(1))).first()
+        if busy is not None:
+            raise HTTPException(409, "UI checks are already being set up for this project.")
     payload = TaskCreate(prompt=ui_checks.setup_prompt(), title=ui_checks.SETUP_TITLE, project_id=project_id,
                          tags=["ui-checks"])
     return await tasks_router.create_task(payload, request)

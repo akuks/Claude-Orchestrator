@@ -7,6 +7,7 @@ import uuid
 from sqlalchemy import select
 
 from app import ui_checks
+from app.config import settings
 from app.database import SessionLocal
 from app.gates import executor as ex
 from app.gates import spec
@@ -71,7 +72,49 @@ def test_setup_creates_task_for_maintainer(client, tmp_path):
     body = r.json()
     assert body["title"] == "Set up UI checks" and body["project_id"] == p["id"]
     assert "Never overwrite" in body["prompt"]
+    assert body["status"] == "queued" and body["risk"] == "warning" and body["tags"] == ["ui-checks"]
+    assert body["created_by"] and body["max_budget_usd"] == settings.default_task_budget_usd
     assert len(_count(p["id"])) == 1
+
+
+def test_setup_refuses_a_second_unfinished_task(client, tmp_path):
+    p, _ = _project(client, tmp_path)
+    # A row the worker never touches (awaiting approval), so the test is not a race with the worker.
+    async def add(status):
+        async with SessionLocal() as s:
+            row = Task(title="Set up UI checks", prompt="x", project_id=p["id"], status=status)
+            s.add(row)
+            await s.commit()
+            return row.id
+    tid = asyncio.run(add("awaiting_approval"))
+    again = client.post(f"/projects/{p['id']}/ui-checks/setup")
+    assert again.status_code == 409
+    assert again.json()["detail"] == "UI checks are already being set up for this project."
+    assert len(_count(p["id"])) == 1
+
+    async def finish():
+        async with SessionLocal() as s:
+            (await s.get(Task, tid)).status = "completed"
+            await s.commit()
+    asyncio.run(finish())
+    assert client.post(f"/projects/{p['id']}/ui-checks/setup").status_code == 201
+
+
+def _contributor(client, pid):
+    u = login_as(f"uic-{uuid.uuid4().hex[:6]}@example.com")
+    r = client.put(f"/projects/{pid}/members", json=[
+        {"subject_type": "user", "subject_id": u.user_id, "role": "contributor"}])
+    assert r.status_code == 200, r.text
+    return u
+
+
+def test_contributor_cannot_set_up_or_create_brand(client, tmp_path):
+    p, _ = _project(client, tmp_path)
+    u = _contributor(client, p["id"])
+    assert u.post(f"/projects/{p['id']}/ui-checks/setup").status_code == 403
+    assert u.post("/context-docs/templates/brand", json={"project_id": p["id"]}).status_code == 403
+    assert _count(p["id"]) == []
+    assert client.get(f"/context-docs?project_id={p['id']}").json() == []
 
 
 def test_setup_needs_maintainer(client, tmp_path):

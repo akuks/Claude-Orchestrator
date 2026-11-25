@@ -1,4 +1,5 @@
 from fastapi import APIRouter, Depends, HTTPException, Request
+from pydantic import BaseModel
 from sqlalchemy import or_, select, true
 
 from .. import context_store, ui_checks
@@ -6,8 +7,6 @@ from ..access import ALL, require_project_role, visible_project_ids
 from ..auth import Principal, current_principal, ensure_admin
 from ..database import SessionLocal
 from ..models import ContextDoc, Project
-from pydantic import BaseModel
-
 from ..schemas import ContextDocCreate, ContextDocOut, ContextDocUpdate
 
 router = APIRouter(prefix="/context-docs", tags=["context-docs"])
