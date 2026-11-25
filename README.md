@@ -1330,6 +1330,48 @@ It lives in the project drawer, on the **Launch** tab.
 
 ---
 
+## Workflow run control
+
+Phase 7a of the forge port. Four things on a workflow run, all on the run's own page.
+
+- **Approve ahead.** A person who may manage the run (its starter, an admin, a maintainer of
+  a project it touches) can approve an "Ask a person" step before the run gets there, and
+  withdraw that approval (`POST` / `DELETE /workflows/runs/{id}/stages/{i}/approve-ahead`).
+  When the run reaches the step it goes straight past, and the step reads "Approved ahead by
+  <name>". A step set to `ahead: false` (the release approvals in the templates) can only be
+  approved when the run reaches it; its box says "Needs you when the run gets here". An early
+  approval is dropped when the run fails, is cancelled or is run again from an earlier step.
+- **One check at a time per project.** A check step takes a lock on the project folder before
+  its first command and lets go when the step ends. If another run holds it, the step waits
+  ("Waiting for checks from another run in this project to finish.") and tries again; it never
+  fails because of it. Agent steps are not locked.
+- **Run again from a step.** On a finished (completed or failed) run, "Run again from here" in a
+  started step restarts from that step (`POST /workflows/runs/{id}/stages/{i}/rerun`). Earlier
+  steps keep their results; later steps start over; old tasks stay in the history. The
+  spending limit still applies. The failed-step Retry is unchanged.
+- **Time and spend per step.** Each run box shows a small line such as "4 min · $0.12"; tokens
+  are under the step's Details. Status words: Running, Waiting its turn, Waiting for approval,
+  Failed, Interrupted — will continue.
+
+The handoff card now lists "Re-check before acting" items (note lines of the form
+`Caution: … | measured: … | check again before acting`) and shows the newest 5 files, with the
+rest under "The full list".
+
+### To know
+
+- Steps still run one after another; side-by-side steps are Phase 7b.
+- The project check lock is in memory (one server process, as today).
+- An early approval is approval of the step as defined when the run started; nothing about later
+  output is checked.
+- Not run against the real `claude` CLI.
+- Ruling: gate-command re-approval by hash is not built. Workflows are database records only
+  admins can change and the guard judges each command when it runs. Cost if wrong: an admin's
+  edited command runs without a second person.
+- Ruling: agent steps are not covered by the project lock. Cost if wrong: two runs' agents can
+  still edit one checkout at once (as today).
+
+---
+
 ## Workflow templates
 
 Five built-in templates start a workflow in the editor: **software**, **planned**
