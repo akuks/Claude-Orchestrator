@@ -444,3 +444,91 @@ def test_redaction_stays_linear_on_long_input():
     with time_limit(3.0):
         redaction.redact(blob, [])
         co_hook.redact(blob, None)
+
+
+# ---- phase 7e (F90b): strip_query, redact_head, the workspace's .env values ----------------
+
+QUERY_CASES = [
+    ("see https://h.example/a/b?token=abc&x=1#frag now", "see https://h.example/a/b now"),
+    ("https://h.example/p#only-frag", "https://h.example/p"),
+    ("(https://h.example/x?a=1).", "(https://h.example/x)."),
+    ("git clone ssh://git@h.example/r.git?ref=main", "git clone ssh://git@h.example/r.git"),
+    ('"http://127.0.0.1:8000/api?q=1"', '"http://127.0.0.1:8000/api"'),
+    ("no url here? really#not", "no url here? really#not"),
+    ("https://h.example/plain", "https://h.example/plain"),
+    ("two https://a.example/?a=1 and https://b.example/c?d=2", "two https://a.example/ and https://b.example/c"),
+    ("", ""),
+]
+
+
+@pytest.mark.parametrize("text,want", QUERY_CASES)
+def test_strip_query_server_and_hook_agree(text, want):
+    assert redaction.strip_query(text) == want
+    assert co_hook.strip_query(text) == want
+
+
+def test_redact_head_server_and_hook_agree(monkeypatch):
+    """Review Focus 2: the hook's copies behave exactly like the server's (no env secrets on either side)."""
+    for k in list(os.environ):
+        if co_hook._SECRET_NAME.search(k):
+            monkeypatch.delenv(k)
+    texts = [f"token: {'q' * 30} " + "x" * 5000, "ghp_" + "a" * 36 + " tail", "short", "a" * 4000, "a" * 4001,
+             "https://u:pw@h.example/a?k=v"]
+    for t in texts:
+        for n in (10, 100, 4000):
+            assert redaction.redact_head(t, [], n) == co_hook.redact_head(t, n)
+        assert redaction.redact_head(t, []) == co_hook.redact_head(t)
+        assert len(redaction.redact_head(t, [])) <= 4000
+    # redact first, then cut: no secret prefix survives the cut
+    sec = "S" * 20
+    assert redaction.redact_head("ab" + sec, [sec], 10) == "ab***"
+    assert co_hook._STRIP_URL.pattern == redaction.STRIP_URL.pattern
+
+
+def test_strip_query_stays_linear():
+    blob = "x://" * 50_000 + "?" + "a" * 50_000
+    with time_limit(3.0):
+        redaction.strip_query(blob)
+        co_hook.strip_query(blob)
+
+
+def test_dotenv_values(tmp_path):
+    (tmp_path / ".env").write_text(
+        "# a comment\nAPI_KEY=abcdef123456\nexport DB_PASS='quoted secret'\nDEBUG=true\nPORT=8000\n"
+        "PIN=123456\nSHORT=abc\nNAME=\"dq-value-1\"  # trailing\nURL=postgres://u:p@h/db # note\nEMPTY=\n")
+    (tmp_path / ".env.local").write_text("LOCAL_TOKEN=local-token-9\n")
+    (tmp_path / ".envrc").write_text("export RC_SECRET=rc-secret-77\n")
+    (tmp_path / "other.env").write_text("NOT_TOP=not-read-001\n")
+    sub = tmp_path / "sub"
+    sub.mkdir()
+    (sub / ".env").write_text("DEEP=deep-value-002\n")
+    outside = tmp_path.parent / f"outside-{uuid.uuid4().hex[:6]}.env"
+    outside.write_text("LINKED=linked-value-003\n")
+    (tmp_path / ".env.link").symlink_to(outside)
+    (tmp_path / ".env.big").write_text("BIG=big-value-0004\n" + "#" * (64 * 1024))
+    (tmp_path / ".env.dir").mkdir()
+    vals = redaction.dotenv_values(tmp_path)
+    assert set(vals) == {"abcdef123456", "quoted secret", "dq-value-1", "postgres://u:p@h/db", "local-token-9",
+                         "rc-secret-77"}
+    assert vals == sorted(vals, key=len, reverse=True)
+    assert redaction.dotenv_values(tmp_path / "missing") == []
+    assert redaction.dotenv_values(None) == []
+
+
+def test_run_masks_workspace_dotenv_values(client, tmp_path):
+    """A value from the project folder's .env never reaches a stored tool result."""
+    d = tmp_path / f"dotenv-{_uid()}"
+    d.mkdir()
+    (d / ".env").write_text("SERVICE_PASSWORD=dotenv-secret-7e7e\n")
+    r = client.post("/projects", json={"name": f"rd-{_uid()}", "directory": str(d)})
+    assert r.status_code == 201, r.text
+    r = client.post("/tasks", json={"prompt": "go [stream-fixture:dotenv_echo]", "project_id": r.json()["id"]})
+    assert r.status_code == 201, r.text
+    done = wait_task(client, r.json()["id"])
+    assert done["status"] == "completed", done.get("error")
+    evs = _events(done["id"])
+    res = [e.payload for e in evs if e.type == "tool_result"][0]
+    assert "dotenv-secret-7e7e" not in json.dumps([e.payload for e in evs])
+    assert "***" in res["content"]
+    # stored tool results lose URL queries
+    assert "https://h.example/download" in res["content"] and "sig=" not in res["content"]

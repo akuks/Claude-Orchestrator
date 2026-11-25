@@ -49,6 +49,39 @@ def valid_agent_model(model: str, tiers: dict) -> bool:
     return model in VALID_MODELS or model in tier_values(tiers)
 
 
+_FAMILIES = tuple(sorted(VALID_MODELS))
+
+
+def _family(model: str) -> str | None:
+    m = model.lower()
+    if m in VALID_MODELS:
+        return m
+    found = [f for f in _FAMILIES if f in m.split("-")]
+    return found[0] if len(found) == 1 else None
+
+
+def tier_of(model, tiers: dict) -> str | None:
+    """The org tier name a model runs as (phase 7e, F102): a tier whose model is exactly this one, else one of
+    the same family (opus / sonnet / haiku); the first such tier in TIERS order. Unknown -> None."""
+    if not isinstance(model, str) or not model or not isinstance(tiers, dict):
+        return None
+    model = model.strip()
+    if model.endswith("[1m]"):
+        model = model[:-4]
+    vals = {k: (v[:-4] if isinstance(v, str) and v.endswith("[1m]") else v) for k, v in tiers.items()}
+    for k in TIERS:
+        if vals.get(k) == model:
+            return k
+    fam = _family(model)
+    if fam is None:
+        return None
+    for k in TIERS:
+        v = vals.get(k)
+        if isinstance(v, str) and v and _family(v) == fam:
+            return k
+    return None
+
+
 async def org_tiers(s) -> dict:
     row = await s.get(GuardOrgSettings, 1)
     return normalized(row.model_tiers if row else None)

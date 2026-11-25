@@ -41,7 +41,8 @@ from .guard.plugin import ensure_plugin
 from .models import (Agent, Artifact, McpCall, Project, SkillPack, Task, TaskEvent, TaskHandoff, TaskQuestion,
                      TaskUsage, User)
 from .briefs import scope as brief_scope
-from .redaction import redact, redact_obj, secrets_from_env
+from . import tiers as org_tier_map
+from .redaction import dotenv_values, redact, redact_head, redact_obj, secrets_from_env, strip_query
 from .resume import gitfacts, ground_rules, handoff, prompting, recovery
 from .resume.texts import CRED_NOTE, RECOVERED_CONTINUE
 from .usage import tracker as usage_tracker
@@ -160,10 +161,22 @@ def _flatten(value) -> str:
 
 
 def _short(value, secrets: list[str] | None = None) -> str:
-    text = _flatten(value)
-    if secrets is not None:  # before the cut, so no secret prefix survives it
-        text = redact(text, secrets)
+    """A stored tool result: URL queries dropped, redacted before the cut (so no secret prefix survives it)."""
+    text = strip_query(_flatten(value))
+    if secrets is not None:
+        return redact_head(text, secrets, _MAX_TOOL_RESULT_CHARS)
     return text[:_MAX_TOOL_RESULT_CHARS]
+
+
+def _run_secret_values(env, workspace) -> list[str]:
+    """The run's secrets: the env's sensitive values plus the workspace's top-level ``.env*`` values (phase 7e,
+    F90b), longest first. A folder that cannot be read adds nothing."""
+    try:
+        extra = dotenv_values(workspace)
+    except Exception:  # noqa: BLE001 - never stops a run
+        log.debug("dotenv values: %s unreadable", workspace, exc_info=True)
+        extra = []
+    return sorted(set(secrets_from_env(env)) | set(extra), key=len, reverse=True)
 
 
 COORDINATOR_BRIEF_LINE = (
@@ -550,7 +563,7 @@ class WorkerManager:
         try:
             async with SessionLocal() as s:
                 sub_env = await build_agent_env(s, task_owner, project_env=project_env)
-            run_secrets[:] = secrets_from_env(sub_env)
+            run_secrets[:] = _run_secret_values(sub_env, workspace)
         except MissingCredential as e:
             await emit("error", {"message": str(e)})
             await self._finish(task_id, Status.FAILED, error=str(e))
@@ -772,7 +785,7 @@ class WorkerManager:
                     ttl_seconds=min(settings.task_timeout_seconds, 86400),
                 )
                 await s.commit()
-            run_secrets[:] = secrets_from_env(sub_env)
+            run_secrets[:] = _run_secret_values(sub_env, workspace)
 
         # Resume bookkeeping (F8-F10): the head this run starts from, the
         # outside-commit base held for the whole run, and handoff.md from the
@@ -853,6 +866,13 @@ class WorkerManager:
         }
         # Claude plan limits (7c): whose plan this run uses and what the stream said about it
         ctx["plan"] = self._new_plan_ctx(plan_owner)
+        # phase 7e (F102): the org's tier names for a helper's model; helpers whose tier comes from their first message
+        try:
+            async with SessionLocal() as s:
+                ctx["tiers"] = await org_tier_map.org_tiers(s)
+        except Exception:  # noqa: BLE001 - the defaults name the tiers then
+            ctx["tiers"] = org_tier_map.normalized(None)
+        ctx["helper_tier_wait"] = set()
         ctx["edit_calls"] = self._run_edits.setdefault(task_id, [])  # shared with the earlier attempts
         self._run_ctx[task_id] = ctx  # _finish reads its edit calls (critical-path warning)
         watch = asyncio.create_task(self._guard_watch(ctx))
@@ -1439,6 +1459,8 @@ class WorkerManager:
         event payload: known keys only, redacted FIRST (so no partial secret
         survives a cut, and both sources key alike), then bounded."""
         payload = redact_obj({k: rec[k] for k in cls._GUARD_KEYS if k in rec}, secrets or [])
+        if isinstance(payload.get("summary"), str):  # phase 7e: a stored summary keeps no URL query
+            payload["summary"] = strip_query(payload["summary"])
         for k, v in list(payload.items()):
             if k in ("rule_ids", "grant_ids"):
                 payload[k] = [str(x)[:64] for x in v][:guard_grants.MAX_GRANT_IDS] if isinstance(v, list) else []
@@ -1596,6 +1618,37 @@ class WorkerManager:
             return
         await self._handle_stream_event(obj, emit, result, ctx)
 
+    _HELPER_TOOLS = ("Agent", "Task")
+
+    @classmethod
+    def _helper_tier_on_call(cls, use: dict, ctx) -> None:
+        """A main-thread helper call (phase 7e, F102): its ``model`` input named as an org tier goes on the
+        tool_use event (``tier``); without one, the helper's first message names it (a ``subagent_start``
+        event). Unknown -> no tier."""
+        if use.get("parent") or use.get("name") not in cls._HELPER_TOOLS or not use.get("id"):
+            return
+        inp = use.get("input") if isinstance(use.get("input"), dict) else {}
+        tier = org_tier_map.tier_of(inp.get("model"), ctx.get("tiers") or org_tier_map.DEFAULT_TIERS)
+        if tier:
+            use["tier"] = tier
+        elif "helper_tier_wait" in ctx:
+            ctx["helper_tier_wait"].add(str(use["id"]))
+
+    @staticmethod
+    async def _helper_tier_from_message(obj: dict, emit, ctx) -> None:
+        wait = ctx.get("helper_tier_wait")
+        parent = obj.get("parent_tool_use_id")
+        if not wait or not parent or str(parent) not in wait:
+            return
+        msg = obj.get("message") if isinstance(obj.get("message"), dict) else {}
+        model = msg.get("model")
+        if not isinstance(model, str) or not model or model == "<synthetic>":
+            return  # Claude Code's own error text is not the helper's model
+        wait.discard(str(parent))
+        tier = org_tier_map.tier_of(model, ctx.get("tiers") or org_tier_map.DEFAULT_TIERS)
+        if tier:
+            await emit("subagent_start", {"tool_use_id": str(parent), "tier": tier, "model": model[:64]})
+
     async def _handle_stream_event(self, obj: dict, emit, result, ctx) -> None:
         await self._guard_on_event(obj, ctx)
         etype = obj.get("type")
@@ -1621,6 +1674,7 @@ class WorkerManager:
             usage = ctx.get("usage")
             if usage is not None:
                 usage.on_assistant(obj)
+            await self._helper_tier_from_message(obj, emit, ctx)
             actual = obj.get("message", {}).get("model")
             if actual and not ctx.get("model_stored"):
                 ctx["model_stored"] = True
@@ -1636,8 +1690,10 @@ class WorkerManager:
                         usage.on_tool_use_main(str(block["id"]), str(name or ""), block.get("input") or {})
                     self._remember_test_call(ctx, name, block)
                     self._remember_edit(ctx, name, block, obj)
-                    await emit("tool_use", {"name": name, "input": block.get("input"),
-                                            "id": block.get("id"), "parent": obj.get("parent_tool_use_id") or None})
+                    use = {"name": name, "input": block.get("input"), "id": block.get("id"),
+                           "parent": obj.get("parent_tool_use_id") or None}
+                    self._helper_tier_on_call(use, ctx)
+                    await emit("tool_use", use)
                     if name and name.startswith("mcp__"):
                         await self._record_mcp_call(ctx, name, block.get("id"))
         elif etype == "user":

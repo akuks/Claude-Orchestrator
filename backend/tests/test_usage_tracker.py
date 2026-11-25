@@ -36,12 +36,14 @@ def test_same_id_in_three_events_counts_once_with_last_usage():
     t.on_assistant(_asst("m1", _u(10, 100, 1000, 75)))
     snap = t.snapshot()
     assert snap["messages"] == 1
-    assert snap["main"] == {"messages": 1, "input": 10, "cache_write": 100, "cache_read": 1000, "output": 75}
+    assert snap["main"] == {"messages": 1, "input": 10, "cache_write": 100, "cache_read": 1000, "output": 75,
+                            "reread_per_step": 1000}
     assert snap["models"]["claude-opus-5-5"]["output"] == 75
     t.on_assistant(_asst("m2", _u(5, 0, 1110, 3)))
     snap = t.snapshot()
     assert snap["messages"] == 2
-    assert snap["main"] == {"messages": 2, "input": 15, "cache_write": 100, "cache_read": 2110, "output": 78}
+    assert snap["main"] == {"messages": 2, "input": 15, "cache_write": 100, "cache_read": 2110, "output": 78,
+                            "reread_per_step": 1055}
 
 
 def test_helper_attribution_by_parent_tool_use_id():
@@ -59,7 +61,8 @@ def test_helper_attribution_by_parent_tool_use_id():
     snap = t.snapshot()
     assert snap["main"]["messages"] == 1 and snap["main"]["input"] == 1
     h = snap["helpers"]
-    assert h["Explore"] == {"messages": 1, "input": 2, "cache_write": 0, "cache_read": 0, "output": 9}
+    assert h["Explore"] == {"messages": 1, "input": 2, "cache_write": 0, "cache_read": 0, "output": 9,
+                            "reread_per_step": 0, "starts": 1}
     assert h["write tests"]["input"] == 3
     assert h["helper"]["messages"] == 2 and h["helper"]["input"] == 9
     assert "Bash" not in h
@@ -214,3 +217,24 @@ def test_synthetic_model_keeps_last_model():
     assert t.est_cost_usd is not None
     assert t._msgs["id:m2"]["model"] == "claude-sonnet-5-5"
     assert t._msgs["id:s1"]["model"] == "claude-sonnet-5-5"
+
+
+def test_reread_per_step_and_helper_starts():
+    """Phase 7e (F96): per bucket cache_read / messages; per helper kind the number of starts."""
+    t = UsageTracker()
+    t.on_assistant(_asst("m1", _u(1, 0, 30_000, 1)))
+    t.on_assistant(_asst("m2", _u(1, 0, 50_001, 1)))
+    for i in range(3):
+        t.on_tool_use_main(f"tu{i}", "Agent", {"subagent_type": "Explore"})
+    for i in range(7):
+        t.on_assistant(_asst(f"h{i}", _u(1, 0, 700, 1), parent=f"tu{i % 3}"))
+    t.on_tool_use_main("tuQ", "Agent", {"subagent_type": "quiet"})  # started, no message yet
+    t.on_assistant(_asst("hx", _u(1, 0, 10, 1), parent="tuGone"))  # unknown parent: "helper", no start counted
+    snap = t.snapshot()
+    assert snap["main"]["reread_per_step"] == 40_000  # 80 001 / 2, rounded
+    assert snap["helpers"]["Explore"]["reread_per_step"] == 700 and snap["helpers"]["Explore"]["starts"] == 3
+    assert snap["helpers"]["Explore"]["messages"] == 7
+    assert snap["helpers"]["helper"]["starts"] == 0
+    assert "quiet" not in snap["helpers"]
+    assert UsageTracker().snapshot()["main"]["reread_per_step"] == 0
+    json.dumps(snap)

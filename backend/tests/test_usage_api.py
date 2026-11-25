@@ -168,3 +168,38 @@ def test_running_and_finished_step_count_tokens_alike(client):
     # what the worker stores at the end for the same figures: input + cache read + cache write, and output
     done = _mk(input_tokens=20 + 300 + 4000, output_tokens=50, usage={"breakdown": bd})
     assert _get(client, run)["thread"]["tokens"] == _get(client, done)["thread"]["tokens"] == 4370
+
+
+def test_reread_and_helper_tips(client):
+    """Phase 7e (F96): the per-step re-read tip, the narrower-brief tip for long helpers, and the fresh-session
+    tip's saving estimate."""
+    from app.usage.report import reread_tip, helper_tip, FRESH_SAVING
+
+    assert reread_tip(45_400) == "Each step re-reads about 45,000 tokens of earlier conversation."
+    assert helper_tip("Explore", 41) == "Helpers of type Explore average 41 steps each — give them a narrower brief."
+    # under 20k per step: no tip
+    low = _mk(usage={"peak_context": 1, "breakdown": _bd({"cache_read": 19_999 * 2, "messages": 2})})
+    body = _get(client, low)
+    assert body["tips"] == [] and body["step"]["reread_per_step"] == 19_999
+    at = _mk(usage={"peak_context": 1, "breakdown": _bd({"cache_read": 40_000, "messages": 2})})
+    assert _get(client, at)["tips"] == [reread_tip(20_000)]
+    # helpers: average over their starts (> 40 steps each)
+    bd = _bd()
+    bd["helpers"] = {"Explore": {**B0, "messages": 82, "starts": 2}, "plan": {**B0, "messages": 80, "starts": 2},
+                     "old": {**B0, "messages": 500}}  # a breakdown stored before 7e: no starts, no tip
+    hl = _mk(usage={"peak_context": 1, "breakdown": bd})
+    assert _get(client, hl)["tips"] == [helper_tip("Explore", 41)]
+    # big re-reads: always shown, first, and the fresh-session tip gains the saving over the next 50 steps
+    big = _mk(usage={"peak_context": 200_000, "breakdown": _bd(
+        {"input": 10, "cache_write": 50_000_000, "cache_read": 160_000 * 25, "messages": 25},
+        [{"tool": "Bash", "chars": 30_000, "id": "y"}], 25)})
+    tips = _get(client, big)["tips"]
+    assert tips[0] == reread_tip(160_000)
+    saving = FRESH_SAVING.format(m=f"{(160_000 - 30_000) * 50:,}")
+    assert saving == "A fresh session would save about 6,500,000 tokens over the next 50 steps."
+    assert tips[1:] == [TIP_NARROW, f"{TIP_FRESH} {saving}", TIP_CACHE]
+    # exactly 150k per step: no saving sentence
+    edge = _mk(usage={"peak_context": 200_000, "breakdown": _bd({"cache_read": 150_000 * 2, "messages": 2})})
+    assert _get(client, edge)["tips"] == [reread_tip(150_000), TIP_FRESH]
+    # a stored breakdown without the field still works (computed from the figures)
+    assert _get(client, at)["step"]["reread_per_step"] == 20_000

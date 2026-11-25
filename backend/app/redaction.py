@@ -127,6 +127,91 @@ def redact(text: str, secrets: list[str]) -> str:
     return text
 
 
+# A URL token (scheme://... up to whitespace, a quote or a bracket); strip_query cuts it at its first ? or #.
+# No backtracking: the token always matches whole, so the scan is linear. co_hook.py keeps a copy.
+STRIP_URL = re.compile(r"""\b[A-Za-z][A-Za-z0-9+.\-]{0,30}://[^\s'"<>`]*""")
+_URL_TAIL = re.compile(r"[).,;:!\]}]+$")
+
+
+def _strip_one(m) -> str:
+    url = m.group(0)
+    cut = min((i for i in (url.find("?"), url.find("#")) if i >= 0), default=-1)
+    if cut < 0:
+        return url
+    tail = _URL_TAIL.search(url[cut:])  # sentence punctuation after the link stays
+    return url[:cut] + (tail.group(0) if tail else "")
+
+
+def strip_query(text) -> str:
+    """URLs keep scheme, host and path; their query and fragment are dropped (phase 7e, F90b)."""
+    return STRIP_URL.sub(_strip_one, "" if text is None else str(text))
+
+
+def redact_head(text, secrets: list[str], n: int = 4000) -> str:
+    """Redact, then cut to ``n`` characters (so no secret prefix survives the cut)."""
+    return redact(str(text or ""), secrets)[:n]
+
+
+DOTENV_MAX_BYTES = 64 * 1024
+DOTENV_MAX_FILES = 20
+DOTENV_VALUE_MIN = 6
+_DOTENV_LINE = re.compile(r"^\s*(?:export\s+)?[A-Za-z_][A-Za-z0-9_.\-]*\s*=\s*(.*)$")
+_NOT_SECRET = frozenset({"true", "false", "yes", "no", "on", "off", "null", "none", "localhost", "development",
+                         "production", "staging", "test", "debug", "info", "warning", "error"})
+
+
+def _dotenv_value(raw: str) -> str:
+    raw = raw.strip()
+    if raw[:1] in ("'", '"'):
+        end = raw.find(raw[0], 1)
+        return raw[1:end] if end > 0 else raw[1:]
+    return re.split(r"\s+#", raw, maxsplit=1)[0].strip()
+
+
+def _secret_looking(v: str) -> bool:
+    if len(v) < DOTENV_VALUE_MIN or v.lower() in _NOT_SECRET:
+        return False
+    return not (v.isdigit() and len(v) <= 6)
+
+
+def dotenv_values(folder) -> list[str]:
+    """Values (6+ characters, not true/false/plain small numbers...) of the folder's top-level ``.env*`` files,
+    longest first. Each file is opened with no links followed, must be a regular file of at most 64 KB; any
+    problem skips that file. Phase 7e (F90b): they join the run's secrets."""
+    import os
+    import stat
+
+    if not folder:
+        return []
+    vals: set[str] = set()
+    try:
+        entries = sorted(e.name for e in os.scandir(folder) if e.name.startswith(".env"))
+    except OSError:
+        return []
+    for name in entries[:DOTENV_MAX_FILES]:
+        try:
+            fd = os.open(os.path.join(folder, name), os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+                         | getattr(os, "O_NONBLOCK", 0))
+        except OSError:
+            continue
+        try:
+            st = os.fstat(fd)
+            if not stat.S_ISREG(st.st_mode) or st.st_size > DOTENV_MAX_BYTES:
+                continue
+            data = os.read(fd, DOTENV_MAX_BYTES + 1)
+        except OSError:
+            continue
+        finally:
+            os.close(fd)
+        if len(data) > DOTENV_MAX_BYTES:
+            continue
+        for line in data.decode("utf-8", errors="replace").splitlines():
+            m = _DOTENV_LINE.match(line)
+            if m and _secret_looking(v := _dotenv_value(m.group(1))):
+                vals.add(v)
+    return sorted(vals, key=len, reverse=True)
+
+
 ENV_VALUE_MIN = 6  # project env values at least this long are scrubbed from gate output
 ENV_MASK = "[redacted]"
 

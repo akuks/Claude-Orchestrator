@@ -1787,3 +1787,36 @@ def test_startup_and_resume_unchanged(plugin, tmp_path, stub):
     assert stub.requests == []
 
 
+
+
+# ---- phase 7e: PostToolUseFailure (F80), guard summaries without URL queries (F90b) ----------
+
+
+def test_post_tool_use_failure_writes_the_done_line(run, stub):
+    """A failed call gets the same done line as a finished one, so it never stays "in flight"."""
+    out = run({"hook_event_name": "PostToolUseFailure", "tool_name": "Bash", "tool_use_id": "tuF",
+               "tool_input": {"command": "false"}, "error": "exit 1"}, event="PostToolUseFailure")
+    assert out is None
+    assert [{k: v for k, v in r.items() if k != "ts"} for r in run.spool()] == [
+        {"event": "PostToolUse", "tool_use_id": "tuF", "done": True}]
+    assert stub.requests == []
+    # no tool_use_id: nothing written; malformed input: no output, no crash
+    assert run({"tool_name": "Bash"}, event="PostToolUseFailure") is None
+    assert run(None, event="PostToolUseFailure", raw="garbage") is None
+    assert len([r for r in run.spool() if r.get("done")]) == 1
+
+
+def test_failed_call_is_not_in_flight(run):
+    from app.resume import recovery
+
+    run(bash("ls"))  # the seen line (tool_use_id tu1)
+    assert [r["tool"] for r in recovery._in_flight([], run.spool())] == ["Bash"]
+    run({"tool_name": "Bash", "tool_use_id": "tu1", "error": "boom"}, event="PostToolUseFailure")
+    assert recovery._in_flight([], run.spool()) == []
+
+
+def test_guard_summary_drops_url_queries(run):
+    run(bash("curl -X DELETE 'https://api.example/v1/items?sig=abc123&exp=9#frag' && rm -rf ~"))
+    rec = [r for r in run.spool() if r.get("decision") == "deny"][-1]
+    assert "https://api.example/v1/items" in rec["summary"]
+    assert "sig=" not in rec["summary"] and "frag" not in rec["summary"]

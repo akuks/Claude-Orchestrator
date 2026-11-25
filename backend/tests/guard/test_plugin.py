@@ -34,8 +34,9 @@ def test_layout_and_hooks_json(tmp_path):
         assert (root / f).is_file(), f
     assert json.loads((root / ".claude-plugin/plugin.json").read_text())["name"] == "co-guard"
     hooks = json.loads((root / "hooks/hooks.json").read_text())["hooks"]
-    assert set(hooks) == {"PreToolUse", "PostToolUse", "SessionStart", "Stop", "SessionEnd", "SubagentStart",
-                          "SubagentStop", "ConfigChange"}
+    assert set(hooks) == {"PreToolUse", "PostToolUse", "PostToolUseFailure", "SessionStart", "Stop", "SessionEnd",
+                          "SubagentStart", "SubagentStop", "ConfigChange"}
+    assert hooks["PostToolUseFailure"][0]["matcher"] == ".*"  # phase 7e (F80): every tool, like PostToolUse
     pre = hooks["PreToolUse"][0]
     assert pre["matcher"] == ".*"  # Ruling R17: every tool
     assert hooks["ConfigChange"][0]["matcher"] == "user_settings|project_settings|local_settings"

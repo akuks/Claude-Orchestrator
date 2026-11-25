@@ -68,6 +68,8 @@ def hooks_json() -> dict:
     hooks = {
         "PreToolUse": entry("PreToolUse", co_hook.HOOK_TIMEOUT, co_hook.TOOL_MATCHER),
         "PostToolUse": entry("PostToolUse", _OTHER_TIMEOUT, co_hook.TOOL_MATCHER),
+        # phase 7e (F80): a failed call's done line (harmless if the CLI never sends it)
+        "PostToolUseFailure": entry("PostToolUseFailure", _OTHER_TIMEOUT, co_hook.TOOL_MATCHER),
     }
     for ev in ("SessionStart", "Stop", "SessionEnd", "SubagentStart", "SubagentStop"):
         hooks[ev] = entry(ev, _OTHER_TIMEOUT)
