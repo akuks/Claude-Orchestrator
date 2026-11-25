@@ -63,10 +63,10 @@ def _long_helper(usages: list) -> tuple[str, int] | None:
             starts = b.get("starts") if isinstance(b, dict) else None
             if not isinstance(starts, int) or isinstance(starts, bool) or starts <= 0:
                 continue
-            avg = round(int(b.get("messages") or 0) / starts)
+            avg = int(b.get("messages") or 0) / starts
             if avg > HELPER_STEPS_MAX and (best is None or avg > best[1]):
                 best = (str(kind), avg)
-    return best
+    return (best[0], round(best[1])) if best else None
 
 
 def tips(usages: list, fresh_tokens: int | None) -> list[str]:

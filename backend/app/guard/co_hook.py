@@ -292,17 +292,20 @@ def redact(text, limit=SUMMARY_MAX):
 
 
 # Local copies of app.redaction.strip_query / redact_head (a test keeps them alike).
-_STRIP_URL = re.compile(r"""\b[A-Za-z][A-Za-z0-9+.\-]{0,30}://[^\s'"<>`]*""")
+_STRIP_URL = re.compile(r"""([A-Za-z][A-Za-z0-9+.\-]{0,30}:\\?/\\?/)([^\s'"<>`]*)""")
 _URL_TAIL = re.compile(r"[).,;:!\]}]+$")
 
 
 def _strip_one(m):
-    url = m.group(0)
-    cut = min((i for i in (url.find("?"), url.find("#")) if i >= 0), default=-1)
+    """One URL: cut at its first ? or # AFTER the authority (a ? or # inside user:password@ is not a query)."""
+    head, rest = m.group(1), m.group(2)
+    slash = rest.find("/")
+    start = rest.rfind("@", 0, len(rest) if slash < 0 else slash) + 1
+    cut = min((i for i in (rest.find("?", start), rest.find("#", start)) if i >= 0), default=-1)
     if cut < 0:
-        return url
-    tail = _URL_TAIL.search(url[cut:])
-    return url[:cut] + (tail.group(0) if tail else "")
+        return m.group(0)
+    tail = _URL_TAIL.search(rest[cut:])  # sentence punctuation after the link stays
+    return head + rest[:cut] + (tail.group(0) if tail else "")
 
 
 def strip_query(text):
@@ -1223,7 +1226,7 @@ def pre_tool_use(payload, policy, started):
     ids = [h.rule_id for h in verdict.hits]
     summary = verdict.hits[0].summary if verdict.hits else tool
     reason = "; ".join(f"{h.reason} ({h.rule_id})" for h in verdict.hits) or "blocked"
-    base = {"event": "PreToolUse", "tool": tool, "rule_ids": ids, "summary": redact(strip_query(summary)),
+    base = {"event": "PreToolUse", "tool": tool, "rule_ids": ids, "summary": strip_query(redact(summary)),
             "tool_use_id": payload.get("tool_use_id"), "agent_id": payload.get("agent_id")}
     if verdict.decision != "approve":
         rec = dict(base, decision="deny", reason=redact(reason))

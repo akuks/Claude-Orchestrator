@@ -203,3 +203,12 @@ def test_reread_and_helper_tips(client):
     assert _get(client, edge)["tips"] == [reread_tip(150_000), TIP_FRESH]
     # a stored breakdown without the field still works (computed from the figures)
     assert _get(client, at)["step"]["reread_per_step"] == 20_000
+
+
+def test_helper_tip_compares_the_unrounded_average(client):
+    """Review M5: 81 steps over 2 starts (40.5) is over 40, though it rounds to 40."""
+    from app.usage.report import helper_tip
+
+    bd = _bd()
+    bd["helpers"] = {"Explore": {**B0, "messages": 81, "starts": 2}}
+    assert _get(client, _mk(usage={"peak_context": 1, "breakdown": bd}))["tips"] == [helper_tip("Explore", 40)]

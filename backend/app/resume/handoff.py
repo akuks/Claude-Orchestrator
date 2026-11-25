@@ -349,7 +349,7 @@ def build(inp: HandoffInput) -> dict:
         """Redact first, then clean, then cut."""
         if text is None:
             return None
-        return " ".join(clean_text(redact(strip_query(text), secrets)).split())[:limit]
+        return " ".join(clean_text(strip_query(redact(str(text), secrets))).split())[:limit]
 
     def fl(items):
         return [x for x in (f(i) for i in items or []) if x]
@@ -363,7 +363,7 @@ def build(inp: HandoffInput) -> dict:
     noted = [s for s in steps if s.get("notes") and _aware(s.get("notes_updated_at"))]
     noted.sort(key=lambda s: _aware(s["notes_updated_at"]))
     notes = noted[-1] if noted else None
-    notes_text = clean_text(redact(strip_query(notes["notes"]), secrets)) if notes else None
+    notes_text = clean_text(strip_query(redact(notes["notes"], secrets))) if notes else None
     cautions: list[dict] = []
     if notes_text:
         notes_text, cautions = split_cautions(notes_text)
@@ -386,7 +386,7 @@ def build(inp: HandoffInput) -> dict:
                 if e.get("type") == "text_output" and not _payload(e).get("parent") and _payload(e).get("text")]
         reply = says[-1] if says else None
     if reply:
-        words = " ".join(clean_text(redact(strip_query(reply), secrets)).split()).split(" ")
+        words = " ".join(clean_text(strip_query(redact(str(reply), secrets))).split()).split(" ")
         reply = " ".join(words[-LAST_REPLY_WORDS:])[-FIELD_MAX:].lstrip()
 
     facts = inp.facts if inp.facts is not None and getattr(inp.facts, "is_repo", False) else None
@@ -650,7 +650,7 @@ def write_file(task_id: str, text: str, secrets=None) -> bool:
         pass
     fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0), 0o600)
     with os.fdopen(fd, "w") as fh:
-        fh.write(redact(strip_query(text or ""), list(secrets or [])))
+        fh.write(strip_query(redact(text or "", list(secrets or []))))
     os.replace(tmp, path)
     return True
 

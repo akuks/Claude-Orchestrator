@@ -161,11 +161,12 @@ def _flatten(value) -> str:
 
 
 def _short(value, secrets: list[str] | None = None) -> str:
-    """A stored tool result: URL queries dropped, redacted before the cut (so no secret prefix survives it)."""
-    text = strip_query(_flatten(value))
+    """A stored tool result: redacted before the cut (so no secret prefix survives it), THEN URL queries dropped
+    (stripping first could cut a ? or # password out of reach of the user:password@ mask)."""
+    text = _flatten(value)
     if secrets is not None:
-        return redact_head(text, secrets, _MAX_TOOL_RESULT_CHARS)
-    return text[:_MAX_TOOL_RESULT_CHARS]
+        return strip_query(redact_head(text, secrets, _MAX_TOOL_RESULT_CHARS))
+    return strip_query(text[:_MAX_TOOL_RESULT_CHARS])
 
 
 def _run_secret_values(env, workspace) -> list[str]:

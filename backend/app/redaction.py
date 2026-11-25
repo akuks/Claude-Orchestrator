@@ -127,19 +127,24 @@ def redact(text: str, secrets: list[str]) -> str:
     return text
 
 
-# A URL token (scheme://... up to whitespace, a quote or a bracket); strip_query cuts it at its first ? or #.
-# No backtracking: the token always matches whole, so the scan is linear. co_hook.py keeps a copy.
-STRIP_URL = re.compile(r"""\b[A-Za-z][A-Za-z0-9+.\-]{0,30}://[^\s'"<>`]*""")
+# A URL token (scheme:// or JSON-escaped scheme:\/\/, up to whitespace, a quote or a bracket); strip_query cuts it
+# at its first ? or # after the authority. Run it AFTER redact (a ? or # in a password must not hide it from
+# URL_USERINFO). No \b anchor; the scheme is bounded, the token always matches whole: the scan stays linear.
+# co_hook.py keeps a copy.
+STRIP_URL = re.compile(r"""([A-Za-z][A-Za-z0-9+.\-]{0,30}:\\?/\\?/)([^\s'"<>`]*)""")
 _URL_TAIL = re.compile(r"[).,;:!\]}]+$")
 
 
 def _strip_one(m) -> str:
-    url = m.group(0)
-    cut = min((i for i in (url.find("?"), url.find("#")) if i >= 0), default=-1)
+    """One URL: cut at its first ? or # AFTER the authority (a ? or # inside user:password@ is not a query)."""
+    head, rest = m.group(1), m.group(2)
+    slash = rest.find("/")
+    start = rest.rfind("@", 0, len(rest) if slash < 0 else slash) + 1
+    cut = min((i for i in (rest.find("?", start), rest.find("#", start)) if i >= 0), default=-1)
     if cut < 0:
-        return url
-    tail = _URL_TAIL.search(url[cut:])  # sentence punctuation after the link stays
-    return url[:cut] + (tail.group(0) if tail else "")
+        return m.group(0)
+    tail = _URL_TAIL.search(rest[cut:])  # sentence punctuation after the link stays
+    return head + rest[:cut] + (tail.group(0) if tail else "")
 
 
 def strip_query(text) -> str:
@@ -155,9 +160,16 @@ def redact_head(text, secrets: list[str], n: int = 4000) -> str:
 DOTENV_MAX_BYTES = 64 * 1024
 DOTENV_MAX_FILES = 20
 DOTENV_VALUE_MIN = 6
-_DOTENV_LINE = re.compile(r"^\s*(?:export\s+)?[A-Za-z_][A-Za-z0-9_.\-]*\s*=\s*(.*)$")
-_NOT_SECRET = frozenset({"true", "false", "yes", "no", "on", "off", "null", "none", "localhost", "development",
-                         "production", "staging", "test", "debug", "info", "warning", "error"})
+DOTENV_MAX_VALUES = 200  # a hostile repo cannot make every redact() slow
+DOTENV_MAX_CHARS = 16 * 1024
+# templates hold placeholders, .envrc holds shell code: never read
+DOTENV_SKIP_SUFFIXES = (".example", ".sample", ".template", ".dist")
+_DOTENV_LINE = re.compile(r"^\s*(?:export\s+)?([A-Za-z_][A-Za-z0-9_.\-]*)\s*=\s*(.*)$")
+_PLAIN_WORD = re.compile(r"^[A-Za-z][A-Za-z_\-]*$")
+_HOST_OR_IP = re.compile(r"^[A-Za-z0-9\-]+(?:\.[A-Za-z0-9\-]+)+(?::\d{1,5})?$")
+_NUMBER = re.compile(r"^[+-]?[\d.,_]+$")
+_ANY_URL = re.compile(r"^[A-Za-z][A-Za-z0-9+.\-]{0,30}://")
+_NOT_SECRET = frozenset({"true", "false", "yes", "no", "on", "off", "null", "none"})
 
 
 def _dotenv_value(raw: str) -> str:
@@ -168,24 +180,40 @@ def _dotenv_value(raw: str) -> str:
     return re.split(r"\s+#", raw, maxsplit=1)[0].strip()
 
 
-def _secret_looking(v: str) -> bool:
-    if len(v) < DOTENV_VALUE_MIN or v.lower() in _NOT_SECRET:
+def _not_a_secret(v: str) -> bool:
+    """Paths, plain words, hostnames, IPs, URLs without user:password@, booleans and numbers."""
+    return (v.lower() in _NOT_SECRET or v.startswith(("/", "./", "../", "~")) or bool(_PLAIN_WORD.match(v))
+            or bool(_HOST_OR_IP.match(v)) or bool(_NUMBER.match(v))
+            or (bool(_ANY_URL.match(v)) and not URL_USERINFO.search(v)))
+
+
+def _dotenv_secret(key: str, v: str) -> bool:
+    """A .env value is a secret when the VALUE looks like a token (``TOKEN_SHAPES``, a URL with user:password@), or
+    its KEY looks secret (``is_sensitive_name``) and the value is not an obvious non-secret."""
+    if len(v) < DOTENV_VALUE_MIN:
         return False
-    return not (v.isdigit() and len(v) <= 6)
+    if TOKEN_SHAPES.search(v) or URL_USERINFO.search(v):
+        return True
+    return is_sensitive_name(key) and not _not_a_secret(v)
 
 
 def dotenv_values(folder) -> list[str]:
-    """Values (6+ characters, not true/false/plain small numbers...) of the folder's top-level ``.env*`` files,
-    longest first. Each file is opened with no links followed, must be a regular file of at most 64 KB; any
-    problem skips that file. Phase 7e (F90b): they join the run's secrets."""
+    """Secret values of the folder's top-level ``.env*`` files (not templates or ``.envrc``), longest first;
+    at most DOTENV_MAX_VALUES values and DOTENV_MAX_CHARS characters in all (the rest is dropped and logged).
+    Each file is opened with no links followed, must be a regular file of at most 64 KB; any problem skips
+    that file. Phase 7e (F90b): they join the run's secrets."""
+    import logging
     import os
     import stat
 
     if not folder:
         return []
-    vals: set[str] = set()
+    vals: dict[str, None] = {}
+    total = 0
+    capped = False
     try:
-        entries = sorted(e.name for e in os.scandir(folder) if e.name.startswith(".env"))
+        entries = sorted(e.name for e in os.scandir(folder) if e.name.startswith(".env")
+                         and e.name != ".envrc" and not e.name.lower().endswith(DOTENV_SKIP_SUFFIXES))
     except OSError:
         return []
     for name in entries[:DOTENV_MAX_FILES]:
@@ -207,8 +235,18 @@ def dotenv_values(folder) -> list[str]:
             continue
         for line in data.decode("utf-8", errors="replace").splitlines():
             m = _DOTENV_LINE.match(line)
-            if m and _secret_looking(v := _dotenv_value(m.group(1))):
-                vals.add(v)
+            if not m:
+                continue
+            v = _dotenv_value(m.group(2))
+            if v in vals or not _dotenv_secret(m.group(1), v):
+                continue
+            if len(vals) >= DOTENV_MAX_VALUES or total + len(v) > DOTENV_MAX_CHARS:
+                capped = True
+                continue
+            vals[v] = None
+            total += len(v)
+    if capped:
+        logging.getLogger(__name__).warning("dotenv values: cap reached in %s (%d values kept)", folder, len(vals))
     return sorted(vals, key=len, reverse=True)
 
 
