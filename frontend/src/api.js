@@ -75,6 +75,8 @@ export const api = {
   resetUserPassword: (id, password) => req('POST', `/users/${id}/reset-password`, { password }),
   userDirectory: () => req('GET', '/users/directory'),
 
+  getMyPreferences: () => req('GET', '/me/preferences'),
+  saveMyPreferences: (payload) => req('PUT', '/me/preferences', payload),
   // ---- Personal credentials (write-only: responses carry presence/kind only) ----
   myCredentials: () => req('GET', '/me/credentials'),
   saveMyCredentials: (payload) => req('PUT', '/me/credentials', payload),

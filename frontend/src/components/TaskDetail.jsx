@@ -174,6 +174,8 @@ function helperLine(p, tiers) {
   return `Helper (${kind})${word}: ${input.description || ''}`.trimEnd()
 }
 
+const PERSONAL_PREFS_LINE = (n) => `The starter's preferences were added (${Number(n) || 0})`
+
 export function renderLine(ev, tiers) {
   const s = EVENT_STYLE[ev.type] || { color: 'var(--co-terminal-text)', prefix: '' }
   const p = ev.payload || {}
@@ -229,6 +231,11 @@ export function renderLine(ev, tiers) {
       break
     case 'summary':
       text = `Older run history kept as a summary (${Number(p.events) || 0} events).`
+      break
+    case 'ground_rules':
+      text = JSON.stringify(p)
+      if (Array.isArray(p.included) && p.included.includes('personal_prefs'))
+        text += `\n${PERSONAL_PREFS_LINE(p.personal_count)}`
       break
     case 'repo_changed':
       text = p.message

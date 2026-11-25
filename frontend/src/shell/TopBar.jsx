@@ -2,6 +2,7 @@ import { Button, Dropdown, Space, Tag, Tooltip } from 'antd'
 import {
   CheckOutlined,
   KeyOutlined,
+  SlidersOutlined,
   LockOutlined,
   LogoutOutlined,
   MoonOutlined,
@@ -21,7 +22,7 @@ const MOTION_CHOICES = [
 ]
 
 // Top bar: ⌘K trigger, Claude credential tag, night toggle, avatar menu.
-export default function TopBar({ user, claudeInfo, isAdmin, onOpenPalette, onOpenCredentials, onChangePassword, onLogout }) {
+export default function TopBar({ user, claudeInfo, isAdmin, onOpenPalette, onOpenCredentials, onOpenPreferences, onChangePassword, onLogout }) {
   const { mode, setMode, motionPref, setMotionPref } = useThemeMode()
   const night = mode === 'night'
   const initials = (user.name || user.email || '?')
@@ -101,6 +102,7 @@ export default function TopBar({ user, claudeInfo, isAdmin, onOpenPalette, onOpe
               },
               { type: 'divider' },
               { key: 'creds', icon: <KeyOutlined />, label: 'My credentials', onClick: onOpenCredentials },
+              { key: 'prefs', icon: <SlidersOutlined />, label: 'My preferences', onClick: onOpenPreferences },
               { key: 'pw', icon: <LockOutlined />, label: 'Change password', onClick: onChangePassword },
               { key: 'out', icon: <LogoutOutlined />, label: 'Log out', onClick: onLogout },
             ],

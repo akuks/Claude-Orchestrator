@@ -71,14 +71,15 @@ export const GROUND_SWITCHES = [
   ['questions', 'Questions', 'Ask the agent to file a blocking question, with a recommendation, and end its turn.'],
   ['decisions', 'Decisions', 'Show recorded project decisions to agents before they edit the files they cover.'],
   ['local_first', 'Keep a copy in the project', 'Agents are told to keep the source of anything they publish elsewhere inside the project.'],
+  ['personal_prefs', "People's own preferences", "Add each person's own preferences to the tasks they start."],
 ]
 export const GROUND_EXTRA_MAX = 2000
 const GROUND_DEFAULTS = {
-  grounding: true, short_answers: true, usage_care: true, notes: true, questions: true, decisions: true, local_first: true, extra: '',
+  grounding: true, short_answers: true, usage_care: true, notes: true, questions: true, decisions: true, local_first: true, personal_prefs: true, extra: '',
 }
 
 // Ground rules: the standing instructions every run gets. Always saved whole
-// (all eight keys); the server refuses a bad value and says why.
+// (all nine keys); the server refuses a bad value and says why.
 export function GroundRulesCard({ canEdit, initial, onSaved }) {
   const [saved, setSaved] = useState({ ...GROUND_DEFAULTS, ...(initial || {}) })
   const [cfg, setCfg] = useState(saved)
@@ -104,6 +105,7 @@ export function GroundRulesCard({ canEdit, initial, onSaved }) {
         questions: !!cfg.questions,
         decisions: !!cfg.decisions,
         local_first: !!cfg.local_first,
+        personal_prefs: !!cfg.personal_prefs,
         extra: cfg.extra || '',
       }
       const out = await api.saveGuardOrgSettings({ ground_rules: body })
