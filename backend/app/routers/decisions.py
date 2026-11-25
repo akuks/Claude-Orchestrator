@@ -8,9 +8,11 @@ from fastapi import APIRouter, HTTPException, Request
 from sqlalchemy import select, update
 
 from ..access import require_project_role
+from ..auth import ensure_admin
 from ..database import SessionLocal
 from ..decisions.health import health as decisions_health
 from ..decisions import proposals as proposals_mod
+from ..decisions import track as track_mod
 from ..decisions.texts import ALREADY_REVIEWED, QUEUE_FULL
 from ..decisions.validate import KINDS, clean_fields, display_id, next_number
 from ..models import DecisionProposal, Project, ProjectDecision, Task, User
@@ -29,8 +31,8 @@ def _now() -> datetime:
     return datetime.now(timezone.utc)
 
 
-def _out(d: ProjectDecision, names: dict) -> DecisionOut:
-    return DecisionOut(
+def _out(d: ProjectDecision, names: dict, track: Optional[dict] = None) -> DecisionOut:
+    return DecisionOut(track=track,
         id=d.id, number=d.number, display_id=display_id(d.number), kind=d.kind, title=d.title, why=d.why,
         see=d.see or None, touches=list(d.touches or []), decided_by=d.decided_by,
         decided_by_name=names.get(d.decided_by), decided_at=d.decided_at, last_verified_at=d.last_verified_at,
@@ -116,7 +118,22 @@ async def list_decisions(project_id: str, request: Request, status: Literal["act
             q = q.where(ProjectDecision.kind == kind)
         rows = (await s.execute(q.order_by(ProjectDecision.number.desc()))).scalars().all()
         names = await _names(s, rows)
-        return [_out(d, names) for d in rows]
+        active = [d.number for d in rows if d.status == "active"]
+        tracks = await track_mod.track_for(s, project_id, active) if active else {}
+        return [_out(d, names, tracks.get(d.number)) for d in rows]
+
+
+@router.post("/track/backfill")
+async def backfill_track(project_id: str, request: Request):
+    """Admin only: "Build from past runs" - fill the track record from the decision notes still in task
+    history (pairs already recorded are skipped) and settle their outcomes."""
+    principal = request.state.principal
+    ensure_admin(principal)
+    async with SessionLocal() as s:
+        await require_project_role(s, principal, project_id)
+        if await s.get(Project, project_id) is None:
+            raise HTTPException(404, "Not found")
+    return {"added": await track_mod.backfill(project_id)}
 
 
 @router.post("", response_model=DecisionOut, status_code=201)

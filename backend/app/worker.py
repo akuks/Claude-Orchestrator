@@ -28,6 +28,7 @@ from .agent_env import PROJECT_ENV_BLOCKED, MissingCredential, build_agent_env, 
 from .config import settings
 from .constants import Priority, Status
 from .decisions import after_run
+from .decisions import track as decision_track
 from .database import SessionLocal
 from .events import broker
 from .gates import test_results
@@ -2078,10 +2079,21 @@ class WorkerManager:
                     if await self._record_band(task_id, band, ts):
                         await emit("usage_band", {"band": band, "value": value})
                     state["pending"].pop(0)
-                while state["notes"]:  # phase 4a / 6b: decision notes and code map answers co-guard showed
-                    etype, payload = state["notes"][0]
-                    await emit(etype, payload)
-                    state["notes"].pop(0)
+                shown: list[int] = []
+                try:
+                    while state["notes"]:  # phase 4a / 6b: decision notes and code map answers co-guard showed
+                        etype, payload = state["notes"][0]
+                        if etype == "decision_note":
+                            shown += [i for i in payload["ids"] if i not in shown]
+                        await emit(etype, payload)
+                        state["notes"].pop(0)
+                finally:
+                    # phase 8a: the decision track record (one row per task and number; never raises); numbers
+                    # this run already recorded skip the database
+                    recorded = state.setdefault("recorded", set())
+                    shown = [i for i in shown if i not in recorded]
+                    if shown and await decision_track.record_shown(task_id, shown):
+                        recorded.update(shown)  # only once committed: a failed write is tried again
             except Exception as e:  # noqa: BLE001 - usage bookkeeping never stops a run
                 log.warning("usage: band ingest failed for %s: %s", task_id, e)
 
@@ -2117,7 +2129,7 @@ class WorkerManager:
         ids = rec.get("ids")
         if not isinstance(ids, list):
             return None
-        ids = [i for i in ids if isinstance(i, int) and not isinstance(i, bool) and i > 0][:3]
+        ids = [i for i in ids if isinstance(i, int) and not isinstance(i, bool) and i > 0][:decision_track.MAX_IDS]
         path = rec.get("path")
         if not ids or not isinstance(path, str):
             return None
@@ -2304,6 +2316,12 @@ class WorkerManager:
                     )
                 )
             await s.commit()
+        # decision track record (phase 8a): what happened after this task was shown decisions, every finish
+        # (failed included; ad-hoc thread steps too; background, never fails the finish)
+        try:  # (a task without showings: the job finds nothing to do)
+            decision_track.spawn_settle_task(task_id)
+        except Exception as e:  # noqa: BLE001
+            log.warning("decision track: settle trigger failed for %s: %s", task_id, e)
         # co-guard deny-and-resume: follow-ups deferred while this step was active
         try:
             await guard_grants.after_task_finished(task_id, submit=self.submit)

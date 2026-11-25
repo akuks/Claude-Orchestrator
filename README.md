@@ -252,6 +252,13 @@ a server that skipped several releases runs each of them in turn. **Take your us
 database backup first** whenever an entry names a migration. The server must stay a
 single process (no `--workers`, no replicas).
 
+### Decision track record (phase 8a)
+
+- **Migration `0024` runs on start.** It adds the table that records each time a decision was shown to a
+  task. Take your usual database backup first.
+- The record starts filling from new runs. **Build from past runs** (admins, on a project's Decisions tab)
+  fills it from history still present; tidied history is gone. See [Decision memory](#decision-memory).
+
 ### Capacity and activity (phase 7g)
 
 - **No migration.** **System health** gains a **Capacity** card, and each project gets an **Activity** tab. Nothing
@@ -1238,6 +1245,16 @@ text of its own.
 glob pattern may be 300 characters with at most 30 `*` or `?`; notes are
 capped at 2 000 characters in all.
 
+**Track record.** Each active decision shows how often agents were shown it and how those tasks went:
+a grey tag such as *Shown 12× · 7 needed fixes*, with the last time it was shown on hover. A task counts as
+*needing fixes* when it was later fixed or failed. When at least 5 tasks that saw a note have ended and at
+least half of them needed fixes or failed (and that is at least 1.5 times the project's overall rate), the note also gets an orange *Often followed by trouble* tag. This
+is a correlation, not a cause: risky files attract both notes and trouble, so treat the tag as a prompt to
+check that the note is still right and clear. The counts are "at least": showings during crash recovery, past
+the once-per-conversation filter, or in history that has been tidied are not counted. Admins can use **Build
+from past runs** on the Decisions tab to fill the record from run history that is still present; it only adds
+records and can be run again safely.
+
 **Not for external projects.** On a project whose trust is not *own*, agents
 get no notes and no index (the people on it can still keep the list).
 
@@ -1521,9 +1538,10 @@ limit creates it. The check is not re-run meanwhile.
 
 **When tries run out.** The check fails as in the earlier rounds (the failure
 line, the run fails) and **Retry** starts the step again with fresh tries. The run
-also fails, with "the fix did not finish", when the fix task fails or is
-cancelled, and with "the fixer agent is not available" when the agent is missing
-or has moved to another project. Cancelling the run while a fix is going cancels
+also fails, with "the fix did not finish", when the fix task fails, with "the fix
+was cancelled" when it is cancelled (not counted in the decision track record), and
+with "the fixer agent is not available" when the agent is missing or has moved to
+another project. Cancelling the run while a fix is going cancels
 it.
 
 **Approval of a fix task.** Its risk is judged on the check output after the fixed

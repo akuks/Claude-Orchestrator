@@ -27,7 +27,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from sqlalchemy import or_, select
+from sqlalchemy import or_, select, update
 
 from ..guard import rules
 from ..redaction import clean_text, redact, strip_query
@@ -843,9 +843,13 @@ async def auto_close(task_id: str) -> bool:
             or_(Task.root_id == root, Task.id == root), Task.status.in_(Status.ACTIVE)).limit(1))).first()
         if active is not None or open_todo(row.content, task_id):
             return False
-        row.status, row.closed_at, row.closed_by = "closed", datetime.now(timezone.utc), "system"
+        # One conditional UPDATE: a person who closed it after the read above keeps their close (no lost update).
+        res = await s.execute(
+            update(TaskHandoff).where(TaskHandoff.id == row.id, TaskHandoff.status != "closed")
+            .values(status="closed", closed_at=datetime.now(timezone.utc), closed_by="system")
+            .execution_options(synchronize_session=False))
         await s.commit()
-        return True
+        return res.rowcount == 1
 
 
 def open_todo(content: dict, task_id: str) -> bool:

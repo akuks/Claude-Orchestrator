@@ -495,6 +495,28 @@ class ProjectDecision(Base):
     stale_reason: Mapped[str | None] = mapped_column(String(300), nullable=True)
 
 
+class DecisionShowing(Base):
+    """A task that was shown a recorded decision (phase 8a), one row per task and decision number (the first
+    showing's time kept), and what happened to that task afterwards. outcome None (not settled, or cancelled)
+    | passed | completed | fixed | failed; retried: the task had automatic retries."""
+
+    __tablename__ = "decision_showings"
+    __table_args__ = (
+        UniqueConstraint("task_id", "decision_number", name="uq_decision_showings_task_number"),
+        Index("ix_decision_showings_project_number", "project_id", "decision_number"),
+        Index("ix_decision_showings_project_shown", "project_id", "shown_at"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    project_id: Mapped[str] = mapped_column(ForeignKey("projects.id", ondelete="CASCADE"))
+    decision_number: Mapped[int] = mapped_column(Integer)
+    task_id: Mapped[str] = mapped_column(ForeignKey("tasks.id", ondelete="CASCADE"))
+    shown_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+    outcome: Mapped[str | None] = mapped_column(String(12), nullable=True)
+    retried: Mapped[bool] = mapped_column(Boolean, default=False, server_default=false())
+    settled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
 class ProjectLaunch(Base):
     """A project's launch settings (phase 5b): one row per project, created on first write.
     `version` is an optimistic lock."""

@@ -1,10 +1,15 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { Alert, Button, Empty, Modal, Popconfirm, Radio, Select, Space, Tag, Tooltip, Typography, message } from 'antd'
 import { PlusOutlined } from '@ant-design/icons'
+import dayjs from 'dayjs'
+import relativeTime from 'dayjs/plugin/relativeTime'
 import { api } from '../api'
+import { when } from '../time'
 import DecisionForm from './DecisionForm'
 import ProposalsQueue from './ProposalsQueue'
 import { INACTIVE_MSG, KINDS, KIND_COLORS, makeRuleDraft } from './decisions'
+
+dayjs.extend(relativeTime)
 
 const day = (s) => (s ? String(s).slice(0, 10) : '')
 
@@ -48,6 +53,30 @@ function HealthPanel({ health, canEdit, onVerify }) {
   )
 }
 
+function TrackTags({ track }) {
+  if (!track || !(track.shown >= 1)) return null
+  const needed = (track.fixed || 0) + (track.failed || 0)
+  const k = (track.passed || 0) + (track.completed || 0) + needed
+  const tip = (
+    <div>
+      <div>{`Tasks that were shown this note later needed fixes or failed in ${needed} of ${k} cases. This doesn't mean the note caused it — worth checking it is still right and clear.`}</div>
+      {track.last_shown_at && <div style={{ opacity: 0.7 }}>Last shown {when(track.last_shown_at).fromNow()}</div>}
+    </div>
+  )
+  return (
+    <>
+      <Tooltip title={tip}>
+        <Tag bordered={false} data-testid="decision-track">{`Shown ${track.shown}×${needed ? ` · ${needed} needed ${needed === 1 ? 'a fix' : 'fixes'}` : ''}`}</Tag>
+      </Tooltip>
+      {track.trouble && (
+        <Tooltip title={tip}>
+          <Tag color="orange" bordered={false} data-testid="decision-trouble">Often followed by trouble</Tag>
+        </Tooltip>
+      )}
+    </>
+  )
+}
+
 function Row({ pid, d, canEdit, busy, act, onEdit, onRule, active }) {
   const [open, setOpen] = useState(false)
   const [by, setBy] = useState(null)
@@ -64,6 +93,7 @@ function Row({ pid, d, canEdit, busy, act, onEdit, onRule, active }) {
             <Tag color="orange" bordered={false} data-testid="decision-stale">May be out of date</Tag>
           </Tooltip>
         )}
+        {d.status === 'active' && <TrackTags track={d.track} />}
       </Space>
       {d.stale_flagged_at && d.status === 'active' && d.stale_reason && (
         <div><Typography.Text type="secondary" style={{ fontSize: 12 }}>{d.stale_reason}</Typography.Text></div>
@@ -121,7 +151,7 @@ function Row({ pid, d, canEdit, busy, act, onEdit, onRule, active }) {
 }
 
 // Project drawer tab: recorded decisions, health, and (maintainers) the writes.
-export default function DecisionsPane({ project, canEdit, onMakeRule, onCount }) {
+export default function DecisionsPane({ project, canEdit, isAdmin = false, onMakeRule, onCount }) {
   const pid = project.id
   const [status, setStatus] = useState('active')
   const [kind, setKind] = useState('')
@@ -245,6 +275,20 @@ export default function DecisionsPane({ project, canEdit, onMakeRule, onCount })
           data-testid="decisions-kind"
           options={[{ value: '', label: 'All kinds' }, ...KINDS.map((k) => ({ value: k, label: k }))]}
         />
+        {isAdmin && (
+          <Popconfirm
+            title="Fill the track record from past runs still in the history? Only adds records; nothing is changed or removed."
+            okText="Build"
+            onConfirm={() =>
+              act(async () => {
+                const r = await api.backfillDecisionTrack(pid)
+                message.success(`Added ${r?.added ?? 0} showings from past runs.`)
+              })
+            }
+          >
+            <Button disabled={busy} data-testid="track-backfill">Build from past runs</Button>
+          </Popconfirm>
+        )}
         {canEdit && (
           <Button type="primary" icon={<PlusOutlined />} onClick={() => setModal({ decision: null })} data-testid="decision-add">
             Add decision

@@ -171,6 +171,7 @@ export const api = {
   createDecision: (id, body) => req('POST', `/projects/${id}/decisions`, body),
   updateDecision: (id, n, body) => req('PATCH', `/projects/${id}/decisions/${n}`, body),
   verifyDecision: (id, n) => req('POST', `/projects/${id}/decisions/${n}/verify`),
+  backfillDecisionTrack: (id) => req('POST', `/projects/${id}/decisions/track/backfill`),
   retireDecision: (id, n) => req('POST', `/projects/${id}/decisions/${n}/retire`),
   listProposals: (id, status = 'pending') => req('GET', `/projects/${id}/decisions/proposals${qs({ status })}`),
   createProposal: (id, body) => req('POST', `/projects/${id}/decisions/proposals`, body),

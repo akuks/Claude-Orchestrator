@@ -331,8 +331,9 @@ def test_no_fix_without_fix_setting(fakes):
     asyncio.run(go())
 
 
-@pytest.mark.parametrize("status", [Status.FAILED, Status.CANCELLED])
-def test_fix_task_not_finishing_fails_run(fakes, status):
+@pytest.mark.parametrize("status,words", [(Status.FAILED, "the fix did not finish"),
+                                          (Status.CANCELLED, "the fix was cancelled")])
+def test_fix_task_not_finishing_fails_run(fakes, status, words):
     fakes.script["pytest -q"] = [FAIL("t"), oc()]
 
     async def go():
@@ -349,8 +350,8 @@ def test_fix_task_not_finishing_fails_run(fakes, status):
         run = await _run(rid)
         assert run.status == "failed"
         assert run.stage_state["0"]["status"] == "failed"
-        assert run.stage_state["0"]["reason"] == "the fix did not finish"
-        assert texts(run)[-1] == "Step Test (gate) failed: the fix did not finish"
+        assert run.stage_state["0"]["reason"] == words
+        assert texts(run)[-1] == f"Step Test (gate) failed: {words}"
         assert len(await _rows(rid)) == 1  # the gate did not run again
 
     asyncio.run(go())
