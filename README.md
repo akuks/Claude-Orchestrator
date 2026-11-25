@@ -1390,8 +1390,8 @@ Workflows saved before this update keep running one step after another, exactly 
   adds a step in sequence.
 - **Moving and deleting.** Moving a step re-numbers what the others wait for; a step cannot go above
   a step it waits for (the arrow is greyed and says why). Deleting a step takes it out of what the
-  others wait for; a step that waited only for it now waits for what the deleted step waited for, and the
-  editor says so.
+  others wait for, and every step that waited for it now also waits for what the deleted step
+  waited for, so nothing starts earlier than before; the editor says so.
 - **Problems are listed all at once**, one plain sentence per line above the picture, for example
   "Step 4 waits for step 6, which comes later." or "Run at most 1 to 4 steps at once."
 - **On the run page** every step that is working shows "Running" at the same time; the header still

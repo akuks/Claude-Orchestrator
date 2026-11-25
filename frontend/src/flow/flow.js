@@ -476,8 +476,8 @@ export function errorBoxes(errorFields, stages) {
 
 // ---- Run statuses -----------------------------------------------------------
 
-export const STATUSES = ['done', 'running', 'waiting', 'failed', 'held', 'next']
-export const STATUS_WORD = { done: 'done', running: 'running', waiting: 'waiting', failed: 'failed', held: 'on hold', next: 'not started' }
+export const STATUSES = ['done', 'running', 'waiting', 'failed', 'held', 'stopped', 'next']
+export const STATUS_WORD = { done: 'done', running: 'running', waiting: 'waiting', failed: 'failed', held: 'on hold', stopped: 'stopped', next: 'not started' }
 
 const STATUS_MAP = {
   done: 'done',
@@ -492,6 +492,7 @@ const STATUS_MAP = {
   awaiting_approval: 'waiting',
   budget: 'waiting',
   held: 'held',
+  stopped: 'stopped',
   failed: 'failed',
   rejected: 'failed',
   cancelled: 'failed',
@@ -502,7 +503,7 @@ export const flowStatus = (raw) => STATUS_MAP[raw] || 'next'
 
 // Statuses a check or person step's own state carries; others ('waiting' = not
 // started) defer to the run position.
-const OWN_STATE = new Set(['passed', 'approved', 'failed', 'rejected', 'waiting_approval', 'needs_approval', 'budget', 'held', 'running'])
+const OWN_STATE = new Set(['passed', 'approved', 'failed', 'rejected', 'waiting_approval', 'needs_approval', 'budget', 'held', 'running', 'stopped'])
 
 const byCreated = (a, b) => String(a.created_at || '').localeCompare(String(b.created_at || ''))
 

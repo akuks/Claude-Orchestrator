@@ -9,6 +9,7 @@ import {
   CloseOutlined,
   DeleteOutlined,
   FlagOutlined,
+  MinusOutlined,
   PauseOutlined,
   PlayCircleFilled,
   PlusOutlined,
@@ -24,6 +25,7 @@ const STATUS_ICON = {
   done: <CheckOutlined />,
   failed: <CloseOutlined />,
   held: <PauseOutlined />,
+  stopped: <MinusOutlined />,
   waiting: <ClockCircleOutlined />,
 }
 

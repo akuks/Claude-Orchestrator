@@ -553,6 +553,9 @@ button.co-flow-box:focus-visible {
 .co-flow-dot-held {
   background: var(--co-warning);
 }
+.co-flow-dot-stopped {
+  background: var(--co-text-muted);
+}
 .co-flow-dot-failed {
   background: var(--co-danger);
 }
@@ -566,6 +569,10 @@ button.co-flow-box:focus-visible {
 .co-flow-box.co-flow-st-waiting,
 .co-flow-box.co-flow-st-held {
   border-color: var(--co-warning);
+}
+.co-flow-box.co-flow-st-stopped {
+  border-color: var(--co-text-muted);
+  opacity: 0.85;
 }
 .co-flow-box.co-flow-st-failed {
   border-color: var(--co-danger);

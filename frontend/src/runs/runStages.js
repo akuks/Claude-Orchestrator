@@ -55,6 +55,8 @@ export function runStages(run, tasks, sstate) {
     if (gs && GATE_STATE[gs]) state = GATE_STATE[gs]
     else if (run.status === 'completed' && !statuses.length) state = 'done'
     else state = stageState(statuses, i, run.current_stage)
+    // Stopped because another branch failed (any kind of step).
+    if (sstate?.[String(i)]?.status === 'stopped') state = 'stopped'
     // Steps side by side: a step working while an earlier one is still open is running too.
     if (state === 'next' && statuses.some((s) => s === 'running' || s === 'queued')) state = 'current'
     return { name: (st && st.name) || `Step ${i + 1}`, state, task_count: statuses.length }
@@ -114,6 +116,8 @@ export function failedStepIndex(run, tasks, sstate) {
   const all = Array.isArray(tasks) ? tasks : []
   for (let i = 0; i < list.length; i++) {
     const own = sstate?.[String(i)]?.status
+    // Stopped with a failed branch is not the failure (old data: a check marked failed, reason "cancelled").
+    if (own === 'stopped' || (own === 'failed' && sstate?.[String(i)]?.reason === 'cancelled')) continue
     if (own === 'failed' || own === 'rejected') return i
     const attempt = stageAttempt(sstate, i)
     if (all.some((t) => t?.stage_index === i && (t.stage_attempt || 0) === attempt && t.status === 'failed')) return i

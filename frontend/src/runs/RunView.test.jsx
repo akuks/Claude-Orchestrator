@@ -769,3 +769,112 @@ describe('RunView: a failed run opens on the step that failed', () => {
     await v.unmount()
   })
 })
+
+describe('RunView: reserve holds, stopped branches, run again', () => {
+  let view
+  beforeAll(() => {
+    window.matchMedia ||= () => ({ matches: true, addListener() {}, removeListener() {}, addEventListener() {}, removeEventListener() {} })
+  })
+  beforeEach(() => {
+    vi.clearAllMocks()
+    api.userDirectory.mockImplementation(async () => [{ id: 'u1', name: 'Asha', email: 'a@x.io' }])
+  })
+  afterEach(async () => {
+    await view?.unmount()
+    view = null
+  })
+  const mount = async () => {
+    view = await render(<RunView id="r1" user={{ id: 'u1', role: 'member' }} projects={[{ id: 'p1', name: 'Canonizer', my_role: 'contributor' }]} navigate={() => {}} />)
+    await flush()
+    await flush()
+    return view.container
+  }
+  const STAGES = [
+    { name: 'Plan', items: [{ agent: 'a', prompt: 'x' }] },
+    { name: 'Sign', kind: 'approval', message: 'ok?', after: [0] },
+    { name: 'Build', items: [{ agent: 'a', prompt: 'x' }], after: [0] },
+  ]
+
+  it('a reserve hold is not the spending limit and does not hide another branch\'s approval alert', async () => {
+    api.getWorkflowRun.mockImplementation(async () => ({
+      run: run({ stages: STAGES, status: 'paused', current_stage: 1 }),
+      tasks: [t('a', 0, 'completed')],
+      stage_state: {
+        0: { status: 'done' },
+        1: { status: 'waiting_approval' },
+        2: { status: 'budget', budget_reserve: true, status_word: 'Waiting for other steps', reason: 'Waiting for other steps to finish.' },
+      },
+      budget: { spent: 1.5, budget_usd: 3 },
+    }))
+    const c = await mount()
+    expect(c.querySelector('[data-testid="run-budget-panel"]')).toBeNull()
+    expect(c.textContent).not.toContain('reached its spending limit')
+    expect(c.querySelector('[data-testid="run-paused"]').textContent).toContain('approve')
+  })
+
+  it('a real spending limit still shows the panel', async () => {
+    api.getWorkflowRun.mockImplementation(async () => ({
+      run: run({ stages: STAGES, status: 'paused', current_stage: 2 }),
+      tasks: [t('a', 0, 'completed')],
+      stage_state: { 0: { status: 'done' }, 2: { status: 'budget', reason: 'limit' } },
+      budget: { spent: 3, budget_usd: 3 },
+    }))
+    const c = await mount()
+    expect(c.querySelector('[data-testid="run-budget-panel"]')).not.toBeNull()
+    expect(c.querySelector('[data-testid="run-paused"]')).toBeNull()
+  })
+
+  it('a stopped check looks stopped (grey, with its reason) and the failed run opens on the real failure', async () => {
+    const stages = [
+      { name: 'Build', items: [{ agent: 'a', prompt: 'x' }] },
+      { name: 'Test', kind: 'gate', run: ['pytest'], project: 'p1', after: [0] },
+      { name: 'Docs', items: [{ agent: 'a', prompt: 'x' }], after: [0] },
+    ]
+    api.getWorkflowRun.mockImplementation(async () => ({
+      run: run({ stages, status: 'failed', current_stage: 1 }),
+      tasks: [t('a', 0, 'completed'), t('d', 2, 'failed')],
+      stage_state: {
+        0: { status: 'done' },
+        1: { status: 'stopped', reason: 'Stopped because Docs failed.', status_word: 'Stopped' },
+        2: { status: 'failed', reason: '1 task failed' },
+      },
+    }))
+    const c = await mount()
+    const boxes = [...c.querySelectorAll('[data-testid="flow-box"]')]
+    expect(boxes.map((b) => b.dataset.status)).toEqual(['done', 'stopped', 'failed'])
+    expect(boxes.map((b) => b.getAttribute('aria-pressed'))).toEqual(['false', 'false', 'true'])
+    await act(async () => boxes[1].click())
+    await flush()
+    expect(c.querySelector('[data-testid="run-stage-stopped"]').textContent).toBe('Stopped because Docs failed.')
+    expect(failedStepIndex(run({ stages, current_stage: 1 }), [], {
+      1: { status: 'failed', reason: 'cancelled' },
+      2: { status: 'failed', reason: 'x' },
+    })).toBe(2)
+  })
+
+  it('Run again from here is not offered for a step that never started', async () => {
+    // A; B, C and D... D waits for A and B, C starts at once; B fails; D never started
+    const stages = [
+      { name: 'A', items: [{ agent: 'a', prompt: 'x' }] },
+      { name: 'B', items: [{ agent: 'a', prompt: 'x' }], after: [0] },
+      { name: 'C', items: [{ agent: 'a', prompt: 'x' }], after: [0] },
+      { name: 'D', items: [{ agent: 'a', prompt: 'x' }], after: [0, 1] },
+    ]
+    api.getWorkflowRun.mockImplementation(async () => ({
+      run: run({ stages, status: 'failed', current_stage: 1 }),
+      tasks: [t('a', 0, 'completed'), t('b', 1, 'failed'), t('c', 2, 'completed')],
+      stage_state: { 0: { status: 'done' }, 1: { status: 'failed' } },
+      step_usage: [],
+    }))
+    const c = await mount()
+    const boxes = [...c.querySelectorAll('[data-testid="flow-box"]')]
+    expect(c.querySelector('[data-testid="run-rerun-btn"]')).not.toBeNull() // B (failed) is selected
+    await act(async () => boxes[3].click())
+    await flush()
+    expect(boxes[3].getAttribute('aria-pressed')).toBe('true')
+    expect(c.querySelector('[data-testid="run-rerun-btn"]')).toBeNull()
+    await act(async () => boxes[2].click())
+    await flush()
+    expect(c.querySelector('[data-testid="run-rerun-btn"]')).not.toBeNull() // C finished
+  })
+})
