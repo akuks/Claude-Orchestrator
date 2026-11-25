@@ -247,6 +247,25 @@ def test_auto_close_skips_an_open_todo_an_active_step_and_a_child(client, tmp_pa
     assert run(handoff.auto_close(kid)) is False and row_of(parent).status == "open"
 
 
+def test_auto_close_racing_a_persons_close_keeps_the_person(client, tmp_path, monkeypatch):
+    """The person closes between auto_close's read (open) and its write: the close stays theirs."""
+    import threading
+
+    tid = _finished(tmp_path)
+    real = handoff.open_todo
+
+    def close_meanwhile(content, task_id):  # the last check before the write
+        t = threading.Thread(target=close, args=(tid,), kwargs={"by": "person-2"})
+        t.start()
+        t.join()
+        return real(content, task_id)
+
+    monkeypatch.setattr(handoff, "open_todo", close_meanwhile)
+    assert run(handoff.auto_close(tid)) is False
+    row = row_of(tid)
+    assert row.status == "closed" and row.closed_by == "person-2"
+
+
 def test_auto_close_keeps_a_persons_close(client, tmp_path):
     tid = _finished(tmp_path)
     close(tid, by="person-1")
