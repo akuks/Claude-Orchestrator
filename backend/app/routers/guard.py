@@ -107,8 +107,8 @@ allowlist in auth.py and again here):
   project) -> 409.
 * ``GET /guard/builtins`` - ``[{id, reason, hard_reason, disableable}]``.
 * ``GET /guard/org-settings`` (any person) / ``PUT`` (admins):
-  ``{disabled_rules, dev_db_patterns, ground_rules, model_tiers}`` (a field left out stays; ``ground_rules`` is replaced
-  whole after ``ground_rules.validate``, so a key left out takes its default, 400 on a bad one); only
+  ``{disabled_rules, dev_db_patterns, ground_rules, model_tiers}`` (a field left out stays; ``ground_rules`` is merged
+  over the stored object by ``ground_rules.validate``, so a key left out keeps its stored value, 400 on a bad one); only
   ``rules.DISABLEABLE`` ids may be switched off and every dev pattern must pass
   ``dbrules.check_dev_pattern`` (400).
 
@@ -1215,7 +1215,7 @@ async def export_rules(request: Request, project_id: Optional[str] = None):
 class OrgSettingsIn(BaseModel):
     disabled_rules: Optional[list[str]] = None
     dev_db_patterns: Optional[list[str]] = None
-    ground_rules: Optional[Any] = None  # replaces the whole object; not an object: 400 (validate) (a key left out takes its default)
+    ground_rules: Optional[Any] = None  # merged over the stored object (a key left out keeps its value); not an object: 400
     model_tiers: Optional[Any] = None  # replaces the whole map; a key left out takes its default (400 on a bad one)
 
 
@@ -1275,8 +1275,11 @@ async def put_org_settings(body: OrgSettingsIn, request: Request):
                 row.disabled_rules = disabled
             if patterns is not None:
                 row.dev_db_patterns = patterns
-            if ground is not None:
-                row.ground_rules = ground
+            if ground is not None:  # merge over what is stored now (checked above, so this cannot fail)
+                try:
+                    row.ground_rules = ground_rules.validate(body.ground_rules, row.ground_rules)
+                except ValueError as e:
+                    raise HTTPException(400, str(e)) from None
             if tier_map is not None:
                 row.model_tiers = tier_map
             row.updated_by = p.user.id

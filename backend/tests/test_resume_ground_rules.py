@@ -132,10 +132,10 @@ def test_org_settings_ground_rules_roundtrip_and_admin_only(client, ground_resto
     assert r.status_code == 200, r.text
     got = client.get("/guard/org-settings").json()["ground_rules"]
     assert got == gr.DEFAULTS | {"usage_care": False}
-    # PUT replaces the whole object: a key left out takes its default
+    # PUT merges over what is stored: a key left out keeps its stored value
     client.put("/guard/org-settings", json={"ground_rules": {"extra": "hello\u202e\u200b there"}})
     got = client.get("/guard/org-settings").json()["ground_rules"]
-    assert got == gr.DEFAULTS | {"extra": "hello there"}
+    assert got == gr.DEFAULTS | {"usage_care": False, "extra": "hello there"}
     # a PUT without ground_rules leaves it alone
     client.put("/guard/org-settings", json={"disabled_rules": []})
     assert client.get("/guard/org-settings").json()["ground_rules"]["extra"] == "hello there"
@@ -338,3 +338,15 @@ def test_old_stored_settings_without_the_key_read_as_on(client, ground_restored)
     assert client.get("/guard/org-settings").json()["ground_rules"]["local_first"] is True
     assert client.put("/guard/org-settings", json={"ground_rules": {"local_first": False}}).status_code == 200
     assert client.get("/guard/org-settings").json()["ground_rules"]["local_first"] is False
+
+
+def test_put_without_a_switch_keeps_it_off(client, ground_restored):
+    _set_ground({})
+    assert client.put("/guard/org-settings", json={"ground_rules": {"personal_prefs": False}}).status_code == 200
+    # an older screen sends every switch it knows, but not personal_prefs
+    old_screen = {k: v for k, v in gr.DEFAULTS.items() if k != "personal_prefs"} | {"short_answers": False}
+    assert client.put("/guard/org-settings", json={"ground_rules": old_screen}).status_code == 200
+    got = client.get("/guard/org-settings").json()["ground_rules"]
+    assert got["personal_prefs"] is False and got["short_answers"] is False
+    assert gr.validate({"grounding": False}, {"personal_prefs": False, "bogus": 1})["personal_prefs"] is False
+    assert gr.validate({}, None) == gr.DEFAULTS

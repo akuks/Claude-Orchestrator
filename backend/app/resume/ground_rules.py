@@ -127,9 +127,10 @@ def normalized(stored) -> dict:
     return out
 
 
-def validate(value) -> dict:
-    """A PUT body's ``ground_rules``: ValueError (the router's 400) for an unknown key, a non-bool switch or a long ``extra``. The result
-    replaces the stored object: a key left out takes its default."""
+def validate(value, stored=None) -> dict:
+    """A PUT body's ``ground_rules``: ValueError (the router's 400) for an unknown key, a non-bool switch or a long ``extra``. The body
+    is merged over what is stored (``normalized(stored)``): a key left out keeps its stored value (its default when
+    nothing is stored), so a screen that does not know a newer switch never turns it back on."""
     if not isinstance(value, dict):
         raise ValueError("ground_rules must be an object")
     unknown = sorted(str(k) for k in value if k not in DEFAULTS)
@@ -138,7 +139,7 @@ def validate(value) -> dict:
     for k in SWITCHES:
         if k in value and not isinstance(value[k], bool):
             raise ValueError(f"{k} must be true or false")
-    out = dict(DEFAULTS) | value
+    out = normalized(stored) | value
     if not isinstance(out["extra"], str):
         raise ValueError("extra must be text")
     out["extra"] = clean_text(out["extra"]).strip()

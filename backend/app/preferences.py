@@ -2,7 +2,8 @@
 (``/me/preferences``), added to the main session's system prompt of every task they start.
 
 * ``validate(body)`` checks a PUT body (ValueError -> the router's 422): at most ``MAX_ITEMS`` items, each text
-  1-``TEXT_MAX`` characters after ``clean``; no newlines.
+  1-``TEXT_MAX`` characters after ``clean``; no newlines; nothing that looks like a secret (``SECRET_MSG``: the
+  text would change under token-shape redaction).
 * ``paragraph(enabled, items, secrets)`` is the exact text added (None when nothing would be added); each item is
   redacted with the run's secrets.
 * ``load_paragraph(user_id, secrets)`` reads the person's row in its own short session: ``(text, count)``."""
@@ -23,6 +24,7 @@ HEADING = "# Preferences of the person who started this task"
 INTRO = ("They set these themselves. Follow them unless the task, the project's instructions or a recorded decision "
          "says otherwise.")
 
+SECRET_MSG = "This looks like a password or key — leave secrets out of your preferences."
 # any line break: a preference is one line and can never start a new line (heading) in the prompt
 _NEWLINES = re.compile("[\n\r\u000b\u000c\u0085  ]")
 _SPACES = re.compile(r"\s+")
@@ -63,6 +65,8 @@ def validate(body) -> tuple[bool, list[dict]]:
             raise ValueError(f"preference {n} is empty")
         if len(text) > TEXT_MAX:
             raise ValueError(f"preference {n} is longer than {TEXT_MAX} characters")
+        if redact(text, []) != text:  # token shapes, user:password@ URLs, labelled values: never stored
+            raise ValueError(SECRET_MSG)
         pid = it.get("id")
         if not isinstance(pid, str) or not _ID.match(pid) or pid in seen:
             pid = uuid.uuid4().hex[:12]
@@ -100,7 +104,8 @@ def paragraph(enabled, items, secrets: list[str] | None = None) -> str | None:
 
 
 def shape(row: UserPreferences | None) -> dict:
-    """The API's ``{enabled, items, updated_at, preview}``."""
+    """The API's ``{enabled, items, updated_at, preview}``. ``preview`` masks token shapes only; a run also masks
+    its own secrets (its env and ``.env`` values), which the preview cannot know."""
     if row is None:
         return {"enabled": True, "items": [], "updated_at": None, "preview": None}
     items = [it for it in (row.items or []) if isinstance(it, dict)]

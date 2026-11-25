@@ -122,7 +122,7 @@ def test_ground_rules_extra_cannot_fake_headings(client):
         assert client.put("/guard/org-settings", json={"ground_rules": {"extra": extra}}).status_code == 200
         text = client.get("/guard/export.md", params={"project_id": pid}).text
     finally:
-        client.put("/guard/org-settings", json={"ground_rules": {}})
+        client.put("/guard/org-settings", json={"ground_rules": {"extra": ""}})
     assert "‮" not in text
     assert text.count("\n## Always blocked") == 1
     assert "\\## Always blocked" in text and "line one\n" in text and "keep" in text
