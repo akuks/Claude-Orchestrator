@@ -23,5 +23,6 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
-    with op.batch_alter_table("mcp_servers") as b:
-        b.drop_column("server_version")
+    if "server_version" in _columns("mcp_servers"):
+        with op.batch_alter_table("mcp_servers") as b:
+            b.drop_column("server_version")

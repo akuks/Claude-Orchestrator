@@ -71,12 +71,18 @@ async def run_argv(argv: list[str], timeout: float = VERSION_TIMEOUT) -> tuple[i
     return code, (text.splitlines()[0] if text else "")[:200]
 
 
-async def run_text(argv: list[str], timeout: float = VERSION_TIMEOUT) -> tuple[int | None, str]:
-    """As ``run_argv`` but the whole output (first 8000 characters)."""
+def minimal_env() -> dict:
+    """PATH, HOME, LANG (and the Claude config folder when the server has one set): nothing else is passed on."""
+    keep = ("PATH", "HOME", "LANG", "CLAUDE_CONFIG_DIR")
+    return {k: os.environ[k] for k in keep if k in os.environ}
+
+
+async def run_text(argv: list[str], timeout: float = VERSION_TIMEOUT, env: dict | None = None) -> tuple[int | None, str]:
+    """As ``run_argv`` but the whole output (first 8000 characters); ``env`` replaces the environment when given."""
     try:
         proc = await asyncio.create_subprocess_exec(
             *argv, stdin=asyncio.subprocess.DEVNULL, stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.STDOUT)
+            stderr=asyncio.subprocess.STDOUT, env=env)
     except (FileNotFoundError, PermissionError):
         return None, "not found"
     except OSError as e:
@@ -308,8 +314,8 @@ async def check_agent_tokens(s) -> Result:
                 return Result(OK, "No users yet, so the task tokens were not tested", {"tested": False})
             raw = await auth.mint_token(sess, user_id, "agent-task", fake, 60)
             found = await auth.resolve_token(sess, raw)
-            accepted = found is not None and found[1].task_id == fake
-            other_task = found is not None and found[1].task_id == "health-other-task"
+            accepted = found is not None and await auth._agent_may_read(sess, found[1], fake)  # noqa: SLF001
+            other_task = found is not None and await auth._agent_may_read(sess, found[1], "health-other-" + fake[6:])  # noqa: SLF001
             await auth.revoke_task_tokens(sess, fake)
             sess.expire_all()
             refused = await auth.resolve_token(sess, raw) is None
@@ -335,14 +341,15 @@ async def check_guard_plugin(s) -> Result:
     if not root.is_symlink() and not root.exists():
         return Result(ATTENTION, "The guard is not installed, so it could not be validated", None,
                       "Restart the app to restore it.")
-    code, text = await run_text([settings.claude_bin, "plugin", "--help"], PLUGIN_HELP_TIMEOUT)
+    env = minimal_env()
+    code, text = await run_text([settings.claude_bin, "plugin", "--help"], PLUGIN_HELP_TIMEOUT, env)
     if code is None:
         why = {"not found": "Claude is not installed", "timed out": "Claude did not answer"}.get(text, "Claude could not run")
         return Result(ATTENTION, f"The guard plugin could not be validated: {why}", {"answer": text},
                       "Install Claude Code, or point the app at it with CO_CLAUDE_BIN.")
-    if code != 0 or "validate" not in text.lower():
+    if code != 0 or not any(ln.strip().lower().startswith(("validate", "plugin validate")) for ln in text.splitlines()):
         return Result(OK, "The guard plugin was not validated (not available in this Claude version)", {"available": False})
-    code, text = await run_text([settings.claude_bin, "plugin", "validate", str(root.resolve())], PLUGIN_VALIDATE_TIMEOUT)
+    code, text = await run_text([settings.claude_bin, "plugin", "validate", str(root.resolve())], PLUGIN_VALIDATE_TIMEOUT, env)
     first = (text.splitlines()[0] if text else "")[:200]
     if code is None:
         why = "Claude did not answer in time" if text == "timed out" else "Claude could not run"
@@ -393,24 +400,32 @@ async def check_database(s) -> Result:
 _SEMVER = re.compile(r"^\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?$")
 
 
-def _preset_packages() -> set[str]:
+def _preset_pins() -> dict[str, str]:
+    """package name -> the version the preset pins now."""
     from ..codemap.presets import PRESETS
     from ..recommend.panel import _pkg_of
 
-    return {_pkg_of(str(a)) for p in PRESETS for a in p["args"] if "@" in str(a)[1:]}
+    pins = {}
+    for p in PRESETS:
+        for a in p["args"]:
+            a = str(a)
+            if "@" in a[1:]:
+                pins[_pkg_of(a)] = p["pinned"]
+    return pins
 
 
 def pinned_version(server) -> str | None:
-    """The version a tool was pinned to by its preset: one argument is `<preset package>@<exact version>`.
-    None when the link is not certain (no such argument, or a range like `latest` or `^1`)."""
+    """The version a tool should be at: the preset's current pin, when one argument is `<preset package>@<exact
+    version>` (an older install pin is flagged too). None when the link is not certain (no such argument, or a
+    range like `latest` or `^1`)."""
     from ..recommend.panel import _pkg_of
 
-    known = _preset_packages()
+    known = _preset_pins()
     for a in server.args or []:
         a = str(a)
         pkg = _pkg_of(a)
         if pkg in known and len(a) > len(pkg) + 1 and a[len(pkg)] == "@" and _SEMVER.match(a[len(pkg) + 1:]):
-            return a[len(pkg) + 1:]
+            return known[pkg]
     return None
 
 

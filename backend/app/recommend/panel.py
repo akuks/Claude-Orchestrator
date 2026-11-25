@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import re
+import time
 
 from sqlalchemy import select
 
@@ -36,13 +37,24 @@ NEEDS_NODE = {"browser-playwright", "browser-devtools"}
 NEEDS_NODE_MARK = "Needs Node 20"
 
 
+NODE_TTL = 300  # seconds: `node --version` is asked at most this often
+_node_cache: tuple[float, bool] | None = None
+
+
 async def node_too_old() -> bool:
-    """True when `node --version` answers and says below 20 (a missing or unreadable Node is the health page's job)."""
+    """True when `node --version` answers and says below 20 (a missing or unreadable Node is the health page's job).
+    The answer is kept for 5 minutes."""
+    global _node_cache
     from ..health import checks
 
+    now = time.monotonic()
+    if _node_cache is not None and now - _node_cache[0] < NODE_TTL:
+        return _node_cache[1]
     code, line = await checks.run_argv(["node", "--version"])
     major = checks.node_major(line) if code == 0 else None
-    return major is not None and major < checks.NODE_MIN
+    old = major is not None and major < checks.NODE_MIN
+    _node_cache = (now, old)
+    return old
 
 
 def ui_skills_text(project, detected: Detected) -> str | None:

@@ -548,7 +548,8 @@ def test_mcp_versions_and_pin_mismatch(db):
                             ("hv-off", ["-y", "chrome-devtools-mcp@1.13.0"], "1.14.0"),
                             ("hv-nopin", ["-y", "other-tool@2.0.0"], "9.9.9"),
                             ("hv-latest", ["-y", "shadcn@latest", "mcp"], "4.0.0"),
-                            ("hv-noinfo", ["-y", "codebase-memory-mcp@0.12.1"], None)])
+                            ("hv-noinfo", ["-y", "codebase-memory-mcp@0.12.1"], None),
+                            ("hv-old", ["-y", "shadcn@4.0.0", "mcp"], "4.0.0")])
     ids = run(go())
     try:
         r = run(by_id("mcp").fn(db))
@@ -561,6 +562,8 @@ def test_mcp_versions_and_pin_mismatch(db):
     for n in ("hv-nopin", "hv-latest", "hv-noinfo"):  # no certain pin, or no version told: no warning
         assert by[n]["version_differs"] is False and by[n]["pinned"] is None
     assert by["hv-noinfo"]["version"] is None
+    assert by["hv-old"]["pinned"] == "4.23.0" and by["hv-old"]["version_differs"] is True  # the preset moved on
+    assert "hv-old is at 4.0.0, expected 4.23.0." in r.summary
     assert summary_only(r.summary, "hv-nopin") and summary_only(r.summary, "hv-noinfo")
 
 
@@ -690,7 +693,7 @@ def plugin_root(monkeypatch, tmp_path):
 
 def test_guard_plugin_validate(monkeypatch, tmp_path, plugin_root):
     log = tmp_path / "calls.txt"
-    ok = _fake_claude(tmp_path, f'echo "$@" >> {log}\nif [ "$2" = "--help" ]; then echo "Commands: validate install"; exit 0; fi\nexit 0\n')
+    ok = _fake_claude(tmp_path, f'echo "$@" >> {log}\nif [ "$2" = "--help" ]; then printf "Commands:\\n  validate <path>\\n"; exit 0; fi\nexit 0\n')
     monkeypatch.setattr(settings, "claude_bin", ok)
     r = run(by_id("guard_plugin").fn(None))
     assert (r.status, r.summary) == (OK, "Claude accepts the guard plugin")
@@ -721,3 +724,33 @@ def test_guard_plugin_hang_is_bounded(monkeypatch, tmp_path, plugin_root):
     assert by_id("guard_plugin").budget > checks.PLUGIN_HELP_TIMEOUT + checks.PLUGIN_VALIDATE_TIMEOUT
     monkeypatch.setattr(settings, "claude_bin", str(tmp_path / "nope"))
     assert run(by_id("guard_plugin").fn(None)).status == ATTENTION
+
+
+def test_agent_tokens_scope_is_really_tested(db, monkeypatch):
+    from app import auth
+
+    async def everything(s, tok, task_id):
+        return True
+
+    monkeypatch.setattr(auth, "_agent_may_read", everything)  # a token that fits every task is a failure
+    r = run(by_id("agent_tokens").fn(db))
+    if r.detail and r.detail.get("tested") is False:
+        pytest.skip("no user in this database")
+    assert r.status == PROBLEM and "another task" in r.summary
+
+
+def test_guard_plugin_help_needs_a_validate_line(monkeypatch, tmp_path, plugin_root):
+    log = tmp_path / "calls.txt"
+    old = _fake_claude(tmp_path, f'echo "$@" >> {log}\nif [ "$2" = "--help" ]; then echo "Usage: claude [prompt]  (see validate docs)"; exit 0; fi\nexit 2\n')
+    monkeypatch.setattr(settings, "claude_bin", old)
+    assert run(by_id("guard_plugin").fn(None)).status == OK
+    assert "plugin validate" not in log.read_text()
+
+
+def test_guard_plugin_env_is_minimal(monkeypatch, tmp_path, plugin_root):
+    out = tmp_path / "env.txt"
+    fake = _fake_claude(tmp_path, f'env > {out}\nif [ "$2" = "--help" ]; then echo "validate"; fi\nexit 0\n')
+    monkeypatch.setattr(settings, "claude_bin", fake)
+    monkeypatch.setenv("CO_SECRET_THING", "hunter2")
+    run(by_id("guard_plugin").fn(None))
+    assert "hunter2" not in out.read_text() and "CO_SECRET_THING" not in out.read_text()
