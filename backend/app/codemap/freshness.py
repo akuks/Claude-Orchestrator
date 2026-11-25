@@ -10,11 +10,11 @@ task start with the safe git helper (``gitsafe``) and put into the task's policy
 * ``unknown`` - could not check: no git, not a repository, no usable sha, a shallow clone that cuts the history
   off, a call that failed or the time budget ran out.
 
-``changed`` is up to CHANGED_MAX files changed since the index - the committed ones (``diff --name-only <sha>
+``changed`` is up to CHANGED_MAX files changed since the index - the committed ones (``diff --name-only -z <sha>
 HEAD``) then the uncommitted and untracked ones (``status``), each once - and ``more`` how many others there are;
 both only for ``current`` / ``ahead`` and only with ``files``. ``head`` is the HEAD it compared with (None when
-unknown). Every git call has at most CALL_TIMEOUT seconds and all of them together at most ``budget``. Never
-raises.
+unknown). Every git call has at most CALL_TIMEOUT seconds (``run_git`` runs two processes, so each gets half)
+and all of them together at most ``budget``. Never raises.
 """
 
 from __future__ import annotations
@@ -55,23 +55,21 @@ def _names(directory: str, sha: str, ahead: bool, git) -> tuple[list[str], int]:
     seen: dict[str, None] = {}
     if ahead:
         try:
-            r = git("diff", "--name-only", sha, "HEAD")
+            r = git("diff", "--name-only", "-z", sha, "HEAD", strip=False)
         except _Out:
             r = None
         if r is not None and r.ok:
-            for line in r.out.splitlines():
-                if line:
-                    seen.setdefault(line, None)
+            for name in r.out.split("\0"):
+                if name:
+                    seen.setdefault(name, None)
     try:
-        r = git("status", "--porcelain=v1", "-z", "--untracked-files=all", "--no-renames")
+        r = git("status", "--porcelain=v1", "-z", "--untracked-files=all", "--no-renames", strip=False)
     except _Out:
         r = None
     if r is not None and r.ok:
-        for i, entry in enumerate(r.out.split("\0")):
+        for entry in r.out.split("\0"):
             if len(entry) > 3 and entry[2] == " ":
                 seen.setdefault(entry[3:], None)
-            elif i == 0 and len(entry) > 2 and entry[1] == " ":  # run_git strips the output: " M a.py" -> "M a.py"
-                seen.setdefault(entry[2:], None)
     names = list(seen)
     return [n[:NAME_MAX] for n in names[:CHANGED_MAX]], max(0, len(names) - CHANGED_MAX)
 
@@ -91,11 +89,12 @@ def _freshness(directory, sha, files: bool, budget: float) -> dict:
         return _unknown()
     deadline = time.monotonic() + budget
 
-    def git(*args):
+    def git(*args, strip=True):
         left = deadline - time.monotonic()
         if left < _MIN_LEFT:
             raise _Out()
-        r = gitsafe.run_git(directory, *args, timeout=min(CALL_TIMEOUT, left))
+        # run_git gives its filter-driver listing and the command each the timeout: half each keeps the budget
+        r = gitsafe.run_git(directory, *args, timeout=min(CALL_TIMEOUT, left) / 2, strip=strip)
         if r.failed:  # git missing, timed out or killed: nothing it said can be trusted
             raise _Out()
         return r

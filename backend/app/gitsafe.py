@@ -52,7 +52,7 @@ remote's lazy fetch of a missing object), so every such call goes through
 * the gate code-state hash's two reads: ``diff`` with exactly
   ``--no-ext-diff --no-textconv --binary HEAD`` and ``ls-files`` with exactly
   ``--others --exclude-standard -z`` (each any order, nothing else);
-* the code map freshness check (phase 7d): ``diff --name-only <hex> HEAD``, exactly that order (the caller
+* the code map freshness check (phase 7d): ``diff --name-only -z <hex> HEAD``, exactly that order (the caller
   bounds it with its timeout and reads only what it needs), and the repository's first commit: ``rev-list
   --max-parents=0 HEAD``, exactly;
 * the typed stage outputs' commit check: ``rev-parse --verify --quiet
@@ -154,8 +154,8 @@ def check_args(args) -> None:
         return
     if cmd == "diff" and sorted(rest) == sorted(DIFF_OPTIONS):
         return
-    if cmd == "diff" and len(rest) == 3 and rest[0] == "--name-only" and _SHA_RE.fullmatch(rest[1]) \
-            and rest[2] == "HEAD":
+    if cmd == "diff" and len(rest) == 4 and rest[:2] == ["--name-only", "-z"] and _SHA_RE.fullmatch(rest[2]) \
+            and rest[3] == "HEAD":
         return
     if cmd == "rev-list" and rest == ["--max-parents=0", "HEAD"]:
         return
@@ -229,9 +229,11 @@ def _filter_overrides(exe: str, directory, timeout: float) -> list[str] | GitRes
     return over
 
 
-def run_git(directory, *args: str, timeout: float) -> GitResult:
+def run_git(directory, *args: str, timeout: float, strip: bool = True) -> GitResult:
     """Run ``git <SAFE_ARGS> <args>`` in ``directory`` (see the module doc);
-    ValueError for a command outside the allowlist."""
+    ValueError for a command outside the allowlist. The filter-driver listing and the
+    command each get ``timeout`` (so at most twice it in all). ``strip=False`` keeps the
+    output as git wrote it (``-z`` output whose first name may start with a space)."""
     check_args(args)
     exe = shutil.which("git")
     if exe is None:
@@ -252,7 +254,8 @@ def run_git(directory, *args: str, timeout: float) -> GitResult:
         return GitResult(False, "", True, "timed out")
     except (OSError, ValueError) as e:
         return GitResult(False, "", True, str(e))
+    out = r.stdout.decode("utf-8", "replace")
     return GitResult(
-        r.returncode == 0, r.stdout.decode("utf-8", "replace").strip(), r.returncode < 0,
+        r.returncode == 0, out.strip() if strip else out, r.returncode < 0,
         r.stderr.decode("utf-8", "replace").strip(), r.returncode,
     )

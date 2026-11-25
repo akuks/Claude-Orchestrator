@@ -189,6 +189,7 @@ CODE_MAP_CURRENT = "The code map is current (built at {sha})."
 CODE_MAP_BEHIND = "The code map is {n} commits behind (built at {sha})."
 CODE_MAP_BEHIND_ONE = "The code map is 1 commit behind (built at {sha})."
 CODE_MAP_CHANGED = "Changed since: {files}."
+CODE_MAP_UNCOMMITTED = "Uncommitted changes: {files}."  # current: the only changes are not committed
 CODE_MAP_MORE = "… (and {n} more)"
 CODE_MAP_DIFFERENT = "The code map was built on a different history; treat it as a rough guide."
 CODE_MAP_UNKNOWN = "Could not check whether the code map is current."
@@ -1659,7 +1660,7 @@ def _fresh_line(cm, root, sha):
     more = more if isinstance(more, int) and not isinstance(more, bool) and more > 0 else 0
     if names:
         files = ", ".join(names) + (", " + CODE_MAP_MORE.replace("{n}", str(more)) if more else "")
-        line += " " + CODE_MAP_CHANGED.replace("{files}", files)
+        line += " " + (CODE_MAP_UNCOMMITTED if fresh else CODE_MAP_CHANGED).replace("{files}", files)
     return fresh, line
 
 

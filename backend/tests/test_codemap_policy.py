@@ -224,6 +224,58 @@ def test_a_slow_check_does_not_hold_the_task_up(client, tmp_path, server, monkey
     assert _gather(_task(p.id), p, u.id).policy["code_map"]["fresh"] == UNKNOWN
 
 
+def test_gates_skip_the_check_and_checks_use_their_own_pool(client, tmp_path, server, monkeypatch):
+    import threading
+
+    from app.codemap import freshness
+    from app.guard import policy_inputs
+    from app.models import Project
+
+    u = _user()
+    p = _project(tmp_path, code_map=True)
+    _add(u, p, _index(p.id))
+    server(p.name)
+    names = []
+
+    def record(*a, **k):
+        names.append(threading.current_thread().name)
+        return {"state": "current", "behind": 0, "changed": [], "more": 0, "head": SHA}
+
+    monkeypatch.setattr(freshness, "freshness", record)
+
+    async def go(**kw):
+        async with SessionLocal() as s:
+            proj = await s.get(Project, p.id)
+            return (await policy_inputs.gather(s, task=_task(p.id), project=proj, owner_id=u.id, mcp=None,
+                                               **kw)).policy
+
+    assert _run(go(freshness=False))["code_map"]["fresh"] == UNKNOWN and names == []
+    assert _run(go())["code_map"]["fresh"]["state"] == "current"
+    assert names and all(n.startswith("co-freshness") for n in names)
+    assert policy_inputs._pool()._max_workers == policy_inputs.FRESH_WORKERS == 4
+
+
+def test_gate_verdict_passes_freshness_false(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+
+    from app.gates import executor
+    from app.guard import policy_inputs
+
+    seen = {}
+
+    async def fake(s, **kw):
+        seen.update(kw)
+        return SimpleNamespace(policy={})
+
+    monkeypatch.setattr(policy_inputs, "gather", fake)
+    proj = SimpleNamespace(id="p", name="p", directory=str(tmp_path), trust="own")
+    try:
+        _run(executor.guard_verdict(None, proj, "ls"))
+    except Exception:  # noqa: BLE001 - only the call into gather matters here
+        pass
+    assert seen.get("freshness") is False
+
+
 # ---- spool -> code_map run-log event -----------------------------------------------------------
 
 

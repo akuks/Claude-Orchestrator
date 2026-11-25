@@ -109,7 +109,7 @@ def _fresh(crun, **fresh):
 
 @pytest.mark.parametrize("fresh,line,flag", [
     ({}, CURRENT, True),
-    ({"changed": ["a.py"]}, CURRENT + " Changed since: a.py.", True),
+    ({"changed": ["a.py"]}, CURRENT + " Uncommitted changes: a.py.", True),
     ({"state": "ahead", "behind": 3, "changed": ["a.py", "b/c.py"], "more": 4, "head": HEAD2},
      BEHIND + " Changed since: a.py, b/c.py, … (and 4 more).", False),
     ({"state": "ahead", "behind": 3, "changed": [], "more": 0, "head": HEAD2}, BEHIND, False),

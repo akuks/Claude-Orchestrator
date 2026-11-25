@@ -133,9 +133,9 @@ def test_without_files_no_diff_or_status_is_run(repo, monkeypatch):
     seen = []
     real = gitsafe.run_git
 
-    def spy(d, *args, timeout):
+    def spy(d, *args, timeout, strip=True):
         seen.append(args[0])
-        return real(d, *args, timeout=timeout)
+        return real(d, *args, timeout=timeout, strip=strip)
 
     monkeypatch.setattr(freshness.gitsafe, "run_git", spy)
     f = freshness.freshness(str(repo), sha, files=False)
@@ -149,10 +149,10 @@ def test_the_total_budget_bounds_every_call(repo, monkeypatch):
     timeouts = []
     real = gitsafe.run_git
 
-    def slow(d, *args, timeout):
+    def slow(d, *args, timeout, strip=True):
         timeouts.append(timeout)
         time.sleep(0.2)
-        return real(d, *args, timeout=timeout)
+        return real(d, *args, timeout=timeout, strip=strip)
 
     monkeypatch.setattr(freshness.gitsafe, "run_git", slow)
     t0 = time.monotonic()
@@ -166,7 +166,7 @@ def test_a_timed_out_call_is_unknown(repo, monkeypatch):
     sha = commit(repo, {"a.py": "1"})
     commit(repo, {"a.py": "2"})
     monkeypatch.setattr(freshness.gitsafe, "run_git",
-                        lambda d, *a, timeout: gitsafe.GitResult(False, "", True, "timed out"))
+                        lambda d, *a, timeout, strip=True: gitsafe.GitResult(False, "", True, "timed out"))
     assert freshness.freshness(str(repo), sha)["state"] == "unknown"
 
 
@@ -176,10 +176,10 @@ def test_only_allow_listed_git_commands_are_used(repo):
     calls = []
     real = gitsafe.run_git
 
-    def spy(d, *args, timeout):
+    def spy(d, *args, timeout, strip=True):
         gitsafe.check_args(args)
         calls.append(args)
-        return real(d, *args, timeout=timeout)
+        return real(d, *args, timeout=timeout, strip=strip)
 
     import unittest.mock as um
 
@@ -188,6 +188,35 @@ def test_only_allow_listed_git_commands_are_used(repo):
         git(repo, "commit", "-q", "--amend", "-m", "x")
         freshness.freshness(str(repo), sha)
     assert {a[0] for a in calls} <= {"rev-parse", "merge-base", "rev-list", "diff", "status"}
+
+
+def test_odd_names_are_raw_and_listed_once(repo):
+    sha = commit(repo, {"a.py": "1"})
+    commit(repo, {"we ird\nname.txt": "1"})
+    (repo / "we ird\nname.txt").write_text("dirty")  # committed-changed and dirty: once, never C-quoted
+    f = freshness.freshness(str(repo), sha)
+    assert f["changed"] == ["we ird\nname.txt"]
+
+
+def test_a_first_status_name_starting_with_a_space_keeps_it(repo):
+    sha = commit(repo, {" lead.py": "1"})
+    (repo / " lead.py").write_text("2")
+    assert freshness.freshness(str(repo), sha)["changed"] == [" lead.py"]
+
+
+def test_one_call_stays_within_what_is_left(repo, monkeypatch):
+    sha = commit(repo, {"a.py": "1"})
+    commit(repo, {"a.py": "2"})
+    seen = []
+    real = gitsafe.run_git
+
+    def spy(d, *args, timeout, strip=True):
+        seen.append(timeout)
+        return real(d, *args, timeout=timeout, strip=strip)
+
+    monkeypatch.setattr(freshness.gitsafe, "run_git", spy)
+    freshness.freshness(str(repo), sha, budget=1.0)
+    assert seen and all(t <= 0.5 for t in seen)  # run_git runs two processes, each with the timeout
 
 
 def test_long_and_odd_names_are_cut(repo):
