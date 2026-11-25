@@ -259,7 +259,7 @@ async def extract_findings(task_id: str, user_id: str | None) -> None:
                 )
 
         # Auto-resolve: on a FULL scan, open findings not seen this run are fixed.
-        if full_scan:
+        if full_scan and env is not None:  # no Claude answer this time: nothing was looked at, so nothing is "fixed"
             open_rows = (
                 await s.execute(
                     select(Finding).where(

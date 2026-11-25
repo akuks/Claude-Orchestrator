@@ -709,7 +709,7 @@ def test_guard_plugin_command_missing_is_ok_and_never_run(monkeypatch, tmp_path,
     old = _fake_claude(tmp_path, f'echo "$@" >> {log}\nif [ "$2" = "--help" ]; then echo "Usage: claude [prompt]"; exit 0; fi\nexit 2\n')
     monkeypatch.setattr(settings, "claude_bin", old)
     r = run(by_id("guard_plugin").fn(None))
-    assert r.status == OK and "not available in this Claude version" in r.summary
+    assert r.status == OK and "no validate command" in r.summary
     assert "validate" not in log.read_text()  # an old CLI never gets the validate call (it could take it as a prompt)
 
 
@@ -754,3 +754,21 @@ def test_guard_plugin_env_is_minimal(monkeypatch, tmp_path, plugin_root):
     monkeypatch.setenv("CO_SECRET_THING", "hunter2")
     run(by_id("guard_plugin").fn(None))
     assert "hunter2" not in out.read_text() and "CO_SECRET_THING" not in out.read_text()
+
+
+def test_guard_plugin_result_is_remembered_until_check_again(monkeypatch, tmp_path, plugin_root):
+    log = tmp_path / "calls.txt"
+    fake = _fake_claude(tmp_path, f'if [ "$1" = "--version" ]; then echo "9.9.9 (Claude Code)"; exit 0; fi\necho "$@" >> {log}\nif [ "$2" = "--help" ]; then echo validate; fi\nexit 0\n')
+    monkeypatch.setattr(settings, "claude_bin", fake)
+    checks.PLUGIN_CACHE.clear()
+    assert run(by_id("guard_plugin").fn(None)).status == OK
+    assert run(by_id("guard_plugin").fn(None)).status == OK
+    assert log.read_text().count("plugin validate") == 1
+    from app.health import runner
+
+    async def again():
+        await runner.run_all(force=True)
+
+    run(again())
+    assert log.read_text().count("plugin validate") == 2  # "Check again" validated afresh
+    checks.PLUGIN_CACHE.clear()

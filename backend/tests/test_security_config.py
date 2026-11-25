@@ -65,3 +65,58 @@ def test_prompt_with_no_scanners_still_has_the_rule(monkeypatch):
     monkeypatch.setattr(security.shutil, "which", lambda n: None)
     p = security.build_security_prompt("b")
     assert "found on this machine: none" in p and "'Not scanned'" in p
+
+
+def test_names_are_masked_and_cut(tmp_path):
+    long_name = "x" * 200
+    _write(tmp_path, ".claude/settings.json", {"hooks": {TOKEN: [], long_name: []}, "permissions": {"allow": ["*"]}})
+    _write(tmp_path, ".mcp.json", {"mcpServers": {TOKEN: {}}})
+    got = claude_config_findings(str(tmp_path))
+    blob = json.dumps(got)
+    assert TOKEN not in blob and "x" * 61 not in blob and got
+
+
+def _run_extract(tmp_path, monkeypatch, env):
+    import asyncio
+    import uuid
+
+    from sqlalchemy import select
+
+    from app.database import SessionLocal
+    from app.models import Finding, Project, Task
+
+    _write(tmp_path, ".claude/settings.json", {"hooks": {"Stop": []}})
+    pid, tid = uuid.uuid4().hex, uuid.uuid4().hex
+
+    async def go():
+        async with SessionLocal() as s:
+            s.add(Project(id=pid, name="sec-" + pid[:6], slug="sec-" + pid[:6], directory=str(tmp_path)))
+            s.add(Task(id=tid, title="Security review (full)", prompt="p", project_id=pid, root_id=tid,
+                       status="completed", tags=["vapt"], result_text="## Summary\nNo issues."))
+            s.add(Finding(project_id=pid, fingerprint="old-" + pid, severity="high", title="old one", status="open"))
+            await s.commit()
+
+        async def fake_env(*a, **k):
+            return env
+
+        async def fake_json(*a, **k):
+            return {"findings": []}
+
+        monkeypatch.setattr(security, "agent_env_or_none", fake_env)
+        monkeypatch.setattr(security, "_extract_json", fake_json)
+        await security.extract_findings(tid, None)
+        async with SessionLocal() as s:
+            rows = (await s.execute(select(Finding).where(Finding.project_id == pid))).scalars().all()
+            return {f.title: f.status for f in rows}
+
+    return asyncio.run(go())
+
+
+def test_full_scan_without_a_credential_fixes_nothing(client, tmp_path, monkeypatch):
+    got = _run_extract(tmp_path, monkeypatch, None)
+    assert got["old one"] == "open"
+    assert got["Claude settings: hooks in .claude/settings.json"] == "open"
+
+
+def test_full_scan_with_a_credential_still_fixes_what_vanished(client, tmp_path, monkeypatch):
+    assert _run_extract(tmp_path, monkeypatch, {"PATH": "/bin"})["old one"] == "fixed"

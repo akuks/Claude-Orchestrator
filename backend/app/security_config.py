@@ -12,12 +12,18 @@ import json
 import os
 
 from .recommend import detect
-from .redaction import TOKEN_SHAPES, URL_USERINFO
+from .redaction import TOKEN_SHAPES, URL_USERINFO, clean_text, redact
 
 FILES = ((".claude", "settings.json"), (".claude", "settings.local.json"), (".mcp.json",))
 WIDE_ALLOWS = frozenset({"*", "Bash", "Bash(*)"})
 PREFIX = "Claude settings: "
 _MAX_NODES = 5000
+
+
+def _safe(name) -> str:
+    """A name from the file, for a title, a sentence or the prompt: masked with the redaction patterns, hidden
+    characters cleaned, cut to 60 characters."""
+    return clean_text(redact(str(name), []))[:60]
 
 
 def _finding(severity, title, file, description, remediation):
@@ -46,7 +52,7 @@ def _scan(doc, name) -> list[dict]:
         return out
     hooks = doc.get("hooks")
     if isinstance(hooks, dict) and hooks:
-        events = ", ".join(sorted(str(k) for k in hooks)[:8])
+        events = ", ".join(_safe(k) for k in sorted(str(k) for k in hooks)[:8])
         out.append(_finding(
             "medium", f"hooks in {name}", name,
             f"{name} runs commands automatically on these events: {events}. A hook runs with your permissions.",
@@ -57,11 +63,11 @@ def _scan(doc, name) -> list[dict]:
     if wide:
         out.append(_finding(
             "high", f"wide permission in {name}", name,
-            f"{name} allows {', '.join(wide)}, so the agent may run any command without asking.",
+            f"{name} allows {', '.join(_safe(w) for w in wide)}, so the agent may run any command without asking.",
             "Allow only the specific commands the project needs."))
     servers = doc.get("mcpServers")
     if isinstance(servers, dict) and servers:
-        names = ", ".join(sorted(str(k) for k in servers)[:8])
+        names = ", ".join(_safe(k) for k in sorted(str(k) for k in servers)[:8])
         out.append(_finding(
             "low", f"connected tools in {name}", name,
             f"{name} sets up connected tools (MCP servers): {names}. They run on the machine and can read what the agent can.",
@@ -71,7 +77,7 @@ def _scan(doc, name) -> list[dict]:
     if tokens:
         out.append(_finding(
             "high", f"a token-like value in {name}", name,
-            f"{name} holds what looks like a secret at: {', '.join(tokens[:5])}.",
+            f"{name} holds what looks like a secret at: {', '.join(_safe(t) for t in tokens[:5])}.",
             "Move the secret out of the file (use an environment variable) and rotate it."))
     return out
 

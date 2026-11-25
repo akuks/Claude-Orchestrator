@@ -110,3 +110,48 @@ def test_only_people_who_may_edit(client, tmp_path):
     u = login_as(f"cp-{uuid.uuid4().hex[:6]}@test.local")
     assert _copy(u, tid, src, "x.md").status_code in (403, 404)
     assert not (ws / "x.md").exists()
+
+
+def test_copy_needs_a_document_name(client, tmp_path):
+    src = _doc()
+    tid, ws = _setup(tmp_path, [src])
+    for dest in ("x.py", "x", "docs.md/x.sh", ".env"):
+        (ws / "docs.md").mkdir(exist_ok=True)
+        r = _copy(client, tid, src, dest)
+        assert r.status_code == 400 and r.json()["detail"] == "Only documents can be copied (.md, .html, .pdf).", dest
+    assert _copy(client, tid, src, "ok.HTML").status_code == 200
+
+
+def test_a_folder_swapped_for_a_link_is_refused(tmp_path):
+    from app.resume import copydoc
+
+    inner = tmp_path / "ws" / "docs"
+    inner.mkdir(parents=True)
+    outside = tmp_path / "out"
+    outside.mkdir()
+    fd = copydoc._open_chain(str(tmp_path / "ws"), ["docs"])
+    os.close(fd)
+    inner.rmdir()
+    os.symlink(outside, inner)
+    try:
+        copydoc._open_chain(str(tmp_path / "ws"), ["docs"])
+        raise AssertionError("a linked folder was followed")
+    except OSError:
+        pass
+    assert list(outside.iterdir()) == []
+
+
+def test_no_project_role_cannot_copy_contributors_can(client, tmp_path):
+    src = _doc()
+    pid = client.post("/projects", json={"name": f"cp-{uuid.uuid4().hex[:6]}"}).json()["id"]
+    u = login_as(f"cv-{uuid.uuid4().hex[:6]}@test.local")
+
+    def grant(role):
+        r = client.put(f"/projects/{pid}/members", json=[{"subject_type": "user", "subject_id": u.user_id, "role": role}])
+        assert r.status_code == 200, r.text
+
+    tid, ws = _setup(tmp_path, [src], created_by=u.user_id, project_id=pid)
+    r = _copy(u, tid, src, "v.md")
+    assert r.status_code in (403, 404) and not (ws / "v.md").exists()
+    grant("contributor")
+    assert _copy(u, tid, src, "v.md").status_code == 200

@@ -118,6 +118,10 @@ async def run_all(s=None, *, force: bool = False) -> dict:
         from ..database import SessionLocal
 
         s = SessionLocal
+    if force:
+        from . import checks
+
+        checks.PLUGIN_CACHE.clear()
     loop = asyncio.get_running_loop()
     if not force and _cache is not None and _clock() - _cache[0] < CACHE_SECONDS:
         return _cache[1]

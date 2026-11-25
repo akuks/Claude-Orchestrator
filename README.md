@@ -265,6 +265,11 @@ single process (no `--workers`, no replicas).
 - **The run log names a helper's model tier**, for example `Helper (Reviewer) [Standard]`.
 - **Security reviews** list the scanners found and never call unscanned code clean; the project's Claude settings are
   checked for unsafe entries.
+- **Stored results are tidier and safer.** Web addresses in stored tool results, guard summaries and handoff texts keep
+  scheme, host and path and drop the query and fragment, and texts are cut to 4,000 characters. Values from the
+  workspace's top-level `.env*` files (6 characters or more) are masked in the run log like other secrets.
+- **Copy into project** needs the contributor role on the task's project, only copies documents (`.md`, `.html`, `.pdf`)
+  and never follows links.
 - **A crashed tool call no longer stays "in flight"** (the guard hook also handles `PostToolUseFailure`).
 
 ### Upkeep (phase 7d)
@@ -2270,8 +2275,10 @@ collapsed **Details** with versions, timings and a suggested fix.
   shows each project's last error under **Details** and warns when more than one code-map engine is set up. **Node**
   warns when it is older than 20 (the browser tools need 20).
 - **Two more self-tests (7e).** **Agent tokens** makes a throw-away task token, checks it works for that task only,
-  revokes it and checks it is refused. **Guard plugin** runs `claude plugin validate` on the guard plugin (20 seconds at
-  most); a Claude version without that command shows "not available in this Claude version".
+  revokes it and checks it is refused. **Guard plugin** runs `claude plugin validate` on the guard plugin (up to about
+  30 seconds, because it asks Claude twice); the answer is remembered for 10 minutes per Claude version and **Check
+  again** runs it afresh. A Claude version without that command shows "Can't check: this Claude version has no validate
+  command." (grey, not a problem).
 - **Secrets.** Every summary and detail is scrubbed: known secrets are masked and home
   folders show as `~`. Text is cut at 500 characters.
 - **API.** `GET /admin/health` returns `{checked_at, overall, checks}`. Admin only.
@@ -2504,8 +2511,11 @@ project has a `package-lock.json`. The prompt lists what it found and tells the 
 "Not scanned" rather than call code clean when none could run. The project's `.claude/settings.json`,
 `.claude/settings.local.json` and `.mcp.json` (no links followed, 256 KB at most, valid JSON) are checked for hooks, wide
 allows (`Bash(*)`, `*`, `Bash`), connected tools and values that look like tokens; these go into the prompt and the
-findings list as "Claude settings: …" (the value of a token is never shown). The scanners run in the agent's own
-session, not in the server.
+findings list as "Claude settings: …" (the value of a token is never shown, and names are masked and cut to 60
+characters). The settings scan reads the **server's checkout of the project**, not the branch of the pull request under
+review. The scanner list reaches only the **PR-review prompt** built by the server; the **Security Review** form's
+prompt is fixed text that asks the agent to run what it finds and to say "Not scanned" otherwise. The scanners run in the
+agent's own session, not in the server. A full scan that could not call Claude (no credential) leaves open findings open.
 
 ---
 

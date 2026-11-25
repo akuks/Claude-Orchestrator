@@ -334,21 +334,38 @@ PLUGIN_HELP_TIMEOUT = 8
 PLUGIN_VALIDATE_TIMEOUT = 20
 
 
+PLUGIN_CACHE_SECONDS = 600
+PLUGIN_CACHE: dict = {}  # (claude binary, its --version answer) -> (monotonic time, Result); "Check again" empties it
+
+
 async def check_guard_plugin(s) -> Result:
-    """`claude plugin validate <guard folder>`. A Claude without that command is fine ("not available"); a hang is
-    cut at 20 s. The command is only run once `claude plugin --help` lists it, so an old CLI never takes it as a prompt."""
+    """`claude plugin validate <guard folder>`, remembered for 10 minutes per Claude binary and version (the page's
+    "Check again" runs it fresh). A Claude without that command is fine ("not available"); a hang is cut at 20 s.
+    The command is only run once `claude plugin --help` lists it, so an old CLI never takes it as a prompt."""
     root = guard_runtime.plugin_root()
     if not root.is_symlink() and not root.exists():
         return Result(ATTENTION, "The guard is not installed, so it could not be validated", None,
                       "Restart the app to restore it.")
     env = minimal_env()
+    vcode, vtext = await run_text([settings.claude_bin, "--version"], PLUGIN_HELP_TIMEOUT, env)
+    key = (str(settings.claude_bin), vtext if vcode == 0 else None)
+    hit = PLUGIN_CACHE.get(key) if key[1] else None
+    if hit and time.monotonic() - hit[0] < PLUGIN_CACHE_SECONDS:
+        return hit[1]
+    r = await _validate_plugin(root, env)
+    if key[1] and r.status == OK:  # a failure or a hang is looked at again next time
+        PLUGIN_CACHE[key] = (time.monotonic(), r)
+    return r
+
+
+async def _validate_plugin(root, env) -> Result:
     code, text = await run_text([settings.claude_bin, "plugin", "--help"], PLUGIN_HELP_TIMEOUT, env)
     if code is None:
         why = {"not found": "Claude is not installed", "timed out": "Claude did not answer"}.get(text, "Claude could not run")
         return Result(ATTENTION, f"The guard plugin could not be validated: {why}", {"answer": text},
                       "Install Claude Code, or point the app at it with CO_CLAUDE_BIN.")
     if code != 0 or not any(ln.strip().lower().startswith(("validate", "plugin validate")) for ln in text.splitlines()):
-        return Result(OK, "The guard plugin was not validated (not available in this Claude version)", {"available": False})
+        return Result(OK, "Can't check: this Claude version has no validate command.", {"available": False})
     code, text = await run_text([settings.claude_bin, "plugin", "validate", str(root.resolve())], PLUGIN_VALIDATE_TIMEOUT, env)
     first = (text.splitlines()[0] if text else "")[:200]
     if code is None:
@@ -453,7 +470,7 @@ async def check_mcp(s) -> Result:
         head = (f"{len(bad)} of {len(servers)} connected tool{'s' if len(servers) != 1 else ''} not responding: {', '.join(bad)}"
                 if bad else f"{len(servers)} connected tool{'s' if len(servers) != 1 else ''} working")
         tail = (" " + " ".join(off)) if off else ""
-        return Result(ATTENTION, head + note + tail, detail,
+        return Result(ATTENTION, head + note + ("." if off else "") + tail, detail,
                       "Open MCP Servers and test the connection." if bad else "Open MCP Servers and check the version that is running.")
     return Result(OK, f"{len(servers)} connected tool{'s' if len(servers) != 1 else ''} working{note}", detail)
 

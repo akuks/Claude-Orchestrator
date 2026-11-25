@@ -24,11 +24,32 @@ class CopyError(Exception):
         self.status, self.text = status, text
 
 
+_DIR = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+DOC_WORDS = "Only documents can be copied (.md, .html, .pdf)."
+OUTSIDE = "The new name points outside the project."
+
+
 def _inside(path: str, root: str) -> bool:
     try:
         return os.path.commonpath([path, root]) == root
     except ValueError:
         return False
+
+
+def _open_chain(start: str, parts) -> int:
+    """A descriptor for the folder ``start`` (an absolute real path) plus ``parts`` below it: every level is opened
+    with O_NOFOLLOW relative to its parent's descriptor, so a folder swapped for a link in the meantime is refused
+    (OSError). The caller closes it."""
+    fd = os.open("/", _DIR)
+    try:
+        for part in [p for p in start.split("/") if p] + list(parts):
+            nxt = os.open(part, _DIR, dir_fd=fd)
+            os.close(fd)
+            fd = nxt
+        return fd
+    except BaseException:
+        os.close(fd)
+        raise
 
 
 def _read_source(path: str, recorded, policy) -> bytes:
@@ -37,12 +58,23 @@ def _read_source(path: str, recorded, policy) -> bytes:
     norm = posixpath.normpath(path)
     if not any(isinstance(r, str) and posixpath.normpath(r) == norm for r in recorded or []):
         raise CopyError(404, "That document is not one this task wrote to a temp folder.")
-    if os.path.splitext(norm)[1].lower() not in _DOC_EXT or not rules.path_in_temp(norm, policy):
+    name = posixpath.basename(norm)
+    if os.path.splitext(name)[1].lower() not in _DOC_EXT:
+        raise CopyError(400, DOC_WORDS)
+    # the folder's real path is where the system's own links (/tmp -> /private/tmp) are resolved; from there no link is followed
+    folder = os.path.realpath(posixpath.dirname(norm))
+    if not rules.path_in_temp(posixpath.join(folder, name), policy):
         raise CopyError(400, "That file is no longer in a temp folder, so it cannot be copied.")
     try:
-        fd = os.open(norm, os.O_RDONLY | os.O_NOFOLLOW | getattr(os, "O_NONBLOCK", 0))
+        dfd = _open_chain(folder, ())
     except OSError:
         raise CopyError(404, "That document is gone or cannot be read.") from None
+    try:
+        fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | getattr(os, "O_NONBLOCK", 0), dir_fd=dfd)
+    except OSError:
+        raise CopyError(404, "That document is gone or cannot be read.") from None
+    finally:
+        os.close(dfd)
     try:
         st = os.fstat(fd)
         if not stat.S_ISREG(st.st_mode):
@@ -68,23 +100,30 @@ def copy_doc(path, dest, recorded, policy, base: str, roots: list[str]) -> str:
         raise CopyError(400, "Say where to put the copy.")
     if os.path.isabs(dest) or dest.startswith(("/", "\\")) or ":" in dest.split("/")[0]:
         raise CopyError(400, "The new name must be a path inside the project, like docs/plan.md.")
-    parts = dest.replace("\\", "/").split("/")
+    parts = [p for p in dest.replace("\\", "/").split("/")]
     if ".." in parts or parts[-1] in ("", "."):
         raise CopyError(400, "The new name must be a path inside the project, like docs/plan.md.")
+    parts = [p for p in parts if p not in ("", ".")]
+    if os.path.splitext(parts[-1])[1].lower() not in _DOC_EXT:
+        raise CopyError(400, DOC_WORDS)
     data = _read_source(path, recorded, policy)
-    real_roots = [os.path.realpath(r) for r in roots if r]
-    full = os.path.join(base, *[p for p in parts if p not in ("", ".")])
-    parent = os.path.dirname(full)
-    if not os.path.isdir(parent):
-        raise CopyError(400, "The folder for the copy does not exist yet. Pick an existing folder.")
-    if not any(_inside(os.path.realpath(parent), r) for r in real_roots):
-        raise CopyError(400, "The new name points outside the project.")
+    base_real = os.path.realpath(base)
+    if not any(_inside(base_real, os.path.realpath(r)) for r in roots if r):
+        raise CopyError(400, OUTSIDE)
     try:
-        fd = os.open(full, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o644)
+        dfd = _open_chain(base_real, parts[:-1])
+    except FileNotFoundError:
+        raise CopyError(400, "The folder for the copy does not exist yet. Pick an existing folder.") from None
+    except OSError:
+        raise CopyError(400, OUTSIDE) from None
+    try:
+        fd = os.open(parts[-1], os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o644, dir_fd=dfd)
     except FileExistsError:
         raise CopyError(409, EXISTS) from None
     except OSError:
         raise CopyError(400, "The copy could not be written there.") from None
+    finally:
+        os.close(dfd)
     try:
         with os.fdopen(fd, "wb") as f:
             f.write(data)

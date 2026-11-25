@@ -878,7 +878,7 @@ async def copy_outside_doc(task_id: str, payload: dict, request: Request):
     p = request.state.principal
     async with SessionLocal() as s:
         task = await require_task(s, p, task_id)
-        await _require_manage(s, p, task)
+        await _require_manage(s, p, task, need_contributor=True)
         row = await _thread_handoff(s, task)
         pid = await effective_project_id(s, task)
         proj = await s.get(Project, pid) if pid else None
