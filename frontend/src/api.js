@@ -116,6 +116,7 @@ export const api = {
       if (e.status === 404) return null
       throw e
     }),
+  copyOutsideDoc: (id, path, dest) => req('POST', `/tasks/${id}/outside-docs/copy`, { path, dest }),
   refreshHandoff: (id) => req('POST', `/tasks/${id}/handoff/refresh`),
   // Token care (phase 3b): the step's figures, the thread's "so far" totals and tips.
   getUsage: (id) => req('GET', `/tasks/${id}/usage`),

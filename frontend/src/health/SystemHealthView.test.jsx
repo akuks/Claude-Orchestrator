@@ -54,6 +54,17 @@ describe('health helpers', () => {
   it('sorts problems, then attention, then ok, keeping order inside a group', () => {
     expect(sortChecks(DATA.checks).map((c) => c.id)).toEqual(['c', 'e', 'b', 'a', 'd'])
   })
+  it('writes tool versions and code-map errors one per line', () => {
+    const rows = detailRows({
+      servers: [{ name: 'fs', status: 'healthy', version: '1.2.0', pinned: '1.3.0', version_differs: true }],
+      projects: [{ project: 'Shop', status: 'failed', error: 'engine crashed', failures: 2 }],
+      engine_warning: null,
+    })
+    expect(rows).toEqual([
+      ['servers', 'fs: healthy, version 1.2.0, expected 1.3.0 (differs)'],
+      ['projects', 'Shop: failed, 2 failed refreshes, last error: engine crashed'],
+    ])
+  })
   it('turns details into rows', () => {
     expect(detailRows({ free_gb: 12, servers: [{ name: 'x', status: 'healthy' }] })).toEqual([
       ['free gb', '12'],

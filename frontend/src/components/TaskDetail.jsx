@@ -151,7 +151,30 @@ export function codeMapLine(p) {
   return `Code map answer: ${fresh}${ids.length ? ` · showed ${ids.map(displayId).join(', ')}` : ''}${partialNote(p)}`
 }
 
-export function renderLine(ev) {
+const TIER_WORD = { strongest: 'Strongest', standard: 'Standard', light: 'Light' }
+const HELPER_TOOLS = ['Agent', 'Task']
+const baseName = (v) => String(v || '').split('/').filter(Boolean).pop() || String(v || '')
+
+// helper call id -> tier, from the "subagent_start" events (the helper's first message's model).
+export function helperTiers(events) {
+  const out = {}
+  for (const e of events || []) {
+    const p = e?.payload
+    if (e?.type === 'subagent_start' && p?.tool_use_id && TIER_WORD[p.tier] && !out[p.tool_use_id]) out[p.tool_use_id] = p.tier
+  }
+  return out
+}
+
+// "Helper (Reviewer) [Standard]: check the diff"; no tier word when the tier is not known.
+function helperLine(p, tiers) {
+  const input = p.input && typeof p.input === 'object' ? p.input : {}
+  const kind = input.subagent_type || 'helper'
+  const tier = TIER_WORD[p.tier] ? p.tier : tiers?.[p.id]
+  const word = TIER_WORD[tier] ? ` [${TIER_WORD[tier]}]` : ''
+  return `Helper (${kind})${word}: ${input.description || ''}`.trimEnd()
+}
+
+export function renderLine(ev, tiers) {
   const s = EVENT_STYLE[ev.type] || { color: 'var(--co-terminal-text)', prefix: '' }
   const p = ev.payload || {}
   let text
@@ -160,6 +183,10 @@ export function renderLine(ev) {
       text = p.text
       break
     case 'tool_use':
+      if (HELPER_TOOLS.includes(p.name)) {
+        text = helperLine(p, tiers)
+        break
+      }
       text = `${p.name}(${p.input ? JSON.stringify(p.input) : ''})`
       break
     case 'tool_result':
@@ -208,6 +235,12 @@ export function renderLine(ev) {
       break
     case 'output':
       text = `Published: ${publishedName(p)}`
+      break
+    case 'doc_copied':
+      text = `Copied ${baseName(p.from)} into the project as ${p.to}.`
+      break
+    case 'subagent_start':
+      text = ''
       break
     default:
       text = JSON.stringify(p)
@@ -534,6 +567,7 @@ export default function TaskDetail({ taskId, onClose, onChanged, onOpenTask, onO
       .then((us) => setNames(new Map(us.map((u) => [u.id, u.name || u.email]))))
       .catch(() => {})
   }, [needNames, names.size])
+  const tiers = useMemo(() => helperTiers(events), [events])
   const guardCtx = useMemo(() => ({ approvals: new Map(requests.map((a) => [a.id, a])), names }), [requests, names])
   const waiting = requests.filter((a) => a.status === 'pending')
   const usage = useUsage(taskId, running, endTick)
@@ -764,6 +798,7 @@ export default function TaskDetail({ taskId, onClose, onChanged, onOpenTask, onO
           <span className="co-terminal-muted">Waiting for output…</span>
         )}
         {events.map((ev, i) => {
+          if (ev.type === 'subagent_start') return null // its tier is shown on the helper's own line
           if (ev.type === 'guard') return <GuardLine key={i} line={guardLine(ev.payload || {}, guardCtx)} />
           if (ev.type === 'plan_limit') {
             return (
@@ -774,7 +809,7 @@ export default function TaskDetail({ taskId, onClose, onChanged, onOpenTask, onO
           }
           const u = usageLine(ev)
           if (u) return <UsageLine key={i} line={u} />
-          const line = renderLine(ev)
+          const line = renderLine(ev, tiers)
           const kept = ev.type === 'summary' && Array.isArray(ev.payload?.lines) ? ev.payload.lines : []
           return (
             <div key={i} style={{ color: line.color }}>

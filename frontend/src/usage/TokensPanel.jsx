@@ -12,6 +12,7 @@ const FIELDS = [
   ['cache_read', 'cache read'],
   ['output', 'output'],
 ]
+const sayN = (v) => (typeof v === 'number' && Number.isFinite(v) && v > 0 ? Math.round(v / 1000) * 1000 : 0)
 const entries = (o) => (o && typeof o === 'object' ? Object.entries(o) : [])
 
 function Buckets({ rows, testid, rowTestid }) {
@@ -28,7 +29,14 @@ function Buckets({ rows, testid, rowTestid }) {
       <tbody>
         {rows.map(([name, b]) => (
           <tr key={name} data-testid={rowTestid}>
-            <td className="co-usage-name">{clean(name)}</td>
+            <td className="co-usage-name">
+              {clean(name)}
+              {sayN(b?.reread_per_step) > 0 && (
+                <div className="co-usage-note" data-testid="tokens-reread">
+                  Re-reads about {sayN(b.reread_per_step).toLocaleString('en-US')} tokens per step
+                </div>
+              )}
+            </td>
             {FIELDS.map(([k]) => (
               <td key={k}>{n(b?.[k])}</td>
             ))}

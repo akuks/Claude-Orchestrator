@@ -32,7 +32,7 @@ vi.mock('../api', () => ({
 }))
 
 import { api } from '../api'
-import TaskDetail, { renderLine } from './TaskDetail'
+import TaskDetail, { helperTiers, renderLine } from './TaskDetail'
 
 // A fake socket that records what the component opens and closes.
 class FakeSocket {
@@ -613,5 +613,19 @@ describe('summary line Details toggle', () => {
     expect(d.textContent).toContain('second {kept} line')
     expect(view.container.textContent).toContain('Older run history kept as a summary (3 events).')
     expect(view.container.textContent).not.toContain('"counts"')
+  })
+})
+
+describe('helper tier and copied-document lines', () => {
+  const call = (p) => ({ type: 'tool_use', payload: { name: 'Agent', id: 'c1', input: { subagent_type: 'Reviewer', description: 'check the diff' }, ...p } })
+  it('shows the tier on a helper line, from the call or a later subagent_start', () => {
+    expect(renderLine(call({ tier: 'standard' })).text).toBe('Helper (Reviewer) [Standard]: check the diff')
+    expect(renderLine(call({})).text).toBe('Helper (Reviewer): check the diff')
+    const tiers = helperTiers([call({}), { type: 'subagent_start', payload: { tool_use_id: 'c1', tier: 'light', model: 'claude-haiku' } }])
+    expect(renderLine(call({}), tiers).text).toBe('Helper (Reviewer) [Light]: check the diff')
+  })
+  it('never prints JSON for subagent_start or doc_copied', () => {
+    expect(renderLine({ type: 'subagent_start', payload: { tool_use_id: 'c1', tier: 'light', model: 'm' } }).text).toBe('')
+    expect(renderLine({ type: 'doc_copied', payload: { from: '/tmp/x/plan.md', to: 'docs/plan.md' } }).text).toBe('Copied plan.md into the project as docs/plan.md.')
   })
 })

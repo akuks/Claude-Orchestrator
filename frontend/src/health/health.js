@@ -36,9 +36,25 @@ export function detailText(v) {
   return String(v)
 }
 
+// One line per connected tool or code-map project, in plain words (the rest of the detail stays generic).
+const SERVER_LINE = (x) =>
+  `${x.name}: ${x.status || 'unknown'}${x.version ? `, version ${x.version}` : ''}${
+    x.pinned ? `, expected ${x.pinned}${x.version_differs ? ' (differs)' : ''}` : ''}`
+const PROJECT_LINE = (x) =>
+  `${x.project}: ${x.status}${x.failures ? `, ${x.failures} failed refresh${x.failures === 1 ? '' : 'es'}` : ''}${
+    x.error ? `, last error: ${x.error}` : ''}`
+const isList = (v, key) => Array.isArray(v) && v.length > 0 && v.every((x) => x && typeof x === 'object' && key in x)
+
 export function detailRows(detail) {
   if (!detail || typeof detail !== 'object') return []
-  return Object.entries(detail).map(([k, v]) => [k.replace(/_/g, ' '), detailText(v)])
+  return Object.entries(detail)
+    .filter(([k, v]) => !(k === 'engine_warning' && !v))
+    .map(([k, v]) => {
+      const label = k.replace(/_/g, ' ')
+      if (k === 'servers' && isList(v, 'version_differs')) return [label, v.map(SERVER_LINE).join('\n')]
+      if (k === 'projects' && isList(v, 'failures')) return [label, v.map(PROJECT_LINE).join('\n')]
+      return [label, detailText(v)]
+    })
 }
 
 // "12 MB", "340 KB" (decimal, rounded) for the tidying preview.

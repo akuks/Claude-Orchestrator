@@ -114,6 +114,17 @@ describe('TokensPanel', () => {
     await click(q(c, 'tokens-toggle'))
     expect(q(c, 'tokens-body')).toBeNull()
   })
+  it('shows the re-read per step for main and each helper, and up to four tips', async () => {
+    const r = report()
+    r.step.breakdown.main.reread_per_step = 152000
+    r.step.breakdown.helpers = { Reviewer: { ...bucket(3, 1, 1, 90, 1), reread_per_step: 30000, starts: 1 } }
+    r.tips = ['one', 'two', 'three', 'four']
+    const c = await mount(<TokensPanel report={r} />)
+    await click(q(c, 'tokens-toggle'))
+    const notes = [...c.querySelectorAll('[data-testid="tokens-reread"]')].map((e) => e.textContent)
+    expect(notes).toEqual(['Re-reads about 152,000 tokens per step', 'Re-reads about 30,000 tokens per step'])
+    expect(c.querySelectorAll('[data-testid="tokens-tips"] li')).toHaveLength(4)
+  })
   it('shows only the tips when there is no breakdown yet', async () => {
     const c = await mount(<TokensPanel report={report({ breakdown: null })} />)
     await click(q(c, 'tokens-toggle'))

@@ -110,4 +110,12 @@ describe('RecommendedSection', () => {
     await mount({ canEdit: false })
     expect(q('rec-brand-save')).toBeNull()
   })
+
+  it('tags a tool that needs a newer Node', async () => {
+    const d = rec()
+    d.items[0] = { ...d.items[0], mark: 'Needs Node 20' }
+    await mount({ data: d })
+    expect(q('rec-item-browser-playwright').textContent).toContain('Needs Node 20')
+    expect(q('rec-item-browser-devtools').textContent).not.toContain('Needs Node')
+  })
 })

@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { Button, Space, Typography } from 'antd'
+import { Button, Input, Space, Typography } from 'antd'
 import { CheckOutlined, DownOutlined, ReloadOutlined, RightOutlined } from '@ant-design/icons'
 import { api } from '../api'
 import { revealHidden } from '../guard/guard'
@@ -20,6 +20,66 @@ function Row({ label, children, testid }) {
     <div className="co-resume-row" data-testid={testid}>
       <span className="co-resume-label">{label}</span>
       <span className="co-resume-text">{children}</span>
+    </div>
+  )
+}
+
+// One temp-folder file with its "Copy into project" action (people who can edit the task).
+function TempDoc({ taskId, path, canManage }) {
+  const name = String(path).split('/').filter(Boolean).pop() || 'file'
+  const [open, setOpen] = useState(false)
+  const [dest, setDest] = useState(`docs/${name}`)
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState(null)
+  const [done, setDone] = useState(null)
+  const copy = async () => {
+    setBusy(true)
+    setError(null)
+    try {
+      const r = await api.copyOutsideDoc(taskId, path, dest.trim())
+      setDone(r?.dest || dest.trim())
+      setOpen(false)
+    } catch (e) {
+      setError(e?.status === 404 && e.message ? e.message : plainError(e))
+    } finally {
+      setBusy(false)
+    }
+  }
+  return (
+    <div data-testid="handoff-temp-doc">
+      <span className="co-resume-mono">{clean(path)}</span>
+      {canManage && !done && !open && (
+        <Button size="small" type="link" onClick={() => setOpen(true)} data-testid="handoff-copy-open">
+          Copy into project
+        </Button>
+      )}
+      {done && (
+        <div className="co-resume-meta" data-testid="handoff-copy-done">
+          Copied to {clean(done)}
+        </div>
+      )}
+      {open && (
+        <div data-testid="handoff-copy-form">
+          <Space.Compact style={{ width: '100%', maxWidth: 420 }}>
+            <Input
+              size="small"
+              value={dest}
+              onChange={(e) => setDest(e.target.value)}
+              aria-label="Where to put the copy, inside the project"
+              data-testid="handoff-copy-dest"
+            />
+            <Button size="small" type="primary" loading={busy} onClick={copy} data-testid="handoff-copy-go">
+              Copy
+            </Button>
+            <Button size="small" onClick={() => setOpen(false)}>Cancel</Button>
+          </Space.Compact>
+        </div>
+      )}
+      {error && (
+        <div className="co-resume-error" data-testid="handoff-copy-error">
+          {error}
+        </div>
+      )}
     </div>
   )
 }
@@ -188,7 +248,9 @@ export default function HandoffCard({ taskId, onHandoff, canManage = false, stat
               {temp.length > 0 && (
                 <Row label="Temp files" testid="handoff-temp">
                   <span className="co-resume-warn">may vanish: </span>
-                  <span className="co-resume-mono">{temp.map(clean).join('\n')}</span>
+                  {temp.map((t) => (
+                    <TempDoc key={t} taskId={taskId} path={t} canManage={canManage} />
+                  ))}
                 </Row>
               )}
               {commits.length > 0 && (
