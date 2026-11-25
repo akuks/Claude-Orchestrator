@@ -25,7 +25,8 @@ import RunLog from '../gates/RunLog'
 import { RUN_STATUS_COLOR, runStatusText, stageKind } from '../gates/gates'
 import { revealHidden } from '../guard/guard'
 import FlowCanvas from '../flow/FlowCanvas'
-import { runBoxStatuses } from '../flow/flow'
+import { plainDuration, runBoxStatuses, usageLine } from '../flow/flow'
+import { plainError } from './plainError'
 import './run.css'
 
 dayjs.extend(relativeTime)
@@ -239,6 +240,9 @@ export default function RunView({ id, user, projects = [], navigate, onOpenCrede
     },
     [boxStatus],
   )
+  const stepUsage = data?.step_usage
+  const usageOf = useCallback((i) => usageLine(Array.isArray(stepUsage) ? stepUsage[i] : null), [stepUsage])
+  const wordOf = useCallback((i) => sstate?.[String(i)]?.status_word || null, [sstate])
   const selStage = stageIdx != null && stageIdx < stages.length ? stageIdx : head >= 0 ? head : null
   const curAttempt = selStage == null ? 0 : stageAttempt(sstate, selStage)
   const stageTasks = selStage == null ? [] : tasksOfStage(tasks, selStage, curAttempt)
@@ -289,7 +293,20 @@ export default function RunView({ id, user, projects = [], navigate, onOpenCrede
       message.success(okText)
       await load()
     } catch (e) {
-      message.error(e.message)
+      message.error(plainError(e))
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const rerun = async (i) => {
+    setBusy(true)
+    try {
+      await api.rerunWorkflowStage(id, i)
+      message.success('Running again from this step')
+      await load()
+    } catch (e) {
+      message.error(plainError(e))
     } finally {
       setBusy(false)
     }
@@ -365,6 +382,15 @@ export default function RunView({ id, user, projects = [], navigate, onOpenCrede
       !stageDef?.project ||
       projects.length === 0 ||
       projects.some((p) => p.id === stageDef.project && p.my_role === 'maintainer'))
+  const selWord = selStage == null ? null : sstate?.[String(selStage)]?.status_word || null
+  const selRaw = selStage != null && Array.isArray(data?.step_usage) ? data.step_usage[selStage] : null
+  const selUsage = usageLine(selRaw)
+  const selStats =
+    selRaw && (Number(selRaw.input_tokens) > 0 || Number(selRaw.output_tokens) > 0)
+      ? `${compact(Number(selRaw.input_tokens) || 0)} tokens in, ${compact(Number(selRaw.output_tokens) || 0)} tokens out · ${plainDuration(selRaw.seconds) || ''}`
+      : null
+  const futureOpen = run.status === 'running' || run.status === 'paused'
+  const canRerun = manage && (run.status === 'completed' || run.status === 'failed') && selStage != null && selStage <= run.current_stage
   const taskButton = (t) => {
     const { agent, text } = splitStageTitle(t.title)
     const on = t.id === selTask
@@ -492,6 +518,8 @@ export default function RunView({ id, user, projects = [], navigate, onOpenCrede
             statusOf={statusOf}
             selected={selStage == null ? null : { step: selStage }}
             onSelect={selectBox}
+            usageOf={usageOf}
+            wordOf={wordOf}
             input={run.input}
             focusStep={head >= 0 ? head : null}
             label="Steps of this run"
@@ -513,10 +541,15 @@ export default function RunView({ id, user, projects = [], navigate, onOpenCrede
                   {stageDef.items.length} agents at once
                 </span>
               )}
-              {kind === 'agent' && (
+              {(kind === 'agent' || selWord) && (
                 <Tag color={STAGE_TAG[stage.state]} data-testid="run-stage-state">
-                  {STEP_STATE_TEXT[stage.state] || stateLabel(stage.state)}
+                  {selWord || STEP_STATE_TEXT[stage.state] || stateLabel(stage.state)}
                 </Tag>
+              )}
+              {selUsage && (
+                <span className="co-run-stage-usage co-num" data-testid="run-stage-usage">
+                  {selUsage}
+                </span>
               )}
             </header>
             {kind === 'gate' ? (
@@ -533,7 +566,7 @@ export default function RunView({ id, user, projects = [], navigate, onOpenCrede
                 onOpenTask={setTaskId}
               />
             ) : kind === 'approval' ? (
-              <ApprovalCard runId={id} index={selStage} stage={stageDef} state={sstate?.[String(selStage)]} canDecide={manage} onChanged={load} />
+              <ApprovalCard runId={id} index={selStage} stage={stageDef} state={sstate?.[String(selStage)]} canDecide={manage} future={futureOpen && selStage > run.current_stage} onChanged={load} />
             ) : stageTasks.length ? (
               <ul className="co-run-tasks">{stageTasks.map(taskButton)}</ul>
             ) : (
@@ -547,7 +580,27 @@ export default function RunView({ id, user, projects = [], navigate, onOpenCrede
                 ) : null}
               </div>
             )}
+            {canRerun && (
+              <div className="co-run-rerun" data-testid="run-rerun">
+                <Popconfirm
+                  title={`Run again from ${stage.name}? Later steps start over.`}
+                  okText="Run again"
+                  cancelText="Not now"
+                  onConfirm={() => rerun(selStage)}
+                >
+                  <Button icon={<ReloadOutlined />} loading={busy} data-testid="run-rerun-btn">
+                    Run again from here
+                  </Button>
+                </Popconfirm>
+              </div>
+            )}
             {kind === 'agent' && <HandedOver tasks={stageTasks} />}
+            {selStats && (
+              <details className="co-run-details" data-testid="run-stage-details">
+                <summary>Details</summary>
+                <div className="co-num">{selStats}</div>
+              </details>
+            )}
             {kind === 'agent' && earlier.length > 0 && (
               <details className="co-run-earlier" data-testid="run-earlier">
                 <summary>Earlier attempts ({earlier.length})</summary>

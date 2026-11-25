@@ -615,3 +615,14 @@ html[data-reduce-motion='true'] .co-flow-plus-pulse {
 .co-flow-add-pop .ant-popover-inner {
   padding: 10px;
 }
+
+.co-flow-usage {
+  position: absolute;
+  top: calc(100% + 6px);
+  left: 0;
+  right: 0;
+  font-size: 12px;
+  text-align: center;
+  white-space: nowrap;
+  color: var(--co-text-muted);
+}

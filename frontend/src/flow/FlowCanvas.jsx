@@ -33,7 +33,7 @@ export const ADD_CHOICES = [
   { kind: 'approval', label: 'Ask a person', icon: <UserOutlined /> },
 ]
 
-function Box({ kind, title, sub, mono, retry, handsOver, outputs, status, selected, error, label, onClick, mini, step, item, small }) {
+function Box({ word, kind, title, sub, mono, retry, handsOver, outputs, status, selected, error, label, onClick, mini, step, item, small }) {
   const cls = [
     'co-flow-box',
     `co-flow-k-${kind}`,
@@ -46,7 +46,7 @@ function Box({ kind, title, sub, mono, retry, handsOver, outputs, status, select
     .filter(Boolean)
     .join(' ')
   const badges = mini ? [] : badgeWords(kind, { retry, outputs: outputs || [] })
-  const words = [label, status ? STATUS_WORD[status] : null, error ? 'needs attention' : null, ...badges.map((b) => b.toLowerCase())]
+  const words = [label, word || (status ? STATUS_WORD[status] : null), error ? 'needs attention' : null, ...badges.map((b) => b.toLowerCase())]
     .filter(Boolean)
     .join(', ')
   const retryWord = badges.find((b) => !b.startsWith('Hands over'))
@@ -89,7 +89,7 @@ function Box({ kind, title, sub, mono, retry, handsOver, outputs, status, select
   const data = { 'data-testid': 'flow-box', 'data-step': step, 'data-item': item == null ? '' : item, 'data-kind': kind, 'data-status': status || undefined }
   if (!onClick)
     return (
-      <div className={cls} title={label} {...data}>
+      <div className={cls} title={word || label} {...data}>
         {body}
       </div>
     )
@@ -232,6 +232,8 @@ export default function FlowCanvas({
   pulseAdd = false,
   label = 'Workflow steps',
   center = false,
+  usageOf,
+  wordOf,
 }) {
   const mini = size === 'mini'
   const edit = mode === 'edit' && !mini
@@ -327,7 +329,7 @@ export default function FlowCanvas({
       aria-label={label}
       data-testid="flow-canvas"
     >
-      <div className="co-flow-track" style={mini ? undefined : { paddingTop: 14 + geo.padTop, paddingBottom: 14 + geo.padBottom }} data-testid="flow-track">
+      <div className="co-flow-track" style={mini ? undefined : { paddingTop: 14 + geo.padTop, paddingBottom: 14 + geo.padBottom + (run && usageOf ? 22 : 0) }} data-testid="flow-track">
         {input ? (
           <Tooltip title={`Running on: ${input}`}>
             <span className="co-flow-pill-wrap" tabIndex={0} aria-label={`Start, running on: ${input}`}>
@@ -352,9 +354,11 @@ export default function FlowCanvas({
                     col.kind === 'agent'
                       ? `Step ${n}, ${many ? `Agent ${k + 1} of ${col.boxes.length}` : 'Agent'}: ${b.title}`
                       : `Step ${n}, ${KIND_WORD[col.kind]}: ${col.name}`
+                  const word = run && wordOf ? wordOf(i, b.item) : null
                   return (
                     <Box
                       key={k}
+                      word={word}
                       kind={col.kind}
                       mini={mini}
                       step={i}
@@ -373,6 +377,11 @@ export default function FlowCanvas({
                     />
                   )
                 })}
+                {run && !mini && usageOf && usageOf(i) && (
+                  <div className="co-flow-usage" data-testid="flow-usage">
+                    {usageOf(i)}
+                  </div>
+                )}
                 {col.kind === 'agent' && col.boxes.length > 0 && !mini && (
                   <div className="co-flow-colname" aria-hidden="true" title={col.name}>
                     {many ? `${col.name} · together` : col.name}

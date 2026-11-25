@@ -13,6 +13,9 @@ vi.mock('../api', () => ({
     rejectWorkflowStage: vi.fn(),
     workflowGateLog: vi.fn(),
     raiseRunBudget: vi.fn(),
+    rerunWorkflowStage: vi.fn(),
+    approveAhead: vi.fn(),
+    withdrawAhead: vi.fn(),
   },
   STATUS_COLORS: {},
 }))
@@ -546,5 +549,127 @@ describe('totalsLine', () => {
     expect(totalsLine({ stages_done: 0, stages: 1, minutes: 0, cost_usd: 0, tokens: 41_200 })).toBe('0 of 1 step done · 0.0 min · 41k tokens')
     expect(totalsLine({ line: 'server line' })).toBe('server line')
     expect(totalsLine(null)).toBeNull()
+  })
+})
+
+describe('RunView: run control (approve ahead, run again, time and spend)', () => {
+  let v
+  beforeAll(() => {
+    window.matchMedia ||= () => ({ matches: false, addListener() {}, removeListener() {}, addEventListener() {}, removeEventListener() {} })
+  })
+  beforeEach(() => vi.clearAllMocks())
+  afterEach(async () => {
+    await v?.unmount()
+    v = null
+  })
+  const mount = async (user = { id: 'u1', role: 'member' }) => {
+    v = await render(<RunView id="r1" user={user} projects={[{ id: 'p1', name: 'Canonizer', my_role: 'contributor' }]} navigate={() => {}} />)
+    await flush()
+    await flush()
+    return v.container
+  }
+  const press = async (el) => {
+    await act(async () => el.dispatchEvent(new MouseEvent('click', { bubbles: true })))
+    await flush()
+  }
+  const STAGES = [{ name: 'Plan', items: [{ agent: 'Planner', prompt: 'p' }] }, { name: 'Sign-off', kind: 'approval', message: 'ok?' }, { name: 'Ship', kind: 'approval', ahead: false }]
+  const base = (over = {}) => ({
+    run: run({ status: 'running', current_stage: 0, stages: STAGES, ...(over.run || {}) }),
+    tasks: [t('a', 0, 'running', { title: '[Feature flow] Planner: plan' })],
+    stage_state: over.stage_state || {},
+    step_usage: over.step_usage,
+  })
+  const pickBox = (c, n) => press([...c.querySelectorAll('[data-testid="flow-box"]')][n])
+
+  it('Approve ahead shows on a later approval step for a manager and calls the api after asking', async () => {
+    api.getWorkflowRun.mockImplementation(async () => base())
+    api.approveAhead.mockResolvedValue({})
+    const c = await mount()
+    await pickBox(c, 1)
+    await press(c.querySelector('[data-testid="approval-ahead-btn"]'))
+    expect(document.querySelector('.ant-popconfirm').textContent).toContain('Approve Sign-off now? The run will go straight past it.')
+    await press([...document.querySelector('.ant-popconfirm').querySelectorAll('button')].find((b) => b.textContent === 'Approve ahead'))
+    expect(api.approveAhead).toHaveBeenCalledWith('r1', 1)
+    expect(api.getWorkflowRun.mock.calls.length).toBeGreaterThan(1) // refetched
+  })
+
+  it('a step that never allows it says it needs you; a non-manager sees no button', async () => {
+    api.getWorkflowRun.mockImplementation(async () => base())
+    let c = await mount()
+    await pickBox(c, 2)
+    expect(c.querySelector('[data-testid="approval-ahead-btn"]')).toBeNull()
+    expect(c.querySelector('[data-testid="approval-needs-you"]').textContent).toBe('Needs you when the run gets here')
+    await v.unmount()
+    c = await mount({ id: 'u9', role: 'member' })
+    await pickBox(c, 1)
+    expect(c.querySelector('[data-testid="approval-ahead-btn"]')).toBeNull()
+  })
+
+  it('shows "Approved ahead by <name>" and Withdraw on a step that was approved ahead', async () => {
+    api.getWorkflowRun.mockImplementation(async () => base({ stage_state: { 1: { ahead: { by_name: 'Asha', at: '2026-11-25T10:00:00Z' } } } }))
+    api.withdrawAhead.mockResolvedValue({})
+    const c = await mount()
+    await pickBox(c, 1)
+    expect(c.querySelector('[data-testid="approval-ahead"]').textContent).toContain('Approved ahead by Asha')
+    await press(c.querySelector('[data-testid="approval-withdraw"]'))
+    expect(api.withdrawAhead).toHaveBeenCalledWith('r1', 1)
+  })
+
+  it('Run again from here: only on a finished run, asks first, refetches', async () => {
+    const done = () => base({ run: { status: 'completed', current_stage: 2 }, stage_state: { 1: { status: 'approved' }, 2: { status: 'approved' } } })
+    api.getWorkflowRun.mockImplementation(async () => done())
+    api.rerunWorkflowStage.mockResolvedValue({})
+    const c = await mount()
+    await pickBox(c, 0)
+    await press(c.querySelector('[data-testid="run-rerun-btn"]'))
+    expect(document.querySelector('.ant-popconfirm').textContent).toContain('Run again from Plan? Later steps start over.')
+    await press([...document.querySelector('.ant-popconfirm').querySelectorAll('button')].find((b) => b.textContent === 'Run again'))
+    expect(api.rerunWorkflowStage).toHaveBeenCalledWith('r1', 0)
+  })
+
+  it('no Run again on a running run, for non-managers, or on a step not reached', async () => {
+    api.getWorkflowRun.mockImplementation(async () => base())
+    let c = await mount()
+    expect(c.querySelector('[data-testid="run-rerun-btn"]')).toBeNull()
+    await v.unmount()
+    api.getWorkflowRun.mockImplementation(async () => base({ run: { status: 'failed', current_stage: 0 } }))
+    c = await mount()
+    await pickBox(c, 1)
+    expect(c.querySelector('[data-testid="run-rerun-btn"]')).toBeNull()
+    await v.unmount()
+    c = await mount({ id: 'u9', role: 'member' })
+    await pickBox(c, 0)
+    expect(c.querySelector('[data-testid="run-rerun-btn"]')).toBeNull()
+  })
+
+  it('a refused rerun shows the server sentence; other failures a plain one', async () => {
+    api.getWorkflowRun.mockImplementation(async () => base({ run: { status: 'completed', current_stage: 2 } }))
+    const m = vi.spyOn((await import('antd')).message, 'error').mockImplementation(() => {})
+    api.rerunWorkflowStage.mockRejectedValue(err(409, 'the run is still going; it can run again once it has finished'))
+    const c = await mount()
+    await pickBox(c, 0)
+    await press(c.querySelector('[data-testid="run-rerun-btn"]'))
+    await press([...document.querySelector('.ant-popconfirm').querySelectorAll('button')].find((b) => b.textContent === 'Run again'))
+    expect(m).toHaveBeenCalledWith('the run is still going; it can run again once it has finished')
+    m.mockRestore()
+  })
+
+  it('shows time and spend on the box, tokens only under Details, and status words', async () => {
+    api.getWorkflowRun.mockImplementation(async () =>
+      base({
+        step_usage: [{ cost_usd: 0.123, input_tokens: 1200, output_tokens: 300, seconds: 250 }, null, null],
+        stage_state: { 0: { status_word: 'Waiting its turn' } },
+      }),
+    )
+    const c = await mount()
+    const lines = [...c.querySelectorAll('[data-testid="flow-usage"]')].map((x) => x.textContent)
+    expect(lines).toEqual(['4 min · $0.12'])
+    expect(c.querySelector('[data-testid="run-stage-usage"]').textContent).toBe('4 min · $0.12')
+    const details = c.querySelector('[data-testid="run-stage-details"]')
+    expect(details.open).toBe(false)
+    expect(details.textContent).toContain('1.2k tokens in')
+    expect(c.querySelector('.co-run-timeline').textContent).not.toMatch(/tokens/)
+    expect(c.querySelector('[data-testid="run-stage-state"]').textContent).toBe('Waiting its turn')
+    expect(c.querySelector('[data-testid="flow-box"]').getAttribute('aria-label')).toContain('Waiting its turn')
   })
 })

@@ -129,6 +129,32 @@ describe('HandoffCard', () => {
     const c = await mount()
     await click(q(c, 'handoff-refresh'))
     await flush()
-    expect(q(c, 'handoff-error').textContent).toBe('nope')
+    expect(q(c, 'handoff-error').textContent).toBe("That didn't work. Try again.")
+  })
+
+  it('lists what to re-check before the notes, the measured part on a muted second line', async () => {
+    api.getHandoff.mockResolvedValue({
+      ...H,
+      content: { ...H.content, notes: { ...H.content.notes, cautions: [{ text: 'The API port may have moved', measured: 'was 8200 on Monday' }] } },
+    })
+    const c = await mount()
+    const box = q(c, 'handoff-cautions')
+    expect(box.textContent).toContain('Re-check before acting')
+    expect(q(c, 'handoff-caution').children[0].textContent).toBe('The API port may have moved')
+    expect(q(c, 'handoff-caution').children[1].textContent).toBe('was 8200 on Monday')
+    expect(box.compareDocumentPosition(q(c, 'handoff-notes')) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+  })
+
+  it('has no re-check list when there are no cautions', async () => {
+    const c = await mount()
+    expect(q(c, 'handoff-cautions')).toBeNull()
+  })
+
+  it('shows the newest 5 files and tucks the rest under "The full list"', async () => {
+    const files = Array.from({ length: 8 }, (_, i) => `src/f${i}.js`)
+    api.getHandoff.mockResolvedValue({ ...H, content: { ...H.content, files } })
+    const c = await mount()
+    expect(q(c, 'handoff-files-count').textContent).toContain('8 files touched. Newest 5:')
+    expect(q(c, 'handoff-files-rest').querySelector('summary').textContent).toBe('The full list')
   })
 })

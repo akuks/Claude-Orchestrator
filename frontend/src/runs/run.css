@@ -293,3 +293,16 @@
 .co-run-timeline .co-flow-full {
   margin: 0 -14px;
 }
+
+.co-run-stage-usage {
+  font-size: 12px;
+  color: var(--co-text-muted);
+}
+.co-run-rerun {
+  margin-top: 12px;
+}
+.co-run-details {
+  margin-top: 12px;
+  font-size: 12px;
+  color: var(--co-text-muted);
+}

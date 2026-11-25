@@ -286,3 +286,24 @@ export function runBoxStatuses({ stages, states, sstate, tasks, agents } = {}) {
     return { status, items: [status], itemTasks: [null], fix, fixTask }
   })
 }
+
+// "under a minute", "4 min", "2 h 5 min" (seconds in, plain words out).
+export function plainDuration(seconds) {
+  const s = seconds == null ? NaN : Number(seconds)
+  if (!Number.isFinite(s) || s < 0) return null
+  const m = Math.round(s / 60)
+  if (s < 60 || m < 1) return 'under a minute'
+  if (m < 60) return `${m} min`
+  const h = Math.floor(m / 60)
+  const r = m % 60
+  return r ? `${h} h ${r} min` : `${h} h`
+}
+
+// The small line on a run box: "4 min · $0.12". A step not started (null) has
+// none; a cost that rounds to $0.00 is left out.
+export function usageLine(usage) {
+  if (!usage || typeof usage !== 'object') return null
+  const time = plainDuration(usage.seconds)
+  const cost = Number(usage.cost_usd) >= 0.005 ? `$${Number(usage.cost_usd).toFixed(2)}` : null
+  return [time, cost].filter(Boolean).join(' · ') || null
+}
