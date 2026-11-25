@@ -30,6 +30,7 @@ const GATE_STATE = {
   rejected: 'failed',
   waiting_approval: 'waiting_approval',
   needs_approval: 'waiting_approval',
+  running: 'current',
 }
 
 // The current attempt of a stage (0 when the run predates attempts).
@@ -54,6 +55,8 @@ export function runStages(run, tasks, sstate) {
     if (gs && GATE_STATE[gs]) state = GATE_STATE[gs]
     else if (run.status === 'completed' && !statuses.length) state = 'done'
     else state = stageState(statuses, i, run.current_stage)
+    // Steps side by side: a step working while an earlier one is still open is running too.
+    if (state === 'next' && statuses.some((s) => s === 'running' || s === 'queued')) state = 'current'
     return { name: (st && st.name) || `Step ${i + 1}`, state, task_count: statuses.length }
   })
 }

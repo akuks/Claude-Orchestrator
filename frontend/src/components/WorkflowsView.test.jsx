@@ -119,7 +119,7 @@ describe('WorkflowsView: stage kinds', () => {
       { name: 'Tests', kind: 'gate', before: [], project: 'p1', run: ['pytest -q'], timeout_min: 60 },
     ]
     const p = await saveEdit(stages, { description: 'd', budget_usd: null })
-    expect(JSON.stringify(p)).toBe(JSON.stringify({ name: 'Ship', description: 'd', stages }))
+    expect(JSON.stringify(p)).toBe(JSON.stringify({ name: 'Ship', description: 'd', stages, max_parallel: 2 }))
   })
 
   it('keeps hand-over names, the retry switch, the fix agent and the spending limit', async () => {
@@ -409,5 +409,129 @@ describe('WorkflowsView: opening a card', () => {
     await click(document.body.querySelector('[data-testid="preview-edit"]'))
     await flush()
     expect(document.body.querySelector('.ant-drawer-open .ant-drawer-title').textContent).toBe('Edit “Ship”')
+  })
+})
+
+describe('WorkflowsView: steps side by side', () => {
+  let view
+  beforeAll(() => {
+    window.matchMedia ||= () => ({ matches: false, addListener() {}, removeListener() {}, addEventListener() {}, removeEventListener() {} })
+  })
+  afterEach(async () => {
+    await view?.unmount()
+    view = null
+    vi.clearAllMocks()
+  })
+  const click = async (el) => {
+    await act(async () => el.dispatchEvent(new MouseEvent('click', { bubbles: true })))
+    await flush()
+  }
+  const byText = (t) => [...document.body.querySelectorAll('button')].find((b) => b.textContent.replace(/\s/g, '') === t)
+  const menuItem = (t) => [...document.body.querySelectorAll('.ant-dropdown-menu-item')].find((li) => li.textContent.trim() === t)
+  const drawer = () => document.body.querySelector('.ant-drawer')
+  const box = (label) => [...drawer().querySelectorAll('[data-testid="flow-box"]')].find((b) => b.getAttribute('aria-label').startsWith(label))
+  const cards = () => [...drawer().querySelectorAll('[data-testid="step-card"]')]
+  async function openEdit(stages, extra = {}) {
+    api.listWorkflows.mockResolvedValue([{ id: 'w1', name: 'Ship', stages, ...extra }])
+    view = await render(<WorkflowsView isAdmin agents={[]} />)
+    await flush()
+    await click(document.body.querySelector('[data-testid="workflow-more"]'))
+    await click(menuItem('Edit'))
+    await flush()
+  }
+  const save = async () => {
+    await click(byText('Save'))
+    await new Promise((r) => setTimeout(r, 50))
+    await flush()
+    return api.updateWorkflow.mock.calls[0]?.[1]
+  }
+  const A = (name, after) => ({ name, kind: 'approval', message: 'm', before: [], ...(after ? { after } : {}) })
+  const DIAMOND = [A('Build', []), A('Write tests', [0]), A('Write docs', [0]), A('Review', [1, 2])]
+  const waitsText = (i) => cards()[i].querySelector('[data-testid="step-waits"]').textContent
+
+  it('saves max_parallel (default 2) and keeps `after` on every kind of step', async () => {
+    await openEdit([
+      { name: 'Build', items: [{ agent: 'a', prompt: 'x' }], after: [] },
+      { name: 'Tests', kind: 'gate', before: [], project: 'p1', run: ['pytest -q'], timeout_min: 60, after: [0] },
+      A('Sign', [0, 1]),
+    ])
+    const p = await save()
+    expect(p.max_parallel).toBe(2)
+    expect(p.stages.map((s) => s.after)).toEqual([[], [0], [0, 1]])
+  })
+
+  it('shows what each step waits for by name, with no numbers', async () => {
+    await openEdit(DIAMOND, { max_parallel: 3 })
+    await click(box('Step 4'))
+    expect(waitsText(3)).toContain('Write tests, Write docs')
+    expect(waitsText(0)).toContain('Starts at once')
+    await click(byText('Settings'))
+    expect(drawer().querySelector('[data-testid="workflow-parallel"]').value).toBe('3')
+    expect((await save()).max_parallel).toBe(3)
+  })
+
+  it('"Run beside the step before" makes a step wait for what the one before waits for', async () => {
+    await openEdit([A('Build', []), A('Tests', [0]), A('Docs', [1])])
+    await click(box('Step 3'))
+    await click(cards()[2].querySelector('[data-testid="run-beside"]'))
+    expect(waitsText(2)).toContain('Build')
+    expect(waitsText(2)).not.toContain('Tests')
+    const p = await save()
+    expect(p.stages.map((s) => s.after)).toEqual([[], [0], [0]])
+  })
+
+  it('"Steps at the same time" is sent as typed (1 to 4)', async () => {
+    await openEdit([A('Build', [])])
+    await click(byText('Settings'))
+    const input = drawer().querySelector('[data-testid="workflow-parallel"]')
+    await act(async () => {
+      const set = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set
+      set.call(input, '4')
+      input.dispatchEvent(new Event('input', { bubbles: true }))
+      input.dispatchEvent(new Event('change', { bubbles: true }))
+    })
+    await flush()
+    expect((await save()).max_parallel).toBe(4)
+  })
+
+  it('moving a step re-numbers the waits; a step cannot go above one it waits for', async () => {
+    await openEdit([A('A', []), A('X', []), A('B', [0]), A('D', [1, 2])])
+    // X and B swap: D waits for both, now numbered 1 and 2 either way
+    await click(drawer().querySelectorAll('[data-testid="flow-move-right"]')[1])
+    // D cannot go above B (which it waits for)
+    const left = drawer().querySelectorAll('[data-testid="flow-move-left"]')[3]
+    expect(left.disabled).toBe(true)
+    expect(left.title).toContain('waits for')
+    const p = await save()
+    expect(p.stages.map((s) => s.name)).toEqual(['A', 'B', 'X', 'D'])
+    expect(p.stages.map((s) => s.after)).toEqual([[], [0], [], [1, 2]])
+  })
+
+  it('deleting a step removes it from the waits and says what happened to a step left with none', async () => {
+    await openEdit([A('Build', []), A('Tests', [0]), A('Sign', [1])])
+    await click(drawer().querySelectorAll('[data-testid="flow-remove"]')[1])
+    await click([...document.body.querySelectorAll('.ant-popconfirm .ant-btn')].find((b) => b.textContent === 'Delete'))
+    expect(document.body.textContent).toContain('“Sign” now waits for what “Tests” waited for.')
+    const p = await save()
+    expect(p.stages.map((s) => [s.name, s.after])).toEqual([['Build', []], ['Sign', [0]]])
+  })
+
+  it('+ on a line puts a step in sequence', async () => {
+    await openEdit([A('Build', []), A('Tests', [0])])
+    await click(drawer().querySelectorAll('[data-testid="flow-plus"]')[1])
+    await click(document.body.querySelector('[data-testid="flow-add-approval"]'))
+    const p = await save()
+    expect(p.stages.map((s) => [s.name, s.after])).toEqual([['Build', []], ['Ask a person', [0]], ['Tests', [1]]])
+  })
+
+  it('shows every sentence the server sends, one per line, above the canvas', async () => {
+    const lines = ['Step 4 waits for step 6, which comes later.', 'Run at most 1 to 4 steps at once.']
+    api.updateWorkflow.mockRejectedValueOnce(Object.assign(new Error(lines.join('\n')), { details: lines }))
+    await openEdit(DIAMOND)
+    await save()
+    const box = drawer().querySelector('[data-testid="workflow-errors"]')
+    expect([...box.querySelectorAll('.ant-alert-message > div')].map((d) => d.textContent)).toEqual(lines)
+    const canvas = drawer().querySelector('[data-testid="flow-canvas"]')
+    expect(box.compareDocumentPosition(canvas) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
   })
 })

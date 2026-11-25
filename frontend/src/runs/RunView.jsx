@@ -362,17 +362,21 @@ export default function RunView({ id, user, projects = [], navigate, onOpenCrede
   const manage = canManageRun(run, user, projects)
   const totalsText = totalsLine(data?.totals)
   const hasAgentSteps = (run.stages || []).some((st) => stageKind(st) === 'agent')
-  const headDef = run.stages?.[run.current_stage]
-  const headStatus = sstate?.[String(run.current_stage)]?.status
   const budget = data?.budget
   const hasBudget = budget?.budget_usd != null
   const budgetHeld = active && Object.values(sstate || {}).some((st) => st?.status === 'budget')
+  // The step a person is needed for: the lowest one waiting (steps side by side may have several).
+  const waitingAt = (run.stages || []).findIndex((st, i) => {
+    const k = stageKind(st)
+    const w = sstate?.[String(i)]?.status
+    return (k === 'approval' && w === 'waiting_approval') || (k === 'gate' && w === 'needs_approval')
+  })
   const pausedText =
-    stageKind(headDef) === 'approval' && headStatus === 'waiting_approval'
-      ? 'Waiting for someone to approve the step below.'
-      : stageKind(headDef) === 'gate' && headStatus === 'needs_approval'
-        ? 'Waiting for someone to allow the check below to run.'
-        : null
+    waitingAt < 0
+      ? null
+      : stageKind(run.stages[waitingAt]) === 'approval'
+        ? 'Waiting for someone to approve the step below.'
+        : 'Waiting for someone to allow the check below to run.'
   const stage = selStage == null ? null : stages[selStage]
   const stageDef = selStage == null ? null : run.stages[selStage]
   const kind = stageKind(stageDef)
@@ -391,7 +395,7 @@ export default function RunView({ id, user, projects = [], navigate, onOpenCrede
       ? `${compact(Number(selRaw.input_tokens) || 0)} tokens in, ${compact(Number(selRaw.output_tokens) || 0)} tokens out${plainDuration(selRaw.seconds) ? ` · ${plainDuration(selRaw.seconds)}` : ''}`
       : null
   const futureOpen = run.status === 'running' || run.status === 'paused'
-  const canRerun = manage && (run.status === 'completed' || run.status === 'failed') && selStage != null && selStage <= run.current_stage
+  const canRerun = manage && (run.status === 'completed' || run.status === 'failed') && selStage != null && (selStage <= run.current_stage || ['done', 'failed'].includes(stages[selStage]?.state))
   const taskButton = (t) => {
     const { agent, text } = splitStageTitle(t.title)
     const on = t.id === selTask

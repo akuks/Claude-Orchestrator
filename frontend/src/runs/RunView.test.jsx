@@ -696,3 +696,48 @@ describe('RunView: run control (approve ahead, run again, time and spend)', () =
     for (const b of c.querySelectorAll('[data-testid="flow-box"]')) expect(b.getAttribute('aria-label')).not.toContain('Failed')
   })
 })
+
+describe('RunView: steps side by side', () => {
+  let view
+  beforeAll(() => {
+    window.matchMedia ||= () => ({ matches: true, addListener() {}, removeListener() {}, addEventListener() {}, removeEventListener() {} })
+  })
+  beforeEach(() => {
+    vi.clearAllMocks()
+    api.userDirectory.mockImplementation(async () => [{ id: 'u1', name: 'Asha', email: 'a@x.io' }])
+  })
+  afterEach(async () => {
+    await view?.unmount()
+    view = null
+  })
+
+  it('shows every running step as running and counts steps done as before', async () => {
+    const stages = [
+      { name: 'Build', items: [{ agent: 'a', prompt: 'x' }] },
+      { name: 'Write tests', items: [{ agent: 'a', prompt: 'x' }], after: [0] },
+      { name: 'Write docs', items: [{ agent: 'a', prompt: 'x' }], after: [0] },
+      { name: 'Check', kind: 'gate', run: ['pytest'], project: 'p1', after: [1, 2] },
+    ]
+    api.getWorkflowRun.mockImplementation(async () => ({
+      run: run({ stages, current_stage: 1 }),
+      tasks: [t('a', 0, 'completed'), t('b', 1, 'running'), t('c', 2, 'running')],
+      stage_state: { 0: { status: 'done' } },
+      totals: { stages_done: 1, stages: 4, minutes: 3, cost_usd: 0, tokens: 0 },
+    }))
+    view = await render(<RunView id="r1" user={{ id: 'u1', role: 'member' }} projects={[{ id: 'p1', name: 'Canonizer', my_role: 'contributor' }]} navigate={() => {}} />)
+    await flush()
+    await flush()
+    const c = view.container
+    const boxes = [...c.querySelectorAll('[data-testid="flow-box"]')]
+    expect(boxes.map((b) => b.dataset.status)).toEqual(['done', 'running', 'running', 'next'])
+    expect(c.querySelector('[data-testid="flow-group"]').querySelectorAll('[data-testid="flow-step"]').length).toBe(2)
+    expect(c.querySelector('[data-testid="run-totals-line"]').textContent).toBe('1 of 4 steps done · 3.0 min')
+  })
+
+  it('a step running above the lowest open step is running, not waiting', () => {
+    const r = { current_stage: 0, status: 'running', stages: [{ name: 'A', items: [] }, { name: 'B', items: [] }, { name: 'C', items: [] }] }
+    expect(runStages(r, [t('x', 0, 'running'), t('y', 2, 'queued')], {}).map((s) => s.state)).toEqual(['current', 'next', 'current'])
+    const g = { current_stage: 0, status: 'running', stages: [{ name: 'A', items: [] }, { name: 'G', kind: 'gate', run: ['x'] }] }
+    expect(runStages(g, [t('x', 0, 'running')], { 1: { status: 'running' } }).map((s) => s.state)).toEqual(['current', 'current'])
+  })
+})

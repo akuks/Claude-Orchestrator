@@ -16,7 +16,7 @@ import {
   ToolOutlined,
   UserOutlined,
 } from '@ant-design/icons'
-import { KIND_WORD, STATUS_WORD, badgeWords, boxKey, connectorPaths, flowModel, layout, sizeOf } from './flow'
+import { KIND_WORD, STATUS_WORD, badgeWords, boxKey, connectorShapes, flowModel, flowPlan, sizeOf, stackExtras, stepDeps, stepLabel } from './flow'
 import './flow.css'
 
 const KIND_ICON = { agent: <RobotOutlined />, gate: <CheckCircleOutlined />, approval: <UserOutlined />, fix: <ToolOutlined /> }
@@ -105,17 +105,20 @@ function Box({ aheadMark, word, kind, title, sub, mono, retry, handsOver, output
   )
 }
 
-function Connector({ nLeft, nRight, height, width, size, state, addAt, onAdd, pulse, openAt, setOpenAt }) {
-  const { lines, arrows } = connectorPaths(nLeft, nRight, width, height, size)
+function Connector({ shapes, height, width, state, addAt, onAdd, plusY, pulse, openAt, setOpenAt }) {
   const cls = ['co-flow-link', state && `co-flow-link-${state}`].filter(Boolean).join(' ')
   return (
     <div className={cls} style={{ width, height }} data-testid="flow-link">
       <svg width={width} height={height} viewBox={`0 0 ${width} ${height}`} aria-hidden="true" focusable="false">
-        {lines.map((d, i) => (
-          <path key={i} d={d} className="co-flow-line" />
-        ))}
-        {arrows.map((p, i) => (
-          <polygon key={i} points={p} className="co-flow-arrow" />
+        {shapes.map((sh, n) => (
+          <g key={n} className={sh.state ? `co-flow-link-${sh.state}` : undefined}>
+            {sh.lines.map((d, i) => (
+              <path key={i} d={d} className="co-flow-line" />
+            ))}
+            {sh.arrows.map((p, i) => (
+              <polygon key={i} points={p} className="co-flow-arrow" />
+            ))}
+          </g>
         ))}
       </svg>
       {onAdd && (
@@ -155,6 +158,7 @@ function Connector({ nLeft, nRight, height, width, size, state, addAt, onAdd, pu
             aria-label="Add a step here"
             data-testid="flow-plus"
             data-at={addAt}
+            style={plusY == null ? undefined : { top: plusY }}
           >
             <PlusOutlined />
           </button>
@@ -164,14 +168,28 @@ function Connector({ nLeft, nRight, height, width, size, state, addAt, onAdd, pu
   )
 }
 
-function StepTools({ index, count, onMove, onRemove }) {
+function StepTools({ index, count, onMove, onRemove, blocked }) {
   const n = index + 1
   return (
     <div className="co-flow-tools" role="group" aria-label={`Step ${n} controls`}>
-      <button type="button" aria-label={`Move step ${n} left`} disabled={index === 0} onClick={() => onMove?.(index, -1)} data-testid="flow-move-left">
+      <button
+        type="button"
+        aria-label={`Move step ${n} left`}
+        title={blocked?.(index, -1) || undefined}
+        disabled={index === 0 || !!blocked?.(index, -1)}
+        onClick={() => onMove?.(index, -1)}
+        data-testid="flow-move-left"
+      >
         <ArrowLeftOutlined />
       </button>
-      <button type="button" aria-label={`Move step ${n} right`} disabled={index >= count - 1} onClick={() => onMove?.(index, 1)} data-testid="flow-move-right">
+      <button
+        type="button"
+        aria-label={`Move step ${n} right`}
+        title={blocked?.(index, 1) || undefined}
+        disabled={index >= count - 1 || !!blocked?.(index, 1)}
+        onClick={() => onMove?.(index, 1)}
+        data-testid="flow-move-right"
+      >
         <ArrowRightOutlined />
       </button>
       <Popconfirm title="Delete this step?" okText="Delete" okButtonProps={{ danger: true }} cancelText="Keep" onConfirm={() => onRemove?.(index)}>
@@ -240,12 +258,14 @@ export default function FlowCanvas({
   usageOf,
   wordOf,
   aheadOf,
+  moveBlocked,
 }) {
   const mini = size === 'mini'
   const edit = mode === 'edit' && !mini
   const run = mode === 'run'
   const model = useMemo(() => flowModel(steps, agents), [steps, agents])
-  const geo = layout(model, { size, mode: edit ? 'edit' : mode })
+  const plan = useMemo(() => flowPlan(steps, model, { size, mode: edit ? 'edit' : mode }), [steps, model, size, edit, mode])
+  const { geo } = plan
   const s = sizeOf(size)
   const linkW = edit ? s.editLink : s.link
   const [openAt, setOpenAt] = useState(null)
@@ -289,31 +309,113 @@ export default function FlowCanvas({
   }, [keepStep, mini, model.length])
 
   const stepStatus = (i) => (run && statusOf ? statusOf(i) : null)
-  const linkState = (i) => {
+  // A line is "reached" once the step it leads to has started (Done: once its step is done).
+  const edgeState = (e) => {
     if (!run) return null
-    if (i < model.length) return stepStatus(i) && stepStatus(i) !== 'next' ? 'reached' : 'muted'
-    return model.length && stepStatus(model.length - 1) === 'done' ? 'reached' : 'muted'
+    if (e.to === 'end') return e.from !== 'start' && stepStatus(e.from) === 'done' ? 'reached' : 'muted'
+    return stepStatus(e.to) && stepStatus(e.to) !== 'next' ? 'reached' : 'muted'
   }
   const isSel = (step, item) =>
     !!selected && selected.step === step && (selected.item === undefined ? item !== 'fix' : selected.item === item)
   const hasErr = (step, item) => !!errors && errors.has(boxKey(step, item))
   const click = onSelect ? (step, item) => () => onSelect({ step, item }) : null
 
-  const connector = (i, nLeft, nRight) => (
-    <Connector
-      nLeft={nLeft}
-      nRight={nRight}
-      height={geo.height}
-      width={linkW}
-      size={size}
-      state={linkState(i)}
-      addAt={i}
-      onAdd={edit && onInsert ? onInsert : null}
-      pulse={pulseAdd && model.length === 0}
-      openAt={openAt}
-      setOpenAt={setOpenAt}
-    />
-  )
+  const connector = (k) => {
+    const shapes = connectorShapes(plan, k, linkW, size).map((sh) => ({ ...sh, state: edgeState(sh) }))
+    const states = new Set(shapes.map((sh) => sh.state))
+    const direct = shapes.filter((sh) => sh.kind !== 'pass')
+    const last = k === plan.count
+    // "+" sits on the line when there is one; at the end it adds after every last step.
+    const single = direct.length === 1 && direct[0].kind === 'direct'
+    const showAdd = edit && onInsert && (single || last)
+    return (
+      <Connector
+        shapes={shapes}
+        height={geo.height}
+        width={linkW}
+        state={states.size === 1 ? [...states][0] : null}
+        addAt={last ? model.length : plan.groups[k][0]}
+        onAdd={showAdd ? onInsert : null}
+        plusY={single ? direct[0].y : null}
+        pulse={pulseAdd && model.length === 0}
+        openAt={openAt}
+        setOpenAt={setOpenAt}
+      />
+    )
+  }
+
+  const slotExtras = (col) => stackExtras(col, size, mode)
+
+  const renderCol = (i) => {
+    const col = model[i]
+    const n = i + 1
+    const many = col.boxes.length > 1
+    const deps = stepDeps(steps, i)
+    const dflt = deps.length === (i > 0 ? 1 : 0) && (i === 0 || deps[0] === i - 1)
+    const waits = dflt ? '' : deps.length ? `, waits for ${deps.map((j) => stepLabel(steps, j)).join(', ')}` : ', starts at once'
+    return (
+    <div className={`co-flow-col co-flow-col-${col.kind}`} data-col={i} data-testid="flow-step" data-kind={col.kind}>
+      {edit && <StepTools index={i} count={model.length} onMove={onMove} onRemove={onRemove} blocked={moveBlocked} />}
+      {col.boxes.map((b, k) => {
+        const status = run ? (statusOf ? statusOf(i, b.item) : null) || 'next' : null
+        const label =
+          col.kind === 'agent'
+            ? `Step ${n}, ${many ? `Agent ${k + 1} of ${col.boxes.length}` : 'Agent'}: ${b.title}`
+            : `Step ${n}, ${KIND_WORD[col.kind]}: ${col.name}`
+        const full = label + waits
+        const word = run && wordOf ? wordOf(i, b.item) : null
+        return (
+          <Box
+            key={k}
+            word={word}
+            aheadMark={run && aheadOf ? !!aheadOf(i) : false}
+            kind={col.kind}
+            mini={mini}
+            step={i}
+            item={b.item}
+            title={b.title}
+            sub={b.sub}
+            mono={b.mono}
+            retry={b.retry}
+            handsOver={b.handsOver}
+            outputs={b.outputs}
+            status={status}
+            selected={isSel(i, b.item)}
+            error={hasErr(i, b.item)}
+            label={full}
+            onClick={click ? click(i, b.item) : null}
+          />
+        )
+      })}
+      {run && !mini && usageOf && usageOf(i) && (
+        <div className="co-flow-usage" data-testid="flow-usage">
+          {usageOf(i)}
+        </div>
+      )}
+      {col.kind === 'agent' && col.boxes.length > 0 && !mini && (
+        <div className="co-flow-colname" aria-hidden="true" title={col.name}>
+          {many ? `${col.name} · together` : col.name}
+        </div>
+      )}
+      {col.fix && !mini && (
+        <FixBranch
+          col={col}
+          label={`Step ${n}, Fixer: ${col.fix.title}`}
+          status={run ? (statusOf ? statusOf(i, 'fix') : null) || 'next' : null}
+          selected={isSel(i, 'fix')}
+          error={hasErr(i, 'fix')}
+          onClick={click ? click(i, 'fix') : null}
+        />
+      )}
+      {edit && col.kind === 'agent' && onAddAgent && (
+        <button type="button" className="co-flow-chip" onClick={() => onAddAgent(i)} aria-label={`Add an agent to step ${n}`} data-testid="flow-add-agent">
+          <PlusOutlined aria-hidden="true" /> agent
+        </button>
+      )}
+    </div>
+
+    )
+  }
 
   const startPill = (
     <div className={`co-flow-pill co-flow-start${mini ? ' co-flow-pill-mini' : ''}`} data-testid="flow-start">
@@ -348,76 +450,27 @@ export default function FlowCanvas({
         ) : (
           startPill
         )}
-        {model.map((col, i) => {
-          const prevN = i === 0 ? 1 : model[i - 1].boxes.length
-          const n = i + 1
-          const many = col.boxes.length > 1
-          return (
-            <div key={i} className="co-flow-seg">
-              {connector(i, prevN, col.boxes.length)}
-              <div className={`co-flow-col co-flow-col-${col.kind}`} data-col={i} data-testid="flow-step" data-kind={col.kind}>
-                {edit && <StepTools index={i} count={model.length} onMove={onMove} onRemove={onRemove} />}
-                {col.boxes.map((b, k) => {
-                  const status = run ? (statusOf ? statusOf(i, b.item) : null) || 'next' : null
-                  const label =
-                    col.kind === 'agent'
-                      ? `Step ${n}, ${many ? `Agent ${k + 1} of ${col.boxes.length}` : 'Agent'}: ${b.title}`
-                      : `Step ${n}, ${KIND_WORD[col.kind]}: ${col.name}`
-                  const word = run && wordOf ? wordOf(i, b.item) : null
+        {plan.groups.map((g, k) => (
+          <div key={k} className="co-flow-seg">
+            {connector(k)}
+            {g.length === 1 ? (
+              renderCol(g[0])
+            ) : (
+              <div className="co-flow-group" style={{ gap: s.gap }} data-testid="flow-group">
+                {g.map((i) => {
+                  const ex = slotExtras(model[i])
                   return (
-                    <Box
-                      key={k}
-                      word={word}
-                      aheadMark={run && aheadOf ? !!aheadOf(i) : false}
-                      kind={col.kind}
-                      mini={mini}
-                      step={i}
-                      item={b.item}
-                      title={b.title}
-                      sub={b.sub}
-                      mono={b.mono}
-                      retry={b.retry}
-                      handsOver={b.handsOver}
-                      outputs={b.outputs}
-                      status={status}
-                      selected={isSel(i, b.item)}
-                      error={hasErr(i, b.item)}
-                      label={label}
-                      onClick={click ? click(i, b.item) : null}
-                    />
+                    <div key={i} className="co-flow-slot" style={{ paddingTop: ex.above, paddingBottom: ex.below }}>
+                      {renderCol(i)}
+                    </div>
                   )
                 })}
-                {run && !mini && usageOf && usageOf(i) && (
-                  <div className="co-flow-usage" data-testid="flow-usage">
-                    {usageOf(i)}
-                  </div>
-                )}
-                {col.kind === 'agent' && col.boxes.length > 0 && !mini && (
-                  <div className="co-flow-colname" aria-hidden="true" title={col.name}>
-                    {many ? `${col.name} · together` : col.name}
-                  </div>
-                )}
-                {col.fix && !mini && (
-                  <FixBranch
-                    col={col}
-                    label={`Step ${n}, Fixer: ${col.fix.title}`}
-                    status={run ? (statusOf ? statusOf(i, 'fix') : null) || 'next' : null}
-                    selected={isSel(i, 'fix')}
-                    error={hasErr(i, 'fix')}
-                    onClick={click ? click(i, 'fix') : null}
-                  />
-                )}
-                {edit && col.kind === 'agent' && onAddAgent && (
-                  <button type="button" className="co-flow-chip" onClick={() => onAddAgent(i)} aria-label={`Add an agent to step ${n}`} data-testid="flow-add-agent">
-                    <PlusOutlined aria-hidden="true" /> agent
-                  </button>
-                )}
               </div>
-            </div>
-          )
-        })}
+            )}
+          </div>
+        ))}
         <div className="co-flow-seg">
-          {connector(model.length, model.length ? model[model.length - 1].boxes.length : 1, 1)}
+          {connector(plan.count)}
           <div className={`co-flow-pill co-flow-end${mini ? ' co-flow-pill-mini' : ''}`} data-testid="flow-end">
             <FlagOutlined aria-hidden="true" /> <span>Done</span>
           </div>

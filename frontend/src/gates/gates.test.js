@@ -143,3 +143,23 @@ describe('approval ahead round trip', () => {
     expect(stagePayload(formStage({ name: 'Rel', kind: 'approval', message: 'm', ahead: false }), [])).not.toHaveProperty('ahead')
   })
 })
+
+describe('steps side by side payload', () => {
+  it('keeps `after` on every kind of step', () => {
+    const agent = { name: 'Dev', items: [{ agent: 'a', prompt: 'p' }], after: [0] }
+    const gate = { name: 'T', kind: 'gate', before: [], project: 'p1', run: ['pytest -q'], timeout_min: 60, after: [] }
+    const approval = { name: 'OK', kind: 'approval', message: 'm', before: [], after: [0, 1] }
+    for (const st of [agent, gate, approval]) {
+      expect(stagePayload(formStage(st)).after).toEqual(st.after)
+    }
+    expect(stagePayload(formStage(gate))).toEqual(gate)
+    // without `after` nothing is sent
+    expect('after' in stagePayload(formStage({ ...gate, after: undefined }))).toBe(false)
+    expect('after' in stagePayload(formStage({ name: 'OK', kind: 'approval', message: 'm' }))).toBe(false)
+  })
+  it('never sends the server-internal max_parallel key inside a step', () => {
+    const p = stagePayload({ name: 'Dev', items: [], max_parallel: 3 })
+    expect('max_parallel' in p).toBe(false)
+    expect('max_parallel' in stagePayload({ name: 'T', kind: 'gate', run: ['x'], max_parallel: 3 })).toBe(false)
+  })
+})
