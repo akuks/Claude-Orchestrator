@@ -1022,6 +1022,20 @@ class UserCredential(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now, onupdate=_now)
 
 
+class UserPreferences(Base):
+    """A person's own standing preferences (phase 8b): added to the system prompt of every task they start.
+    Only the person writes it (``/me/preferences``); ``items`` is a list of ``{id, text, on}``."""
+
+    __tablename__ = "user_preferences"
+
+    user_id: Mapped[str] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), primary_key=True
+    )
+    enabled: Mapped[bool] = mapped_column(default=True)
+    items: Mapped[list] = mapped_column(JSON, default=list)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now, onupdate=_now)
+
+
 class OrgSetting(Base):
     """Admin-managed org-wide secret settings (e.g. "fallback_anthropic_api_key"),
     stored encrypted."""

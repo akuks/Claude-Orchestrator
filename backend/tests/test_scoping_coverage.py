@@ -55,6 +55,9 @@ NOT_PROJECT_BOUND = {
     ("DELETE", "/me/credentials/claude"): "removes the caller's own Claude credential only",
     ("DELETE", "/me/credentials/github"): "removes the caller's own GitHub token only",
     ("POST", "/me/credentials/test"): "probes the caller's own credentials, no project data",
+    # Personal preferences (phase 8b): always the caller's own list (no user id anywhere).
+    ("GET", "/me/preferences"): "the caller's own preferences, never another user's",
+    ("PUT", "/me/preferences"): "writes the caller's own preferences only",
     # co-guard policy (Phase 2): org-wide, readable by every person by spec.
     ("GET", "/guard/builtins"): "the static built-in rule table (ids, reasons), no stored data",
     ("GET", "/guard/org-settings"): "org-wide disabled built-ins and dev DB patterns, no project data",

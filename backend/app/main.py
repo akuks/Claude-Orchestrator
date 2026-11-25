@@ -37,6 +37,7 @@ from .routers import (
     launch,
     mcp,
     plan,
+    preferences as preferences_router,
     projects,
     questions,
     recommend as recommend_router,
@@ -227,6 +228,7 @@ for _r in (
     teams.router,
     credentials.router,
     credentials.admin_router,
+    preferences_router.router,
     health_router.router,
     guard.api,
 ):

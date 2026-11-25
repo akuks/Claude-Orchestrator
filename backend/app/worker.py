@@ -22,7 +22,7 @@ from pathlib import Path
 
 from sqlalchemy import func, select
 
-from . import auth, context_store, mcp_manager, memory, notifications, planlimits, rootcommit, security
+from . import auth, context_store, mcp_manager, memory, notifications, planlimits, preferences, rootcommit, security
 from .access import effective_project_id
 from .agent_env import PROJECT_ENV_BLOCKED, MissingCredential, build_agent_env, credential_ref
 from .config import settings
@@ -658,6 +658,16 @@ class WorkerManager:
         if superpowers:
             main_text = "\n\n".join(filter(None, [main_text, ground_rules.PRECEDENCE_LINE]))
             included.append("precedence")
+        personal_count = 0
+        if guard_inputs.personal_prefs and task_owner:  # phase 8b: the starter's own list, main session only
+            try:
+                prefs_text, personal_count = await preferences.load_paragraph(task_owner, run_secrets)
+            except Exception:  # noqa: BLE001 - a failed load never fails the task
+                log.warning("preferences: could not load for task %s; not added", task_id, exc_info=True)
+                prefs_text, personal_count = None, 0
+            if prefs_text:
+                main_text = "\n\n".join(filter(None, [main_text, prefs_text]))
+                included.append("personal_prefs")
         if guard_inputs.decisions_index:  # phase 4a: the project's decision index, after the ground rules
             main_text = "\n\n".join(filter(None, [main_text, guard_inputs.decisions_index]))
             included.append("decisions")
@@ -666,7 +676,8 @@ class WorkerManager:
             main_text = "\n\n".join(filter(None, [main_text, brief_text]))
             included.append("brief")
         system_prompt = "\n\n".join(filter(None, [system_prompt, guard_inputs.data_line, main_text]))
-        await emit("ground_rules", {"included": included})
+        await emit("ground_rules", {"included": included,
+                                    **({"personal_count": personal_count} if "personal_prefs" in included else {})})
 
         # Repo-backed project tasks: skip artifact diffing (git tracks changes and
         # scanning a whole repo is slow/noisy). Sandbox tasks still collect outputs.
