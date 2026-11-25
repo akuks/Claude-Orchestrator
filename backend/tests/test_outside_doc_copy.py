@@ -1,3 +1,4 @@
+import pytest
 """Phase 7e task 3 (spec §3): copy a temp-folder document the thread recorded into the project."""
 
 import asyncio
@@ -33,8 +34,18 @@ def _setup(tmp_path, docs, **kw):
     return tid, ws
 
 
+@pytest.fixture(autouse=True)
+def _own_temp_root(monkeypatch):
+    # On Linux CI pytest's tmp_path (the task folder) lives under /tmp, and a temp root that holds the
+    # task's folder is not treated as a temp root. Give the docs a temp root of their own via TMPDIR.
+    root = f"/tmp/co-copytest-root-{uuid.uuid4().hex[:8]}"
+    os.makedirs(root)
+    monkeypatch.setenv("TMPDIR", root)
+    yield root
+
+
 def _doc(name="plan.md", body="# plan"):
-    d = f"/tmp/co-copytest-{uuid.uuid4().hex[:8]}"
+    d = os.path.join(os.environ["TMPDIR"], f"co-copytest-{uuid.uuid4().hex[:8]}")
     os.makedirs(d)
     p = f"{d}/{name}"
     open(p, "w").write(body)
