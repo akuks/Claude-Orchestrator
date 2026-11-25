@@ -3,6 +3,7 @@ import { Button, Form, Input, Modal, Popconfirm, Select, Space, Switch, Table, T
 import { KeyOutlined, PlusOutlined, ReloadOutlined } from '@ant-design/icons'
 import { when } from '../time'
 import { api } from '../api'
+import { userTag } from '../plan/plan'
 import OrgFallbackCard from './OrgFallbackCard'
 
 const ROLES = [
@@ -87,6 +88,42 @@ export default function UsersView({ currentUser, onFallbackChanged }) {
   const [loading, setLoading] = useState(false)
   const [createOpen, setCreateOpen] = useState(false)
   const [resetFor, setResetFor] = useState(null)
+  const [plans, setPlans] = useState([])
+  const loadPlans = useCallback(() => {
+    api.planStatusAll().then((r) => setPlans(Array.isArray(r) ? r : [])).catch(() => setPlans([]))
+  }, [])
+  useEffect(() => {
+    loadPlans()
+  }, [loadPlans])
+  const planOf = (owner) => plans.find((p) => String(p.credential_owner) === String(owner))
+  const tryNow = async (owner) => {
+    try {
+      await api.planTryNow(owner)
+      message.success('Work can start now.')
+    } catch (e) {
+      message.error(e.message)
+    }
+    loadPlans()
+  }
+  const tryNowButton = (owner, name) => (
+    <Popconfirm
+      title={`Let ${name}'s work start now? If the limit is still reached, it will pause again.`}
+      onConfirm={() => tryNow(owner)}
+    >
+      <Button size="small">Try now</Button>
+    </Popconfirm>
+  )
+  const planCell = (owner, name) => {
+    const tag = userTag(planOf(owner))
+    return tag ? (
+      <Space size="small">
+        <Tag color={tag.color}>{tag.text}</Tag>
+        {tag.color === 'red' && tryNowButton(owner, name)}
+      </Space>
+    ) : null
+  }
+  const org = planOf('org')
+  const orgRow = org ? [{ id: 'org', name: 'Org fallback key', email: '', isOrg: true }] : []
 
   const load = useCallback(async () => {
     setLoading(true)
@@ -116,10 +153,15 @@ export default function UsersView({ currentUser, onFallbackChanged }) {
     { title: 'Name', dataIndex: 'name' },
     { title: 'Email', dataIndex: 'email' },
     {
+      title: 'Claude plan',
+      key: 'plan',
+      render: (_, u) => planCell(u.isOrg ? 'org' : u.id, u.name),
+    },
+    {
       title: 'Role',
       dataIndex: 'role',
       width: 130,
-      render: (r, u) => (
+      render: (r, u) => u.isOrg ? null : (
         <Select size="small" value={r} options={ROLES} style={{ width: 100 }} onChange={(v) => patch(u, { role: v })} />
       ),
     },
@@ -128,6 +170,7 @@ export default function UsersView({ currentUser, onFallbackChanged }) {
       dataIndex: 'active',
       width: 90,
       render: (a, u) => {
+        if (u.isOrg) return null
         const sw = <Switch size="small" checked={a} disabled={u.id === currentUser?.id} onChange={(v) => patch(u, { active: v })} />
         return a && u.id !== currentUser?.id ? (
           <Popconfirm title="Deactivate this user?" onConfirm={() => patch(u, { active: false })}>
@@ -142,13 +185,13 @@ export default function UsersView({ currentUser, onFallbackChanged }) {
       title: 'Last login',
       dataIndex: 'last_login_at',
       width: 140,
-      render: (d) => (d ? when(d).fromNow() : <Typography.Text type="secondary">never</Typography.Text>),
+      render: (d, u) => u.isOrg ? null : (d ? when(d).fromNow() : <Typography.Text type="secondary">never</Typography.Text>),
     },
     {
       title: '',
       key: 'actions',
       width: 150,
-      render: (_, u) => (
+      render: (_, u) => u.isOrg ? null : (
         <Space>
           {u.id === currentUser?.id && <Tag>you</Tag>}
           <Button size="small" icon={<KeyOutlined />} onClick={() => setResetFor(u)}>
@@ -170,7 +213,7 @@ export default function UsersView({ currentUser, onFallbackChanged }) {
           Refresh
         </Button>
       </Space>
-      <Table rowKey="id" size="middle" loading={loading} columns={columns} dataSource={users} pagination={false} />
+      <Table rowKey="id" size="middle" loading={loading} columns={columns} dataSource={[...orgRow, ...users]} pagination={false} />
       <CreateModal open={createOpen} onClose={() => setCreateOpen(false)} onDone={load} />
       <ResetModal user={resetFor} onClose={() => setResetFor(null)} />
     </>

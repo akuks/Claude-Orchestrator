@@ -197,6 +197,11 @@ export const api = {
   usageByModel: () => req('GET', '/usage/by-model'),
   usageByUser: () => req('GET', '/usage/by-user'),
 
+  // ---- Claude plan limits ----
+  planStatus: () => req('GET', '/plan/status'),
+  planStatusAll: () => req('GET', '/plan/status/all'),
+  planTryNow: (owner) => req('DELETE', `/plan/status/${encodeURIComponent(owner)}`),
+
   // ---- Security findings ----
   listFindings: (params = {}) => {
     const qs = new URLSearchParams(

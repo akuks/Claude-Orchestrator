@@ -52,6 +52,7 @@ import HandoffCard from '../resume/HandoffCard'
 import PublishedLinks, { publishedName } from '../runs/PublishedLinks'
 import ContinueButton from '../resume/ContinueButton'
 import RunNotices from '../resume/RunNotices'
+import { eventLine, pausedText } from '../plan/plan'
 import UsageChips from '../usage/UsageChips'
 import SoFarLine from '../usage/SoFarLine'
 import TokensPanel from '../usage/TokensPanel'
@@ -721,6 +722,9 @@ export default function TaskDetail({ taskId, onClose, onChanged, onOpenTask, onO
         </Descriptions>
       )}
 
+      {task?.status === 'queued' && pausedText(task) && (
+        <Alert data-testid="task-plan-paused" type="warning" showIcon style={{ marginBottom: 12 }} message={pausedText(task)} />
+      )}
       <RunNotices task={task} events={events} handoff={handoff} />
       <ThreadQuestions
         taskId={taskId}
@@ -754,6 +758,13 @@ export default function TaskDetail({ taskId, onClose, onChanged, onOpenTask, onO
         )}
         {events.map((ev, i) => {
           if (ev.type === 'guard') return <GuardLine key={i} line={guardLine(ev.payload || {}, guardCtx)} />
+          if (ev.type === 'plan_limit') {
+            return (
+              <div key={i} data-testid="plan-limit-line" style={{ color: 'var(--co-terminal-text)' }}>
+                {eventLine(ev.payload || {})}
+              </div>
+            )
+          }
           const u = usageLine(ev)
           if (u) return <UsageLine key={i} line={u} />
           const line = renderLine(ev)
