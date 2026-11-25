@@ -251,7 +251,7 @@ def test_capacity_macos_readers(monkeypatch):
     monkeypatch.setattr(capacity, "read_cgroup", lambda n: None)
     vm = ("Mach Virtual Memory Statistics: (page size of 16384 bytes)\nPages free:     1000.\n"
           "Pages inactive:  500.\nPages speculative: 100.\n")
-    outs = {"sysctl": str(16 * GB), "vm_stat": vm}
+    outs = {"/usr/sbin/sysctl": str(16 * GB), "/usr/bin/vm_stat": vm}
     monkeypatch.setattr(capacity, "run_command", lambda *a: outs.get(a[0]))
     assert capacity.memory() == {"total": 16 * GB, "free": 1600 * 16384}
     outs.clear()
@@ -267,3 +267,69 @@ def test_capacity_route(client, monkeypatch, member_client, anon_client):
     assert d["slots"] >= 1 and isinstance(d["running"], int) and isinstance(d["queued"], int)
     assert member_client.get("/admin/health/capacity").status_code == 403
     assert anon_client.get("/admin/health/capacity").status_code == 401
+
+
+# ---- fix round ---------------------------------------------------------------------------------------------
+def test_subject_with_unit_separator_is_kept_and_rename_counts():
+    sha = "b" * 40
+    text = (f"{sha}\x1f2026-11-20T10:00:00+00:00\x1fN\x1fn@x\x1fa\x1fb\x1fc\n\n"
+            "1\t1\t{a => b}/x.txt\n-\t-\tbin.png\n")
+    [c] = activity.parse_log(text)
+    assert c["title"] == "abc" and c["files"] == 2 and c["added"] == 1
+
+
+def test_byte_cap_stops_git_and_marks_truncated(tmp_path, monkeypatch):
+    d = repo(tmp_path)
+    for i in range(6):
+        commit(d, f"f{i}.txt", "x\n" * 5, msg="m" * 150)
+    monkeypatch.setattr(activity, "MAX_LOG_BYTES", 400)
+    h = activity.history(str(d), 30, gitfacts.Budget())
+    assert h["truncated"] is True and 0 < len(h["commits"]) < 6
+    r = gitsafe.run_git(str(d), "log", "--no-merges", "--numstat", gitsafe.ACTIVITY_FORMAT, "--since=2020-01-01",
+                        "-n", "50", timeout=10, max_bytes=100)
+    assert r.capped and len(r.out.encode()) <= 100
+
+
+def _task_events(pid, specs):
+    """specs: [(title, age_days, [content...])] -> task ids."""
+    async def go():
+        from app.database import SessionLocal
+        from app.models import Task, TaskEvent
+        ids = []
+        async with SessionLocal() as s:
+            for title, age, contents in specs:
+                tid = uuid.uuid4().hex
+                ids.append(tid)
+                s.add(Task(id=tid, title=title, prompt="p", root_id=tid, status="completed", project_id=pid,
+                           created_at=datetime.now(timezone.utc) - timedelta(days=age)))
+                await s.flush()
+                for i, c in enumerate(contents):
+                    s.add(TaskEvent(task_id=tid, seq=i, type="tool_result", payload={"content": c}))
+            await s.commit()
+        return ids
+    return asyncio.run(go())
+
+
+def test_task_map_prefers_oldest_and_honours_the_event_cap(client, tmp_path, monkeypatch):
+    pid = client.post("/projects", json={"name": f"tm-{uuid.uuid4().hex[:8]}",
+                                         "directory": str(tmp_path)}).json()["id"]
+    sha1, sha2 = "1" * 40, "2" * 40
+    older, newer = _task_events(pid, [("older", 3, [f"[main {sha1[:7]}] x"]), ("newer", 1, [f"[main {sha1[:7]}] x"])])
+    now = datetime.now(timezone.utc)
+    m = asyncio.run(activity.task_map(pid, now - timedelta(days=7), [sha1]))
+    assert m[sha1] == {"id": older, "title": "older"}
+    # the cap keeps the NEWEST events: sha2 sits in an older event than the cap allows
+    pid2 = client.post("/projects", json={"name": f"tm-{uuid.uuid4().hex[:8]}",
+                                          "directory": str(tmp_path)}).json()["id"]
+    monkeypatch.setattr(activity, "EVENT_CAP", 2)
+    (t,) = _task_events(pid2, [("t", 1, [f"[main {sha2[:7]}] old", "noise", "noise2"])])
+    assert asyncio.run(activity.task_map(pid2, now - timedelta(days=7), [sha2])) == {}
+    monkeypatch.setattr(activity, "EVENT_CAP", 5000)
+    activity._cache.clear()
+    assert asyncio.run(activity.task_map(pid2, now - timedelta(days=7), [sha2]))[sha2]["id"] == t
+
+
+def test_capacity_cgroup_ignores_reclaimable_cache(monkeypatch):
+    fake_linux(monkeypatch, 64, 60, {"memory.max": str(4 * GB), "memory.current": str(3 * GB),
+                                     "memory.stat": f"anon 1\ninactive_file {2 * GB}\n"})
+    assert capacity.memory() == {"total": 4 * GB, "free": 3 * GB}

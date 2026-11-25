@@ -44,11 +44,11 @@ class Commit:
     subject: str
 
 
-def _git(directory, budget: Budget, *args: str) -> gitsafe.GitResult:
+def _git(directory, budget: Budget, *args: str, **kw) -> gitsafe.GitResult:
     left = budget.left()
     if left <= 0:
         return gitsafe.GitResult(False, "", True, "git time budget spent")
-    return gitsafe.run_git(directory, *args, timeout=left)
+    return gitsafe.run_git(directory, *args, timeout=left, **kw)
 
 
 def facts(directory, budget: Budget) -> Facts:

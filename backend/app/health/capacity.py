@@ -58,8 +58,8 @@ def _linux(meminfo: str) -> dict | None:
 
 
 def _macos() -> dict | None:
-    total = run_command("sysctl", "-n", "hw.memsize")
-    vm = run_command("vm_stat")
+    total = run_command("/usr/sbin/sysctl", "-n", "hw.memsize")
+    vm = run_command("/usr/bin/vm_stat")
     if not total or not vm:
         return None
     try:
@@ -86,6 +86,10 @@ def _cgroup_limit(mem: dict) -> dict:
         return mem
     cur = read_cgroup("memory.current")
     used = int(cur.strip()) if cur and cur.strip().isdigit() else None
+    if used is not None:  # estimate: reclaimable page cache (inactive_file) is not "used"
+        m = re.search(r"^inactive_file (\d+)", read_cgroup("memory.stat") or "", re.M)
+        if m:
+            used = max(0, used - int(m.group(1)))
     free = max(0, limit - used) if used is not None else min(mem["free"], limit)
     return {"total": limit, "free": min(free, mem["free"])}
 

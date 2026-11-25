@@ -4,6 +4,7 @@ per-project history. Commit titles and names are plain text (control characters 
 from __future__ import annotations
 
 import re
+import time
 from datetime import datetime, timedelta, timezone
 
 from .. import gitsafe
@@ -15,7 +16,10 @@ TITLE_MAX = 200
 NAME_MAX = 60
 TASK_LOOKBACK_DAYS = 14
 TASK_CAP = 500
-EVENT_CAP = 20000
+EVENT_CAP = 5000
+MAX_LOG_BYTES = 8 * 1024 * 1024
+CACHE_SECONDS = 300.0
+_cache: dict[tuple, tuple[float, dict]] = {}
 
 _HEAD_RE = re.compile(r"^([0-9a-f]{40})\x1f")
 _NUM_RE = re.compile(r"^(\d+|-)\t(\d+|-)\t")
@@ -40,8 +44,9 @@ def parse_log(text: str) -> list[dict]:
         if _HEAD_RE.match(line):
             f = line.split("\x1f")
             cur = None
-            if len(f) != 5:
+            if len(f) < 5:
                 continue
+            f = [*f[:4], "\x1f".join(f[4:])]
             try:
                 when = datetime.fromisoformat(f[1])
             except ValueError:
@@ -73,13 +78,16 @@ def history(directory, days: int, budget: gitfacts.Budget, now: datetime | None 
     cutoff = now - timedelta(days=days)
     since = (cutoff - timedelta(days=1)).strftime("%Y-%m-%d")  # git filters on commit date; we re-check authored
     lg = gitfacts._git(directory, budget, "log", "--no-merges", "--numstat", gitsafe.ACTIVITY_FORMAT,
-                       f"--since={since}", "-n", str(MAX_COMMITS + 1))
+                       f"--since={since}", "-n", str(MAX_COMMITS + 1),
+                       max_bytes=MAX_LOG_BYTES)
     if lg.failed:
         return {"is_repo": True, "commits": [], "truncated": True}
     if not lg.ok:  # e.g. no commits yet
         return {"is_repo": True, "commits": [], "truncated": False}
     recs = parse_log(lg.out)
-    truncated = len(recs) > MAX_COMMITS
+    if lg.capped:  # the output was cut: its last record may be partial, drop it
+        recs = recs[:-1]
+    truncated = len(recs) > MAX_COMMITS or lg.capped
     seen, commits = set(), []
     for c in recs[:MAX_COMMITS]:
         if c["sha"] in seen or c["_when"] < cutoff:
@@ -109,7 +117,9 @@ def summarize(commits: list[dict], days: int, now: datetime | None = None) -> tu
 
 async def task_map(project_id: str, since: datetime, shas: list[str]) -> dict[str, dict]:
     """sha -> {id, title} for tasks of this project whose own commit output ("[branch abc1234] ...") names it.
-    Only what runs recorded is used; a commit made outside a run stays unmapped. Bounded."""
+    Only what runs recorded is used; a commit made outside a run stays unmapped. When several tasks name a sha
+    the oldest wins. Bounded (newest EVENT_CAP events, payloads dropped as read) and cached 5 minutes per
+    (project, newest commit, commit count)."""
     from sqlalchemy import select
 
     from ..database import SessionLocal
@@ -117,29 +127,38 @@ async def task_map(project_id: str, since: datetime, shas: list[str]) -> dict[st
 
     if not shas:
         return {}
-    found: dict[str, dict] = {}
+    key = (project_id, shas[0], shas[-1], len(shas))
+    hit = _cache.get(key)
+    if hit and time.monotonic() - hit[0] < CACHE_SECONDS:
+        return hit[1]
+    by_prefix: dict[str, list[str]] = {}
+    for sha in shas:
+        by_prefix.setdefault(sha[:7], []).append(sha)
+    found: dict[str, tuple[datetime, str]] = {}
     lo = since - timedelta(days=TASK_LOOKBACK_DAYS)
     async with SessionLocal() as s:
         tasks = (await s.execute(
-            select(Task.id, Task.title).where(Task.project_id == project_id, Task.created_at >= lo)
+            select(Task.id, Task.title, Task.created_at).where(Task.project_id == project_id, Task.created_at >= lo)
             .order_by(Task.created_at.desc()).limit(TASK_CAP))).all()
-        info = {t.id: t.title for t in tasks}
-        ids = list(info)
-        scanned = 0
-        for i in range(0, len(ids), 200):
-            rows = (await s.execute(
+        info = {t.id: (t.created_at, t.title) for t in tasks}
+        if info:
+            res = await s.stream(
                 select(TaskEvent.task_id, TaskEvent.payload)
-                .where(TaskEvent.task_id.in_(ids[i:i + 200]), TaskEvent.type == "tool_result")
-                .limit(EVENT_CAP - scanned))).all()
-            scanned += len(rows)
-            for tid, payload in rows:
-                content = (payload or {}).get("content") if isinstance(payload, dict) else None
+                .where(TaskEvent.task_id.in_(list(info)), TaskEvent.type == "tool_result")
+                .order_by(TaskEvent.id.desc()).limit(EVENT_CAP).execution_options(yield_per=100))
+            async for tid, payload in res:
+                content = payload.get("content") if isinstance(payload, dict) else None
                 if not isinstance(content, str):
                     continue
                 for short in gitfacts.own_shas([content]):
-                    for sha in shas:
-                        if sha.startswith(short) and sha not in found:
-                            found[sha] = {"id": tid, "title": _plain(info[tid], 200)}
-            if scanned >= EVENT_CAP:
-                break
-    return found
+                    for sha in by_prefix.get(short[:7], ()):
+                        if sha.startswith(short):
+                            made = info[tid][0]
+                            if sha not in found or made < found[sha][0]:
+                                found[sha] = (made, tid)
+                content = payload = None
+    out = {sha: {"id": tid, "title": _plain(info[tid][1], 200)} for sha, (_, tid) in found.items()}
+    if len(_cache) > 200:
+        _cache.clear()
+    _cache[key] = (time.monotonic(), out)
+    return out
