@@ -21,7 +21,7 @@ from ..constants import Status
 from ..gates import executor, spec, test_results, totals
 from ..models import Agent, Project, Task, Workflow, WorkflowGateRun, WorkflowRun
 from ..redaction import clean_text, env_values, mask_values
-from .. import workflow_templates as wft
+from .. import flowgraph, workflow_templates as wft
 from ..workflow_runner import ACTIVE_RUN, _spent as _run_spent, gate_status_text
 from ..schemas import (
     BudgetRaise,
@@ -205,11 +205,18 @@ async def workflow_projects(s, wf: Workflow) -> list[str]:
     return sorted(ids)
 
 
-async def _normalize(s, stages: list[dict]) -> list[dict]:
+async def _normalize(s, stages: list[dict], max_parallel=None) -> list[dict]:
+    """Validated stages with `max_parallel` stored on stage 0 (no column: no migration).
+    Step-order problems come back together as a list of sentences in `detail`."""
     try:
-        return await spec.validate_stages(s, stages)
+        out = await spec.validate_stages(s, stages)
     except ValueError as e:
         raise HTTPException(422, str(e))
+    problems = flowgraph.validate(out, max_parallel)
+    if problems:
+        raise HTTPException(422, problems)
+    flowgraph.set_max_parallel(out, max_parallel)
+    return out
 
 
 def _run_visible(p, run: WorkflowRun, visible) -> bool:
@@ -236,7 +243,7 @@ async def create_workflow(payload: WorkflowCreate, request: Request):
     ensure_admin(request.state.principal)
     stages = [st.model_dump(exclude_unset=True) for st in payload.stages]
     async with SessionLocal() as s:
-        stages = await _normalize(s, stages)
+        stages = await _normalize(s, stages, payload.max_parallel)
         await _validate_agents(s, stages)
         wf = Workflow(name=payload.name, description=payload.description, stages=stages, budget_usd=payload.budget_usd,
                       created_by=request.state.principal.user.id)
@@ -261,9 +268,19 @@ async def update_workflow(workflow_id: str, payload: WorkflowUpdate, request: Re
         wf = await s.get(Workflow, workflow_id)
         if wf is None:
             raise HTTPException(404, "Workflow not found")
+        mp = data.pop("max_parallel", None) if "max_parallel" in data else None
         if "stages" in data:
-            data["stages"] = await _normalize(s, data["stages"])
+            if "max_parallel" not in payload.model_fields_set:
+                mp = flowgraph.get_max_parallel(wf.stages or [])
+            data["stages"] = await _normalize(s, data["stages"], mp)
             await _validate_agents(s, data["stages"])
+        elif "max_parallel" in payload.model_fields_set:
+            kept = [dict(x) for x in wf.stages or []]
+            problems = flowgraph.validate(kept, mp)
+            if problems:
+                raise HTTPException(422, problems)
+            flowgraph.set_max_parallel(kept, mp)
+            data["stages"] = kept
         for k, v in data.items():
             setattr(wf, k, v)
         await s.commit()

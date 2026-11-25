@@ -6,6 +6,8 @@ import os
 import re
 import stat
 
+from app import flowgraph
+
 MAX_IMPORT_BYTES = 64 * 1024
 MAX_REPO_FILES = 20
 REPO_DIR = (".claude-orchestrator", "workflows")
@@ -109,6 +111,9 @@ def export_markdown(wf) -> str:
     doc = {"name": wf.name, "description": desc, "stages": wf.stages or []}
     if wf.budget_usd is not None:
         doc["budget_usd"] = wf.budget_usd
+    mp = flowgraph.get_max_parallel(wf.stages or [])
+    if mp != flowgraph.DEFAULT_MAX_PARALLEL:
+        doc["max_parallel"] = mp
     shown = desc.replace("```", "'''")
     title = " ".join((wf.name or "").split())
     parts = [f"# {title}", ""]
@@ -137,6 +142,8 @@ def parse_import(text: str) -> dict:
     out = {"name": data.get("name"), "description": data.get("description"), "stages": data.get("stages")}
     if data.get("budget_usd") is not None:
         out["budget_usd"] = data["budget_usd"]  # WorkflowCreate validates it like a save
+    if data.get("max_parallel") is not None:
+        out["max_parallel"] = data["max_parallel"]  # checked by flowgraph.validate on save
     return out
 
 

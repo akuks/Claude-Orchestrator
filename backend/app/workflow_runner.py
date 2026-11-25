@@ -92,7 +92,8 @@ _PLACEHOLDER = re.compile(r"\{\{(input|prev|stage(\d+))(?:\.([a-z][a-z0-9_]{0,39
 
 
 def substitute(prompt: str, run_input: str, stage_outputs: dict[int, str],
-               named_outputs: dict[int, dict[str, str]] | None = None) -> str:
+               named_outputs: dict[int, dict[str, str]] | None = None,
+               after: list[int] | None = None, stage_names: dict[int, str] | None = None) -> str:
     """Fill placeholders in a stage prompt:
       {{input}}        -> the run's input
       {{prev}}         -> the previous stage's combined output
@@ -102,6 +103,9 @@ def substitute(prompt: str, run_input: str, stage_outputs: dict[int, str],
     An unknown stage or name gives "". Single pass: the template is tokenised once, so
     a substituted value that itself holds `{{...}}` is never expanded again.
     If no {{input}} and no stage placeholder exists, the input is appended (back-compat).
+    With `after` (a step that declares what it waits for): {{prev}} is the output of those steps in step
+    order, each under "From <name>:" when there is more than one; {{prev.name}} takes the first of them
+    that has `name`; an empty `after` gives "". Without `after` nothing changes.
     """
     named = named_outputs or {}
     p = prompt or ""
@@ -118,6 +122,18 @@ def substitute(prompt: str, run_input: str, stage_outputs: dict[int, str],
             had_input = True
             return run_input or ""
         had_stage = True
+        if head == "prev" and after is not None:
+            srcs = sorted(set(after))
+            if name:
+                for j in srcs:
+                    if name in (named.get(j) or {}):
+                        return named[j][name]
+                return ""
+            if len(srcs) == 1:
+                return stage_outputs.get(srcs[0], "")
+            names = stage_names or {}
+            return "\n\n".join(
+                f"From {names.get(j) or f'step {j + 1}'}:\n{stage_outputs.get(j, '')}" for j in srcs)
         idx = prev_idx if head == "prev" else int(num) - 1
         if idx is None:
             return ""
