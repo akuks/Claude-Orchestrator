@@ -120,6 +120,14 @@ describe('runs and credentials in the palette', () => {
     expect(a.navigate).toHaveBeenCalledWith({ page: 'runs', id: 'r1' })
     expect(searchCommands(cmds, 'feature flow')[0].id).toBe('run:r1')
   })
+  it('offers "My preferences" when the action exists', () => {
+    const openPreferences = vi.fn()
+    const c = buildCommands({ actions: { ...actions(), openPreferences } }).find((x) => x.id === 'action:preferences')
+    expect(c.label).toBe('My preferences')
+    c.run()
+    expect(openPreferences).toHaveBeenCalled()
+    expect(buildCommands({ actions: actions() }).some((x) => x.id === 'action:preferences')).toBe(false)
+  })
   it('offers "My credentials" when the action exists', () => {
     const openCredentials = vi.fn()
     const cmds = buildCommands({ actions: { ...actions(), openCredentials } })
