@@ -65,7 +65,7 @@ function UiChecks({ project, canEdit }) {
     try {
       setTask(await api.setupUiChecks(project.id))
     } catch (e) {
-      setErr(plainError(e))
+      setErr(e?.status === 409 ? 'UI checks are already being set up for this project.' : plainError(e))
     } finally {
       setBusy(false)
     }

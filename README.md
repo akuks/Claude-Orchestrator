@@ -2127,7 +2127,7 @@ link to the task. Others see "Ask a maintainer to set up UI checks."
 
 ### Brand guide template
 
-In the **Context Store**, **Start from a template: Brand guide** (for people who can add docs to a project) adds a
+In the **Context Store**, **Start from a template: Brand guide** (for the project's maintainers and admins) adds a
 project doc `brand/brand.md` for the chosen project and opens it for editing. If the project already has one, you see
 "This project already has a brand guide." (`POST /context-docs/templates/brand`.)
 
