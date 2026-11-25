@@ -381,7 +381,7 @@ _GATE_STATE = {
 
 def _in_flight(status) -> bool:
     """A step started and not finished (successfully or not)."""
-    return status not in (None, "done", "passed", "approved", "failed", "rejected")
+    return status not in (None, "done", "passed", "approved", "failed", "rejected", "stopped")
 
 
 def _gate_stage_state(status, index: int, current: int) -> str:
@@ -726,6 +726,10 @@ def _status_word(kind: str, entry: dict, live: bool, current: bool, working: boo
     status = entry.get("status")
     if live or (working and status in ("waiting", "running")):
         return "Running"
+    if status == "stopped":
+        return "Stopped"  # another branch failed (7b)
+    if status == "budget" and entry.get("budget_reserve"):
+        return "Waiting for other steps"  # other steps' caps use what is left, not the limit (7b)
     if status == "waiting" and entry.get("_slot_wait"):
         return "Waiting its turn"  # allowed; waits for a free place among the steps at once (7b)
     if status == "held":

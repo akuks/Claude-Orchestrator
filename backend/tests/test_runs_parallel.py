@@ -239,8 +239,12 @@ def test_failure_stops_the_other_branches_and_retry_continues(fakes, agents):
         run = await _run(rid)
         assert run.status == "failed"
         assert run.stage_state["1"]["status"] == "failed"
-        assert run.stage_state["3"]["status"] == "failed" and run.stage_state["3"]["reason"] == "cancelled"
+        # Stopped because B failed (not a failure of their own); Cancel would say "cancelled".
+        for k in ("2", "3"):
+            assert run.stage_state[k]["status"] == "stopped"
+            assert run.stage_state[k]["reason"] == "Stopped because B failed."
         assert has(run, "Step E (gate) still needs: slow")
+        assert has(run, "C: stopped because B failed") and has(run, "E: stopped because B failed")
         assert c_task in w.cancelled  # the other agent branch is cancelled like Cancel does
         assert [x.outcome for x in await _rows(rid)] == ["cancelled"]
         assert lock_owners(rid) == [] and (rid, 3) not in r._gates
@@ -754,11 +758,12 @@ def test_retry_gives_a_new_attempt_only_to_steps_that_started(fakes, agents):
         await _finish_tasks(rid, 1, Status.FAILED)
         await r._advance(rid)
         run = await _run(rid)
-        assert run.status == "failed" and run.stage_state["2"]["status"] == "budget"
+        assert run.status == "failed" and run.stage_state["2"]["status"] == "stopped"
         assert await r.retry_run(rid)
         run = await _run(rid)
         assert has(run, "Step B retried (attempt 2)") and not has(run, "Step C retried")
         assert run.stage_state["2"].get("attempt", 0) == 0
+        assert run.stage_state["2"]["status"] in ("running", "budget")  # never started: simply starts again
 
     asyncio.run(go())
 
@@ -910,5 +915,123 @@ def test_a_killed_gate_forgets_the_stop_request(fakes, agents):
         await r._kill_gates(rid, record=False)
         assert rid not in r._stop_after_gate
         await r.cancel_run(rid)
+
+    asyncio.run(go())
+
+
+def test_stopped_branches_say_so(client, fakes, agents, monkeypatch):
+    """A, then gate G, agent C and agent B side by side; B fails: G and C are "stopped" (word
+    "Stopped"), B is the one failure; Retry gives every one of them a new attempt."""
+    from _runs7a import use_runner
+
+    a, b = agents
+    fakes.script["slow"] = ["block", oc()]
+    w = FakeWorker()
+    r = WorkflowRunner(w, 999)
+    use_runner(monkeypatch, r)
+
+    async def go():
+        pid = await _project()
+        st = [agent("A", a), after(gate(pid, run=("slow",), name="G"), 0), after(agent("C", a), 0),
+              after(agent("B", b), 0)]
+        st[0]["max_parallel"] = 3
+        rid = await make_run(st, [pid])
+        await r.start_run(rid)
+        await _finish_tasks(rid, 0)
+        await r._advance(rid)
+        await wait_for(lambda: (rid, 1) in r._procs)
+        await _finish_tasks(rid, 3, Status.FAILED, "boom")
+        await r._advance(rid)
+        await calm(r)
+        await _finish_tasks(rid, 2, Status.CANCELLED, None)  # what the worker does
+        return rid
+
+    loop = asyncio.new_event_loop()
+    try:
+        rid = loop.run_until_complete(go())
+        d = client.get(f"/workflows/runs/{rid}").json()
+        ss = d["stage_state"]
+        for k in ("1", "2"):
+            assert ss[k]["status"] == "stopped" and ss[k]["reason"] == "Stopped because B failed."
+            assert ss[k]["status_word"] == "Stopped"
+        assert ss["3"]["status"] == "failed" and ss["3"]["status_word"] == "Failed"
+        run = loop.run_until_complete(_run(rid))
+        assert has(run, "G: stopped because B failed") and has(run, "C: stopped because B failed")
+        assert not has(run, "B: stopped")
+        assert (loop.run_until_complete(_tasks(rid, 2)))[0].id in w.cancelled
+        assert loop.run_until_complete(r.retry_run(rid))
+        loop.run_until_complete(calm(r))
+        run = loop.run_until_complete(_run(rid))
+        for k in ("1", "2", "3"):
+            assert run.stage_state[k]["attempt"] == 1
+        assert run.stage_state["1"]["status"] == "passed" and run.status == "running"
+    finally:
+        loop.close()
+
+
+def test_reserve_hold_is_flagged_for_the_screen(client, fakes, agents, monkeypatch):
+    from _runs7a import use_runner
+
+    a, b = agents
+    r = WorkflowRunner(FakeWorker(), 999)
+    use_runner(monkeypatch, r)
+
+    async def go():
+        held = await make_run([agent("A", a), agent("B", b), after(agent("C", a), 0)], budget=3.0)
+        await r.start_run(held)
+        await _cost(held, 0, 1.5)
+        await r._advance(held)  # C waits for B's cap
+        limit = await make_run([agent("A", a), agent("B", b)], budget=1.0)
+        await r.start_run(limit)
+        await _cost(limit, 0, 1.0)
+        await r._advance(limit)  # the real spending limit
+        return held, limit
+
+    loop = asyncio.new_event_loop()
+    try:
+        held, limit = loop.run_until_complete(go())
+        st = client.get(f"/workflows/runs/{held}").json()["stage_state"]["2"]
+        assert st["status"] == "budget" and st["budget_reserve"] is True
+        assert st["status_word"] == "Waiting for other steps"
+        st = client.get(f"/workflows/runs/{limit}").json()["stage_state"]["1"]
+        assert st["status"] == "budget" and "budget_reserve" not in st and "status_word" not in st
+        assert st["reason"].startswith("budget reached")
+        # Once B ends the hold goes; the started step carries no flag.
+        loop.run_until_complete(_cost(held, 1, 0.5))
+        loop.run_until_complete(r._advance(held))
+        st = client.get(f"/workflows/runs/{held}").json()["stage_state"]["2"]
+        assert st["status"] == "running" and "budget_reserve" not in st
+    finally:
+        loop.close()
+
+
+def test_reserve_counts_only_current_attempts(fakes, agents):
+    """A task of an older attempt left waiting (here: B's first try, awaiting approval) does not
+    hold later steps."""
+    a, b = agents
+
+    async def go():
+        st = [agent("A", a), {"name": "B", "items": [{"agent": b, "prompt": "x"}, {"agent": a, "prompt": "y"}]},
+              after(agent("C", a), 0), after(agent("D", b), 1, 2)]
+        rid = await make_run(st, budget=4.0)
+        r = WorkflowRunner(FakeWorker(), 999)
+        await r.start_run(rid)
+        await _cost(rid, 0, 0.5)
+        await r._advance(rid)  # B (2 tasks, $2 caps) and C ($1.50 cap)
+        bt = await _tasks(rid, 1)
+        async with SessionLocal() as s:
+            (await s.get(Task, bt[0].id)).status = Status.FAILED
+            (await s.get(Task, bt[1].id)).status = Status.AWAITING_APPROVAL  # an old sibling left waiting
+            await s.commit()
+        await r._advance(rid)
+        assert (await _run(rid)).status == "failed"
+        assert await r.retry_run(rid)  # B again (attempt 1); C again
+        run = await _run(rid)
+        async with SessionLocal() as s:
+            reserved = await wr._reserved(s, run)
+        active = [t for t in await _tasks(rid) if t.status in Status.ACTIVE and t.total_cost_usd is None]
+        old = [t for t in active if t.id == bt[1].id]
+        assert old and old[0].stage_attempt == 0 and run.stage_state["1"]["attempt"] == 1
+        assert reserved == sum(t.max_budget_usd for t in active) - old[0].max_budget_usd
 
     asyncio.run(go())

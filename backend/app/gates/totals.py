@@ -42,7 +42,7 @@ def _mins(a, b) -> float:
 
 def _working(st) -> bool:
     """A step in flight (7b: several can be at once; a plain line run has only the current one)."""
-    return (st or {}).get("status") not in (None, "done", "passed", "approved", "failed", "rejected")
+    return (st or {}).get("status") not in (None, "done", "passed", "approved", "failed", "rejected", "stopped")
 
 
 def _tok(t) -> int:

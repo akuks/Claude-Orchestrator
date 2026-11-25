@@ -289,15 +289,17 @@ def _budget_cap(own: float | None, remaining: float | None) -> float | None:
 
 async def _reserved(s, run) -> float:
     """What the run's tasks still at work may spend: their caps (max_budget_usd), for the ones
-    with no recorded cost yet."""
-    v = (
+    with no recorded cost yet, of each step's current attempt (a fix task carries its gate's
+    attempt); an older attempt's task left waiting does not hold later steps."""
+    rows = (
         await s.execute(
-            select(func.coalesce(func.sum(Task.max_budget_usd), 0.0)).where(
+            select(Task.stage_index, Task.stage_attempt, Task.max_budget_usd).where(
                 Task.workflow_run_id == run.id, Task.status.in_(list(Status.ACTIVE)),
                 Task.total_cost_usd.is_(None))
         )
-    ).scalar()
-    return float(v or 0.0)
+    ).all()
+    return float(sum(cap or 0.0 for j, att, cap in rows
+                     if j is not None and (att or 0) == _attempt(run, j)))
 
 
 async def _flow_left(s, run, remaining: float | None) -> float | None:
@@ -316,7 +318,12 @@ def _budget_hold(run, i: int, st: dict, spent: float, reason: str | None = None)
     reason = reason or f"budget reached (${spent:.2f} of ${float(run.budget_usd or 0):.2f})"
     if st.get("status") != "budget" or st.get("reason") != reason:
         runlog.append(run, f"Step {_stage_name(run, i)} held: {reason}")
-    _put_state(run, i, {**st, "status": "budget", "reason": reason})
+    st = {**st, "status": "budget", "reason": reason}
+    if reason == RESERVE_WORDS:
+        st["budget_reserve"] = True  # the UI's flag: not the spending limit, other steps' caps
+    else:
+        st.pop("budget_reserve", None)
+    _put_state(run, i, st)
     if reason != RESERVE_WORDS:
         # Held for other steps' caps: another branch is at work by definition, so the run
         # is not "waiting for you" (7b).
@@ -436,19 +443,32 @@ def _move_pointer(run) -> None:
         run.status = RUN_RUNNING
 
 
-def _cancel_words(run, i: int, procs: dict) -> bool:
-    """Mark a gate or approval step stopped by a cancel (or by another branch failing): the
-    command it still needed is logged and the step fails "cancelled". True when marked."""
+FINISHED_STATES = ("done", "passed", "failed", "approved", "rejected", "stopped")
+
+
+def _cancel_words(run, i: int, procs: dict, failed_name: str | None = None) -> bool:
+    """Mark a step stopped by a cancel: a gate or approval logs the command it still needed
+    and fails "cancelled" (agent steps are left; their tasks are cancelled). With
+    `failed_name` (7b: another branch failed) every kind of step in flight becomes "stopped",
+    reason "Stopped because <name> failed.", with one log line. True when marked."""
     st = get_state(run, i)
     status = st.get("status")
-    if _kind(run, i) == "agent" or status in ("passed", "failed", "approved", "rejected", None):
+    if status is None or status in FINISHED_STATES:
         return False
-    live = procs.get((run.id, i))
-    nxt = _next_cmd(run.stages[i], st) if status in GATE_LIVE else None
-    cmd = live["cmd"] if live else (nxt[1] if nxt else None)
-    if cmd:
-        runlog.append(run, f"{_label(run, i)} still needs: {cmd}")
-    st.update(status="failed", reason="cancelled")
+    kind = _kind(run, i)
+    if kind == "agent" and failed_name is None:
+        return False
+    if kind != "agent":
+        live = procs.get((run.id, i))
+        nxt = _next_cmd(run.stages[i], st) if status in GATE_LIVE else None
+        cmd = live["cmd"] if live else (nxt[1] if nxt else None)
+        if cmd:
+            runlog.append(run, f"{_label(run, i)} still needs: {cmd}")
+    if failed_name is None:
+        st.update(status="failed", reason="cancelled")
+    else:
+        st.update(status="stopped", reason=f"Stopped because {failed_name} failed.")
+        runlog.append(run, f"{_stage_name(run, i)}: stopped because {failed_name} failed")
     _put_state(run, i, st)
     return True
 
@@ -1014,9 +1034,10 @@ class WorkflowRunner:
 
     @staticmethod
     async def _finished_agent(s, run, j: int) -> bool:
-        """An agent step still marked running whose tasks of this attempt all completed (it
-        finished as another branch failed): not retried; the next advance marks it done."""
-        if _kind(run, j) != "agent" or get_state(run, j).get("status") != "running":
+        """An agent step still marked running (or stopped) whose tasks of this attempt all
+        completed (it finished as another branch failed): not retried; the next advance marks
+        it done."""
+        if _kind(run, j) != "agent" or get_state(run, j).get("status") not in ("running", "stopped"):
             return False
         rows = (await s.execute(select(Task.status).where(
             Task.workflow_run_id == run.id, Task.stage_index == j,
@@ -1311,7 +1332,14 @@ class WorkflowRunner:
                 if run is None or run.status != RUN_FAILED:
                     return None
                 stages = run.stages or []
-                stopped = {i for i in range(len(stages)) if _cancel_words(run, i, self._procs)}
+                bad = [j for j in range(len(stages))
+                       if get_state(run, j).get("status") in ("failed", "rejected")]
+                who = _stage_name(run, bad[0]) if bad else "another step"
+                # An agent branch whose tasks all completed finished, it was not stopped: it is
+                # left as it is and marked done by the next advance (Retry / Run again).
+                done_agents = {j for j in range(len(stages)) if await self._finished_agent(s, run, j)}
+                stopped = {i for i in range(len(stages))
+                           if i not in done_agents and _cancel_words(run, i, self._procs, who)}
                 rows = (await s.execute(select(Task.id, Task.stage_index, Task.stage_attempt).where(
                     Task.workflow_run_id == run.id, Task.status.in_(list(Status.ACTIVE))))).all()
                 tids = []
@@ -1360,7 +1388,7 @@ class WorkflowRunner:
             async with SessionLocal() as s:
                 run = await s.get(WorkflowRun, run_id)
                 if (run is None or run.status not in ACTIVE_RUN
-                        or get_state(run, v.index).get("status") != "running"
+                        or get_state(run, v.index).get("status") not in ("running", "stopped")
                         or _attempt(run, v.index) != v.attempt):
                     return flipped
                 for tid, values, reason in results:
@@ -1837,6 +1865,7 @@ class WorkflowRunner:
                     reason = st.get("fail_reason")
                 st.pop("fail_reason", None)
                 st.pop("lock_wait", None)
+                st.pop("budget_reserve", None)
                 _put_state(run, i, {**st, "status": "fixing", "fix_task": task.id, "reason": reason})
                 if run.status == RUN_PAUSED:
                     run.status = RUN_RUNNING  # the cap was raised: resume
@@ -1882,7 +1911,7 @@ class WorkflowRunner:
     def _flag_others(self, run, i: int) -> None:
         """A gate failed the run: when another step is in flight (only with branches), the
         gate's task stops it once it ends (_gate_main)."""
-        if any(j != i and not _ok(run, j) and get_state(run, j).get("status") not in (None, "failed", "rejected")
+        if any(j != i and not _ok(run, j) and get_state(run, j).get("status") not in (None, *FINISHED_STATES)
                for j in range(run.current_stage or 0, len(run.stages or []))):
             self._stop_after_gate.add(run.id)
 
