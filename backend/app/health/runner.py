@@ -84,12 +84,12 @@ def _failed(check, why: str) -> dict:
 
 async def _run_one(check, s) -> dict:
     try:
-        result = await asyncio.wait_for(check.fn(s), CHECK_BUDGET)
+        result = await asyncio.wait_for(check.fn(s), getattr(check, "budget", None) or CHECK_BUDGET)
         if not isinstance(result, Result) or result.status not in _ORDER:
             return _failed(check, "the check gave an unusable answer")
         return _entry(check, result)
     except asyncio.TimeoutError:
-        return _failed(check, f"it did not answer within {CHECK_BUDGET:g} seconds")
+        return _failed(check, f"it did not answer within {(getattr(check, 'budget', None) or CHECK_BUDGET):g} seconds")
     except asyncio.CancelledError:
         raise
     except Exception as e:  # noqa: BLE001 - a broken check must not break the page

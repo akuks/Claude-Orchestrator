@@ -25,10 +25,16 @@ def is_code_map_server(server) -> bool:
     return SERVER_MARK in hay.lower()
 
 
+def code_map_servers(servers) -> list:
+    """Every code map server among `servers`, enabled ones first (then by name, so the pick is stable)."""
+    found = [m for m in servers if is_code_map_server(m)]
+    found.sort(key=lambda m: (not getattr(m, "enabled", True), m.name or ""))
+    return found
+
+
 def code_map_server(servers):
     """The code map server among `servers` (enabled ones first), or None."""
-    found = [m for m in servers if is_code_map_server(m)]
-    found.sort(key=lambda m: not getattr(m, "enabled", True))
+    found = code_map_servers(servers)
     return found[0] if found else None
 
 

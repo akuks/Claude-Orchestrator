@@ -12,7 +12,7 @@ from sqlalchemy.orm import Session
 from app import models
 from app.database import _alembic_cfg, _baseline_metadata, run_migrations
 
-HEAD = "0022"  # the latest revision
+HEAD = "0023"  # the latest revision
 
 
 def _tables(db) -> set[str]:
@@ -831,3 +831,34 @@ def test_migration_0022_is_one_transaction_and_skips_what_is_there(scratch_url, 
     with caplog.at_level(logging.WARNING):
         command.upgrade(_alembic_cfg(url), "0022")
     assert any("task history table" in r.getMessage() for r in caplog.records)
+
+
+def test_migration_0023_upgrade_downgrade(scratch_url):
+    from alembic import command
+
+    url = scratch_url
+    command.upgrade(_alembic_cfg(url), "0022")
+
+    def old_rows(sc, insp):
+        sc.exec_driver_sql("INSERT INTO mcp_servers (id, name, transport, scope, args, enabled, status, tools, created_at,"
+                           " environment, default_action, start_in_project) VALUES ('m23', 'old', 'stdio', 'team', '[]', true,"
+                           " 'unknown', '[]', CURRENT_TIMESTAMP, 'unknown', 'auto_approve', false)")
+
+    _inspect(url, old_rows)
+    command.upgrade(_alembic_cfg(url), "0023")
+
+    def check(sc, insp):
+        cols = {c["name"]: c for c in insp.get_columns("mcp_servers")}
+        assert "server_version" in cols and cols["server_version"]["nullable"]
+        return (sc.exec_driver_sql("SELECT server_version FROM mcp_servers WHERE id='m23'").scalar(),
+                sc.exec_driver_sql("SELECT version_num FROM alembic_version").scalar())
+
+    assert _inspect(url, check) == (None, "0023")
+    command.upgrade(_alembic_cfg(url), "0023")  # again: nothing to do
+    command.downgrade(_alembic_cfg(url), "0022")
+
+    def check_down(sc, insp):
+        assert "server_version" not in {c["name"] for c in insp.get_columns("mcp_servers")}
+        return sc.exec_driver_sql("SELECT name FROM mcp_servers WHERE id='m23'").scalar()
+
+    assert _inspect(url, check_down) == "old"

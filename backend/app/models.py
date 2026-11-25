@@ -731,6 +731,8 @@ class McpServer(Base):
     enabled: Mapped[bool] = mapped_column(default=True)
     status: Mapped[str] = mapped_column(String(16), default="unknown")
     status_detail: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    # serverInfo.version from the last successful handshake (0023); None when the tool did not say
+    server_version: Mapped[str | None] = mapped_column(String(64), nullable=True)
     tools: Mapped[list] = mapped_column(JSON, default=list)
     last_checked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)

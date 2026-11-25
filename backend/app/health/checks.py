@@ -15,6 +15,7 @@ import asyncio
 import json
 import os
 import platform
+import re
 import shutil
 import subprocess
 import sys
@@ -56,6 +57,7 @@ class Check:
     id: str
     title: str
     fn: Callable[..., Awaitable[Result]] = field(repr=False)
+    budget: float | None = None  # seconds; None = the runner's default (a check that runs two programs asks for more)
 
 
 # -- probes (the seams the tests replace) -------------------------------------
@@ -63,6 +65,14 @@ async def run_argv(argv: list[str], timeout: float = VERSION_TIMEOUT) -> tuple[i
     """Run ``argv`` (never a shell) with stdin /dev/null; (return code, first
     line of stdout+stderr). (None, "not found") when the program is missing,
     (None, "timed out") when it hangs (it is killed)."""
+    code, text = await run_text(argv, timeout)
+    if code is None:
+        return code, text
+    return code, (text.splitlines()[0] if text else "")[:200]
+
+
+async def run_text(argv: list[str], timeout: float = VERSION_TIMEOUT) -> tuple[int | None, str]:
+    """As ``run_argv`` but the whole output (first 8000 characters)."""
     try:
         proc = await asyncio.create_subprocess_exec(
             *argv, stdin=asyncio.subprocess.DEVNULL, stdout=asyncio.subprocess.PIPE,
@@ -85,8 +95,7 @@ async def run_argv(argv: list[str], timeout: float = VERSION_TIMEOUT) -> tuple[i
                 await asyncio.wait_for(proc.wait(), timeout=2)
             except (asyncio.TimeoutError, asyncio.CancelledError):
                 pass
-    text = out.decode(errors="replace").strip()
-    return proc.returncode, (text.splitlines()[0] if text else "")[:200]
+    return proc.returncode, out.decode(errors="replace").strip()[:8000]
 
 
 def disk_free_bytes(path: Path) -> int:
@@ -142,9 +151,27 @@ async def check_git(s) -> Result:
                        fix="Install git on this machine; tasks and projects need it.")
 
 
+NODE_MIN = 20  # the browser tools need Node 20 or newer
+
+
+def node_major(version: str | None) -> int | None:
+    """The major number of `v20.11.0` (or `20.11.0`), or None when it does not parse."""
+    m = re.match(r"^v?(\d+)\.\d+", (version or "").strip())
+    return int(m.group(1)) if m else None
+
+
 async def check_node(s) -> Result:
-    return await _tool(["node", "--version"], name="Node", missing_status=ATTENTION,
-                       fix="Install Node if your projects or tools need it.")
+    r = await _tool(["node", "--version"], name="Node", missing_status=ATTENTION,
+                    fix="Install Node if your projects or tools need it.")
+    if r.status != OK:
+        return r
+    version = (r.detail or {}).get("version")
+    major = node_major(version)
+    r.detail = {**(r.detail or {}), "major": major, "needed": NODE_MIN}
+    if major is not None and major < NODE_MIN:
+        return Result(ATTENTION, f"Node {version.lstrip('v')} is too old for the browser tools (they need {NODE_MIN} or newer).",
+                      r.detail, f"Install Node {NODE_MIN} or newer on this machine.")
+    return r
 
 
 async def check_docker(s) -> Result:
@@ -267,6 +294,66 @@ async def check_guard_errors(s) -> Result:
                   {"count": n, "latest": msg}, "Open the failed tasks' run logs and look at the guard lines.")
 
 
+async def check_agent_tokens(s) -> Result:
+    """Self-test of the task tokens: mint a throwaway one for a made-up task, see it accepted for that task only,
+    revoke it, see it refused. Never committed: the whole thing is one rolled-back transaction."""
+    from .. import auth
+    from ..models import User
+
+    fake = "health" + uuid.uuid4().hex[:20]
+    async with s() as sess:
+        try:
+            user_id = (await sess.execute(select(User.id).where(User.active.is_(True)).limit(1))).scalar()
+            if user_id is None:
+                return Result(OK, "No users yet, so the task tokens were not tested", {"tested": False})
+            raw = await auth.mint_token(sess, user_id, "agent-task", fake, 60)
+            found = await auth.resolve_token(sess, raw)
+            accepted = found is not None and found[1].task_id == fake
+            other_task = found is not None and found[1].task_id == "health-other-task"
+            await auth.revoke_task_tokens(sess, fake)
+            sess.expire_all()
+            refused = await auth.resolve_token(sess, raw) is None
+        finally:
+            await sess.rollback()
+    detail = {"accepted_for_its_task": accepted, "accepted_for_another_task": other_task, "refused_after_revoke": refused}
+    if not accepted or other_task or not refused:
+        what = ("a task token was not accepted" if not accepted
+                else "a task token also fits another task" if other_task else "a revoked task token still works")
+        return Result(PROBLEM, f"Task tokens are not working: {what}", detail,
+                      "Restart the app; if this stays, do not run tasks.")
+    return Result(OK, "Task tokens are accepted for their own task and refused once revoked", detail)
+
+
+PLUGIN_HELP_TIMEOUT = 8
+PLUGIN_VALIDATE_TIMEOUT = 20
+
+
+async def check_guard_plugin(s) -> Result:
+    """`claude plugin validate <guard folder>`. A Claude without that command is fine ("not available"); a hang is
+    cut at 20 s. The command is only run once `claude plugin --help` lists it, so an old CLI never takes it as a prompt."""
+    root = guard_runtime.plugin_root()
+    if not root.is_symlink() and not root.exists():
+        return Result(ATTENTION, "The guard is not installed, so it could not be validated", None,
+                      "Restart the app to restore it.")
+    code, text = await run_text([settings.claude_bin, "plugin", "--help"], PLUGIN_HELP_TIMEOUT)
+    if code is None:
+        why = {"not found": "Claude is not installed", "timed out": "Claude did not answer"}.get(text, "Claude could not run")
+        return Result(ATTENTION, f"The guard plugin could not be validated: {why}", {"answer": text},
+                      "Install Claude Code, or point the app at it with CO_CLAUDE_BIN.")
+    if code != 0 or "validate" not in text.lower():
+        return Result(OK, "The guard plugin was not validated (not available in this Claude version)", {"available": False})
+    code, text = await run_text([settings.claude_bin, "plugin", "validate", str(root.resolve())], PLUGIN_VALIDATE_TIMEOUT)
+    first = (text.splitlines()[0] if text else "")[:200]
+    if code is None:
+        why = "Claude did not answer in time" if text == "timed out" else "Claude could not run"
+        return Result(ATTENTION, f"The guard plugin could not be validated: {why}", {"available": True, "answer": text},
+                      "Try again; if it keeps failing, restart the app.")
+    if code != 0:
+        return Result(ATTENTION, "Claude does not accept the guard plugin as it is", {"available": True, "exit_code": code, "answer": first},
+                      "Restart the app to restore the guard; if this stays, tell the maintainers.")
+    return Result(OK, "Claude accepts the guard plugin", {"available": True})
+
+
 # -- the app itself -----------------------------------------------------------
 def _folders() -> list[tuple[str, Path]]:
     ws = Path(settings.workspaces_dir)
@@ -303,6 +390,30 @@ async def check_database(s) -> Result:
     return Result(PROBLEM, "The database needs updating", detail, "Restart the app; it updates the database on start.")
 
 
+_SEMVER = re.compile(r"^\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?$")
+
+
+def _preset_packages() -> set[str]:
+    from ..codemap.presets import PRESETS
+    from ..recommend.panel import _pkg_of
+
+    return {_pkg_of(str(a)) for p in PRESETS for a in p["args"] if "@" in str(a)[1:]}
+
+
+def pinned_version(server) -> str | None:
+    """The version a tool was pinned to by its preset: one argument is `<preset package>@<exact version>`.
+    None when the link is not certain (no such argument, or a range like `latest` or `^1`)."""
+    from ..recommend.panel import _pkg_of
+
+    known = _preset_packages()
+    for a in server.args or []:
+        a = str(a)
+        pkg = _pkg_of(a)
+        if pkg in known and len(a) > len(pkg) + 1 and a[len(pkg)] == "@" and _SEMVER.match(a[len(pkg) + 1:]):
+            return a[len(pkg) + 1:]
+    return None
+
+
 async def check_mcp(s) -> Result:
     from ..models import McpServer
 
@@ -310,15 +421,25 @@ async def check_mcp(s) -> Result:
         servers = (await sess.execute(select(McpServer).where(McpServer.enabled.is_(True)).order_by(McpServer.name))).scalars().all()
     if not servers:
         return Result(OK, "No tools are connected", {"servers": [], "start_in_project": 0})
-    listing = [{"name": m.name, "status": m.status} for m in servers]
+    listing, off = [], []
+    for m in servers:
+        version = getattr(m, "server_version", None) or None
+        pin = pinned_version(m) if version else None  # no version told, nothing to compare
+        mismatch = bool(pin and version.lstrip("v") != pin)
+        if mismatch:
+            off.append(f"{m.name} is at {version}, expected {pin}.")
+        listing.append({"name": m.name, "status": m.status, "version": version, "pinned": pin, "version_differs": mismatch})
     # an admin's choice, so never attention by itself; the summary names it
     in_project = sum(1 for m in servers if m.transport == "stdio" and getattr(m, "start_in_project", False))
     detail = {"servers": listing, "start_in_project": in_project}
     note = f"; {in_project} start(s) in the project folder" if in_project else ""
     bad = [m.name for m in servers if m.status not in ("healthy", "unknown")]
-    if bad:
-        return Result(ATTENTION, f"{len(bad)} of {len(servers)} connected tool{'s' if len(servers) != 1 else ''} not responding: {', '.join(bad)}{note}",
-                      detail, "Open MCP Servers and test the connection.")
+    if bad or off:
+        head = (f"{len(bad)} of {len(servers)} connected tool{'s' if len(servers) != 1 else ''} not responding: {', '.join(bad)}"
+                if bad else f"{len(servers)} connected tool{'s' if len(servers) != 1 else ''} working")
+        tail = (" " + " ".join(off)) if off else ""
+        return Result(ATTENTION, head + note + tail, detail,
+                      "Open MCP Servers and test the connection." if bad else "Open MCP Servers and check the version that is running.")
     return Result(OK, f"{len(servers)} connected tool{'s' if len(servers) != 1 else ''} working{note}", detail)
 
 
@@ -345,24 +466,32 @@ async def check_skill_packs(s) -> Result:
 
 async def check_code_map(s) -> Result:
     """Which projects keep a code map, and whether any refresh is failing. Reads the database only."""
-    from ..codemap.status import code_map_server
+    from ..codemap.status import code_map_server, code_map_servers
     from ..models import McpServer, Project, ProjectIndex
 
     async with s() as sess:
         servers = (await sess.execute(select(McpServer).where(McpServer.enabled.is_(True)))).scalars().all()
         rows = (await sess.execute(
-            select(Project.name, ProjectIndex.status)
+            select(Project.name, ProjectIndex.status, ProjectIndex.error, ProjectIndex.fail_count)
             .select_from(Project).outerjoin(ProjectIndex, ProjectIndex.project_id == Project.id)
             .where(Project.code_map.is_(True)).order_by(Project.name))).all()
     have_tool = code_map_server(servers) is not None
-    failing = [n for n, st in rows if st == "failed"]
-    listing = [{"project": n, "status": st or "never"} for n, st in rows]
-    detail = {"projects": listing, "tool_added": have_tool}
+    failing = [n for n, st, _e, _f in rows if st == "failed"]
+    listing = [{"project": n, "status": st or "never", "error": (err or "")[:200] or None, "failures": fails or 0}
+               for n, st, err, fails in rows]
+    engines = [m.name for m in code_map_servers(servers) if m.enabled]
+    ordinal = {2: "Two", 3: "Three"}.get(len(engines), str(len(engines)))
+    two = (f"{ordinal} code-map engines are set up ({', '.join(engines)}); only {engines[0]} is used."
+           if len(engines) > 1 else None)
+    detail = {"projects": listing, "tool_added": have_tool, "engines": engines, "engine_warning": two}
     n = len(rows)
     if failing:
         k = len(failing)
-        return Result(ATTENTION, f"{k} project{chr(39)}s code map is failing" if k == 1 else f"{k} projects{chr(39)} code maps are failing",
+        head = f"{k} project{chr(39)}s code map is failing" if k == 1 else f"{k} projects{chr(39)} code maps are failing"
+        return Result(ATTENTION, head + (f". {two}" if two else ""),
                       detail, "Open the project, then Code map, and read why the last refresh failed.")
+    if two:
+        return Result(ATTENTION, two, detail, "Remove or turn off the engine you do not want under Connected tools.")
     if not have_tool:
         if n:
             return Result(ATTENTION, "The Code map tool is not added yet", detail,
@@ -370,8 +499,8 @@ async def check_code_map(s) -> Result:
         return Result(OK, "The Code map tool is not added yet", detail)
     if not n:
         return Result(OK, "No project keeps a code map", detail)
-    building = sum(1 for _, st in rows if st == "running")
-    waiting = sum(1 for _, st in rows if st not in ("ok", "running"))
+    building = sum(1 for _, st, _e, _f in rows if st == "running")
+    waiting = sum(1 for _, st, _e, _f in rows if st not in ("ok", "running"))
     head = f"{n} project{'s' if n != 1 else ''} keep{'s' if n == 1 else ''} a code map"
     parts = ([f"{waiting} not built yet"] if waiting else []) + ([f"{building} building"] if building else [])
     return Result(OK, head + ("; " + ", ".join(parts) if parts else "; all up to date"), detail)
@@ -432,8 +561,10 @@ CHECKS: list[Check] = [
     Check("git", "Git", check_git),
     Check("node", "Node", check_node),
     Check("guard_files", "The guard is intact", check_guard_files),
+    Check("guard_plugin", "Guard plugin", check_guard_plugin, budget=30.0),
     Check("guard_selftest", "The guard blocks what it should", check_guard_selftest),
     Check("guard_errors", "Guard errors in the last 7 days", check_guard_errors),
+    Check("agent_tokens", "Agent tokens", check_agent_tokens),
     Check("folders", "The app can write its folders", check_folders),
     Check("database", "Database is up to date", check_database),
     Check("mcp", "Connected tools", check_mcp),
