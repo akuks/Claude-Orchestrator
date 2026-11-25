@@ -1,7 +1,12 @@
-"""Workflow runner: advances workflow runs stage by stage.
+"""Workflow runner: advances workflow runs step by step, branches side by side (phase 7b).
 
-A thin orchestrator (like the scheduler) over the EXISTING task machinery. For
-each active run it watches the current stage and:
+A thin orchestrator (like the scheduler) over the EXISTING task machinery. A step may wait
+for several earlier steps (`after`, see flowgraph); each pass watches every step in flight
+and starts the steps whose waited-for steps all finished successfully, lowest first, up to
+max_parallel at once (approvals waiting do not count). A step failing stops the others the
+way Cancel does and fails the run. A plain line (no `after`) runs exactly as before.
+current_stage is kept as the lowest step not finished successfully. For each step in
+flight the runner:
   * agent stage: the current attempt's tasks
       - all completed            -> start the next stage (or finish the run)
       - any failed/cancelled     -> halt the run (status=failed)
@@ -58,7 +63,7 @@ from sqlalchemy import delete, func, select, update
 
 from .constants import Status
 from .database import SessionLocal
-from . import tiers
+from . import flowgraph, tiers
 from .gates import codestate, executor, fixloop, outputs as typed_outputs, preflight, runlog, totals
 from .gates.spec import stage_kind
 from .gates.test_results import TestResult
@@ -82,6 +87,11 @@ FIXER_GONE_WORDS = "the fixer agent is not available"
 FIX_UNFINISHED_WORDS = "the fix did not finish"
 UNCHANGED_WORDS = "failed then passed unchanged"
 GATE_LIVE = ("waiting", "running")  # gate states that want a live process
+# Phase 7b: a step is finished successfully in this state (per kind).
+SUCCESS = {"agent": "done", "gate": "passed", "approval": "approved"}
+# States that hold one of the run's max_parallel slots (approvals waiting never do).
+SLOT_STATES = ("running", "waiting", "fixing")  # a gate waiting for "Allow" does not (7b)
+RESERVE_WORDS = "Waiting for other steps to finish so the spending limit is not passed."
 BUDGET_MIN = 0.01  # below this remainder a capped run pauses instead of starting work
 BUDGET_MAX = 10000.0
 
@@ -92,7 +102,8 @@ _PLACEHOLDER = re.compile(r"\{\{(input|prev|stage(\d+))(?:\.([a-z][a-z0-9_]{0,39
 
 
 def substitute(prompt: str, run_input: str, stage_outputs: dict[int, str],
-               named_outputs: dict[int, dict[str, str]] | None = None) -> str:
+               named_outputs: dict[int, dict[str, str]] | None = None,
+               after: list[int] | None = None, stage_names: dict[int, str] | None = None) -> str:
     """Fill placeholders in a stage prompt:
       {{input}}        -> the run's input
       {{prev}}         -> the previous stage's combined output
@@ -102,6 +113,9 @@ def substitute(prompt: str, run_input: str, stage_outputs: dict[int, str],
     An unknown stage or name gives "". Single pass: the template is tokenised once, so
     a substituted value that itself holds `{{...}}` is never expanded again.
     If no {{input}} and no stage placeholder exists, the input is appended (back-compat).
+    With `after` (a step that declares what it waits for): {{prev}} is the output of those steps in step
+    order, each under "From <name>:" when there is more than one; {{prev.name}} takes the first of them
+    that has `name`; an empty `after` gives "". Without `after` nothing changes.
     """
     named = named_outputs or {}
     p = prompt or ""
@@ -118,6 +132,18 @@ def substitute(prompt: str, run_input: str, stage_outputs: dict[int, str],
             had_input = True
             return run_input or ""
         had_stage = True
+        if head == "prev" and after is not None:
+            srcs = sorted(set(after))
+            if name:
+                for j in srcs:
+                    if name in (named.get(j) or {}):
+                        return named[j][name]
+                return ""
+            if len(srcs) == 1:
+                return stage_outputs.get(srcs[0], "")
+            names = stage_names or {}
+            return "\n\n".join(
+                f"From {names.get(j) or f'step {j + 1}'}:\n{stage_outputs.get(j, '')}" for j in srcs)
         idx = prev_idx if head == "prev" else int(num) - 1
         if idx is None:
             return ""
@@ -261,15 +287,53 @@ def _budget_cap(own: float | None, remaining: float | None) -> float | None:
     return remaining if own is None else min(own, remaining)
 
 
-def _budget_hold(run, i: int, st: dict, spent: float) -> None:
+async def _reserved(s, run) -> float:
+    """What the run's tasks still at work may spend: their caps (max_budget_usd), for the ones
+    with no recorded cost yet, of each step's current attempt (a fix task carries its gate's
+    attempt); an older attempt's task left waiting does not hold later steps."""
+    rows = (
+        await s.execute(
+            select(Task.stage_index, Task.stage_attempt, Task.max_budget_usd).where(
+                Task.workflow_run_id == run.id, Task.status.in_(list(Status.ACTIVE)),
+                Task.total_cost_usd.is_(None))
+        )
+    ).all()
+    return float(sum(cap or 0.0 for j, att, cap in rows
+                     if j is not None and (att or 0) == _attempt(run, j)))
+
+
+async def _flow_left(s, run, remaining: float | None) -> float | None:
+    """For a run with branches (7b): the remaining amount minus what steps still at work may
+    spend, so steps side by side never together pass the limit. A plain line run (one step
+    at a time) keeps the old amount."""
+    if remaining is None or not _is_flow(run):
+        return remaining
+    return round(remaining - await _reserved(s, run), 6)
+
+
+def _budget_hold(run, i: int, st: dict, spent: float, reason: str | None = None) -> None:
     """Pause the run at stage i because the budget is used up: stage status "budget" and the
     fixed log line (once per spent/budget pair). The run resumes on the next advance after
-    the cap is raised."""
-    reason = f"budget reached (${spent:.2f} of ${float(run.budget_usd or 0):.2f})"
+    the cap is raised. `reason` (7b): held while other steps' caps use what is left."""
+    reason = reason or f"budget reached (${spent:.2f} of ${float(run.budget_usd or 0):.2f})"
     if st.get("status") != "budget" or st.get("reason") != reason:
         runlog.append(run, f"Step {_stage_name(run, i)} held: {reason}")
-    _put_state(run, i, {**st, "status": "budget", "reason": reason})
-    run.status = RUN_PAUSED
+    st = {**st, "status": "budget", "reason": reason}
+    if reason == RESERVE_WORDS:
+        st["budget_reserve"] = True  # the UI's flag: not the spending limit, other steps' caps
+    else:
+        st.pop("budget_reserve", None)
+    _put_state(run, i, st)
+    if reason != RESERVE_WORDS:
+        # Held for other steps' caps: another branch is at work by definition, so the run
+        # is not "waiting for you" (7b).
+        run.status = RUN_PAUSED
+
+
+def _unstart(run, i: int) -> None:
+    """Back to not started, same attempt (a step that was only held when the run stopped)."""
+    old = get_state(run, i)
+    _put_state(run, i, {k: old[k] for k in ("attempt", "log_seq", "auto_retried") if k in old})
 
 
 def _new_attempt(run, i: int, auto: bool = False, log: bool = True) -> int:
@@ -328,12 +392,94 @@ def _label(run, i: int) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Steps side by side (phase 7b)
+# ---------------------------------------------------------------------------
+def _kind(run, i: int) -> str:
+    stages = run.stages or []
+    return stage_kind(stages[i]) if 0 <= i < len(stages) else "agent"
+
+
+def _ok(run, i: int) -> bool:
+    """Step i finished successfully (agent done, gate passed, approval approved). Every step
+    below current_stage is finished by definition (it is the lowest one that is not)."""
+    if i < (run.current_stage or 0):
+        return True
+    return get_state(run, i).get("status") == SUCCESS[_kind(run, i)]
+
+
+def _holds_slot(st: dict) -> bool:
+    """The step takes one of the run's max_parallel places: working, or a gate between its
+    commands (waiting its turn for the project, or held on the budget during a fix)."""
+    status = st.get("status")
+    if status == "waiting" and st.get("slot_wait"):
+        return False  # allowed, but waiting for a free place
+    return (status in SLOT_STATES or (status == "held" and bool(st.get("lock_wait")))
+            or (status == "budget" and bool(st.get("fix_pending"))))
+
+
+def _slots_used(run, but: int | None = None) -> int:
+    return sum(1 for j in range(run.current_stage or 0, len(run.stages or []))
+               if j != but and _holds_slot(get_state(run, j)))
+
+
+def _is_flow(run) -> bool:
+    """A run whose snapshot declares `after` somewhere. Without it the run is a plain line and
+    every status decision stays exactly as before 7b."""
+    return any(isinstance(st, dict) and "after" in st for st in run.stages or [])
+
+
+def _move_pointer(run) -> None:
+    """Keep current_stage = the lowest step not finished successfully (kept for compatibility;
+    nothing new depends on it). Moving on sets the run running, as the old move to the next
+    step did; nothing left completes the run (current_stage then stays on the last step)."""
+    n = len(run.stages or [])
+    cur = run.current_stage or 0
+    low = next((i for i in range(cur, n) if not _ok(run, i)), None)
+    if low is None:
+        run.status = RUN_COMPLETED
+        run.current_stage = max(0, n - 1)
+    elif low != cur:
+        run.current_stage = low
+        run.status = RUN_RUNNING
+
+
+FINISHED_STATES = ("done", "passed", "failed", "approved", "rejected", "stopped")
+
+
+def _cancel_words(run, i: int, procs: dict, failed_name: str | None = None) -> bool:
+    """Mark a step stopped by a cancel: a gate or approval logs the command it still needed
+    and fails "cancelled" (agent steps are left; their tasks are cancelled). With
+    `failed_name` (7b: another branch failed) every kind of step in flight becomes "stopped",
+    reason "Stopped because <name> failed.", with one log line. True when marked."""
+    st = get_state(run, i)
+    status = st.get("status")
+    if status is None or status in FINISHED_STATES:
+        return False
+    kind = _kind(run, i)
+    if kind == "agent" and failed_name is None:
+        return False
+    if kind != "agent":
+        live = procs.get((run.id, i))
+        nxt = _next_cmd(run.stages[i], st) if status in GATE_LIVE else None
+        cmd = live["cmd"] if live else (nxt[1] if nxt else None)
+        if cmd:
+            runlog.append(run, f"{_label(run, i)} still needs: {cmd}")
+    if failed_name is None:
+        st.update(status="failed", reason="cancelled")
+    else:
+        st.update(status="stopped", reason=f"Stopped because {failed_name} failed.")
+        runlog.append(run, f"{_stage_name(run, i)}: stopped because {failed_name} failed")
+    _put_state(run, i, st)
+    return True
+
+
+# ---------------------------------------------------------------------------
 # Approve ahead (F123)
 # ---------------------------------------------------------------------------
 AHEAD_REFUSED = "This step can only be approved when the run reaches it."
 
 
-def _drop_ahead(run, why: str, start: int | None = None) -> None:
+def _drop_ahead(run, why: str, start: int | None = None, only: set | None = None) -> None:
     """Drop every early approval not applied yet on a step from `start` on (default: the
     current step and the steps not reached yet), one log line each. Used when the run fails
     or is cancelled, and on run again. An approval already applied (status "approved") is a
@@ -343,6 +489,8 @@ def _drop_ahead(run, why: str, start: int | None = None) -> None:
     changed = False
     for i in range(max(0, first), len(run.stages or [])):
         st = state.get(str(i))
+        if only is not None and i not in only:
+            continue
         if isinstance(st, dict) and "ahead" in st and st.get("status") != "approved":
             st = {k: v for k, v in st.items() if k != "ahead"}
             if st:
@@ -362,7 +510,9 @@ def _fail_run(run, why: str = "the run failed", release: bool = True) -> None:
     run.status = RUN_FAILED
     _drop_ahead(run, why)
     if release:
-        release_project_locks(run.id)
+        # A gate of another branch whose command is still in flight keeps its lock until the
+        # runner has killed it (_stop_others), as Cancel does.
+        release_project_locks(run.id, keep_in_flight=True)
 
 
 # ---------------------------------------------------------------------------
@@ -382,21 +532,24 @@ def _lock_key(directory: str) -> str:
     return os.path.realpath(directory)
 
 
-def release_project_locks(run_id: str, i: int | None = None) -> None:
-    """Let go of the project locks the run's gate stage i (any stage when None) holds."""
+def release_project_locks(run_id: str, i: int | None = None, keep_in_flight: bool = False) -> None:
+    """Let go of the project locks the run's gate stage i (any stage when None) holds. With
+    `keep_in_flight`, a lock whose gate process is still running is kept."""
     for path, owner in list(_PROJECT_LOCKS.items()):
         if owner[0] == run_id and (i is None or owner[1] == i):
+            if keep_in_flight and owner in _IN_FLIGHT:
+                continue
             _PROJECT_LOCKS.pop(path, None)
 
 
 async def _owner_live(s, owner: tuple[str, int]) -> bool:
-    """True while the owning run is active, on that gate stage and the stage still runs or
-    fixes its checks. Anything else is a lock nobody let go of (a missed path): free."""
+    """True while the owning run is active and its gate stage still runs or fixes its checks.
+    Anything else is a lock nobody let go of (a missed path): free."""
     if owner in _IN_FLIGHT:
         return True  # its process may still be running (a cancel kills it after the commit)
     rid, j = owner
     run = await s.get(WorkflowRun, rid)
-    if run is None or run.status not in ACTIVE_RUN or run.current_stage != j:
+    if run is None or run.status not in ACTIVE_RUN or not (0 <= j < len(run.stages or [])):
         return False
     st = get_state(run, j)
     if st.get("status") in LOCK_HOLDING:
@@ -409,13 +562,12 @@ async def _owner_live(s, owner: tuple[str, int]) -> bool:
 async def _take_project_lock(s, directory: str, run_id: str, i: int) -> bool:
     """Take the project folder's check lock for (run_id, i). True when taken or already
     held by this same run and stage (a resumed or next command), False when another live
-    gate stage holds it."""
+    gate stage holds it (another run's, or since 7b another branch of this run)."""
     path = _lock_key(directory)
     me = (run_id, i)
     for _ in range(3):
         owner = _PROJECT_LOCKS.get(path)
-        if owner is None or owner == me or owner[0] == run_id:
-            # (this run's other stage cannot still be checking: the run is on stage i)
+        if owner is None or owner == me:
             _PROJECT_LOCKS[path] = me
             return True
         if await _owner_live(s, owner):
@@ -428,7 +580,7 @@ async def _take_project_lock(s, directory: str, run_id: str, i: int) -> bool:
 
 async def _project_lock_free(s, directory: str, run_id: str, i: int) -> bool:
     owner = _PROJECT_LOCKS.get(_lock_key(directory))
-    return owner is None or owner[0] == run_id or not await _owner_live(s, owner)
+    return owner is None or owner == (run_id, i) or not await _owner_live(s, owner)
 
 
 def _lock_hold(run, i: int, st: dict) -> None:
@@ -471,6 +623,10 @@ async def _start_stage(s, run: WorkflowRun, stage_index: int, worker, pre: dict 
         ok, spent, remaining = await _budget_ok(s, run)
         if not ok:
             _budget_hold(run, stage_index, old, spent)
+            return []
+        remaining = await _flow_left(s, run, remaining)
+        if remaining is not None and remaining < BUDGET_MIN:
+            _budget_hold(run, stage_index, old, spent, RESERVE_WORDS)
             return []
         if old.get("status") == "budget" and run.status == RUN_PAUSED:
             run.status = RUN_RUNNING  # the cap was raised: resume
@@ -536,7 +692,11 @@ async def _start_stage(s, run: WorkflowRun, stage_index: int, worker, pre: dict 
             runlog.append(run, f"Step {name} failed: unknown agent {item.get('agent')}")
             _fail_run(run)
             return []
-        prompt = substitute(item.get("prompt", ""), run.input, outputs, named)
+        # Only a step that declares `after` gets the new {{prev}} (7b); an old step keeps the
+        # old one (the highest earlier step with output), exactly as before.
+        after = flowgraph.deps(run.stages, stage_index) if "after" in stage else None
+        prompt = substitute(item.get("prompt", ""), run.input, outputs, named, after=after,
+                            stage_names={j: _stage_name(run, j) for j in after or []})
         names = [n for n in (item.get("outputs") or []) if isinstance(n, str)]
         if names:
             prompt = f"{prompt}\n\n{typed_outputs.suffix(names)}"
@@ -657,6 +817,10 @@ class _Post:
 
     results: list = field(default_factory=list)  # (task id, priority, created_at, status)
     spawns: list = field(default_factory=list)  # (stage index, hand-out)
+    verifies: list = field(default_factory=list)  # _Verify to check outside the lock
+    fixes: list = field(default_factory=list)  # _Fix to start outside the lock
+    need: "_NeedPreflight | None" = None  # a step start that needs a pre-flight answer
+    failed: bool = False  # the run failed in this pass: stop the other branches
 
 
 @dataclass
@@ -712,6 +876,9 @@ class WorkflowRunner:
         # (run_id, stage) -> hand-out of a gate task that ended in this process without
         # finishing its stage, so a respawn is not reported as a server restart.
         self._ended: dict[tuple[str, int], str] = {}
+        # Runs a gate failed while another step was in flight (7b): the gate's task stops the
+        # others when it ends. A plain line run never has another step in flight.
+        self._stop_after_gate: set[str] = set()
 
     async def start(self):
         self._task = asyncio.create_task(self._loop())
@@ -775,14 +942,18 @@ class WorkflowRunner:
         """Kick off a freshly created run (start stage 0) immediately."""
         await self._advance(run_id, first=True)
 
+    def live_gates(self, run_id: str) -> list[dict]:
+        """Every gate command this process is running for the run, lowest step first:
+        [{stage_index, command, k, n, log_name}] (several when branches run side by side)."""
+        out = [{"stage_index": i, "command": p["cmd"], "k": p["k"], "n": p["n"],
+                "log_name": p.get("log_name")}
+               for (rid, i), p in list(self._procs.items()) if rid == run_id]
+        return sorted(out, key=lambda x: x["stage_index"])
+
     def live_gate(self, run_id: str) -> dict | None:
-        """The gate command this process is running for the run, or None:
-        {stage_index, command, k, n, log_name}."""
-        for (rid, i), p in list(self._procs.items()):
-            if rid == run_id:
-                return {"stage_index": i, "command": p["cmd"], "k": p["k"], "n": p["n"],
-                        "log_name": p.get("log_name")}
-        return None
+        """The lowest-numbered gate command this process is running for the run, or None."""
+        lives = self.live_gates(run_id)
+        return lives[0] if lives else None
 
     async def cancel_run(self, run_id: str) -> bool:
         """Halt a run AND cancel its in-flight stage tasks and live gate."""
@@ -801,18 +972,9 @@ class WorkflowRunner:
                     )
                 ).scalars().all()
                 _fail_run(run, "the run was cancelled", release=False)
-                i = run.current_stage
-                if 0 <= i < len(run.stages or []) and stage_kind(run.stages[i]) != "agent":
-                    st = get_state(run, i)
-                    status = st.get("status")
-                    if status not in ("passed", "failed", "approved", "rejected", None):
-                        live = self._procs.get((run_id, i))
-                        nxt = _next_cmd(run.stages[i], st) if status in GATE_LIVE else None
-                        cmd = live["cmd"] if live else (nxt[1] if nxt else None)
-                        if cmd:
-                            runlog.append(run, f"{_label(run, i)} still needs: {cmd}")
-                        st.update(status="failed", reason="cancelled")
-                        _put_state(run, i, st)
+                # Every step in flight (several when branches run side by side).
+                for i in range(len(run.stages or [])):
+                    _cancel_words(run, i, self._procs)
                 await s.commit()
                 return list(active_tasks)
 
@@ -830,9 +992,10 @@ class WorkflowRunner:
         return True
 
     async def retry_run(self, run_id: str) -> bool:
-        """Re-run the current (failed) stage as a new attempt and continue the pipeline.
-        Earlier tasks and gate rows are kept; the stage gets a new hand-out, so a late
-        result from the old one is dropped."""
+        """Re-run the failed step(s) as a new attempt and continue the run: every step that
+        started and did not finish successfully (the failed one and the branches stopped with
+        it), or the current step when none did. Earlier tasks and gate rows are kept; each
+        step gets a new hand-out, so a late result from the old one is dropped."""
         async with SessionLocal() as s:
             run = await s.get(WorkflowRun, run_id)
             if run is None or run.status != RUN_FAILED:
@@ -849,14 +1012,37 @@ class WorkflowRunner:
                 i = run.current_stage
                 if not (0 <= i < len(run.stages or [])):
                     return None
-                _new_attempt(run, i)
-                return await self._start_and_commit(s, run, i, pre)
+                left = [j for j in range(i, len(run.stages)) if not _ok(run, j)
+                        and get_state(run, j).get("status") is not None
+                        and not await self._finished_agent(s, run, j)]
+                # Only a step that started gets a new attempt; one only held (pre-flight,
+                # budget, cancelled before it started) just goes back to not started.
+                todo = [j for j in left if get_state(run, j).get("started_at")]
+                targets = todo or [i]
+                for j in targets:
+                    _new_attempt(run, j)
+                for j in left:
+                    if j not in targets:
+                        _unstart(run, j)
+                await s.commit()
+                return True
 
-        post = await self._locked(run_id, fn)
-        if post is None:
+        if await self._locked(run_id, fn) is None:
             return False
-        await self._run_post(run_id, post)
+        await self._advance(run_id)
         return True
+
+    @staticmethod
+    async def _finished_agent(s, run, j: int) -> bool:
+        """An agent step still marked running (or stopped) whose tasks of this attempt all
+        completed (it finished as another branch failed): not retried; the next advance marks
+        it done."""
+        if _kind(run, j) != "agent" or get_state(run, j).get("status") not in ("running", "stopped"):
+            return False
+        rows = (await s.execute(select(Task.status).where(
+            Task.workflow_run_id == run.id, Task.stage_index == j,
+            Task.stage_attempt == _attempt(run, j)))).scalars().all()
+        return bool(rows) and all(x == Status.COMPLETED for x in rows)
 
     async def approve_stage(self, run_id: str, i: int, user) -> None:
         async def fn(pre):
@@ -895,6 +1081,7 @@ class WorkflowRunner:
                 await s.commit()
 
         await self._locked(run_id, fn)
+        await self._stop_others(run_id)
 
     async def _ahead_target(self, s, run_id: str, i: int, withdraw: bool = False):
         run = await s.get(WorkflowRun, run_id)
@@ -908,10 +1095,12 @@ class WorkflowRunner:
             # Opt-in per step: only a step saved with "ahead": true (runs keep the snapshot
             # they started with, so runs started before that flag existed never allow it).
             raise ValueError(AHEAD_REFUSED)
-        if i <= run.current_stage:
-            # A step reached but held (pre-flight) is still undecided: its early approval
-            # may be withdrawn, never given.
-            held = i == run.current_stage and get_state(run, i).get("status") == "held"
+        status = get_state(run, i).get("status")
+        if i < run.current_stage or status is not None:
+            # Reached (7b: a branch may reach it before a lower step finishes). A step
+            # reached but held (pre-flight) is still undecided: its early approval may be
+            # withdrawn, never given.
+            held = status == "held"
             if not (withdraw and held):
                 raise ValueError("this step has already been reached")
         return run
@@ -956,10 +1145,12 @@ class WorkflowRunner:
         await self._locked(run_id, fn)
 
     async def rerun_from(self, run_id: str, n: int, user) -> None:
-        """Run a completed or failed run again from step n (F66): steps n.. are reset to not
-        started (each keeps its attempt count, one higher, so old tasks and gate rows stay
-        history), step n starts as a new attempt and the run is running again. Earlier steps
-        keep their results. Raises ValueError (409) otherwise."""
+        """Run a completed or failed run again from step n (F66): step n and every step that
+        waits for it, directly or not (7b), are reset to not started (each keeps its attempt
+        count, one higher, so old tasks and gate rows stay history), step n starts as a new
+        attempt and the run is running again. Other steps keep their results; another step
+        that had not finished (a branch that failed or was stopped) is reset too, so the run
+        can finish. Raises ValueError (409) otherwise."""
         async with SessionLocal() as s:
             run = await s.get(WorkflowRun, run_id)
             if run is None:
@@ -981,11 +1172,18 @@ class WorkflowRunner:
                 st_n = get_state(run, n)
                 reached = n < run.current_stage or run.status == RUN_COMPLETED or bool(
                     st_n.get("started_at") or st_n.get("status"))
-                if n > run.current_stage or not reached:
+                if not reached:
                     raise ValueError("this step was never reached")
-                _drop_ahead(run, f"run again from {_stage_name(run, n)}", start=n)
+                reset = flowgraph.dependants(stages, n)
+                for j in range(run.current_stage, len(stages)):
+                    # Another unfinished branch of a failed run is reset too (or the run fails
+                    # again at once), unless its tasks all completed: the next advance marks it done.
+                    if (j != n and j not in reset and not _ok(run, j) and get_state(run, j).get("status") is not None
+                            and not await self._finished_agent(s, run, j)):
+                        reset.add(j)
+                _drop_ahead(run, f"run again from {_stage_name(run, n)}", start=n, only=reset | {n})
                 state = dict(run.stage_state or {})
-                for j in range(n + 1, len(stages)):
+                for j in sorted(reset):
                     old = state.get(str(j))
                     if not isinstance(old, dict) or not (old.get("started_at") or old.get("status")
                                                          or old.get("attempt")):
@@ -996,16 +1194,17 @@ class WorkflowRunner:
                         fresh["log_seq"] = old["log_seq"]
                     state[str(j)] = fresh
                 run.stage_state = state
-                run.current_stage = n
+                # The lowest step not finished: n, unless an earlier unfinished step was reset.
+                run.current_stage = min([n, run.current_stage, *reset])
                 runlog.append(run, f"Run again from {_stage_name(run, n)} by {_user_name(user)}")
                 _new_attempt(run, n, log=False)
                 st = get_state(run, n)
                 st.pop("auto_retried", None)
                 _put_state(run, n, st)
-                return await self._start_and_commit(s, run, n, pre)
+                await s.commit()
 
-        post = await self._locked(run_id, fn)
-        await self._run_post(run_id, post)
+        await self._locked(run_id, fn)
+        await self._advance(run_id)
 
     async def raise_budget(self, run_id: str, budget_usd: float, user) -> None:
         """Set the run's budget cap to `budget_usd` (must be more than spent, 0.01..10000,
@@ -1046,10 +1245,15 @@ class WorkflowRunner:
                                                       "this gate is not waiting for an allowance")
                 who = _user_name(user)
                 st.update(status="waiting", allowed=True, decided_by=who, decided_at=_iso(), reason=None)
+                # Waiting for "Allow" freed its place (7b): with every place taken now it runs
+                # when one is free (the next advance hands it out).
+                full = _slots_used(run, but=i) >= flowgraph.get_max_parallel(run.stages)
+                if full:
+                    st["slot_wait"] = True
                 _put_state(run, i, st)
                 runlog.append(run, f"{_label(run, i)} allowed")
                 await s.commit()
-                return st.get("handout")
+                return None if full else st.get("handout")
 
         handout = await self._locked(run_id, fn)
         self._spawn_gate(run_id, i, handout)
@@ -1079,17 +1283,88 @@ class WorkflowRunner:
                 self._ended.pop(key, None)
 
     async def _advance(self, run_id: str, first: bool = False):
+        """One or more locked passes over the run (_advance_locked); between them, outside the
+        lock: typed-output checks, fix-task starts and pre-flight answers."""
+        pre: dict = {}
         post = None
-        for _ in range(4):
-            post = await self._locked(run_id, lambda pre: self._advance_locked(run_id, pre))
-            if isinstance(post, _Fix):
-                post = await self._start_fix(run_id, post)
+        for _ in range(16):
+            post = await self._locked(run_id, lambda p: self._advance_locked(run_id, p), pre)
+            if post is None or post.failed:
                 break
-            if not isinstance(post, _Verify):
-                break
-            await self._check_outputs(run_id, post)
-            post = None
+            if post.need is not None:
+                need, post.need = post.need, None
+                await self._run_post(run_id, post)
+                pre[need.index] = await _preflight(need.lines)
+                post = None
+                continue
+            if post.verifies:
+                verifies, post.verifies = post.verifies, []
+                await self._run_post(run_id, post)
+                for v in verifies:
+                    await self._check_outputs(run_id, v)
+                post = None
+                continue
+            if post.fixes:
+                fixes, post.fixes = post.fixes, []
+                await self._run_post(run_id, post)
+                for fx in fixes:
+                    await self._run_post(run_id, await self._start_fix(run_id, fx))
+                post = None
+                await self._stop_others(run_id)  # a fix that could not start fails the run
+            break
         await self._run_post(run_id, post)
+        if post is not None and post.failed:
+            await self._stop_others(run_id)
+
+    async def _stop_others(self, run_id: str) -> None:
+        """After a step failed (7b): stop every other step still in flight exactly as Cancel
+        does (its gate process killed with a `cancelled` row, its tasks cancelled, its project
+        locks let go after the kill). The failed step's own tasks are left as before. A plain
+        line run has nothing else in flight: nothing happens."""
+        async with SessionLocal() as s:
+            run = await s.get(WorkflowRun, run_id)
+            if run is None or run.status != RUN_FAILED:
+                return
+
+        async def fn(pre):
+            async with SessionLocal() as s:
+                run = await s.get(WorkflowRun, run_id)
+                if run is None or run.status != RUN_FAILED:
+                    return None
+                stages = run.stages or []
+                bad = [j for j in range(len(stages))
+                       if get_state(run, j).get("status") in ("failed", "rejected")]
+                who = _stage_name(run, bad[0]) if bad else "another step"
+                # An agent branch whose tasks all completed finished, it was not stopped: it is
+                # left as it is and marked done by the next advance (Retry / Run again).
+                done_agents = {j for j in range(len(stages)) if await self._finished_agent(s, run, j)}
+                stopped = {i for i in range(len(stages))
+                           if i not in done_agents and _cancel_words(run, i, self._procs, who)}
+                rows = (await s.execute(select(Task.id, Task.stage_index, Task.stage_attempt).where(
+                    Task.workflow_run_id == run.id, Task.status.in_(list(Status.ACTIVE))))).all()
+                tids = []
+                for tid, j, att in rows:
+                    if j is None or not (0 <= j < len(stages)) or (att or 0) != _attempt(run, j):
+                        continue
+                    if j in stopped or (_kind(run, j) == "agent"
+                                        and get_state(run, j).get("status") == "running"):
+                        tids.append(tid)
+                if not stopped and not tids:
+                    return None
+                await s.commit()
+                return stopped, tids
+
+        res = await self._locked(run_id, fn)
+        if not res:
+            return
+        stopped, tids = res
+        await self._kill_gates(run_id, record=True, stages=stopped)
+        release_project_locks(run_id)  # after the gates' processes are gone
+        for tid in tids:
+            try:
+                await self.worker.cancel(tid)
+            except Exception:  # noqa: BLE001
+                pass
 
     async def _check_outputs(self, run_id: str, v: _Verify) -> None:
         """Parse and verify the typed outputs of a finished agent stage (outside the run
@@ -1112,7 +1387,8 @@ class WorkflowRunner:
             flipped: list[tuple[str, str]] = []
             async with SessionLocal() as s:
                 run = await s.get(WorkflowRun, run_id)
-                if (run is None or run.status not in ACTIVE_RUN or run.current_stage != v.index
+                if (run is None or run.status not in ACTIVE_RUN
+                        or get_state(run, v.index).get("status") not in ("running", "stopped")
                         or _attempt(run, v.index) != v.attempt):
                     return flipped
                 for tid, values, reason in results:
@@ -1144,6 +1420,10 @@ class WorkflowRunner:
                     log.exception("workflow runner: emitting %s for task %s failed", etype, tid)
 
     async def _advance_locked(self, run_id: str, pre: dict) -> "_Post | None":
+        """One pass over the run under its lock (7b): watch every step in flight, then start
+        the steps whose waited-for steps all finished successfully, lowest first, while fewer
+        than max_parallel steps hold a place (approvals waiting never do) and the budget allows.
+        A plain line run has one step in flight at a time and behaves exactly as before."""
         async with SessionLocal() as s:
             run = await s.get(WorkflowRun, run_id)
             if run is None or run.status not in ACTIVE_RUN:
@@ -1152,6 +1432,7 @@ class WorkflowRunner:
                 run.status = RUN_COMPLETED
                 await s.commit()
                 return None
+            post = _Post()
 
             if run.status == RUN_PENDING:
                 # Claim the run atomically: start_run (request path) and the
@@ -1168,126 +1449,267 @@ class WorkflowRunner:
                     await s.rollback()
                     return None
                 await s.refresh(run)
-                return await self._start_and_commit(s, run, 0, pre)
+            else:
+                if not (0 <= run.current_stage < len(run.stages)):
+                    return None
+                await self._adopt_started_agents(s, run)
+                for i in range(run.current_stage, len(run.stages)):
+                    if _ok(run, i) or get_state(run, i).get("status") is None:
+                        continue
+                    await self._watch(s, run, i, post)
+                    if run.status == RUN_FAILED:
+                        await s.commit()
+                        post.failed = True
+                        return post
+                _move_pointer(run)
+                if run.status == RUN_COMPLETED:
+                    await s.commit()
+                    return post
 
-            i = run.current_stage
-            if not (0 <= i < len(run.stages)):
-                return None
-            kind = stage_kind(run.stages[i])
+            await self._schedule(s, run, pre, post)
+            if run.status == RUN_FAILED:
+                await s.commit()
+                post.failed = True
+                return post
+            if post.need is None and _is_flow(run):
+                await self._flow_status(s, run)
+            await s.commit()
+            return post
+
+    @staticmethod
+    async def _adopt_started_agents(s, run) -> None:
+        """An agent step that has tasks of its current attempt but no status (a run active
+        from before agent steps got one) is running: mark it so it is watched, never started
+        a second time."""
+        idle = [i for i in range(run.current_stage or 0, len(run.stages))
+                if stage_kind(run.stages[i]) == "agent" and not _ok(run, i)
+                and get_state(run, i).get("status") is None]
+        if not idle:
+            return
+        have = set((await s.execute(select(Task.stage_index, Task.stage_attempt).where(
+            Task.workflow_run_id == run.id, Task.stage_index.in_(idle)))).all())
+        for i in idle:
+            if (i, _attempt(run, i)) in have or (_attempt(run, i) == 0 and (i, None) in have):
+                st = get_state(run, i)
+                st.update(status="running", started_at=st.get("started_at") or _iso())
+                _put_state(run, i, st)
+
+    async def _watch(self, s, run, i: int, post: _Post) -> None:
+        """Follow step i, which is in flight (started, not finished successfully). Writes
+        go to the session; slow work is queued on `post` (spawns, fixes, output checks)."""
+        run_id = run.id
+        kind = stage_kind(run.stages[i])
+        st = get_state(run, i)
+        status = st.get("status")
+
+        if kind == "gate" and status == "budget" and st.get("fix_pending"):
+            # A fix round held on the budget: once it is raised, start the FIX TASK
+            # (not the gate again). While still short, stay held without re-reading logs.
+            ok, _, _ = await _budget_ok(s, run)
+            if ok:
+                post.fixes.append(_Fix(i, st.get("handout"), int(st.get("fix_pending") or 0)))
+            return
+        if kind == "gate" and status == "held" and st.get("lock_wait"):
+            # Held for the project's check lock: hand the same hand-out out again once
+            # the lock is free (the gate takes it before its next command).
+            project = await s.get(Project, run.stages[i].get("project")) if run.stages[i].get("project") else None
+            if project is not None and (project.directory or "").strip() and not await _project_lock_free(
+                    s, project.directory, run_id, i):
+                return
+            if st.get("fix_pending"):
+                post.fixes.append(_Fix(i, st.get("handout"), int(st.get("fix_pending") or 0)))
+                return
+            st.update(status="waiting", reason=None)
+            _put_state(run, i, st)
+            await s.commit()
+            post.spawns.append((i, st.get("handout")))
+            return
+        if status in ("held", "budget"):
+            return  # started again by _schedule (pre-flight / budget checked again)
+
+        if kind == "gate":
+            if status == "failed":
+                if run.status != RUN_FAILED:
+                    _fail_run(run)
+            elif status in GATE_LIVE:
+                t = self._gates.get((run_id, i))
+                if t is not None and not t.done():
+                    return
+                if st.get("slot_wait"):
+                    return  # allowed, waiting for a free place: _schedule hands it out
+                lost = self._ended.pop((run_id, i), None) == st.get("handout")
+                if status == "running" and not lost:
+                    # This process has no child for it: the server restarted mid-command.
+                    runlog.append(run, f"{_label(run, i)} resumed after a server restart")
+                    await s.commit()
+                post.spawns.append((i, st.get("handout")))
+            elif status == "fixing":
+                r = await self._fix_watch(s, run, i, st)
+                if isinstance(r, _Fix):
+                    post.fixes.append(r)
+                elif isinstance(r, _Post):
+                    post.spawns.extend(r.spawns)
+            return
+
+        if kind == "approval":
+            if status == "rejected":
+                if run.status != RUN_FAILED:
+                    _fail_run(run)
+            elif status == "waiting_approval":
+                if run.status != RUN_PAUSED:
+                    run.status = RUN_PAUSED
+            return
+
+        # Agent stage: inspect the current attempt's tasks only.
+        tasks = (
+            await s.execute(
+                select(Task).where(
+                    Task.workflow_run_id == run.id,
+                    Task.stage_index == i,
+                    Task.stage_attempt == _attempt(run, i),
+                )
+            )
+        ).scalars().all()
+        if not tasks:
+            return
+        statuses = [t.status for t in tasks]
+        bad = any(x in (Status.FAILED, Status.CANCELLED) for x in statuses)
+        if bad and self._auto_retry_due(run, i, st, statuses):
+            if not any(x in Status.ACTIVE for x in statuses):
+                _new_attempt(run, i, auto=True)  # no status now: _schedule starts it again
+                return
+            bad = False  # wait for the siblings to end, then retry
+        if bad:
+            if status != "failed":
+                n = sum(1 for x in statuses if x in (Status.FAILED, Status.CANCELLED))
+                st.update(status="failed", reason=f"{n} task{'s' if n != 1 else ''} failed")
+                _put_state(run, i, st)
+                runlog.append(run, f"Step {_stage_name(run, i)} failed: {st['reason']}")
+            _fail_run(run)
+            return
+        if any(x == Status.AWAITING_APPROVAL for x in statuses):
+            run.status = RUN_PAUSED  # gated stage waiting for a human
+            return
+        if all(x == Status.COMPLETED for x in statuses):
+            expects = st.get("expects") or {}
+            todo = [t for t in tasks if t.id in expects and t.outputs is None]
+            if todo:
+                pids = {t.project_id for t in todo if t.project_id}
+                dirs = {p.id: p.directory for p in (
+                    await s.execute(select(Project).where(Project.id.in_(pids)))
+                ).scalars().all()} if pids else {}
+                post.verifies.append(_Verify(i, _attempt(run, i), [
+                    (t.id, list(expects[t.id]), (t.result_text or "")[-typed_outputs.SCAN_BYTES:],
+                     dirs.get(t.project_id)) for t in todo
+                ]))
+                return
+            st.update(status="done", finished_at=_iso())
+            _put_state(run, i, st)
+            _move_pointer(run)
+            t = await totals.compute(s, run)
+            runlog.append(run, f"Step {_stage_name(run, i)} done. {totals.line(t)}")
+            return
+        # Otherwise still running — make sure the run reflects that.
+        if run.status == RUN_PAUSED:
+            run.status = RUN_RUNNING
+
+    async def _schedule(self, s, run, pre: dict, post: _Post) -> None:
+        """Start every step that may start now, lowest first: its waited-for steps finished
+        successfully and it has not started (or it is held on pre-flight / the budget and is
+        tried again). Agent and gate steps need a free place (max_parallel); approvals do
+        not. Each start is committed on its own; an approval approved ahead finishes at once
+        and may let its dependants start in the same pass. A start that needs a pre-flight
+        answer stops the pass (post.need): the caller asks outside the lock and comes back."""
+        stages = run.stages
+        limit = flowgraph.get_max_parallel(stages)
+        tried: set[int] = set()
+        while run.status in ACTIVE_RUN:
+            cur = run.current_stage or 0
+            used = _slots_used(run)
+            pick = None
+            for i in range(cur, len(stages)):
+                if i in tried or _ok(run, i):
+                    continue
+                st = get_state(run, i)
+                status = st.get("status")
+                if not (status is None or (status in ("held", "budget") and not st.get("lock_wait")
+                                           and not st.get("fix_pending"))
+                        or (status == "waiting" and st.get("slot_wait"))):
+                    continue
+                if not all(_ok(run, j) for j in flowgraph.deps(stages, i)):
+                    continue
+                if stage_kind(stages[i]) != "approval" and used >= limit:
+                    continue
+                pick = i
+                break
+            if pick is None:
+                return
+            tried.add(pick)
+            st = get_state(run, pick)
+            if st.get("slot_wait"):
+                # An allowed gate that waited for a place: hand out the same hand-out now.
+                st.pop("slot_wait", None)
+                _put_state(run, pick, st)
+                await s.commit()
+                post.spawns.append((pick, st.get("handout")))
+                continue
+            try:
+                submits = await _start_stage(s, run, pick, self.worker, pre)
+            except _NeedPreflight as e:
+                await s.commit()  # what this pass decided so far stands
+                post.need = e
+                return
+            await s.commit()
+            for t in submits:
+                await s.refresh(t)
+            post.results.extend((t.id, t.priority, t.created_at, t.status) for t in submits)
+            if run.status == RUN_FAILED:
+                return
+            if _ok(run, pick):  # approved ahead when reached: move on at once
+                _move_pointer(run)
+                await s.commit()
+                continue
+            spawn = self._want_spawn(run, pick)
+            if spawn:
+                post.spawns.append((pick, spawn))
+
+    async def _flow_status(self, s, run) -> None:
+        """Run status of a run with branches (7b): running while any step works (or is held
+        to start again); paused ("Waiting for you") only when nothing else runs and a step
+        waits for a person (an approval, a task approval, a fix task approval) or the budget."""
+        if run.status not in (RUN_RUNNING, RUN_PAUSED):
+            return
+        rows = (await s.execute(select(Task.stage_index, Task.stage_attempt, Task.status, Task.id).where(
+            Task.workflow_run_id == run.id))).all()
+        work = wait = False
+        for i in range(run.current_stage or 0, len(run.stages)):
+            if _ok(run, i):
+                continue
             st = get_state(run, i)
             status = st.get("status")
-
-            if kind == "gate" and status == "budget" and st.get("fix_pending"):
-                # A fix round held on the budget: once it is raised, start the FIX TASK
-                # (not the gate again). While still short, stay held without re-reading logs.
-                ok, _, _ = await _budget_ok(s, run)
-                if not ok:
-                    return None
-                return _Fix(i, st.get("handout"), int(st.get("fix_pending") or 0))
-            if kind == "gate" and status == "held" and st.get("lock_wait"):
-                # Held for the project's check lock: hand the same hand-out out again once
-                # the lock is free (the gate takes it before its next command).
-                project = await s.get(Project, run.stages[i].get("project")) if run.stages[i].get("project") else None
-                if project is not None and (project.directory or "").strip() and not await _project_lock_free(
-                        s, project.directory, run_id, i):
-                    return None
-                if st.get("fix_pending"):
-                    return _Fix(i, st.get("handout"), int(st.get("fix_pending") or 0))
-                st.update(status="waiting", reason=None)
-                _put_state(run, i, st)
-                await s.commit()
-                return _Post(spawns=[(i, st.get("handout"))])
-            if status in ("held", "budget"):
-                return await self._start_and_commit(s, run, i, pre)
-
-            if kind == "gate":
-                if status == "passed":
-                    return await self._next_stage(s, run, i, pre)
-                if status == "failed":
-                    if run.status != RUN_FAILED:
-                        _fail_run(run)
-                        await s.commit()
-                elif status in GATE_LIVE:
-                    t = self._gates.get((run_id, i))
-                    if t is not None and not t.done():
-                        return None
-                    lost = self._ended.pop((run_id, i), None) == st.get("handout")
-                    if status == "running" and not lost:
-                        # This process has no child for it: the server restarted mid-command.
-                        runlog.append(run, f"{_label(run, i)} resumed after a server restart")
-                        await s.commit()
-                    return _Post(spawns=[(i, st.get("handout"))])
-                elif status == "fixing":
-                    return await self._fix_watch(s, run, i, st)
-                elif status is None:
-                    return await self._start_and_commit(s, run, i, pre)
-                return None
-
-            if kind == "approval":
-                if status == "approved":
-                    return await self._next_stage(s, run, i, pre)
-                if status == "rejected":
-                    if run.status != RUN_FAILED:
-                        _fail_run(run)
-                        await s.commit()
-                elif status == "waiting_approval":
-                    if run.status != RUN_PAUSED:
-                        run.status = RUN_PAUSED
-                        await s.commit()
-                elif status is None:
-                    return await self._start_and_commit(s, run, i, pre)
-                return None
-
-            # Agent stage: inspect the current attempt's tasks only.
-            tasks = (
-                await s.execute(
-                    select(Task).where(
-                        Task.workflow_run_id == run.id,
-                        Task.stage_index == i,
-                        Task.stage_attempt == _attempt(run, i),
-                    )
-                )
-            ).scalars().all()
-            if not tasks:
-                return None
-            statuses = [t.status for t in tasks]
-            bad = any(x in (Status.FAILED, Status.CANCELLED) for x in statuses)
-            if bad and self._auto_retry_due(run, i, st, statuses):
-                if not any(x in Status.ACTIVE for x in statuses):
-                    _new_attempt(run, i, auto=True)
-                    return await self._start_and_commit(s, run, i, pre)
-                bad = False  # wait for the siblings to end, then retry
-            if bad:
-                if status != "failed":
-                    n = sum(1 for x in statuses if x in (Status.FAILED, Status.CANCELLED))
-                    st.update(status="failed", reason=f"{n} task{'s' if n != 1 else ''} failed")
-                    _put_state(run, i, st)
-                    runlog.append(run, f"Step {_stage_name(run, i)} failed: {st['reason']}")
-                _fail_run(run)
-                await s.commit()
-                return None
-            if any(x == Status.AWAITING_APPROVAL for x in statuses):
-                run.status = RUN_PAUSED  # gated stage waiting for a human
-                await s.commit()
-                return None
-            if all(x == Status.COMPLETED for x in statuses):
-                expects = st.get("expects") or {}
-                todo = [t for t in tasks if t.id in expects and t.outputs is None]
-                if todo:
-                    pids = {t.project_id for t in todo if t.project_id}
-                    dirs = {p.id: p.directory for p in (
-                        await s.execute(select(Project).where(Project.id.in_(pids)))
-                    ).scalars().all()} if pids else {}
-                    return _Verify(i, _attempt(run, i), [
-                        (t.id, list(expects[t.id]), (t.result_text or "")[-typed_outputs.SCAN_BYTES:],
-                         dirs.get(t.project_id)) for t in todo
-                    ])
-                return await self._next_stage(s, run, i, pre, finish_agent=True)
-            # Otherwise still running — make sure the run reflects that.
-            if run.status == RUN_PAUSED:
-                run.status = RUN_RUNNING
-                await s.commit()
-            return None
+            kind = stage_kind(run.stages[i])
+            if status is None:
+                continue
+            if status in ("budget", "waiting_approval", "needs_approval"):
+                wait = True
+            elif kind == "agent" and status == "running":
+                mine = [x for j, a, x, _ in rows if j == i and (a or 0) == _attempt(run, i)]
+                if Status.AWAITING_APPROVAL in mine:
+                    wait = True
+                else:
+                    work = True
+            elif kind == "gate" and status == "fixing":
+                fix = [x for _, _, x, tid in rows if tid == st.get("fix_task")]
+                if fix and fix[0] == Status.AWAITING_APPROVAL:
+                    wait = True
+                else:
+                    work = True
+            elif status in ("running", "waiting", "held"):
+                work = True
+        if work:
+            run.status = RUN_RUNNING
+        elif wait:
+            run.status = RUN_PAUSED
 
     async def _fix_watch(self, s, run, i: int, st: dict) -> "_Fix | _Post | None":
         """A gate stage in `fixing`: create the round's fix task (via _Fix) or follow it.
@@ -1329,7 +1751,7 @@ class WorkflowRunner:
         first therefore wins: no task is created on a failed run."""
 
         def same(run, st) -> bool:
-            if run is None or run.status not in ACTIVE_RUN or run.current_stage != fx.index:
+            if run is None or run.status not in ACTIVE_RUN:
                 return False
             if not (0 <= fx.index < len(run.stages or [])) or stage_kind(run.stages[fx.index]) != "gate":
                 return False
@@ -1386,8 +1808,14 @@ class WorkflowRunner:
                 ok, spent, remaining = await _budget_ok(s, run)
                 # Remember what failed: a hold's own reason replaces it on screen.
                 fr = st.get("fail_reason") if st.get("status") in ("budget", "held") else st.get("reason")
+                left = await _flow_left(s, run, remaining) if ok else remaining
+                if ok and left is not None and left < BUDGET_MIN:
+                    ok, why = False, RESERVE_WORDS
+                else:
+                    why = None
+                remaining = left
                 if not ok:
-                    _budget_hold(run, i, {**st, "fix_pending": fx.round, "fail_reason": fr}, spent)
+                    _budget_hold(run, i, {**st, "fix_pending": fx.round, "fail_reason": fr}, spent, why)
                     await s.commit()
                     release_project_locks(run_id, i)  # a person must raise the limit: free the folder
                     return None
@@ -1437,6 +1865,7 @@ class WorkflowRunner:
                     reason = st.get("fail_reason")
                 st.pop("fail_reason", None)
                 st.pop("lock_wait", None)
+                st.pop("budget_reserve", None)
                 _put_state(run, i, {**st, "status": "fixing", "fix_task": task.id, "reason": reason})
                 if run.status == RUN_PAUSED:
                     run.status = RUN_RUNNING  # the cap was raised: resume
@@ -1455,52 +1884,6 @@ class WorkflowRunner:
                 and not st.get("auto_retried") and st.get("status") != "failed"
                 and Status.FAILED in statuses and Status.CANCELLED not in statuses)
 
-    async def _start_and_commit(self, s, run, i: int, pre: dict) -> _Post:
-        """Start stage i in this session and commit (a held stage is checked again).
-        Returns the submits and gate spawn to do after the lock is released."""
-        submits = await _start_stage(s, run, i, self.worker, pre)
-        await s.commit()
-        for t in submits:
-            await s.refresh(t)
-        post = _Post(results=[(t.id, t.priority, t.created_at, t.status) for t in submits])
-        if (run.status in ACTIVE_RUN and stage_kind(run.stages[i]) == "approval"
-                and get_state(run, i).get("status") == "approved"):
-            # Approved ahead when reached: move on at once (the commit above stands even
-            # when the next stage asks for a pre-flight answer and this is called again).
-            nxt = await self._next_stage(s, run, i, pre)
-            return nxt or post
-        spawn = self._want_spawn(run, i)
-        if spawn:
-            post.spawns.append((i, spawn))
-        return post
-
-    async def _next_stage(self, s, run, i: int, pre: dict, finish_agent: bool = False) -> "_Post | None":
-        """Move from stage i to i + 1 (or complete the run). A conditional UPDATE claims
-        the move so two advances cannot both start the next stage."""
-        last = i + 1 >= len(run.stages)
-        values = {"status": RUN_COMPLETED} if last else {"status": RUN_RUNNING, "current_stage": i + 1}
-        claimed = await s.execute(
-            update(WorkflowRun)
-            .where(WorkflowRun.id == run.id, WorkflowRun.current_stage == i,
-                   WorkflowRun.status.in_(list(ACTIVE_RUN)))
-            .values(**values)
-            .execution_options(synchronize_session=False)
-        )
-        if claimed.rowcount != 1:
-            await s.rollback()
-            return None
-        await s.refresh(run)
-        if finish_agent:
-            st = get_state(run, i)
-            st.update(status="done", finished_at=_iso())
-            _put_state(run, i, st)
-            t = await totals.compute(s, run)
-            runlog.append(run, f"Step {_stage_name(run, i)} done. {totals.line(t)}")
-        if last:
-            await s.commit()
-            return None
-        return await self._start_and_commit(s, run, i + 1, pre)
-
     async def _submit(self, results):
         for tid, prio, created, status in results:
             if status != Status.AWAITING_APPROVAL:
@@ -1514,9 +1897,10 @@ class WorkflowRunner:
             raise ValueError("the run is not active")
         if not (0 <= i < len(run.stages or [])) or stage_kind(run.stages[i]) != kind:
             raise ValueError(f"step {i + 1} is not {'an' if kind == 'approval' else 'a'} {kind} step")
-        if run.current_stage != i:
-            raise ValueError("this step is not the current step")
         st = get_state(run, i)
+        if _ok(run, i) or st.get("status") is None:
+            # Finished or not reached. Any step in flight may be decided (7b: branches).
+            raise ValueError("this step is not the current step")
         if st.get("status") != want:
             raise ValueError(why)
         return run, st
@@ -1524,9 +1908,16 @@ class WorkflowRunner:
     # ------------------------------------------------------------------
     # Gates
     # ------------------------------------------------------------------
+    def _flag_others(self, run, i: int) -> None:
+        """A gate failed the run: when another step is in flight (only with branches), the
+        gate's task stops it once it ends (_gate_main)."""
+        if any(j != i and not _ok(run, j) and get_state(run, j).get("status") not in (None, *FINISHED_STATES)
+               for j in range(run.current_stage or 0, len(run.stages or []))):
+            self._stop_after_gate.add(run.id)
+
     def _want_spawn(self, run, i: int) -> str | None:
         """The hand-out to spawn after commit, when stage i is a gate waiting to run."""
-        if run.status not in ACTIVE_RUN or run.current_stage != i:
+        if run.status not in ACTIVE_RUN:
             return None
         if not (0 <= i < len(run.stages or [])) or stage_kind(run.stages[i]) != "gate":
             return None
@@ -1542,11 +1933,12 @@ class WorkflowRunner:
             return
         self._gates[key] = asyncio.create_task(self._gate_main(run_id, i, handout))
 
-    async def _kill_gates(self, run_id: str, record: bool) -> None:
-        """Cancel the run's live gate tasks (run_command kills the process group). With
-        `record`, a command that was in flight and not yet recorded gets a `cancelled` row."""
+    async def _kill_gates(self, run_id: str, record: bool, stages: set | None = None) -> None:
+        """Cancel the run's live gate tasks (only those of `stages` when given; run_command
+        kills the process group). With `record`, a command that was in flight and not yet
+        recorded gets a `cancelled` row."""
         for key, task in list(self._gates.items()):
-            if key[0] != run_id:
+            if key[0] != run_id or (stages is not None and key[1] not in stages):
                 continue
             info = self._procs.get(key)
             task.cancel()
@@ -1620,6 +2012,7 @@ class WorkflowRunner:
                     advance = True
                     break
         except asyncio.CancelledError:
+            self._stop_after_gate.discard(run_id)  # killed: whoever killed it stops the rest
             raise
         except Exception as e:  # noqa: BLE001 - a broken gate fails its stage, never the loop
             log.exception("gate %s stage %s failed", run_id, i)
@@ -1635,12 +2028,19 @@ class WorkflowRunner:
                 await self._advance(run_id)
             except Exception:  # noqa: BLE001 - the tick tries again; the gate result stands
                 log.exception("workflow runner: advancing run %s after its gate failed", run_id)
+        try:
+            # This gate failed the run while other steps were in flight (7b): stop them.
+            if run_id in self._stop_after_gate:
+                self._stop_after_gate.discard(run_id)
+                await self._stop_others(run_id)
+        except Exception:  # noqa: BLE001
+            log.exception("workflow runner: stopping the other steps of run %s failed", run_id)
 
     async def _gate_error(self, run_id: str, i: int, handout: str, err: Exception) -> None:
         async def fn(pre):
             async with SessionLocal() as s:
                 run = await s.get(WorkflowRun, run_id)
-                if run is None or run.status not in ACTIVE_RUN or run.current_stage != i:
+                if run is None or run.status not in ACTIVE_RUN or not (0 <= i < len(run.stages or [])):
                     return
                 st = get_state(run, i)
                 if st.get("handout") != handout or st.get("status") not in GATE_LIVE:
@@ -1653,6 +2053,7 @@ class WorkflowRunner:
                 _put_state(run, i, st)
                 runlog.append(run, f"{_label(run, i)} failed: {reason}")
                 _fail_run(run)
+                self._flag_others(run, i)
                 await s.commit()
 
         try:
@@ -1668,7 +2069,7 @@ class WorkflowRunner:
         # Phase 1: read and probe, no lock.
         async with SessionLocal() as s:
             run = await s.get(WorkflowRun, run_id)
-            if run is None or run.status not in ACTIVE_RUN or run.current_stage != i:
+            if run is None or run.status not in ACTIVE_RUN or not (0 <= i < len(run.stages or [])):
                 return None
             stage = run.stages[i]
             st = get_state(run, i)
@@ -1696,7 +2097,7 @@ class WorkflowRunner:
         async def fn(pre):
             async with SessionLocal() as s:
                 run = await s.get(WorkflowRun, run_id)
-                if run is None or run.status not in ACTIVE_RUN or run.current_stage != i:
+                if run is None or run.status not in ACTIVE_RUN or not (0 <= i < len(run.stages or [])):
                     return None
                 stage = run.stages[i]
                 st = get_state(run, i)
@@ -1711,6 +2112,7 @@ class WorkflowRunner:
                     _put_state(run, i, st)
                     runlog.append(run, line)
                     _fail_run(run)  # lets go of the project lock too
+                    self._flag_others(run, i)
                     await s.commit()
 
                 if plan is None:
@@ -1803,7 +2205,7 @@ class WorkflowRunner:
     async def _gate_record_locked(self, run_id, i, handout, step, out) -> bool | None:
         async with SessionLocal() as s:
             run = await s.get(WorkflowRun, run_id)
-            if run is None or run.status not in ACTIVE_RUN or run.current_stage != i:
+            if run is None or run.status not in ACTIVE_RUN or not (0 <= i < len(run.stages or [])):
                 return None
             st = get_state(run, i)
             if st.get("handout") != handout or st.get("status") != "running" or step.get("recorded"):
@@ -1902,6 +2304,7 @@ class WorkflowRunner:
                 runlog.append(run, f"{_label(run, i)} failed: "
                               f"{_gate_detail(cmd, out, res, step.get('timeout_min'), names=False)}")
                 _fail_run(run)
+                self._flag_others(run, i)
             else:
                 _put_state(run, i, st)
             await s.commit()

@@ -306,3 +306,13 @@
   font-size: 12px;
   color: var(--co-text-muted);
 }
+
+/* A branch stopped because another failed: calm, not an error. */
+.co-run-stopped {
+  margin: 0 0 8px;
+  padding: 6px 10px;
+  border-radius: 8px;
+  background: var(--co-hover);
+  color: var(--co-text-secondary);
+  font-size: 13px;
+}

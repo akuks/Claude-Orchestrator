@@ -21,7 +21,7 @@ from ..constants import Status
 from ..gates import executor, spec, test_results, totals
 from ..models import Agent, Project, Task, Workflow, WorkflowGateRun, WorkflowRun
 from ..redaction import clean_text, env_values, mask_values
-from .. import workflow_templates as wft
+from .. import flowgraph, workflow_templates as wft
 from ..workflow_runner import ACTIVE_RUN, _spent as _run_spent, gate_status_text
 from ..schemas import (
     BudgetRaise,
@@ -205,11 +205,18 @@ async def workflow_projects(s, wf: Workflow) -> list[str]:
     return sorted(ids)
 
 
-async def _normalize(s, stages: list[dict]) -> list[dict]:
+async def _normalize(s, stages: list[dict], max_parallel=None) -> list[dict]:
+    """Validated stages with `max_parallel` stored on stage 0 (no column: no migration).
+    Step-order problems come back together as a list of sentences in `detail`."""
     try:
-        return await spec.validate_stages(s, stages)
+        out = await spec.validate_stages(s, stages)
     except ValueError as e:
         raise HTTPException(422, str(e))
+    problems = flowgraph.validate(out, max_parallel)
+    if problems:
+        raise HTTPException(422, problems)
+    flowgraph.set_max_parallel(out, max_parallel)
+    return out
 
 
 def _run_visible(p, run: WorkflowRun, visible) -> bool:
@@ -236,7 +243,7 @@ async def create_workflow(payload: WorkflowCreate, request: Request):
     ensure_admin(request.state.principal)
     stages = [st.model_dump(exclude_unset=True) for st in payload.stages]
     async with SessionLocal() as s:
-        stages = await _normalize(s, stages)
+        stages = await _normalize(s, stages, payload.max_parallel)
         await _validate_agents(s, stages)
         wf = Workflow(name=payload.name, description=payload.description, stages=stages, budget_usd=payload.budget_usd,
                       created_by=request.state.principal.user.id)
@@ -261,9 +268,19 @@ async def update_workflow(workflow_id: str, payload: WorkflowUpdate, request: Re
         wf = await s.get(Workflow, workflow_id)
         if wf is None:
             raise HTTPException(404, "Workflow not found")
+        mp = data.pop("max_parallel", None) if "max_parallel" in data else None
         if "stages" in data:
-            data["stages"] = await _normalize(s, data["stages"])
+            if "max_parallel" not in payload.model_fields_set:
+                mp = flowgraph.get_max_parallel(wf.stages or [])
+            data["stages"] = await _normalize(s, data["stages"], mp)
             await _validate_agents(s, data["stages"])
+        elif "max_parallel" in payload.model_fields_set:
+            kept = [dict(x) for x in wf.stages or []]
+            problems = flowgraph.validate(kept, mp)
+            if problems:
+                raise HTTPException(422, problems)
+            flowgraph.set_max_parallel(kept, mp)
+            data["stages"] = kept
         for k, v in data.items():
             setattr(wf, k, v)
         await s.commit()
@@ -362,6 +379,11 @@ _GATE_STATE = {
 }
 
 
+def _in_flight(status) -> bool:
+    """A step started and not finished (successfully or not)."""
+    return status not in (None, "done", "passed", "approved", "failed", "rejected", "stopped")
+
+
 def _gate_stage_state(status, index: int, current: int) -> str:
     """Live state of a gate/approval stage from its stage_state status."""
     if status in _GATE_STATE:
@@ -430,12 +452,13 @@ async def live_runs(request: Request):
             stages = []
             for i, st in enumerate(run.stages or []):
                 sts = by_stage.get(i, [])
+                status = ((run.stage_state or {}).get(str(i)) or {}).get("status")
+                # Several steps can be in flight at once (7b): each is "current".
+                cur = i if _in_flight(status) else run.current_stage
                 if spec.stage_kind(st) != "agent":
-                    state = _gate_stage_state(
-                        ((run.stage_state or {}).get(str(i)) or {}).get("status"), i, run.current_stage
-                    )
+                    state = _gate_stage_state(status, i, cur)
                 else:
-                    state = _stage_state(sts, i, run.current_stage)
+                    state = _stage_state(sts, i, cur)
                 stages.append(
                     LiveStageOut(
                         name=(st.get("name") if isinstance(st, dict) else None) or f"Stage {i + 1}",
@@ -614,6 +637,11 @@ async def get_run(run_id: str, request: Request):
         live = await _live_with_progress(runner, run.id)
         if live and live.get("stage_index") in hidden:
             live = None
+        # Every gate command running now (several when branches run side by side, 7b); the
+        # lowest one carries the progress line as before.
+        lives = {g["stage_index"]: g for g in (getattr(runner, "live_gates", None) or (lambda _r: []))(run.id)}
+        if live:
+            lives[live["stage_index"]] = live
         stage_state = {k: dict(v) if isinstance(v, dict) else {} for k, v in (run.stage_state or {}).items()}
         held = [
             k for k, v in stage_state.items()
@@ -633,6 +661,7 @@ async def get_run(run_id: str, request: Request):
             if str(i) in stage_state:
                 e = stage_state[str(i)]
                 e["_lock_wait"] = bool(e.pop("lock_wait", None))  # internal; read by _status_word below
+                e["_slot_wait"] = bool(e.pop("slot_wait", None))  # allowed, waiting for a free place (7b)
                 if isinstance(e.get("ahead"), dict):  # who approved ahead, by name only
                     e["ahead"] = {"by_name": e["ahead"].get("by_name"), "at": e["ahead"].get("at")}
                 elif "ahead" in e:
@@ -640,19 +669,24 @@ async def get_run(run_id: str, request: Request):
             if kind == "agent":
                 if str(i) in stage_state:
                     stage_state[str(i)].pop("expects", None)  # internal: task ids -> output names
-                    word = _status_word(kind, stage_state[str(i)], False, run_active and i == run.current_stage, False)
+                    word = _status_word(kind, stage_state[str(i)], False, run_active and (
+                        i == run.current_stage or _in_flight(stage_state[str(i)].get("status"))), False)
                     stage_state[str(i)].pop("_lock_wait", None)
+                    stage_state[str(i)].pop("_slot_wait", None)
                     if word:
                         stage_state[str(i)]["status_word"] = word
                 continue
             entry = stage_state.setdefault(str(i), {})
             lv = None
+            if kind == "gate" and i not in hidden:
+                lv = lives.get(i)
             if kind == "gate":
-                lv = live if live and live.get("stage_index") == i else None
                 entry["status_text"] = gate_status_text(st, entry, lv)
-            word = _status_word(kind, entry, bool(lv), run_active and i == run.current_stage,
+            word = _status_word(kind, entry, bool(lv), run_active and (
+                                    i == run.current_stage or _in_flight(entry.get("status"))),
                                 kind == "gate" and task_alive(i))
             entry.pop("_lock_wait", None)
+            entry.pop("_slot_wait", None)
             if word:
                 entry["status_word"] = word
             if i in hidden:
@@ -692,6 +726,12 @@ def _status_word(kind: str, entry: dict, live: bool, current: bool, working: boo
     status = entry.get("status")
     if live or (working and status in ("waiting", "running")):
         return "Running"
+    if status == "stopped":
+        return "Stopped"  # another branch failed (7b)
+    if status == "budget" and entry.get("budget_reserve"):
+        return "Waiting for other steps"  # other steps' caps use what is left, not the limit (7b)
+    if status == "waiting" and entry.get("_slot_wait"):
+        return "Waiting its turn"  # allowed; waits for a free place among the steps at once (7b)
     if status == "held":
         # Only a wait for another run's checks; a pre-flight hold keeps the screen's own words.
         return "Waiting its turn" if entry.get("_lock_wait") else None

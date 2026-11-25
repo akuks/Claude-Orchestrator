@@ -60,7 +60,7 @@ export function flowModel(steps, agents) {
             outputs: outputNames(it).map((n) => revealHidden(n).text),
           }))
         : [{ item: null, title: 'No agent yet', sub: '', retry: false, handsOver: 0 }]
-      return { index, kind, name, boxes, fix: null }
+      return { index, kind, name, boxes, fix: null, deps: stepDeps(steps, index) }
     }
     if (kind === 'gate') {
       const run = Array.isArray(st?.run) ? st.run : []
@@ -71,9 +71,10 @@ export function flowModel(steps, agents) {
         name,
         boxes: [{ item: null, title: name, sub: String(cmd).trim(), mono: true, retry: !!String(st?.retry ?? '').trim(), handsOver: 0 }],
         fix: st?.fix?.agent ? { title: agentName(st.fix.agent, agents) || 'an agent' } : null,
+        deps: stepDeps(steps, index),
       }
     }
-    return { index, kind, name, boxes: [{ item: null, title: name, sub: firstLine(st?.message), retry: false, handsOver: 0 }], fix: null }
+    return { index, kind, name, boxes: [{ item: null, title: name, sub: firstLine(st?.message), retry: false, handsOver: 0 }], fix: null, deps: stepDeps(steps, index) }
   })
 }
 
@@ -91,22 +92,148 @@ export function boxOffsets(n, size) {
   return Array.from({ length: k }, (_, i) => (i - (k - 1) / 2) * (s.h + s.gap))
 }
 
-// The canvas's inner height (the tallest column) and the extra room above
-// (step tools) and below (fixer branch, "+ agent" chip) it needs.
-export function layout(model, { size = 'full', mode = 'view' } = {}) {
+// What a step's column needs above and below its boxes (step tools, caption,
+// fixer branch, "+ agent" chip): they hang outside the column.
+function extras(col, size, mode) {
   const s = sizeOf(size)
-  const height = Math.max(s.h, ...model.map((c) => columnHeight(c.boxes.length, size)))
-  const half = height / 2
-  let above = half
-  let below = half
-  for (const c of model) {
-    const ch = columnHeight(c.boxes.length, size) / 2
-    if (mode === 'edit' && size !== 'mini') above = Math.max(above, ch + s.tools)
-    if (c.kind === 'agent' && size !== 'mini') above = Math.max(above, ch + s.caption)
-    if (c.fix && size !== 'mini') below = Math.max(below, ch + s.branch + s.fixer)
-    if (mode === 'edit' && c.kind === 'agent' && size !== 'mini') below = Math.max(below, ch + s.chip)
+  if (size === 'mini') return { above: 0, below: 0 }
+  const edit = mode === 'edit'
+  return {
+    above: Math.max(edit ? s.tools : 0, col.kind === 'agent' ? s.caption : 0),
+    below: Math.max(col.fix ? s.branch + s.fixer : 0, edit && col.kind === 'agent' ? s.chip : 0),
   }
+}
+
+// The same for a step stacked with others: a run's usage line needs room too.
+export function stackExtras(col, size, mode) {
+  const ex = extras(col, size, mode)
+  return mode === 'run' && size !== 'mini' ? { above: ex.above, below: ex.below + 22 } : ex
+}
+
+// A step's slot in a stack of several steps: its column plus what hangs off it.
+const slotHeight = (col, size, mode) => {
+  const ex = stackExtras(col, size, mode)
+  return ex.above + columnHeight(col.boxes.length, size) + ex.below
+}
+const stackHeight = (cols, size, mode) => cols.reduce((a, c) => a + slotHeight(c, size, mode), 0) + (cols.length - 1) * sizeOf(size).gap
+
+// The canvas's inner height (the tallest column or stack of steps) and the
+// extra room above (step tools) and below (fixer branch, "+ agent" chip) it
+// needs. groups: step indexes sharing a column (default: one step each).
+export function layout(model, { size = 'full', mode = 'view', groups = null } = {}) {
+  const s = sizeOf(size)
+  const gs = groups || model.map((_, i) => [i])
+  const parts = gs.map((g) => {
+    if (g.length === 1) {
+      const c = model[g[0]]
+      const ch = columnHeight(c.boxes.length, size) / 2
+      const ex = extras(c, size, mode)
+      return { h: ch * 2, up: ch + ex.above, down: ch + ex.below }
+    }
+    const h = stackHeight(g.map((i) => model[i]), size, mode)
+    return { h, up: h / 2, down: h / 2 }
+  })
+  const height = Math.max(s.h, ...parts.map((p) => p.h))
+  const half = height / 2
+  const above = Math.max(half, ...parts.map((p) => p.up))
+  const below = Math.max(half, ...parts.map((p) => p.down))
   return { height, padTop: above - half, padBottom: below - half }
+}
+
+// ---- Which steps wait for which ---------------------------------------------
+
+// The earlier steps step i waits for. `after` missing = the step before.
+export function stepDeps(steps, i) {
+  const a = (Array.isArray(steps) ? steps : [])[i]?.after
+  if (!Array.isArray(a)) return i > 0 ? [i - 1] : []
+  return [...new Set(a.filter((j) => Number.isInteger(j) && j >= 0 && j < i))].sort((x, y) => x - y)
+}
+
+// True when any step says what it waits for (otherwise the workflow is a plain line).
+export const usesAfter = (steps) => (Array.isArray(steps) ? steps : []).some((st) => Array.isArray(st?.after))
+
+// How many waits deep each step is (a step that starts at once is 0).
+export function stepDepths(steps) {
+  const out = []
+  ;(Array.isArray(steps) ? steps : []).forEach((_, i) => {
+    const d = stepDeps(steps, i)
+    out.push(d.length ? 1 + Math.max(...d.map((j) => out[j])) : 0)
+  })
+  return out
+}
+
+// Steps in columns by depth; steps of one column are stacked in step order.
+export function stepGroups(steps) {
+  const depths = stepDepths(steps)
+  const groups = []
+  depths.forEach((d, i) => {
+    ;(groups[d] ||= []).push(i)
+  })
+  return groups
+}
+
+// Steps nobody waits for: they lead to Done.
+export function stepSinks(steps) {
+  const list = Array.isArray(steps) ? steps : []
+  const waited = new Set()
+  list.forEach((_, i) => stepDeps(list, i).forEach((j) => waited.add(j)))
+  return list.map((_, i) => i).filter((i) => !waited.has(i))
+}
+
+// The lines of the picture: { from: 'start' | step, to: step | 'end' }.
+export function flowEdges(steps) {
+  const list = Array.isArray(steps) ? steps : []
+  if (!list.length) return [{ from: 'start', to: 'end' }]
+  const out = []
+  list.forEach((_, i) => {
+    const d = stepDeps(list, i)
+    if (!d.length) out.push({ from: 'start', to: i })
+    d.forEach((j) => out.push({ from: j, to: i }))
+  })
+  stepSinks(list).forEach((i) => out.push({ from: i, to: 'end' }))
+  return out
+}
+
+// A step's name for sentences ("Step 3" when it has none).
+export const stepLabel = (steps, i) => String((Array.isArray(steps) ? steps : [])[i]?.name ?? '').trim() || `Step ${i + 1}`
+
+// Vertical middle of each step's column and of each of its boxes, in the
+// canvas's own coordinates (0 .. layout height).
+export function stepYs(model, groups, height, { size = 'full', mode = 'view' } = {}) {
+  const s = sizeOf(size)
+  const out = []
+  for (const g of groups) {
+    if (g.length === 1) {
+      const i = g[0]
+      out[i] = { center: height / 2, boxes: boxOffsets(model[i].boxes.length, size).map((o) => height / 2 + o) }
+      continue
+    }
+    let y = (height - stackHeight(g.map((i) => model[i]), size, mode)) / 2
+    for (const i of g) {
+      const c = model[i]
+      const ex = stackExtras(c, size, mode)
+      const center = y + ex.above + columnHeight(c.boxes.length, size) / 2
+      out[i] = { center, boxes: boxOffsets(c.boxes.length, size).map((o) => center + o) }
+      y += slotHeight(c, size, mode) + s.gap
+    }
+  }
+  return out
+}
+
+// Everything the canvas needs to draw its lines.
+export function flowPlan(steps, model, { size = 'full', mode = 'view' } = {}) {
+  const groups = stepGroups(steps)
+  const geo = layout(model, { size, mode, groups })
+  const ys = stepYs(model, groups, geo.height, { size, mode })
+  const groupOf = []
+  groups.forEach((g, k) => g.forEach((i) => (groupOf[i] = k)))
+  const edges = flowEdges(steps)
+  const gof = (n) => (n === 'start' ? -1 : n === 'end' ? groups.length : groupOf[n])
+  const lanes = edges.filter((e) => gof(e.to) - gof(e.from) > 1).length
+  // Lines that skip a column run along a lane above everything, inside the canvas.
+  const unit = size === 'mini' ? 3 : 6
+  const laneRoom = lanes ? unit + unit * lanes : 0
+  return { groups, groupOf, geo, ys, edges, mid: geo.height / 2, count: groups.length, lanes, unit, laneRoom, top: lanes ? geo.padTop + laneRoom : 0 }
 }
 
 // SVG paths of a connector from a column of nLeft boxes to one of nRight
@@ -130,6 +257,73 @@ export function connectorPaths(nLeft, nRight, width, height, size) {
   return { lines, arrows }
 }
 
+const TIP = 6
+
+// The lines of one edge inside one connector. src/dst: { center, boxes }.
+function directShape(src, dst, width, size) {
+  if (Math.abs(src.center - dst.center) < 0.01) return connectorPaths(src.boxes.length, dst.boxes.length, width, src.center * 2, size)
+  const cx = width / 2
+  const arrows = dst.boxes.map((y) => `${width - TIP},${y - 4} ${width},${y} ${width - TIP},${y + 4}`)
+  if (src.boxes.length === 1 && dst.boxes.length === 1) {
+    return { lines: [`M0 ${src.center} C${cx} ${src.center} ${cx} ${dst.center} ${width - TIP} ${dst.center}`], arrows }
+  }
+  const ym = (src.center + dst.center) / 2
+  const lines = [
+    ...src.boxes.map((y) => `M0 ${y} C${cx * 0.6} ${y} ${cx * 0.6} ${ym} ${cx} ${ym}`),
+    ...dst.boxes.map((y) => `M${cx} ${ym} C${cx * 1.4} ${ym} ${cx * 1.4} ${y} ${width - TIP} ${y}`),
+  ]
+  return { lines, arrows }
+}
+
+// The lines inside connector k (the gap before column k; the last one leads to
+// Done). Each: { from, to, kind: 'direct' | 'exit' | 'pass' | 'enter', lines,
+// arrows, y } — a line that skips columns rides along the top of the canvas.
+export function connectorShapes(plan, k, width, size = 'full') {
+  const { groupOf, ys, edges, mid, count } = plan
+  const at = (n) => (n === 'start' || n === 'end' ? { center: mid, boxes: [mid] } : ys[n])
+  const col = (n) => (n === 'start' ? -1 : n === 'end' ? count : groupOf[n])
+  let lane = 0
+  const out = []
+  const cx = width / 2
+  // Rounded corners: down/up along x = cx between the lane and a box line.
+  const corner = (dy) => Math.max(1, Math.min(8, cx - 2, Math.abs(dy) - 1))
+  for (const e of edges) {
+    const gf = col(e.from)
+    const gt = col(e.to)
+    const skip = gt - gf > 1
+    const my = skip ? -(plan.geo.padTop + plan.unit + plan.unit * lane++) : 0
+    if (k < gf + 1 || k > gt) continue
+    const src = at(e.from)
+    const dst = at(e.to)
+    if (!skip) {
+      out.push({ ...e, kind: 'direct', ...directShape(src, dst, width, size), y: (src.center + dst.center) / 2 })
+    } else if (k === gf + 1) {
+      out.push({
+        ...e,
+        kind: 'exit',
+        lines: src.boxes.map((y) => {
+          const r = corner(y - my)
+          return `M0 ${y} L${cx - r} ${y} Q${cx} ${y} ${cx} ${y - r} L${cx} ${my + r} Q${cx} ${my} ${cx + r} ${my} L${width} ${my}`
+        }),
+        arrows: [],
+        y: my,
+      })
+    } else if (k === gt) {
+      out.push({
+        ...e,
+        kind: 'enter',
+        lines: dst.boxes.map((y) => {
+          const r = corner(y - my)
+          return `M0 ${my} L${cx - r} ${my} Q${cx} ${my} ${cx} ${my + r} L${cx} ${y - r} Q${cx} ${y} ${cx + r} ${y} L${width - TIP} ${y}`
+        }),
+        arrows: dst.boxes.map((y) => `${width - TIP},${y - 4} ${width},${y} ${width - TIP},${y + 4}`),
+        y: my,
+      })
+    } else out.push({ ...e, kind: 'pass', lines: [`M0 ${my} L${width} ${my}`], arrows: [], y: my })
+  }
+  return out
+}
+
 // ---- Step edits -------------------------------------------------------------
 
 export const NEW_STEP_NAME = { agent: 'Agents', gate: 'Check', approval: 'Ask a person' }
@@ -141,25 +335,94 @@ export function newStep(kind) {
   return { name: NEW_STEP_NAME.agent, kind: 'agent', items: [{}] }
 }
 
+// Every step with its waits written out (so they can be re-numbered).
+const explicit = (list) => list.map((st, i) => ({ ...st, after: stepDeps(list, i) }))
+const uniqSorted = (a) => [...new Set(a)].sort((x, y) => x - y)
+
+// A step put in at `index`, in sequence: in a workflow that says what steps wait
+// for, it waits for what the step it lands before waited for, and that step now
+// waits for it (at the end it waits for every last step). A plain line stays plain.
 export function insertStep(stages, index, kind) {
   const list = Array.isArray(stages) ? [...stages] : []
   const at = Math.max(0, Math.min(index, list.length))
-  list.splice(at, 0, newStep(kind))
-  return list
+  if (!usesAfter(list)) {
+    list.splice(at, 0, newStep(kind))
+    return list
+  }
+  const old = explicit(list)
+  // Between two steps that run side by side there is no "in sequence": leave the list
+  // as it is. (The canvas only offers "+" on a single line or at the end, so the UI
+  // never asks for this.)
+  if (at > 0 && at < old.length && !old[at].after.includes(at - 1)) return list
+  const next = old.map((st) => ({ ...st, after: st.after.map((j) => (j >= at ? j + 1 : j)) }))
+  const waits = at < old.length ? old[at].after : stepSinks(old)
+  next.splice(at, 0, { ...newStep(kind), after: [...waits] })
+  if (at + 1 < next.length) next[at + 1] = { ...next[at + 1], after: [at] }
+  return next
 }
 
-// dir: -1 (left) or 1 (right). Out of range leaves the list as it is.
+// Why a step can't swap places with its neighbour, in words (null: it can).
+// Only workflows that say what steps wait for have the rule; a plain line moves freely.
+export function moveBlocked(stages, index, dir) {
+  const list = Array.isArray(stages) ? stages : []
+  const to = index + dir
+  if (!usesAfter(list) || index < 0 || index >= list.length || to < 0 || to >= list.length) return null
+  const lo = Math.min(index, to)
+  const hi = Math.max(index, to)
+  if (!stepDeps(list, hi).includes(lo)) return null
+  return dir < 0
+    ? `“${stepLabel(list, index)}” waits for “${stepLabel(list, to)}”, so it can't go above it.`
+    : `“${stepLabel(list, to)}” waits for “${stepLabel(list, index)}”, so “${stepLabel(list, index)}” can't go below it.`
+}
+
+// dir: -1 (left) or 1 (right). Out of range, or past a step it waits for, leaves
+// the list as it is; waits are re-numbered.
 export function moveStep(stages, index, dir) {
   const list = Array.isArray(stages) ? [...stages] : []
   const to = index + dir
   if (index < 0 || index >= list.length || to < 0 || to >= list.length) return list
-  const [st] = list.splice(index, 1)
-  list.splice(to, 0, st)
-  return list
+  if (moveBlocked(list, index, dir)) return list
+  if (!usesAfter(list)) {
+    const [st] = list.splice(index, 1)
+    list.splice(to, 0, st)
+    return list
+  }
+  const swap = (j) => (j === index ? to : j === to ? index : j)
+  const next = explicit(list).map((st) => ({ ...st, after: uniqSorted(st.after.map(swap)) }))
+  ;[next[index], next[to]] = [next[to], next[index]]
+  return next
 }
 
+// Takes a step out. Steps that waited for it wait for what it waited for instead. A plain line stays plain.
 export function removeStep(stages, index) {
-  return (Array.isArray(stages) ? stages : []).filter((_, i) => i !== index)
+  const list = Array.isArray(stages) ? stages : []
+  if (!usesAfter(list)) return list.filter((_, i) => i !== index)
+  const old = explicit(list)
+  const gone = old[index]?.after || []
+  return old
+    .filter((_, i) => i !== index)
+    .map((st) => {
+      let a = st.after
+      // It inherits what the deleted step waited for, so it never starts earlier than before.
+      if (a.includes(index)) a = [...a.filter((j) => j !== index), ...gone]
+      return { ...st, after: uniqSorted(a.map((j) => (j > index ? j - 1 : j))) }
+    })
+}
+
+// A plain sentence about what deleting a step did to the steps waiting for it
+// (null when nothing waited only for it).
+export function removeNote(stages, index) {
+  const list = Array.isArray(stages) ? stages : []
+  if (!usesAfter(list)) return null
+  const gone = stepDeps(list, index)
+  const named = list
+    .map((_, i) => i)
+    .filter((i) => i > index && stepDeps(list, i).length === 1 && stepDeps(list, i)[0] === index)
+    .map((i) => `“${stepLabel(list, i)}”`)
+  if (!named.length) return null
+  const many = named.length > 1
+  if (!gone.length) return `${named.join(', ')} now ${many ? 'start' : 'starts'} at once.`
+  return `${named.join(', ')} now ${many ? 'wait' : 'waits'} for what “${stepLabel(list, index)}” waited for.`
 }
 
 export function addAgent(stages, index) {
@@ -213,8 +476,8 @@ export function errorBoxes(errorFields, stages) {
 
 // ---- Run statuses -----------------------------------------------------------
 
-export const STATUSES = ['done', 'running', 'waiting', 'failed', 'held', 'next']
-export const STATUS_WORD = { done: 'done', running: 'running', waiting: 'waiting', failed: 'failed', held: 'on hold', next: 'not started' }
+export const STATUSES = ['done', 'running', 'waiting', 'failed', 'held', 'stopped', 'next']
+export const STATUS_WORD = { done: 'done', running: 'running', waiting: 'waiting', failed: 'failed', held: 'on hold', stopped: 'stopped', next: 'not started' }
 
 const STATUS_MAP = {
   done: 'done',
@@ -229,6 +492,7 @@ const STATUS_MAP = {
   awaiting_approval: 'waiting',
   budget: 'waiting',
   held: 'held',
+  stopped: 'stopped',
   failed: 'failed',
   rejected: 'failed',
   cancelled: 'failed',
@@ -239,7 +503,7 @@ export const flowStatus = (raw) => STATUS_MAP[raw] || 'next'
 
 // Statuses a check or person step's own state carries; others ('waiting' = not
 // started) defer to the run position.
-const OWN_STATE = new Set(['passed', 'approved', 'failed', 'rejected', 'waiting_approval', 'needs_approval', 'budget', 'held', 'running'])
+const OWN_STATE = new Set(['passed', 'approved', 'failed', 'rejected', 'waiting_approval', 'needs_approval', 'budget', 'held', 'running', 'stopped'])
 
 const byCreated = (a, b) => String(a.created_at || '').localeCompare(String(b.created_at || ''))
 

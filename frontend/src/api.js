@@ -27,7 +27,10 @@ async function req(method, path, body) {
     // Validation errors (422) come as [{loc, msg}]: show "field: message".
     if (Array.isArray(detail) && detail.every((d) => d && d.msg))
       detail = detail.map((d) => `${(d.loc || []).filter((x) => x !== 'body').join('.') || 'request'}: ${d.msg}`).join('; ')
-    const err = new Error(typeof detail === 'string' ? detail : JSON.stringify(detail))
+    // A list of plain sentences (several problems at once) comes through as the list.
+    const lines = Array.isArray(detail) && detail.length && detail.every((d) => typeof d === 'string') ? detail : null
+    const err = new Error(lines ? lines.join('\n') : typeof detail === 'string' ? detail : JSON.stringify(detail))
+    if (lines) err.details = lines
     err.status = res.status
     throw err
   }

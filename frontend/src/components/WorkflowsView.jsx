@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { Alert, Button, Drawer, Dropdown, Empty, Form, Input, InputNumber, Modal, Space, Tag, message } from 'antd'
+import { Alert, Button, Drawer, Dropdown, Empty, Form, Input, InputNumber, Modal, Select, Space, Tag, message } from 'antd'
 import {
   AppstoreOutlined,
   ArrowUpOutlined,
@@ -25,7 +25,7 @@ import { RUN_STATUS_COLOR, budgetPayload, exportFileName, formStage, runStatusTe
 import FlowCanvas from '../flow/FlowCanvas'
 import FlowPreview from '../flow/FlowPreview'
 import MiniFlow from '../flow/MiniFlow'
-import { errorBoxes, fieldSelection, newStep, selAfterMove, selAfterRemove } from '../flow/flow'
+import { errorBoxes, fieldSelection, insertStep, moveBlocked, moveStep, removeNote, removeStep, selAfterMove, selAfterRemove, stepDeps, stepLabel } from '../flow/flow'
 import '../gates/workflows.css'
 
 export const NEW_MENU = [
@@ -72,11 +72,45 @@ const money = (v) => '$' + Number(v).toFixed(2)
 
 const sameKeys = (a, b) => a.size === b.size && [...a].every((k) => b.has(k))
 
+// What a step waits for, by name, and the shortcut to run it beside the step before.
+function WaitsFor({ form, name, index, stages }) {
+  const deps = stepDeps(stages, index)
+  const options = stages.slice(0, index).map((_, j) => {
+    const label = stepLabel(stages, j)
+    const dup = stages.filter((__, x) => stepLabel(stages, x) === label).length > 1
+    return { value: j, label: dup ? `${label} (step ${j + 1})` : label }
+  })
+  const names = deps.map((j) => options.find((o) => o.value === j)?.label ?? stepLabel(stages, j))
+  if (index === 0)
+    return (
+      <div className="co-wf-waits" data-testid="step-waits">
+        <span className="co-wf-waits-label">Waits for:</span> <span>Starts at once</span>
+      </div>
+    )
+  return (
+    <div className="co-wf-waits" data-testid="step-waits">
+      <Form.Item
+        name={[name, 'after']}
+        label="Waits for"
+        getValueProps={(v) => ({ value: Array.isArray(v) ? v : deps })}
+        normalize={(v) => [...(v || [])].sort((a, b) => a - b)}
+        extra={deps.length ? `Starts when ${names.join(', ')} ${deps.length > 1 ? 'are' : 'is'} done.` : 'Starts at once'}
+        style={{ marginBottom: 6 }}
+      >
+        <Select mode="multiple" options={options} placeholder="Starts at once" aria-label={`What step ${index + 1} waits for`} style={{ width: '100%' }} />
+      </Form.Item>
+      <Button size="small" onClick={() => form.setFieldValue(['stages', index, 'after'], stepDeps(stages, index - 1))} data-testid="run-beside">
+        Run beside the step before
+      </Button>
+    </div>
+  )
+}
+
 function WorkflowEditor({ open, workflow, prefill, hint, missing = [], agents, onClose, onSaved }) {
   const [form] = Form.useForm()
   const [saving, setSaving] = useState(false)
   const [projects, setProjects] = useState([])
-  const [error, setError] = useState('')
+  const [error, setError] = useState([])
   const [rawSel, setSel] = useState(null)
   const [errKeys, setErrKeys] = useState(() => new Set())
   const [settingsOpen, setSettingsOpen] = useState(false)
@@ -91,22 +125,23 @@ function WorkflowEditor({ open, workflow, prefill, hint, missing = [], agents, o
 
   useEffect(() => {
     if (!open) return
-    setError('')
+    setError([])
     setSel(null)
     setErrKeys(new Set())
     setSettingsOpen(false)
     if (workflow) {
-      form.setFieldsValue({ ...workflow, budget_usd: workflow.budget_usd ?? null, stages: (workflow.stages || []).map(formStage) })
+      form.setFieldsValue({ ...workflow, budget_usd: workflow.budget_usd ?? null, max_parallel: workflow.max_parallel ?? 2, stages: (workflow.stages || []).map(formStage) })
     } else if (prefill) {
       form.resetFields()
       form.setFieldsValue({
         name: prefill.name,
         description: prefill.description,
+        max_parallel: prefill.max_parallel ?? 2,
         stages: (prefill.stages || []).map(formStage),
       })
     } else {
       form.resetFields()
-      form.setFieldsValue({ stages: [] })
+      form.setFieldsValue({ stages: [], max_parallel: 2 })
     }
   }, [open, workflow, prefill])
 
@@ -134,13 +169,14 @@ function WorkflowEditor({ open, workflow, prefill, hint, missing = [], agents, o
       return
     }
     if (!(v.stages || []).length) {
-      setError('Add at least one step before you save.')
+      setError(['Add at least one step before you save.'])
       return
     }
     setSaving(true)
-    setError('')
-    const { budget_usd: budget, ...rest } = v
-    const payload = { ...rest, stages: (v.stages || []).map((st) => stagePayload(st, agents)), ...budgetPayload(budget, workflow?.budget_usd) }
+    setError([])
+    const { budget_usd: budget, max_parallel: parallel, ...rest } = v
+    const n = Math.round(Number(parallel))
+    const payload = { ...rest, max_parallel: n >= 1 && n <= 4 ? n : 2, stages: (v.stages || []).map((st) => stagePayload(st, agents)), ...budgetPayload(budget, workflow?.budget_usd) }
     try {
       if (isEdit) await api.updateWorkflow(workflow.id, payload)
       else await api.createWorkflow(payload)
@@ -148,27 +184,45 @@ function WorkflowEditor({ open, workflow, prefill, hint, missing = [], agents, o
       onSaved?.()
       onClose()
     } catch (e) {
-      setError(e.message)
+      setError(e.details || [e.message])
     } finally {
       setSaving(false)
     }
   }
 
+  // After a step is added, moved or removed: write the re-numbered waits back to every step.
+  const syncAfter = (next) =>
+    next.forEach((st, i) => {
+      if (Array.isArray(st.after)) form.setFieldValue(['stages', i, 'after'], st.after)
+    })
   const insert = (index, kind) => {
-    listOps.current?.add(newStep(kind), index)
+    const next = insertStep(stages, index, kind)
+    listOps.current?.add(next[index], index)
+    syncAfter(next)
     setErrKeys(new Set())
-    setError('')
+    setError([])
     setSel({ step: index, item: kind === 'agent' ? 0 : null })
   }
   const move = (index, dir) => {
     const to = index + dir
     if (to < 0 || to >= stages.length) return
+    const blocked = moveBlocked(stages, index, dir)
+    if (blocked) {
+      message.warning(blocked)
+      return
+    }
+    const next = moveStep(stages, index, dir)
     listOps.current?.move(index, to)
+    syncAfter(next)
     setErrKeys(new Set())
     setSel((cur) => selAfterMove(cur, index, to))
   }
   const removeAt = (index) => {
+    const note = removeNote(stages, index)
+    const next = removeStep(stages, index)
     listOps.current?.remove(index)
+    syncAfter(next)
+    if (note) message.info(note)
     setErrKeys(new Set())
     setSel((cur) => selAfterRemove(cur, index))
   }
@@ -247,6 +301,14 @@ function WorkflowEditor({ open, workflow, prefill, hint, missing = [], agents, o
               data-testid="workflow-budget"
             />
           </Form.Item>
+          <Form.Item
+            name="max_parallel"
+            label="Steps at the same time"
+            extra="When steps are set up to run side by side, no more than this many work at once (1 to 4)."
+            style={{ marginTop: 14, marginBottom: 0 }}
+          >
+            <InputNumber min={1} max={4} precision={0} style={{ width: 90 }} aria-label="Steps at the same time" data-testid="workflow-parallel" />
+          </Form.Item>
         </div>
         {hint && <Alert data-testid="template-hint" type="info" showIcon message={hint} style={{ marginBottom: 10 }} />}
         {missing.length > 0 && (
@@ -255,6 +317,18 @@ function WorkflowEditor({ open, workflow, prefill, hint, missing = [], agents, o
             type="warning"
             showIcon
             message={`Add these helpers from Agents → presets first: ${missing.join(', ')}`}
+            style={{ marginBottom: 10 }}
+          />
+        )}
+        {error.length > 0 && (
+          <Alert
+            type="error"
+            showIcon
+            data-testid="workflow-errors"
+            className="co-wf-errors"
+            message={error.map((line, i) => (
+              <div key={i}>{line}</div>
+            ))}
             style={{ marginBottom: 10 }}
           />
         )}
@@ -273,6 +347,7 @@ function WorkflowEditor({ open, workflow, prefill, hint, missing = [], agents, o
                     onInsert={insert}
                     onMove={move}
                     onRemove={removeAt}
+                    moveBlocked={(i, d) => moveBlocked(stages, i, d)}
                     onAddAgent={addAgentAt}
                     errors={errKeys}
                     focusStep={sel?.step ?? null}
@@ -300,6 +375,9 @@ function WorkflowEditor({ open, workflow, prefill, hint, missing = [], agents, o
                             <Input placeholder="e.g. Build it" aria-label={`Name of step ${si + 1}`} />
                           </Form.Item>
                         </div>
+                        <div hidden={focus === 'fix'}>
+                          <WaitsFor form={form} name={f.name} index={si} stages={stages} />
+                        </div>
                         <StageFields
                           name={f.name}
                           projects={projects}
@@ -324,7 +402,6 @@ function WorkflowEditor({ open, workflow, prefill, hint, missing = [], agents, o
             )
           }}
         </Form.List>
-        {error && <Alert type="error" showIcon message={error} style={{ marginTop: 12 }} />}
       </Form>
     </Drawer>
   )

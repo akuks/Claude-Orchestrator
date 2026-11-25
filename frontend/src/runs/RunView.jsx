@@ -15,6 +15,7 @@ import {
   isRunActive,
   runStages,
   earlierAttemptTasks,
+  failedStepIndex,
   splitStageTitle,
   stageAttempt,
   tasksOfStage,
@@ -46,6 +47,7 @@ const STEP_STATE_TEXT = {
   next: 'Not started',
   failed: 'Failed',
   waiting_approval: 'Waiting for approval',
+  stopped: 'Stopped',
 }
 
 const fmtMin = (m) => (m >= 10 ? Math.round(m).toFixed(0) : (Math.round(m * 10) / 10).toFixed(1))
@@ -227,7 +229,12 @@ export default function RunView({ id, user, projects = [], navigate, onOpenCrede
   const stagesKey = JSON.stringify(freshStages)
   // eslint-disable-next-line react-hooks/exhaustive-deps
   const stages = useMemo(() => freshStages, [stagesKey])
-  const head = useMemo(() => timelineComet(stages).headIndex, [stages])
+  const cometHead = useMemo(() => timelineComet(stages).headIndex, [stages])
+  // A failed run opens on the step that failed, not one only cancelled with it.
+  const head = useMemo(() => {
+    const failed = run?.status === 'failed' ? failedStepIndex(run, tasks, sstate) : -1
+    return failed >= 0 ? failed : cometHead
+  }, [run, tasks, sstate, cometHead])
   // Each box's status on the canvas: a step's own, each agent's current task.
   const boxStatus = useMemo(() => runBoxStatuses({ stages: run?.stages, states: stages, sstate, tasks }), [run?.stages, stages, sstate, tasks])
   const statusOf = useCallback(
@@ -362,17 +369,22 @@ export default function RunView({ id, user, projects = [], navigate, onOpenCrede
   const manage = canManageRun(run, user, projects)
   const totalsText = totalsLine(data?.totals)
   const hasAgentSteps = (run.stages || []).some((st) => stageKind(st) === 'agent')
-  const headDef = run.stages?.[run.current_stage]
-  const headStatus = sstate?.[String(run.current_stage)]?.status
   const budget = data?.budget
   const hasBudget = budget?.budget_usd != null
-  const budgetHeld = active && Object.values(sstate || {}).some((st) => st?.status === 'budget')
+  // Only a real spending limit: a step waiting just for other steps' reserved spend is not it.
+  const budgetHeld = active && Object.values(sstate || {}).some((st) => st?.status === 'budget' && st.budget_reserve !== true)
+  // The step a person is needed for: the lowest one waiting (steps side by side may have several).
+  const waitingAt = (run.stages || []).findIndex((st, i) => {
+    const k = stageKind(st)
+    const w = sstate?.[String(i)]?.status
+    return (k === 'approval' && w === 'waiting_approval') || (k === 'gate' && w === 'needs_approval')
+  })
   const pausedText =
-    stageKind(headDef) === 'approval' && headStatus === 'waiting_approval'
-      ? 'Waiting for someone to approve the step below.'
-      : stageKind(headDef) === 'gate' && headStatus === 'needs_approval'
-        ? 'Waiting for someone to allow the check below to run.'
-        : null
+    waitingAt < 0
+      ? null
+      : stageKind(run.stages[waitingAt]) === 'approval'
+        ? 'Waiting for someone to approve the step below.'
+        : 'Waiting for someone to allow the check below to run.'
   const stage = selStage == null ? null : stages[selStage]
   const stageDef = selStage == null ? null : run.stages[selStage]
   const kind = stageKind(stageDef)
@@ -391,7 +403,9 @@ export default function RunView({ id, user, projects = [], navigate, onOpenCrede
       ? `${compact(Number(selRaw.input_tokens) || 0)} tokens in, ${compact(Number(selRaw.output_tokens) || 0)} tokens out${plainDuration(selRaw.seconds) ? ` · ${plainDuration(selRaw.seconds)}` : ''}`
       : null
   const futureOpen = run.status === 'running' || run.status === 'paused'
-  const canRerun = manage && (run.status === 'completed' || run.status === 'failed') && selStage != null && selStage <= run.current_stage
+  // Only a step that was reached: below the lowest open step, or with a result or a state of its own.
+  const reached = selStage != null && (selStage < run.current_stage || ['done', 'failed', 'stopped'].includes(stages[selStage]?.state) || !!sstate?.[String(selStage)]?.status)
+  const canRerun = manage && (run.status === 'completed' || run.status === 'failed') && reached
   const taskButton = (t) => {
     const { agent, text } = splitStageTitle(t.title)
     const on = t.id === selTask
@@ -554,6 +568,11 @@ export default function RunView({ id, user, projects = [], navigate, onOpenCrede
                 </span>
               )}
             </header>
+            {stage.state === 'stopped' && (
+              <div className="co-run-stopped" data-testid="run-stage-stopped">
+                {sstate?.[String(selStage)]?.reason || 'Stopped because another step failed.'}
+              </div>
+            )}
             {kind === 'gate' ? (
               <GateCard
                 runId={id}

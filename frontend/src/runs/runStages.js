@@ -30,6 +30,7 @@ const GATE_STATE = {
   rejected: 'failed',
   waiting_approval: 'waiting_approval',
   needs_approval: 'waiting_approval',
+  running: 'current',
 }
 
 // The current attempt of a stage (0 when the run predates attempts).
@@ -54,6 +55,10 @@ export function runStages(run, tasks, sstate) {
     if (gs && GATE_STATE[gs]) state = GATE_STATE[gs]
     else if (run.status === 'completed' && !statuses.length) state = 'done'
     else state = stageState(statuses, i, run.current_stage)
+    // Stopped because another branch failed (any kind of step).
+    if (sstate?.[String(i)]?.status === 'stopped') state = 'stopped'
+    // Steps side by side: a step working while an earlier one is still open is running too.
+    if (state === 'next' && statuses.some((s) => s === 'running' || s === 'queued')) state = 'current'
     return { name: (st && st.name) || `Step ${i + 1}`, state, task_count: statuses.length }
   })
 }
@@ -102,4 +107,20 @@ export function splitStageTitle(title) {
   const s = String(title ?? '')
   const m = s.match(/^\[[^\]]*\]\s*([^:]+):\s*(.*)$/s)
   return m ? { agent: m[1].trim(), text: m[2] } : { agent: null, text: s }
+}
+
+// The step that really failed (a check failed or rejected, an agent task failed), not
+// one only cancelled because another branch failed. -1 when there is none.
+export function failedStepIndex(run, tasks, sstate) {
+  const list = Array.isArray(run?.stages) ? run.stages : []
+  const all = Array.isArray(tasks) ? tasks : []
+  for (let i = 0; i < list.length; i++) {
+    const own = sstate?.[String(i)]?.status
+    // Stopped with a failed branch is not the failure (old data: a check marked failed, reason "cancelled").
+    if (own === 'stopped' || (own === 'failed' && sstate?.[String(i)]?.reason === 'cancelled')) continue
+    if (own === 'failed' || own === 'rejected') return i
+    const attempt = stageAttempt(sstate, i)
+    if (all.some((t) => t?.stage_index === i && (t.stage_attempt || 0) === attempt && t.status === 'failed')) return i
+  }
+  return -1
 }

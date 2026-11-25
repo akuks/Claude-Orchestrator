@@ -617,3 +617,11 @@ input.co-wf-step-name {
 .co-gate .ant-alert-error .ant-alert-description {
   color: var(--co-text);
 }
+
+/* Several problem sentences: the icon sits by the first line, not the middle of the list. */
+.co-wf-errors.ant-alert {
+  align-items: flex-start;
+}
+.co-wf-errors .ant-alert-icon {
+  margin-top: 4px;
+}

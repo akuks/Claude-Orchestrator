@@ -1347,8 +1347,9 @@ Phase 7a of the forge port. Four things on a workflow run, all on the run's own 
   ("Waiting for checks from another run in this project to finish.") and tries again; it never
   fails because of it. Agent steps are not locked.
 - **Run again from a step.** On a finished (completed or failed) run, "Run again from here" in a
-  started step restarts from that step (`POST /workflows/runs/{id}/stages/{i}/rerun`). Earlier
-  steps keep their results; later steps start over; old tasks stay in the history. The
+  started step restarts from that step (`POST /workflows/runs/{id}/stages/{i}/rerun`). That step and the
+  steps that wait for it start over; steps that don't wait for it keep their results (on a failed
+  run, other unfinished branches start over too); old tasks stay in the history. The
   spending limit still applies. The failed-step Retry is unchanged.
 - **Time and spend per step.** Each run box shows a small line such as "4 min · $0.12"; tokens
   are under the step's Details. A check step's card leads with "Waiting its turn" (another run's
@@ -1362,7 +1363,7 @@ rest under "The full list".
 
 ### To know
 
-- Steps still run one after another; side-by-side steps are Phase 7b.
+- Steps run one after another unless you set them up to run side by side (next section).
 - The project check lock is in memory (one server process, as today).
 - An early approval is approval of the step as defined when the run started; nothing about later
   output is checked.
@@ -1372,6 +1373,42 @@ rest under "The full list".
   edited command runs without a second person.
 - Ruling: agent steps are not covered by the project lock. Cost if wrong: two runs' agents can
   still edit one checkout at once (as today).
+
+---
+
+## Steps side by side
+
+Phase 7b of the forge port. A step can say which earlier steps it waits for, so several steps run at
+the same time: for example "Write tests" and "Write docs" both after "Build", and "Review" after both.
+Workflows saved before this update keep running one step after another, exactly as before.
+
+- **In the editor.** Click a step and use **Waits for**: pick the earlier steps by name (the step
+  before is the default; leave it empty and the step "Starts at once"). **Run beside the step before**
+  makes a step wait for the same steps as the one before it. **Settings** has **Steps at the same
+  time** (1 to 4, default 2). The picture puts steps in columns by how long a chain of waits leads to
+  them; steps that run together are stacked, with a line from each step waited for. "+" on a line still
+  adds a step in sequence.
+- **Moving and deleting.** Moving a step re-numbers what the others wait for; a step cannot go above
+  a step it waits for (the arrow is greyed and says why). Deleting a step takes it out of what the
+  others wait for, and every step that waited for it now also waits for what the deleted step
+  waited for, so nothing starts earlier than before; the editor says so.
+- **Problems are listed all at once**, one plain sentence per line above the picture, for example
+  "Step 4 waits for step 6, which comes later." or "Run at most 1 to 4 steps at once."
+- **On the run page** every step that is working shows "Running" at the same time; the header still
+  reads "N of M steps done". A step that fails stops the others that are working, the same way Cancel
+  does; Retry continues. "Run again from here" restarts that step and every step that waits for it.
+  Approvals waiting for a person do not stop other steps; the run shows "Waiting for you" only when
+  nothing else can run. A step that waits for several steps gets their results one after another,
+  each under "From <step name>:" in "the previous step's result".
+
+### To know
+
+- "Run this only if ..." and "continue when any one of these finishes" are not built.
+- Two agent steps working at once in one project share its folder, as two agents of one step already do.
+- Past the limit of steps at the same time, ready steps wait their turn, lowest number first.
+- A plain line workflow can be moved around freely; once any step says what it waits for, the order
+  rule above applies to the whole workflow.
+- Not run against the real `claude` CLI.
 
 ---
 

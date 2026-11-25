@@ -206,3 +206,59 @@ describe('FlowCanvas', () => {
     expect(v.container.querySelector('[data-testid="flow-canvas"]').className).toContain('co-flow-center')
   })
 })
+
+describe('FlowCanvas: steps side by side', () => {
+  let v
+  afterEach(async () => {
+    await v?.unmount()
+    v = null
+  })
+  const DIAMOND = [
+    { name: 'Build', kind: 'approval', message: 'm' },
+    { name: 'Write tests', kind: 'approval', message: 'm', after: [0] },
+    { name: 'Write docs', kind: 'approval', message: 'm', after: [0] },
+    { name: 'Review', kind: 'approval', message: 'm', after: [1, 2] },
+  ]
+
+  it('stacks steps that run together in one column, with a line from each step waited for', async () => {
+    v = await render(<FlowCanvas steps={DIAMOND} onSelect={() => {}} />)
+    const c = v.container
+    expect(c.querySelectorAll('[data-testid="flow-group"]').length).toBe(1)
+    expect(c.querySelector('[data-testid="flow-group"]').querySelectorAll('[data-testid="flow-step"]').length).toBe(2)
+    // Start → Build, Build → both, both → Review, Review → Done
+    const links = [...c.querySelectorAll('[data-testid="flow-link"]')]
+    expect(links.length).toBe(4)
+    expect(links.map((l) => l.querySelectorAll('polygon').length)).toEqual([1, 2, 2, 1])
+    expect(links[2].querySelectorAll('path').length).toBeGreaterThanOrEqual(2)
+    // the review step says what it waits for, in names
+    expect(boxes(c)[3].getAttribute('aria-label')).toContain('waits for Write tests, Write docs')
+  })
+  it('a step that starts at once says so', async () => {
+    v = await render(<FlowCanvas steps={[{ name: 'A', kind: 'approval' }, { name: 'B', kind: 'approval', after: [] }]} onSelect={() => {}} />)
+    expect(boxes(v.container)[1].getAttribute('aria-label')).toContain('starts at once')
+    expect(v.container.querySelectorAll('[data-testid="flow-link"]')[0].querySelectorAll('polygon').length).toBe(2)
+  })
+  it('a plain line draws no groups and no extra words', async () => {
+    v = await render(<FlowCanvas steps={STEPS} agents={AGENTS} onSelect={() => {}} />)
+    expect(v.container.querySelector('[data-testid="flow-group"]')).toBeNull()
+    expect(boxes(v.container).every((b) => !b.getAttribute('aria-label').includes('waits for'))).toBe(true)
+  })
+  it('the run shows every running step at once', async () => {
+    const statusOf = (i) => ['done', 'running', 'running', 'next'][i]
+    v = await render(<FlowCanvas mode="run" steps={DIAMOND} statusOf={statusOf} onSelect={() => {}} />)
+    expect(boxes(v.container).map((b) => b.dataset.status)).toEqual(['done', 'running', 'running', 'next'])
+    const links = [...v.container.querySelectorAll('[data-testid="flow-link"]')].map((l) => l.className)
+    expect(links[1]).toContain('reached')
+    expect(links[2]).toContain('muted')
+  })
+  it('+ shows on a single line and at the end, not on a fan of lines', async () => {
+    v = await render(<FlowCanvas mode="edit" steps={DIAMOND} onInsert={() => {}} onSelect={() => {}} />)
+    expect([...v.container.querySelectorAll('[data-testid="flow-plus"]')].map((p) => p.dataset.at)).toEqual(['0', '4'])
+  })
+  it('a step that waits for the one next to it cannot be moved past it', async () => {
+    v = await render(<FlowCanvas mode="edit" steps={DIAMOND} onSelect={() => {}} moveBlocked={(i, d) => (i === 3 && d === -1 ? 'no' : null)} />)
+    const left = [...v.container.querySelectorAll('[data-testid="flow-move-left"]')]
+    expect(left[3].disabled).toBe(true)
+    expect(left[2].disabled).toBe(false)
+  })
+})

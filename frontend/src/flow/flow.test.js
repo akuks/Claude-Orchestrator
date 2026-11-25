@@ -7,6 +7,14 @@ import {
   boxOffsets,
   columnHeight,
   connectorPaths,
+  connectorShapes,
+  flowEdges,
+  flowPlan,
+  moveBlocked,
+  removeNote,
+  stepDeps,
+  stepDepths,
+  stepGroups,
   errorBoxes,
   fieldSelection,
   flowModel,
@@ -193,5 +201,181 @@ describe('usageLine / plainDuration', () => {
     expect(usageLine({ seconds: 250, cost_usd: 0 })).toBe('4 min')
     expect(usageLine({ seconds: 0, cost_usd: 0 })).toBe('under a minute')
     expect(usageLine(null)).toBeNull()
+  })
+})
+
+describe('steps side by side: layout', () => {
+  const LINE = STEPS
+  // A (0) → B (1) and C (2) together → D (3) waits for both
+  const DIAMOND = [
+    { name: 'A', kind: 'approval', message: 'm' },
+    { name: 'B', kind: 'approval', message: 'm', after: [0] },
+    { name: 'C', kind: 'approval', message: 'm', after: [0] },
+    { name: 'D', kind: 'approval', message: 'm', after: [1, 2] },
+  ]
+  it('a missing `after` means the step before; [] starts at once', () => {
+    expect([0, 1, 2].map((i) => stepDeps(LINE, i))).toEqual([[], [0], [1]])
+    expect(stepDeps([{}, { after: [] }, { after: [1, 0, 0, 5, 2] }], 2)).toEqual([0, 1])
+    expect(stepDeps([{}, { after: [] }], 1)).toEqual([])
+  })
+  it('a plain line lays out exactly as before', () => {
+    const model = flowModel(LINE, AGENTS)
+    const plain = layout(model)
+    expect(layout(model, { groups: stepGroups(LINE) })).toEqual(plain)
+    expect(layout(model, { groups: stepGroups(LINE), mode: 'edit' })).toEqual(layout(model, { mode: 'edit' }))
+    const plan = flowPlan(LINE, model)
+    expect(plan.groups).toEqual([[0], [1], [2]])
+    // every step sits on the middle line, its boxes where a column puts them
+    expect(plan.ys.map((y) => y.center)).toEqual([plan.mid, plan.mid, plan.mid])
+    expect(plan.ys[0].boxes).toEqual(boxOffsets(2).map((o) => plan.mid + o))
+    // and each connector is the old one
+    const h = plan.geo.height
+    const n = [2, 1, 1]
+    for (let k = 0; k <= 3; k++) {
+      const shapes = connectorShapes(plan, k, 72)
+      expect(shapes.length).toBe(1)
+      const old = connectorPaths(k === 0 ? 1 : n[k - 1], k === 3 ? 1 : n[k], 72, h)
+      expect({ lines: shapes[0].lines, arrows: shapes[0].arrows }).toEqual(old)
+    }
+  })
+  it('puts steps in columns by depth and stacks the ones that run together', () => {
+    expect(stepGroups(DIAMOND)).toEqual([[0], [1, 2], [3]])
+    expect(stepDepths([{}, { after: [] }, { after: [0, 1] }, { after: [2] }])).toEqual([0, 0, 1, 2])
+    const model = flowModel(DIAMOND, [])
+    const plan = flowPlan(DIAMOND, model)
+    expect(plan.geo.height).toBe(2 * 64 + 12)
+    expect(plan.ys[1].center).toBeLessThan(plan.mid)
+    expect(plan.ys[2].center).toBeGreaterThan(plan.mid)
+    expect(plan.ys[1].center + plan.ys[2].center).toBe(plan.mid * 2)
+  })
+  it('draws a line from each step waited for', () => {
+    const plan = flowPlan(DIAMOND, flowModel(DIAMOND, []))
+    expect(flowEdges(DIAMOND)).toEqual([
+      { from: 'start', to: 0 },
+      { from: 0, to: 1 },
+      { from: 0, to: 2 },
+      { from: 1, to: 3 },
+      { from: 2, to: 3 },
+      { from: 3, to: 'end' },
+    ])
+    expect(connectorShapes(plan, 1, 72).map((s) => [s.from, s.to, s.kind])).toEqual([[0, 1, 'direct'], [0, 2, 'direct']])
+    expect(connectorShapes(plan, 2, 72).map((s) => [s.from, s.to])).toEqual([[1, 3], [2, 3]])
+  })
+  it('a line that skips a column rides along the top', () => {
+    const steps = [{ name: 'A' }, { name: 'B' }, { name: 'C', after: [0, 1] }]
+    const plan = flowPlan(steps, flowModel(steps, []))
+    expect(connectorShapes(plan, 1, 72).map((s) => s.kind)).toEqual(['direct', 'exit'])
+    expect(connectorShapes(plan, 2, 72).map((s) => s.kind)).toEqual(['enter', 'direct'])
+  })
+})
+
+describe('steps side by side: editing keeps the waits right', () => {
+  const E = (name, after) => ({ name, kind: 'approval', message: 'm', ...(after ? { after } : {}) })
+  const after = (list) => list.map((s) => s.after)
+  it('a plain line is edited as before (no `after` appears)', () => {
+    const line = [E('A'), E('B'), E('C')]
+    expect(insertStep(line, 1, 'gate').map((s) => s.name)).toEqual(['A', 'Check', 'B', 'C'])
+    expect(after(insertStep(line, 1, 'gate'))).toEqual([undefined, undefined, undefined, undefined])
+    expect(moveStep(line, 0, 1).map((s) => s.name)).toEqual(['B', 'A', 'C'])
+    expect(after(removeStep(line, 1))).toEqual([undefined, undefined])
+    expect(moveBlocked(line, 0, 1)).toBeNull()
+  })
+  const DIAMOND = [E('A', []), E('B', [0]), E('C', [0]), E('D', [1, 2])]
+  it('moving a step re-numbers every wait', () => {
+    // B and C swap: both still wait for A; D still waits for both
+    const m = moveStep(DIAMOND, 1, 1)
+    expect(m.map((s) => s.name)).toEqual(['A', 'C', 'B', 'D'])
+    expect(after(m)).toEqual([[], [0], [0], [1, 2]])
+    const m2 = moveStep([E('A', []), E('X', []), E('B', [0]), E('D', [2, 1])], 1, 1)
+    expect(m2.map((s) => s.name)).toEqual(['A', 'B', 'X', 'D'])
+    expect(after(m2)).toEqual([[], [0], [], [1, 2]])
+  })
+  it('a step cannot go above a step it waits for (D waits for C, which is next to it)', () => {
+    expect(moveBlocked(DIAMOND, 3, -1)).not.toBeNull()
+    expect(moveStep(DIAMOND, 3, -1)).toEqual(DIAMOND)
+  })
+  it('refuses to move a step past one it waits for, in words', () => {
+    const list = [E('Build', []), E('Tests', [0])]
+    expect(moveBlocked(list, 1, -1)).toBe('“Tests” waits for “Build”, so it can\'t go above it.')
+    expect(moveStep(list, 1, -1)).toEqual(list)
+    expect(moveBlocked(list, 0, 1)).toBe('“Tests” waits for “Build”, so “Build” can\'t go below it.')
+  })
+  it('deleting a step removes it from every wait and re-numbers', () => {
+    const d = removeStep(DIAMOND, 1)
+    expect(d.map((s) => s.name)).toEqual(['A', 'C', 'D'])
+    // D waited for B and C: it now also waits for what B waited for (A)
+    expect(after(d)).toEqual([[], [0], [0, 1]])
+    // never points later or nowhere
+    d.forEach((s, i) => (s.after || []).forEach((j) => expect(j).toBeLessThan(i)))
+  })
+  it('a step left with nothing to wait for takes what the deleted one waited for', () => {
+    const line = [E('A', []), E('B', [0]), E('C', [1])]
+    expect(after(removeStep(line, 1))).toEqual([[], [0]])
+    expect(removeNote(line, 1)).toBe('“C” now waits for what “B” waited for.')
+    expect(removeNote([E('A', []), E('B', []), E('C', [1])], 1)).toBe('“C” now starts at once.')
+    expect(removeNote(DIAMOND, 1)).toBeNull()
+  })
+  it('+ on a line puts the step in sequence', () => {
+    // between A and B: the new step waits for A, B waits for the new step
+    const ins = insertStep([E('A', []), E('B', [0]), E('C', [0])], 1, 'gate')
+    expect(ins.map((s) => s.name)).toEqual(['A', 'Check', 'B', 'C'])
+    expect(after(ins)).toEqual([[], [0], [1], [0]])
+    // at the start the old first step now waits for the new one
+    expect(after(insertStep([E('A', []), E('B', [0])], 0, 'gate'))).toEqual([[], [0], [1]])
+    // at the end it waits for every last step
+    expect(after(insertStep(DIAMOND, 4, 'gate'))).toEqual([[], [0], [0], [1, 2], [3]])
+    const mid = insertStep(DIAMOND, 3, 'gate')
+    expect(after(mid)).toEqual([[], [0], [0], [1, 2], [3]])
+  })
+})
+
+describe('steps side by side: guards', () => {
+  const E = (name, after) => ({ name, kind: 'approval', message: 'm', after })
+  it('deleting a join never lets a step start earlier', () => {
+    // A -> B; C waits for B and for Z (which starts at once); delete B
+    const list = [E('A', []), E('Z', []), E('B', [0]), E('C', [1, 2])]
+    const d = removeStep(list, 2)
+    expect(d.map((s) => [s.name, s.after])).toEqual([['A', []], ['Z', []], ['C', [0, 1]]])
+  })
+  it('refuses to insert between steps that run side by side', () => {
+    const diamond = [E('A', []), E('B', [0]), E('C', [0]), E('D', [1, 2])]
+    expect(insertStep(diamond, 2, 'gate')).toEqual(diamond)
+    expect(insertStep(diamond, 3, 'gate')).toHaveLength(5)
+  })
+})
+
+describe('side lines stay inside the picture', () => {
+  const nums = (d) => d.match(/-?\d+(\.\d+)?/g).map(Number)
+  const cases = {
+    skip: [{ name: 'A' }, { name: 'B' }, { name: 'C', after: [0, 1] }],
+    diamondSkip: [
+      { name: 'A' },
+      { name: 'B', after: [0] },
+      { name: 'C', after: [0] },
+      { name: 'T', after: [1] },
+      { name: 'R', after: [2, 3] },
+    ],
+  }
+  it.each(Object.keys(cases))('every point of every line is within the computed height (%s)', (key) => {
+    const steps = cases[key]
+    for (const mode of ['view', 'edit', 'run']) {
+      const plan = flowPlan(steps, flowModel(steps, []), { mode })
+      expect(plan.lanes).toBeGreaterThan(0)
+      for (let k = 0; k <= plan.count; k++) {
+        for (const sh of connectorShapes(plan, k, 72)) {
+          for (const d of sh.lines) {
+            const v = nums(d)
+            for (let i = 1; i < v.length; i += 2) {
+              expect(v[i]).toBeGreaterThanOrEqual(-plan.top)
+              expect(v[i]).toBeLessThanOrEqual(plan.geo.height)
+            }
+          }
+        }
+      }
+    }
+  })
+  it('a plain line reserves no lane', () => {
+    const plan = flowPlan(STEPS, flowModel(STEPS, AGENTS))
+    expect([plan.lanes, plan.top, plan.laneRoom]).toEqual([0, 0, 0])
   })
 })

@@ -635,12 +635,14 @@ class WorkflowStage(BaseModel):
     auto_retry: Optional[Any] = None  # checked by validate_stages (must be a bool)
     fix: Optional[Any] = None  # gate fix loop, checked by validate_stages
     ahead: Optional[Any] = None  # approval steps: true = may be approved ahead (validate_stages)
+    after: Optional[Any] = None  # indexes of earlier steps it waits for (flowgraph.validate)
 
 
 class WorkflowCreate(BaseModel):
     name: str = Field(min_length=1, max_length=200)
     description: Optional[str] = None
     budget_usd: Optional[float] = Field(default=None, ge=0.01, le=10000, strict=True)
+    max_parallel: Optional[Any] = None  # 1-4, checked by flowgraph.validate; stored on stage 0
     stages: list[WorkflowStage] = Field(min_length=1)
 
 
@@ -649,6 +651,7 @@ class WorkflowUpdate(BaseModel):
     description: Optional[str] = None
     stages: Optional[list[WorkflowStage]] = None
     budget_usd: Optional[float] = Field(default=None, ge=0.01, le=10000, strict=True)
+    max_parallel: Optional[Any] = None
 
 
 class WorkflowOut(BaseModel):
@@ -657,9 +660,16 @@ class WorkflowOut(BaseModel):
     description: Optional[str]
     stages: list
     budget_usd: Optional[float] = None
+    max_parallel: int = 2  # read from stage 0 (flowgraph.get_max_parallel)
     created_at: datetime
 
     model_config = {"from_attributes": True}
+
+    @model_validator(mode="after")
+    def _mp(self):
+        from app.flowgraph import get_max_parallel
+        self.max_parallel = get_max_parallel(self.stages or [])
+        return self
 
 
 class WorkflowRunCreate(BaseModel):

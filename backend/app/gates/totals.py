@@ -3,8 +3,8 @@
 compute(s, run) rules:
 - Wall time per stage comes from run.stage_state[str(i)] {"started_at", "finished_at"} (iso).
 - stages_done: stages with a finished_at. stages: len(run.stages).
-- minutes: finished stages' wall time plus the current stage (run.current_stage, started and
-  not finished, run not completed/failed) up to now; rounded to one decimal.
+- minutes: finished stages' wall time plus every stage in flight (run.current_stage, and since
+  7b any step started and not finished; run not completed/failed) up to now; rounded to one decimal.
 - cost_usd / tokens: sums over every task of the run (Task.workflow_run_id), every attempt;
   total_cost_usd and input_tokens + output_tokens, None counts as 0.
 - last: the finished stage with the latest finished_at: {"name", "minutes" (its wall time),
@@ -38,6 +38,11 @@ def _parse(v):
 
 def _mins(a, b) -> float:
     return max(0.0, (b - a).total_seconds() / 60.0)
+
+
+def _working(st) -> bool:
+    """A step in flight (7b: several can be at once; a plain line run has only the current one)."""
+    return (st or {}).get("status") not in (None, "done", "passed", "approved", "failed", "rejected", "stopped")
 
 
 def _tok(t) -> int:
@@ -76,7 +81,7 @@ async def compute(s, run, tasks=None) -> dict:
             minutes += m
             if last_at is None or b > last_at:
                 last_at, last_i, last_min = b, i, m
-        elif a and live and i == run.current_stage:
+        elif a and live and (i == run.current_stage or _working(st)):
             minutes += _mins(a, now)
 
     # Runs from before 0014 have no stage_state: count their finished stages from the position.
@@ -164,7 +169,7 @@ async def per_step(s, run, tasks, gate_rows, hidden=frozenset(), gates_complete:
         seconds = 0.0
         if a and b:
             seconds = (b - a).total_seconds()
-        elif a and live and i == run.current_stage:
+        elif a and live and (i == run.current_stage or _working(st)):
             seconds = (now - a).total_seconds()
         else:
             ms = [g.duration_ms for g in gate_rows if g.stage_index == i and (g.attempt or 0) == attempt]

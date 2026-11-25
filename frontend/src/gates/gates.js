@@ -114,7 +114,10 @@ function fixPayload(fix, project, agents) {
   return { agent: fix.agent, rounds: rounds >= 1 && rounds <= 3 ? Math.round(rounds) : 1 }
 }
 
-const AGENT_DROP = new Set(['kind', 'before', 'run', 'retry', 'timeout_min', 'message', 'project', 'fix'])
+const AGENT_DROP = new Set(['max_parallel', 'kind', 'before', 'run', 'retry', 'timeout_min', 'message', 'project', 'fix'])
+
+// What a step waits for: the earlier steps' numbers, sent for every kind of step.
+const afterPayload = (st) => (Array.isArray(st?.after) ? { after: st.after.filter((j) => Number.isInteger(j)) } : {})
 
 export function stagePayload(st, agents) {
   const kind = stageKind(st)
@@ -131,7 +134,7 @@ export function stagePayload(st, agents) {
     if (b.length) out.before = b
     return out
   }
-  const base = { name: st.name, kind, before: clean(st.before) }
+  const base = { name: st.name, kind, before: clean(st.before), ...afterPayload(st) }
   if (kind === 'gate') {
     const run = clean(st.run)
     const retry = typeof st.retry === 'string' ? st.retry.trim() : ''
