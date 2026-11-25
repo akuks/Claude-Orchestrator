@@ -102,23 +102,26 @@ def test_two_gates_passing_together_start_the_join_once(fakes, agents):
 
 
 def test_max_parallel_one_runs_one_at_a_time(fakes, agents):
+    """B, C and an approval are all ready after A: with one place only B starts, the approval
+    (which needs no place) waits for a person at once, C waits for B."""
     a, b = agents
 
     async def go():
-        rid = await make_run(diamond(a, b, mp=1))
+        st = [agent("A", a), agent("B", b), after(approval("Sign", ahead=None), 0), after(agent("C", a), 0)]
+        st[0]["max_parallel"] = 1
+        rid = await make_run(st)
         r = WorkflowRunner(FakeWorker(), 999)
         await r.start_run(rid)
         await _finish_tasks(rid, 0)
         await r._advance(rid)
-        assert await started(rid) == [0, 1]  # lowest first, C waits for a place
+        run = await _run(rid)
+        assert await started(rid) == [0, 1]
+        assert run.stage_state["2"]["status"] == "waiting_approval" and "3" not in run.stage_state
         await r._advance(rid)
         assert await started(rid) == [0, 1]
         await _finish_tasks(rid, 1)
         await r._advance(rid)
-        assert await started(rid) == [0, 1, 2]
-        await _finish_tasks(rid, 2)
-        await r._advance(rid)
-        assert await started(rid) == [0, 1, 2, 3]
+        assert await started(rid) == [0, 1, 3]
 
     asyncio.run(go())
 
@@ -508,3 +511,301 @@ def test_run_view_shows_every_running_gate(client, fakes, agents, monkeypatch):
         loop.run_until_complete(r.cancel_run(rid))
     finally:
         loop.close()
+
+
+async def _cost(rid, stage, cost, status=Status.COMPLETED):
+    async with SessionLocal() as s:
+        for t in await _tasks(rid, stage):
+            t = await s.get(Task, t.id)
+            t.status, t.result_text, t.total_cost_usd = status, "x", cost
+        await s.commit()
+
+
+def test_branches_together_never_pass_the_spending_limit(fakes, agents):
+    a, b = agents
+
+    async def go():
+        rid = await make_run([agent("A", a), agent("B", b), after(agent("C", a), 0)], budget=3.0)
+        r = WorkflowRunner(FakeWorker(), 999)
+        await r.start_run(rid)
+        await _cost(rid, 0, 1.5)  # $1.50 left
+        await r._advance(rid)
+        run = await _run(rid)
+        assert [t.max_budget_usd for t in await _tasks(rid, 1)] == [1.5]
+        assert await started(rid) == [0, 1]
+        assert run.stage_state["2"]["status"] == "budget" and run.stage_state["2"]["reason"] == wr.RESERVE_WORDS
+        assert run.status == "running"  # B still works
+        await _cost(rid, 1, 0.5)
+        await r._advance(rid)
+        assert [t.max_budget_usd for t in await _tasks(rid, 2)] == [1.0]
+
+    asyncio.run(go())
+
+
+def test_a_step_started_later_counts_what_running_steps_may_spend(fakes, agents):
+    a, b = agents
+
+    async def go():
+        # B and X after A; C after X starts while B still runs.
+        rid = await make_run([agent("A", a), agent("B", b), after(agent("X", a), 0), agent("C", a)], budget=4.5)
+        r = WorkflowRunner(FakeWorker(), 999)
+        await r.start_run(rid)
+        await _cost(rid, 0, 1.5)  # $3 left
+        await r._advance(rid)
+        caps = {t.stage_index: t.max_budget_usd for t in await _tasks(rid)}
+        assert caps[1] == 2.0 and caps[2] == 1.0
+        await _cost(rid, 2, 0.5)  # $2.50 left, B may still spend $2
+        await r._advance(rid)
+        caps = {t.stage_index: t.max_budget_usd for t in await _tasks(rid)}
+        assert caps[3] == 0.5
+
+    asyncio.run(go())
+
+
+def test_line_run_keeps_the_old_budget_caps(fakes, agents):
+    a, b = agents
+
+    async def go():
+        rid = await make_run([agent("A", a), {"name": "B", "items": [{"agent": b, "prompt": "x"},
+                                                                       {"agent": a, "prompt": "y"}]}], budget=3.0)
+        r = WorkflowRunner(FakeWorker(), 999)
+        await r.start_run(rid)
+        await _cost(rid, 0, 1.5)
+        await r._advance(rid)
+        assert [t.max_budget_usd for t in await _tasks(rid, 1)] == [1.5, 1.5]  # as before 7b
+
+    asyncio.run(go())
+
+
+def test_agent_step_with_tasks_but_no_status_is_not_started_again(fakes, agents):
+    """A run active from before agent steps got a status: its running step is watched."""
+    a, b = agents
+
+    async def go():
+        rid = await make_run([agent("A", a), agent("B", b)], status="running", current=0, state={})
+        async with SessionLocal() as s:
+            s.add(Task(title="a", prompt="x", status=Status.RUNNING, workflow_run_id=rid, stage_index=0,
+                       stage_attempt=0))
+            await s.commit()
+        r = WorkflowRunner(FakeWorker(), 999)
+        await r._advance(rid)
+        assert len(await _tasks(rid, 0)) == 1
+        run = await _run(rid)
+        assert run.stage_state["0"]["status"] == "running" and run.status == "running"
+        await _finish_tasks(rid, 0)
+        await r._advance(rid)
+        assert await started(rid) == [0, 1] and len(await _tasks(rid, 0)) == 1
+
+    asyncio.run(go())
+
+
+def test_a_gate_waiting_for_allow_frees_its_place(fakes, agents):
+    a, b = agents
+    fakes.guard["risky"] = ("approve", ["why"])
+
+    async def go():
+        p = await _project()
+        st = [agent("A", a), gate(p, run=("risky",), name="G"), after(agent("C", b), 0)]
+        st[0]["max_parallel"] = 1
+        rid = await make_run(st, [p])
+        r = WorkflowRunner(FakeWorker(), 999)
+        await r.start_run(rid)
+        await _finish_tasks(rid, 0)
+        await r._advance(rid)
+        await calm(r)
+        assert (await _run(rid)).stage_state["1"]["status"] == "needs_approval"
+        await r._advance(rid)  # the next tick: the place is free
+        run = await _run(rid)
+        assert await started(rid) == [0, 2] and run.status == "running"
+        await r.allow_gate(rid, 1, ANN)  # C holds the only place: G waits for it
+        await calm(r)
+        run = await _run(rid)
+        assert run.stage_state["1"]["status"] == "waiting" and run.stage_state["1"]["slot_wait"]
+        assert "risky" not in fakes.calls
+        await _finish_tasks(rid, 2)
+        await r._advance(rid)
+        await calm(r)
+        run = await _run(rid)
+        assert run.stage_state["1"]["status"] == "passed" and run.status == "completed"
+
+    asyncio.run(go())
+
+
+def test_only_gates_waiting_for_allow_pause_the_run(fakes, agents):
+    a, _ = agents
+    fakes.guard["risky"] = ("approve", ["why"])
+
+    async def go():
+        p = await _project()
+        rid = await make_run([agent("A", a), gate(p, run=("risky",), name="G"),
+                              after(agent("C", a), 0)], [p])
+        r = WorkflowRunner(FakeWorker(), 999)
+        await r.start_run(rid)
+        await _finish_tasks(rid, 0)
+        await r._advance(rid)
+        await calm(r)
+        await r._advance(rid)
+        assert (await _run(rid)).status == "running"
+        await _finish_tasks(rid, 2)
+        await r._advance(rid)
+        assert (await _run(rid)).status == "paused"
+
+    asyncio.run(go())
+
+
+def test_two_gates_of_one_run_in_one_folder_take_turns(fakes, agents):
+    a, b = agents
+    fakes.script["one"] = ["block"]
+
+    async def go():
+        p = await _project()
+        rid = await make_run([agent("A", a), gate(p, run=("one",), name="G1"),
+                              after(gate(p, run=("two",), name="G2"), 0), after(agent("D", b), 1, 2)], [p])
+        r = WorkflowRunner(FakeWorker(), 999)
+        await r.start_run(rid)
+        await _finish_tasks(rid, 0)
+        await r._advance(rid)
+        await wait_for(lambda: (rid, 1) in r._procs)
+        for _ in range(30):
+            await asyncio.sleep(0.01)
+        run = await _run(rid)
+        assert run.stage_state["2"]["status"] == "held" and run.stage_state["2"]["lock_wait"]
+        assert "two" not in fakes.calls
+        # G1's command ends (the fake now passes it): kill the block and run G1 again by hand.
+        fakes.script["one"] = [oc()]
+        await r._kill_gates(rid, record=False, stages={1})
+        wr.release_project_locks(rid, 1)
+        r._spawn_gate(rid, 1, run.stage_state["1"]["handout"])
+        await calm(r)
+        await r._advance(rid)
+        await calm(r)
+        run = await _run(rid)
+        assert run.stage_state["1"]["status"] == "passed" and run.stage_state["2"]["status"] == "passed"
+        assert len(await _tasks(rid, 3)) == 1 and lock_owners(rid) == []
+
+    asyncio.run(go())
+
+
+def test_auto_retry_on_a_branch_leaves_the_other_running(fakes, agents):
+    a, b = agents
+
+    async def go():
+        st = [agent("A", a), {**agent("B", b), "auto_retry": True}, after(agent("C", a), 0),
+              after(agent("D", b), 1, 2)]
+        rid = await make_run(st)
+        w = FakeWorker()
+        r = WorkflowRunner(w, 999)
+        await r.start_run(rid)
+        await _finish_tasks(rid, 0)
+        await r._advance(rid)
+        await _finish_tasks(rid, 1, Status.FAILED)
+        await r._advance(rid)
+        run = await _run(rid)
+        assert run.status == "running" and run.stage_state["1"]["attempt"] == 1
+        assert run.stage_state["1"]["status"] == "running" and w.cancelled == []
+        await _finish_tasks(rid, 1)
+        await _finish_tasks(rid, 2)
+        await r._advance(rid)
+        assert len(await _tasks(rid, 3)) == 1
+
+    asyncio.run(go())
+
+
+def test_typed_outputs_failing_on_a_branch_stops_the_other(fakes, agents):
+    a, b = agents
+
+    async def go():
+        st = [agent("A", a), agent("B", b), after(agent("C", a), 0)]
+        st[1]["items"][0]["outputs"] = ["result"]
+        rid = await make_run(st)
+        w = FakeWorker()
+        r = WorkflowRunner(w, 999)
+        await r.start_run(rid)
+        await _finish_tasks(rid, 0)
+        await r._advance(rid)
+        await _finish_tasks(rid, 1, text="no outputs block here")
+        await r._advance(rid)
+        assert (await _run(rid)).status == "failed"
+        assert (await _tasks(rid, 2))[0].id in w.cancelled
+
+    asyncio.run(go())
+
+
+def test_retry_gives_a_new_attempt_only_to_steps_that_started(fakes, agents):
+    a, b = agents
+
+    async def go():
+        rid = await make_run(diamond(a, b), budget=3.0)
+        r = WorkflowRunner(FakeWorker(), 999)
+        await r.start_run(rid)
+        await _cost(rid, 0, 1.5)
+        await r._advance(rid)  # B starts, C held for the limit
+        await _finish_tasks(rid, 1, Status.FAILED)
+        await r._advance(rid)
+        run = await _run(rid)
+        assert run.status == "failed" and run.stage_state["2"]["status"] == "budget"
+        assert await r.retry_run(rid)
+        run = await _run(rid)
+        assert has(run, "Step B retried (attempt 2)") and not has(run, "Step C retried")
+        assert run.stage_state["2"].get("attempt", 0) == 0
+
+    asyncio.run(go())
+
+
+def test_run_again_keeps_a_branch_that_finished_as_another_failed(fakes, agents):
+    a, b = agents
+
+    async def go():
+        rid = await make_run(diamond(a, b))
+        r = WorkflowRunner(FakeWorker(), 999)
+        await r.start_run(rid)
+        await _finish_tasks(rid, 0)
+        await r._advance(rid)
+        await _finish_tasks(rid, 2, text="c out")  # C completes, not yet marked done
+        await _finish_tasks(rid, 1, Status.FAILED)
+        await r._advance(rid)
+        run = await _run(rid)
+        assert run.status == "failed" and run.stage_state["2"]["status"] == "running"
+        await r.rerun_from(rid, 1, ANN)
+        run = await _run(rid)
+        assert run.stage_state["2"]["status"] == "done" and run.stage_state["2"].get("attempt", 0) == 0
+        assert len(await _tasks(rid, 2)) == 1
+
+    asyncio.run(go())
+
+
+def test_a_failing_pass_still_hands_out_what_it_started(fakes, agents):
+    a, b = agents
+
+    async def go():
+        st = [agent("A", a), agent("B", b), after(agent("Bad", "no-such-agent"), 0)]
+        rid = await make_run(st)
+        w = FakeWorker()
+        r = WorkflowRunner(w, 999)
+        await r.start_run(rid)
+        await _finish_tasks(rid, 0)
+        await r._advance(rid)
+        run = await _run(rid)
+        assert run.status == "failed" and has(run, "unknown agent no-such-agent")
+        b_task = (await _tasks(rid, 1))[0].id
+        assert b_task in w.submitted and b_task in w.cancelled
+
+    asyncio.run(go())
+
+
+def test_completed_run_points_at_the_last_step(fakes, agents):
+    a, b = agents
+
+    async def go():
+        rid = await make_run([agent("A", a), after(agent("B", b), )])
+        r = WorkflowRunner(FakeWorker(), 999)
+        await r.start_run(rid)
+        assert await started(rid) == [0, 1]
+        await _finish_tasks(rid, 1)
+        await r._advance(rid)
+        await _finish_tasks(rid, 0)
+        await r._advance(rid)
+        run = await _run(rid)
+        assert run.status == "completed" and run.current_stage == 1
+
+    asyncio.run(go())
