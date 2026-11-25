@@ -28,7 +28,7 @@ import { revealHidden } from '../guard/guard'
 import FlowCanvas from '../flow/FlowCanvas'
 import { plainDuration, runBoxStatuses, usageLine } from '../flow/flow'
 import { plainError } from './plainError'
-import { localizeServerText } from '../plan/plan'
+import { stepWaitText } from '../plan/plan'
 import './run.css'
 
 dayjs.extend(relativeTime)
@@ -569,9 +569,9 @@ export default function RunView({ id, user, projects = [], navigate, onOpenCrede
                 </span>
               )}
             </header>
-            {sstate?.[String(selStage)]?.plan_wait && sstate[String(selStage)].reason && (
+            {stepWaitText(sstate?.[String(selStage)]) && (
               <div className="co-run-stopped" data-testid="run-stage-plan-wait">
-                {localizeServerText(sstate[String(selStage)].reason)}
+                {stepWaitText(sstate[String(selStage)])}
               </div>
             )}
             {stage.state === 'stopped' && (

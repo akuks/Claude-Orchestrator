@@ -1,7 +1,7 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { flush, render } from '../home/testRender'
 import dayjs from 'dayjs'
-import { bannerText, eventLine, pausedText, localWhen, localizeServerText, userTag } from './plan'
+import { bannerText, eventLine, pausedText, localWhen, stepWaitText, userTag } from './plan'
 
 vi.mock('../api', () => ({ api: { planStatus: vi.fn(), planStatusAll: vi.fn() } }))
 import { api } from '../api'
@@ -30,13 +30,19 @@ describe('plan texts', () => {
     expect(eventLine({ paused: true, not_before: t }, now)).toContain('Starts again at 14:05')
     expect(eventLine({ status: 'allowed_warning', resets_at: t }, now)).not.toMatch(/[{}]/)
   })
-  it('localizes a server UTC time', () => {
-    const out = localizeServerText('Paused — your Claude plan limit was reached. Starts again at 23:30.', now)
-    expect(out).toMatch(/Starts again at (tomorrow |\d+ \w+, )?\d{2}:\d{2}\.$/)
+  it('held step uses its own not_before', () => {
+    expect(stepWaitText({ plan_wait: true, reason: 'x 23:30', not_before: at('2026-11-25T14:05:00') }, now)).toBe('Paused — your Claude plan limit was reached. Starts again at 14:05.')
+    expect(stepWaitText({ plan_wait: true, reason: 'server' }, now)).toBe('server')
+    expect(stepWaitText({ reason: 'r' }, now)).toBeNull()
+  })
+  it('limit banner uses hold_until', () => {
+    const b = { kind: 'limit', text: 'x', resets_at: at('2026-11-25T20:00:00') }
+    expect(bannerText(b, now, { hold_until: at('2026-11-25T14:04:00') })).toContain('at 14:05.')
   })
   it('user tags', () => {
-    expect(userTag({ held: true, resets_at: at('2026-11-25T14:04:00') }, now).text).toBe('Limit reached until 14:05')
+    expect(userTag({ held: true, resets_at: at('2026-11-25T20:04:00'), hold_until: at('2026-11-25T14:04:00') }, now).text).toBe('Limit reached until 14:05')
     expect(userTag({ held: false, banner: { kind: 'warning' } }).text).toBe('Close to limit')
+    expect(userTag({ held: false, api_key: true, banner: null })).toBeNull()
     expect(userTag({ held: false, banner: null })).toBeNull()
   })
 })

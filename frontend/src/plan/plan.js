@@ -18,10 +18,10 @@ export function localWhen(iso, now = dayjs()) {
 const plus1 = (iso) => (iso ? when(iso).add(1, 'minute') : null)
 
 // A banner object {kind, text, resets_at} -> the sentence to show.
-export function bannerText(b, now) {
+export function bannerText(b, now, status) {
   if (!b) return null
   if (b.kind === 'limit') {
-    const t = localWhen(plus1(b.resets_at), now)
+    const t = localWhen(plus1(status?.hold_until || b.resets_at), now)
     return t ? `Your Claude plan limit was reached. Work starts again at ${t}.` : b.text
   }
   const t = localWhen(b.resets_at, now)
@@ -54,15 +54,11 @@ export function eventLine(p = {}, now) {
   return 'Your Claude plan is working normally.'
 }
 
-// A server sentence with a UTC "HH:MM" (a held workflow step) -> the same sentence in local time.
-export function localizeServerText(text, now = dayjs()) {
-  if (!text) return text
-  return text.replace(/\b(\d{2}):(\d{2})\b/, (m, h, mi) => {
-    const n = new Date(now.valueOf())
-    let ms = Date.UTC(n.getUTCFullYear(), n.getUTCMonth(), n.getUTCDate(), +h, +mi)
-    if (ms < now.valueOf() - 3600e3) ms += 86400e3
-    return localWhen(dayjs(ms), now)
-  })
+// A held workflow step: the paused sentence from its own not_before (local time); server reason without it.
+export function stepWaitText(state, now = dayjs()) {
+  if (!state?.plan_wait) return null
+  const t = localWhen(state.not_before, now)
+  return t ? `Paused — your Claude plan limit was reached. Starts again at ${t}.` : state.reason || null
 }
 
 export const STATUS_WORDS = {
@@ -75,7 +71,7 @@ export const STATUS_WORDS = {
 export function userTag(st, now) {
   if (!st) return null
   if (st.held) {
-    const t = localWhen(plus1(st.resets_at), now)
+    const t = localWhen(plus1(st.hold_until || st.resets_at), now)
     return { color: 'red', text: t ? `Limit reached until ${t}` : 'Limit reached' }
   }
   if (st.banner?.kind === 'warning') return { color: 'gold', text: 'Close to limit' }
