@@ -598,6 +598,9 @@ def test_real_true_and_false_gate(client, monkeypatch):
         await r.start_run(ok)
         await r.start_run(bad)
         await settle(r, timeout=30)
+        # One check at a time per project (7a): the second run waited its turn; the next tick runs it.
+        await r._advance(bad)
+        await settle(r, timeout=30)
         run = await _run(ok)
         assert run.status == "completed", texts(run)
         assert has(run, "Step Ok (gate) passed")

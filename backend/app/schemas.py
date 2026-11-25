@@ -634,6 +634,7 @@ class WorkflowStage(BaseModel):
     message: Optional[str] = None
     auto_retry: Optional[Any] = None  # checked by validate_stages (must be a bool)
     fix: Optional[Any] = None  # gate fix loop, checked by validate_stages
+    ahead: Optional[Any] = None  # approval steps: false = never approved ahead (validate_stages)
 
 
 class WorkflowCreate(BaseModel):

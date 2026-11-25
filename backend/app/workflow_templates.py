@@ -23,8 +23,12 @@ def _gate(name: str) -> dict:
     return {"name": name, "kind": "gate", "run": ["npm test"], "timeout_min": 60, "before": []}
 
 
-def _approval(name: str, message: str) -> dict:
-    return {"name": name, "kind": "approval", "message": message}
+def _approval(name: str, message: str, ahead: bool = True) -> dict:
+    """An approval step; ahead=False (release approvals) can never be approved ahead."""
+    st = {"name": name, "kind": "approval", "message": message}
+    if not ahead:
+        st["ahead"] = False
+    return st
 
 
 def _build(task: str) -> str:
@@ -53,7 +57,7 @@ TEMPLATES: dict[str, dict] = {
             ]),
             _gate("Test"),
             _agent("Review", [("Reviewer", "Review the change on this branch against the plan and rank your findings.\n\nPlan:\n{{stage1}}\n\nWork: {{input}}")]),
-            _approval("Approve release", "Check the review and approve the release."),
+            _approval("Approve release", "Check the review and approve the release.", ahead=False),
         ],
     },
     "documents": {
@@ -82,7 +86,7 @@ TEMPLATES: dict[str, dict] = {
             _gate("Test"),
             _agent("Build check", [("Checker", "Run the production build and report totals and errors, facts only.\n\nWork: {{input}}")]),
             _agent("Review", [("Reviewer", "Review the UI change for correctness and accessibility and rank your findings.\n\nWork: {{input}}")]),
-            _approval("Approve", "Look at the result and approve it."),
+            _approval("Approve", "Look at the result and approve it.", ahead=False),
         ],
     },
 }

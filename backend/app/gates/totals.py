@@ -123,3 +123,59 @@ def line(t: dict) -> str:
     if last:
         out += f" (last: {last['name']}, {_fmt_min(last['minutes'])} min, ${last['cost_usd']:.2f})"
     return out
+
+
+async def per_step(s, run, gate_rows=None) -> list[dict | None]:
+    """Time and spend per step for its newest attempt (F66), computed on read:
+    {"cost_usd", "input_tokens", "output_tokens", "seconds"}, or None for a step that has not
+    started and has no tasks. Cost and tokens sum the step's tasks of that attempt (None counts
+    as 0). Seconds: started_at -> finished_at; while the run is on the step, up to now; for a
+    step that ended without a finish time (a failure), its gate runs' durations or its tasks'
+    last completion. `gate_rows` are the run's WorkflowGateRun rows when already loaded."""
+    from ..models import WorkflowGateRun
+
+    stages = run.stages or []
+    state = run.stage_state or {}
+    now = datetime.now(timezone.utc)
+    tasks = (await s.execute(select(Task).where(Task.workflow_run_id == run.id))).scalars().all()
+    if gate_rows is None:
+        gate_rows = (
+            await s.execute(select(WorkflowGateRun).where(WorkflowGateRun.run_id == run.id))
+        ).scalars().all()
+    live = run.status not in ("completed", "failed")
+    out: list[dict | None] = []
+    for i in range(len(stages)):
+        st = state.get(str(i)) if isinstance(state.get(str(i)), dict) else {}
+        try:
+            attempt = int(st.get("attempt") or 0)
+        except (TypeError, ValueError):
+            attempt = 0
+        mine = [t for t in tasks if t.stage_index == i and (t.stage_attempt or 0) == attempt]
+        a, b = _parse(st.get("started_at")), _parse(st.get("finished_at"))
+        if not a and not mine:
+            out.append(None)
+            continue
+        seconds = 0.0
+        if a and b:
+            seconds = (b - a).total_seconds()
+        elif a and live and i == run.current_stage:
+            seconds = (now - a).total_seconds()
+        else:
+            rows = [g for g in gate_rows if g.stage_index == i and (g.attempt or 0) == attempt]
+            if rows:
+                seconds = sum((g.duration_ms or 0) for g in rows) / 1000.0
+            elif a:
+                ends = [_aware(t.completed_at) for t in mine if t.completed_at]
+                if ends:
+                    seconds = (max(ends) - a).total_seconds()
+        out.append({
+            "cost_usd": round(sum(t.total_cost_usd or 0.0 for t in mine), 4),
+            "input_tokens": sum(t.input_tokens or 0 for t in mine),
+            "output_tokens": sum(t.output_tokens or 0 for t in mine),
+            "seconds": max(0, int(seconds)),
+        })
+    return out
+
+
+def _aware(d):
+    return d if d is None or d.tzinfo else d.replace(tzinfo=timezone.utc)
