@@ -271,19 +271,22 @@ export default function FlowCanvas({
     }
   }, [model.length])
 
-  // Keep the focused step (the run's current step, or the one being edited) in view.
+  // Keep the focused or selected step fully in view (with room for its badge and the edge
+  // fade). Only the canvas scrolls, never the page.
+  const keepStep = selected && selected.step != null ? selected.step : focusStep
   useEffect(() => {
-    if (focusStep == null || mini) return
+    if (keepStep == null || mini) return
     const sc = scroller.current
-    const col = sc?.querySelector(`[data-col="${focusStep}"]`)
+    const col = sc?.querySelector(`[data-col="${keepStep}"]`)
     if (!sc || !col) return
+    const room = 24
     const left = col.offsetLeft
     const w = col.offsetWidth
-    if (left >= sc.scrollLeft && left + w <= sc.scrollLeft + sc.clientWidth) return
-    const to = Math.max(0, left - (sc.clientWidth - w) / 2)
+    if (left - room >= sc.scrollLeft && left + w + room <= sc.scrollLeft + sc.clientWidth) return
+    const to = Math.max(0, left + w / 2 - sc.clientWidth / 2)
     if (typeof sc.scrollTo === 'function') sc.scrollTo({ left: to, behavior: 'smooth' })
     else sc.scrollLeft = to
-  }, [focusStep, mini, model.length])
+  }, [keepStep, mini, model.length])
 
   const stepStatus = (i) => (run && statusOf ? statusOf(i) : null)
   const linkState = (i) => {

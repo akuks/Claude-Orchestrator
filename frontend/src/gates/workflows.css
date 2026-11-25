@@ -611,3 +611,9 @@ input.co-wf-step-name {
   align-items: center;
   gap: 4px;
 }
+
+/* The failure reason keeps the normal text colour so it stays readable on the dark red box. */
+.co-gate .ant-alert-error .ant-alert-message,
+.co-gate .ant-alert-error .ant-alert-description {
+  color: var(--co-text);
+}
