@@ -122,12 +122,17 @@ def test_retry_reopens_it(client, tmp_path):
     assert run(handoff.snapshot(tid, "working")).status == "open"
 
 
-def test_the_continue_snapshot_reopens_it(client, tmp_path):
+def test_the_continue_snapshot_alone_keeps_it_closed(client, tmp_path):
+    """The Continue route snapshots before its step is queued; only the queued step reopens it (reopen)."""
     tid = mk_task(workspace_dir=str(tmp_path), started_at=_now() - timedelta(hours=2),
                   completed_at=_now() - timedelta(hours=1))
     run(handoff.snapshot(tid, "run ended"))
     close(tid)
-    assert run(handoff.snapshot(tid, "continue")).status == "open"
+    assert run(handoff.snapshot(tid, "continue")).status == "closed"
+    assert run(handoff.reopen(tid)) is True
+    row = row_of(tid)
+    assert row.status == "open" and row.closed_at is None and row.closed_by is None
+    assert run(handoff.reopen(tid)) is False  # already open
 
 
 def test_continue_route_reopens_a_closed_handoff(client):
@@ -138,12 +143,32 @@ def test_continue_route_reopens_a_closed_handoff(client):
     assert wait_task(me, tid)["status"] == "completed"
     assert me.post(f"/tasks/{tid}/handoff/close").status_code == 200
     assert me.post(f"/tasks/{tid}/handoff/refresh").json()["status"] == "closed"  # a person's Refresh
+    closed_at = row_of(tid).closed_at
     r = me.post(f"/tasks/{tid}/continue", json={"mode": "fresh"})
     assert r.status_code == 201, r.text
+    row = row_of(tid)  # right after the POST: reopened (unless the step already ran and closed it again)
+    assert row.status == "open" or (row.closed_by == "system" and row.closed_at > closed_at)
+    assert row.closed_by != me.user_id
     assert wait_task(me, r.json()["id"])["status"] == "completed"
-    # reopened by the Continue (and closed again by the system only when its step completed cleanly)
+
+
+def test_a_refused_continue_leaves_it_closed(client, monkeypatch):
+    from fastapi import HTTPException
+
+    from app.routers import tasks as tasks_router
+
+    me = login_as(f"hc-409-{uuid.uuid4().hex[:6]}@test.local")
+    tid = me.post("/tasks", json={"prompt": "refused continue"}).json()["id"]
+    assert wait_task(me, tid)["status"] == "completed"
+    assert me.post(f"/tasks/{tid}/handoff/close").status_code == 200
+
+    async def busy(*a, **kw):  # a step of the thread became active under the lock
+        raise HTTPException(409, "A step of this thread is still active")
+
+    monkeypatch.setattr(tasks_router, "queue_continue", busy)
+    assert me.post(f"/tasks/{tid}/continue", json={"mode": "fresh"}).status_code == 409
     row = row_of(tid)
-    assert row.status == "open" or row.closed_by == "system"
+    assert row.status == "closed" and row.closed_by == me.user_id
 
 
 # ---- closed automatically when a step completes with nothing open ----------------------------------

@@ -29,6 +29,12 @@ def _switch_off_after():
     run(retention.save_settings(enabled=False, days=60, by=None))
 
 
+def tidy_on(only, days=60):
+    """A pass with the switch on (tidy stops when it is off)."""
+    run(retention.save_settings(enabled=True, days=days, by=None))
+    return run(retention.tidy(days=days, only=only))
+
+
 def mk(status="completed", ended_days=400.0, events=30, handoff_state="closed", notes="my notes", root=None):
     tid = uuid.uuid4().hex
     ended = _now() - timedelta(days=ended_days) if ended_days is not None else None
@@ -106,7 +112,7 @@ def test_settings_validate_days(client):
 
 def test_tidies_finished_old_tasks_into_one_summary(client):
     old = mk(events=30)
-    out = run(retention.tidy(days=60, only=[old]))
+    out = tidy_on(only=[old])
     assert out["tasks"] == 1
     evs = events_of(old)
     assert len(evs) == 1 and evs[0].type == "summary"
@@ -136,7 +142,7 @@ def test_never_touches_unfinished_or_recent_tasks(client):
         "recent": mk(ended_days=10),
         "running_with_old_end": mk(status="running", ended_days=400),  # a Retry in flight keeps an old row?
     }
-    out = run(retention.tidy(days=60, only=list(ids.values())))
+    out = tidy_on(only=list(ids.values()))
     assert out["tasks"] == 0
     for name, tid in ids.items():
         assert len(events_of(tid)) == 30, name
@@ -145,16 +151,16 @@ def test_never_touches_unfinished_or_recent_tasks(client):
 
 def test_an_open_handoff_keeps_its_previous_version(client):
     tid = mk(handoff_state="open")
-    run(retention.tidy(days=60, only=[tid]))
+    tidy_on(only=[tid])
     assert events_of(tid)[0].type == "summary"
     assert handoff_of(tid).prev_text == "before"
 
 
 def test_idempotent_and_a_later_run_is_folded_in(client):
     tid = mk(events=6)
-    run(retention.tidy(days=60, only=[tid]))
+    tidy_on(only=[tid])
     first = events_of(tid)
-    assert run(retention.tidy(days=60, only=[tid]))["tasks"] == 0  # already a summary: skipped
+    assert tidy_on(only=[tid])["tasks"] == 0  # already a summary: skipped
     assert [e.id for e in events_of(tid)] == [e.id for e in first]
 
     async def more():  # a Retry long ago added events after the summary
@@ -164,7 +170,7 @@ def test_idempotent_and_a_later_run_is_folded_in(client):
             await s.commit()
 
     run(more())
-    assert run(retention.tidy(days=60, only=[tid]))["tasks"] == 1
+    assert tidy_on(only=[tid])["tasks"] == 1
     evs = events_of(tid)
     assert len(evs) == 1 and evs[0].type == "summary"
     assert evs[0].payload["events"] == 7 and evs[0].payload["counts"]["error"] == 1
@@ -177,7 +183,7 @@ def test_batches_and_preview(client, monkeypatch):
     ids = [mk(events=3) for _ in range(5)]
     pre = run(retention.preview(days=60, only=ids))
     assert pre["tasks"] == 5 and pre["bytes"] > 0
-    out = run(retention.tidy(days=60, only=ids))
+    out = tidy_on(only=ids)
     assert out["tasks"] == 5 and out["batches"] == 3
     assert run(retention.preview(days=60, only=ids))["tasks"] == 0
 
@@ -190,7 +196,7 @@ def test_never_deletes_decisions(client):
             return (await s.execute(select(func.count()).select_from(ProjectDecision))).scalar()
 
     before = run(n())
-    run(retention.tidy(days=60, only=[tid]))
+    tidy_on(only=[tid])
     assert run(n()) == before
 
 
@@ -199,7 +205,7 @@ def test_never_deletes_decisions(client):
 
 def test_readers_cope_with_a_summary_only_task(client, tmp_path):
     tid = mk()
-    run(retention.tidy(days=60, only=[tid]))
+    tidy_on(only=[tid])
     ev = {"type": "summary", "payload": events_of(tid)[0].payload, "created_at": _now()}
     line = logfmt.line(ev)
     assert line and "TIDIED" in line and "30" in line
@@ -243,3 +249,190 @@ def test_routes(client):
     assert [e.type for e in events_of(tid)] == ["summary"]
     r = client.patch("/admin/health/retention", json={"enabled": False})
     assert r.status_code == 200 and r.json()["enabled"] is False and r.json()["days"] == 90
+
+
+# ---- fix round 1: switch off, races, stopping, preview cost -----------------------------------------
+
+
+def _counts():
+    async def go():
+        async with SessionLocal() as s:
+            return ((await s.execute(select(func.count()).select_from(TaskEvent))).scalar(),
+                    (await s.execute(select(func.count()).select_from(TaskHandoff)
+                                     .where(TaskHandoff.prev_text.is_not(None)))).scalar())
+
+    return run(go())
+
+
+def test_switch_off_writes_nothing_from_loop_get_post_or_tidy(client):
+    run(retention.save_settings(enabled=False, days=60, by=None))
+    mk()
+    mk()
+    before = _counts()
+    assert run(retention.run_if_due()) is None
+    assert client.get("/admin/health/retention").status_code == 200
+    assert client.post("/admin/health/retention/run").status_code == 409
+    out = run(retention.tidy(days=60))  # even called directly, it checks the switch
+    assert out["stopped"] is True and out["tasks"] == 0
+    assert _counts() == before
+
+
+class _HookedSession:
+    """SessionLocal whose sessions call ``hook`` just before a DELETE of task events runs."""
+
+    def __init__(self, hook):
+        from app.database import SessionLocal as real
+
+        self._real, self._hook = real, hook
+
+    def __call__(self):
+        outer = self
+
+        class Proxy:
+            def __init__(self, s):
+                self._s = s
+
+            def __getattr__(self, k):
+                return getattr(self._s, k)
+
+            async def execute(self, stmt, *a, **kw):
+                from sqlalchemy.sql.dml import Delete
+
+                if isinstance(stmt, Delete) and stmt.table.name == "task_events":
+                    await outer._hook(outer._real)
+                return await self._s.execute(stmt, *a, **kw)
+
+        class CM:
+            def __init__(self):
+                self._cm = outer._real()
+
+            async def __aenter__(self):
+                return Proxy(await self._cm.__aenter__())
+
+            async def __aexit__(self, *e):
+                return await self._cm.__aexit__(*e)
+
+        return CM()
+
+
+def test_a_retry_racing_the_tidy_keeps_its_events(client, monkeypatch):
+    """A person's Retry commits between the re-check and the delete: the queued task is left alone."""
+    from app.constants import Status
+
+    tid = mk(events=10)
+
+    async def retry(real):
+        async with real() as other:
+            t = await other.get(Task, tid)
+            t.status, t.completed_at, t.started_at = Status.QUEUED, None, None
+            await other.commit()
+
+    run(retention.save_settings(enabled=True, days=60, by=None))
+    monkeypatch.setattr(retention, "SessionLocal", _HookedSession(retry))
+    out = run(retention.tidy(days=60, only=[tid]))
+    assert out["tasks"] == 0
+    assert task_of(tid).status == Status.QUEUED
+    assert len(events_of(tid)) == 10 and "summary" not in {e.type for e in events_of(tid)}
+
+
+def test_an_event_after_the_read_is_kept_after_the_summary(client, monkeypatch):
+    tid = mk(events=5)
+
+    async def emit(real):
+        async with real() as other:
+            other.add(TaskEvent(task_id=tid, seq=6, type="text_output", payload={"text": "late line"}))
+            await other.commit()
+
+    run(retention.save_settings(enabled=True, days=60, by=None))
+    monkeypatch.setattr(retention, "SessionLocal", _HookedSession(emit))
+    run(retention.tidy(days=60, only=[tid]))
+    evs = events_of(tid)
+    assert [(e.seq, e.type) for e in evs] == [(5, "summary"), (6, "text_output")]
+    assert evs[0].payload["events"] == 5 and not any("late line" in x for x in evs[0].payload["lines"])
+    monkeypatch.undo()
+    tidy_on(only=[tid])  # the late event folds in once, its line once
+    p = events_of(tid)[0].payload
+    assert p["events"] == 6 and sum("late line" in x for x in p["lines"]) == 1
+
+
+def test_switching_off_mid_pass_stops_it(client, monkeypatch):
+    monkeypatch.setattr(retention, "BATCH", 1)
+    real_sleep = asyncio.sleep
+    ids = [mk(events=3) for _ in range(3)]
+    run(retention.save_settings(enabled=True, days=60, by=None))
+
+    async def sleep(_):  # an admin switches it off during the first pause
+        await retention.save_settings(enabled=False, by=None)
+        await real_sleep(0)
+
+    monkeypatch.setattr(retention.asyncio, "sleep", sleep)
+    out = run(retention.tidy(days=60, only=ids))
+    assert out["tasks"] == 1 and out["stopped"] is True
+    assert sum([e.type for e in events_of(i)] == ["summary"] for i in ids) == 1
+    assert all(handoff_of(i).prev_text == "before" for i in ids)  # nor the handoffs
+
+
+def test_changing_the_days_mid_pass_stops_it(client, monkeypatch):
+    monkeypatch.setattr(retention, "BATCH", 1)
+    real_sleep = asyncio.sleep
+    ids = [mk(events=3) for _ in range(2)]
+    run(retention.save_settings(enabled=True, days=60, by=None))
+
+    async def sleep(_):
+        await retention.save_settings(days=90, by=None)
+        await real_sleep(0)
+
+    monkeypatch.setattr(retention.asyncio, "sleep", sleep)
+    out = run(retention.tidy(days=60, only=ids))
+    assert out["tasks"] == 1 and out["stopped"] is True
+
+
+def test_handoff_prune_skips_a_row_saved_meanwhile(client, monkeypatch):
+    """The prune is one conditional UPDATE: a snapshot between its select and its update keeps its prev."""
+    tid = mk()
+    real_execute_update = retention.update
+
+    def update(model):
+        async def fresh():
+            async with SessionLocal() as s:
+                row = (await s.execute(select(TaskHandoff).where(TaskHandoff.root_id == tid))).scalar_one()
+                row.saved_at, row.prev_text = _now(), "fresh prev"
+                await s.commit()
+
+        import threading
+
+        th = threading.Thread(target=lambda: asyncio.run(fresh()))
+        th.start()
+        th.join()
+        return real_execute_update(model)
+
+    monkeypatch.setattr(retention, "update", update)
+    assert run(retention._prune_handoffs(_now() - timedelta(days=60), only=[tid])) == 0
+    assert handoff_of(tid).prev_text == "fresh prev"
+
+
+def test_preview_reads_no_payload_and_is_cached(client, monkeypatch):
+    ids = [mk(events=4) for _ in range(2)]
+    seen = []
+    from sqlalchemy import event as sa_event
+
+    from app.database import engine
+
+    def spy(conn, cursor, statement, *a):
+        seen.append(statement)
+
+    sa_event.listen(engine.sync_engine, "before_cursor_execute", spy)
+    try:
+        pre = run(retention.preview(days=60, only=ids))
+    finally:
+        sa_event.remove(engine.sync_engine, "before_cursor_execute", spy)
+    assert pre["tasks"] == 2 and pre["bytes"] == 8 * retention.ROW_ESTIMATE
+    assert seen and not any("payload" in st for st in seen)
+    assert retention.PREVIEW_CACHE_SECONDS >= 600
+    seen.clear()
+    sa_event.listen(engine.sync_engine, "before_cursor_execute", spy)
+    try:
+        assert run(retention.preview(days=60, only=ids)) == pre  # cached: no query
+    finally:
+        sa_event.remove(engine.sync_engine, "before_cursor_execute", spy)
+    assert seen == []

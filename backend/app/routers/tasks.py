@@ -585,6 +585,12 @@ async def continue_task(task_id: str, request: Request, payload: ContinueCreate 
         parent = await require_task(s, p, task_id)
         child = await queue_continue(s, parent, mode=mode, sender=p.user.id, auto=False)
         out = TaskOut.model_validate(child)
+    # the step is queued (a 409 above leaves a closed handoff closed): a new run of the thread reopens it,
+    # before the worker can run (and auto-close) the step
+    try:
+        await resume_handoff.reopen(task_id)
+    except Exception:  # noqa: BLE001 - the step's first snapshot reopens it too
+        logging.getLogger(__name__).exception("handoff reopen after continue failed for %s", task_id)
     await worker.submit(out.id, out.priority, out.created_at)
     return out
 

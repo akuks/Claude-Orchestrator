@@ -794,13 +794,29 @@ async def snapshot(task_id: str, reason: str, *, secrets=None, since=None, endin
 
 def _reopens(row, reason: str, started) -> bool:
     """A closed handoff stays closed (its content still updates) until a new run of the thread: a run that
-    started after the close, or a person's Continue (whose snapshot is taken just before its step is queued)."""
+    started after the close (a person's Continue reopens it with ``reopen`` once its step is queued)."""
     if row.status != "closed":
-        return True
-    if reason == "continue":
         return True
     closed_at = _aware(row.closed_at)
     return closed_at is None or (started is not None and started > closed_at)
+
+
+async def reopen(task_id: str) -> bool:
+    """Reopen the thread's closed handoff (a Continue's step was just queued). True when it reopened."""
+    from ..database import SessionLocal
+    from ..models import Task, TaskHandoff
+
+    async with SessionLocal() as s:
+        task = await s.get(Task, task_id)
+        if task is None:
+            return False
+        row = (await s.execute(select(TaskHandoff).where(TaskHandoff.root_id == (task.root_id or task.id)))
+               ).scalar_one_or_none()
+        if row is None or row.status != "closed":
+            return False
+        row.status, row.closed_at, row.closed_by = "open", None, None
+        await s.commit()
+        return True
 
 
 async def auto_close(task_id: str) -> bool:
