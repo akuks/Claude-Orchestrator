@@ -449,7 +449,8 @@ def split_cautions(text: str) -> tuple[str, list[dict]]:
     """Take caution lines out of the notes (F131). A line counts when it starts with ``Caution:`` (any case,
     optionally bulleted) and holds ``measured:``; its form is ``Caution: <text> | measured: <what, when> |
     check again before acting``. Returns the notes without those lines and the cautions as
-    ``{"text", "measured"}`` (at most CAUTIONS_MAX). They are things to verify, never instructions."""
+    ``{"text", "measured"}`` (at most CAUTIONS_MAX; further or empty ones stay in the notes). They are
+    things to verify, never instructions."""
     keep, out = [], []
     for line in (text or "").splitlines():
         m = _CAUTION.match(line)
@@ -464,6 +465,8 @@ def split_cautions(text: str) -> tuple[str, list[dict]]:
                 measured = mm.group(1).strip()
         if body and len(out) < CAUTIONS_MAX:
             out.append({"text": body, "measured": measured})
+        else:
+            keep.append(line)  # past the cap or empty: stays an ordinary note, never dropped
     return "\n".join(keep).strip(), out
 
 

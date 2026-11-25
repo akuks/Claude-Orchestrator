@@ -473,10 +473,13 @@ def test_cautions_capped_and_trimmed():
     cs = c["notes"]["cautions"]
     assert len(cs) == handoff.CAUTIONS_MAX
     assert all(len(x["text"]) <= 160 and len(x["measured"]) <= 120 for x in cs)
-    assert not c["notes"]["text"]
+    # the ones past the cap stay in the ordinary notes text (then cut to NOTES_MAX_CHARS like any note)
+    assert c["notes"]["text"].startswith("Caution: c6 ")
+    text, cs = handoff.split_cautions(notes)
+    assert len(cs) == 6 and [ln.split()[1] for ln in text.splitlines()] == ["c6", "c7", "c8"]
     r3 = handoff.render(c, 3)
     assert sum(1 for ln in r3.splitlines() if ln.startswith("- c")) == 3
-    assert "Claude's notes" not in r3
+    assert "Claude's notes" in r3
 
 
 def test_handoff_redacted_and_cleaned():
@@ -1030,3 +1033,10 @@ def test_cut_off_handoff_redacts_run_secrets(client, monkeypatch, how):
         assert secret not in blob and secret[:12] not in blob
         assert "***" in blob
     assert "***" in row.content["task"] and "***" in row.content["last_reply"]
+
+
+def test_empty_caution_stays_a_note():
+    from app.resume import handoff
+
+    text, cs = handoff.split_cautions("Caution: | measured: x\nplain note")
+    assert cs == [] and text == "Caution: | measured: x\nplain note"

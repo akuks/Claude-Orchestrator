@@ -277,3 +277,94 @@ def test_held_step_words_in_the_api(client, fakes, monkeypatch):
         loop.run_until_complete(r.cancel_run(b))
     finally:
         loop.close()
+
+
+# --- fix round 1 -----------------------------------------------------------------------------
+
+
+def test_cancel_kill_window_keeps_the_folder(fakes):
+    """While cancel_run is still killing A's process, B's held gate must not start (I-1)."""
+    fakes.script["slow"] = ["block"]
+
+    async def go():
+        pid = await _project()
+        r = WorkflowRunner(FakeWorker(), 999)
+        a = await make_run([gate(pid, run=("slow",))], [pid])
+        b = await make_run([gate(pid, run=("fast",))], [pid])
+        await r.start_run(a)
+        await wait_for(lambda: (a, 0) in r._procs)
+        await r.start_run(b)
+        await settle_b(r, b)
+        assert (await _run(b)).stage_state["0"]["status"] == "held"
+        seen = {}
+        orig = r._kill_gates
+
+        async def slow_kill(run_id, record):
+            # A is committed failed but its process still runs: a tick for B happens now.
+            assert (await _run(a)).status == "failed"
+            await r._advance(b)
+            await settle_b(r, b)
+            seen["b_state"] = (await _run(b)).stage_state["0"]["status"]
+            seen["b_ran"] = "fast" in fakes.calls
+            await orig(run_id, record)
+
+        r._kill_gates = slow_kill
+        assert await r.cancel_run(a)
+        assert seen == {"b_state": "held", "b_ran": False}
+        assert (a, 0) not in wr._IN_FLIGHT
+        await r._advance(b)  # A's process is gone: B runs now
+        await until_status(b, "completed")
+
+    asyncio.run(go())
+
+
+def test_fix_after_budget_hold_takes_the_lock_again(fakes):
+    """M-1: the fix round works in the folder, so after a budget hold (which lets the lock go)
+    it takes the lock again before the fix task starts; busy -> held, then the fix starts."""
+    fakes.script["check"] = [FAIL(), oc()]
+    fakes.script["slow"] = ["block"]
+
+    async def go():
+        pid = await _project()
+        stage = gate(pid, run=("check",))
+        stage["fix"] = {"agent": await _fixer(pid), "rounds": 1}
+        rid = await make_run([stage], [pid], budget=1.0)
+        async with SessionLocal() as s:
+            s.add(Task(title="spent", prompt="x", status=Status.COMPLETED, workflow_run_id=rid,
+                       stage_index=0, stage_attempt=0, total_cost_usd=1.0))
+            await s.commit()
+        r = WorkflowRunner(FakeWorker(), 999)
+        await r.start_run(rid)
+        await settle(r)
+        assert (await _run(rid)).stage_state["0"]["status"] == "budget" and lock_owners(rid) == []
+        other = await make_run([gate(pid, run=("slow",))], [pid])  # another run's checks take the folder
+        await r.start_run(other)
+        await wait_for(lambda: (other, 0) in r._procs)
+        await r.raise_budget(rid, 5.0, ANN)
+        run = await _run(rid)
+        st = run.stage_state["0"]
+        assert st["status"] == "held" and st["reason"] == LOCK_WORDS and st["fix_pending"] == 1
+        assert [t.title for t in await _tasks(rid, 0)] == ["spent"]  # no fix task yet
+        assert await r.cancel_run(other)
+        await r._advance(rid)
+        run = await _run(rid)
+        st = run.stage_state["0"]
+        assert st["status"] == "fixing" and st.get("fix_task") and lock_owners(rid)
+        assert "fix_pending" not in st and st["reason"] != LOCK_WORDS
+
+    asyncio.run(go())
+
+
+def test_preflight_hold_after_a_fix_round_keeps_the_turn(client):
+    """The same gate stage continuing after a fix round and held for its pre-flight still owns the
+    folder; a plain pre-flight hold (no fix round) does not."""
+    async def go():
+        pid = await _project()
+        a = await make_run([gate(pid)], [pid], status="running",
+                           state={"0": {"status": "held", "reason": "x", "fix_round": 1}})
+        b = await make_run([gate(pid)], [pid], status="running", state={"0": {"status": "held", "reason": "x"}})
+        async with SessionLocal() as s:
+            assert await wr._owner_live(s, (a, 0)) is True
+            assert await wr._owner_live(s, (b, 0)) is False
+
+    asyncio.run(go())

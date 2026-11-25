@@ -334,14 +334,16 @@ AHEAD_REFUSED = "This step can only be approved when the run reaches it."
 
 
 def _drop_ahead(run, why: str, start: int | None = None) -> None:
-    """Drop every early approval on a step from `start` on (default: the steps not reached
-    yet), one log line each. Used when the run fails or is cancelled, and on run again."""
-    first = (run.current_stage + 1) if start is None else start
+    """Drop every early approval not applied yet on a step from `start` on (default: the
+    current step and the steps not reached yet), one log line each. Used when the run fails
+    or is cancelled, and on run again. An approval already applied (status "approved") is a
+    record of what happened: kept, never reported as dropped."""
+    first = run.current_stage if start is None else start
     state = dict(run.stage_state or {})
     changed = False
     for i in range(max(0, first), len(run.stages or [])):
         st = state.get(str(i))
-        if isinstance(st, dict) and "ahead" in st:
+        if isinstance(st, dict) and "ahead" in st and st.get("status") != "approved":
             st = {k: v for k, v in st.items() if k != "ahead"}
             if st:
                 state[str(i)] = st
@@ -371,6 +373,9 @@ LOCK_WORDS = "Waiting for checks from another run in this project to finish."
 # there. In memory: one server process; empty after a restart.
 _PROJECT_LOCKS: dict[str, tuple[str, int]] = {}
 LOCK_HOLDING = ("waiting", "running", "fixing")  # gate states that keep the lock
+# (run id, stage) of gate commands whose process this server has started and not yet seen
+# end (the kill of a cancel included): such an owner is live whatever its database row says.
+_IN_FLIGHT: set[tuple[str, int]] = set()
 
 
 def _lock_key(directory: str) -> str:
@@ -387,11 +392,18 @@ def release_project_locks(run_id: str, i: int | None = None) -> None:
 async def _owner_live(s, owner: tuple[str, int]) -> bool:
     """True while the owning run is active, on that gate stage and the stage still runs or
     fixes its checks. Anything else is a lock nobody let go of (a missed path): free."""
+    if owner in _IN_FLIGHT:
+        return True  # its process may still be running (a cancel kills it after the commit)
     rid, j = owner
     run = await s.get(WorkflowRun, rid)
     if run is None or run.status not in ACTIVE_RUN or run.current_stage != j:
         return False
-    return get_state(run, j).get("status") in LOCK_HOLDING
+    st = get_state(run, j)
+    if st.get("status") in LOCK_HOLDING:
+        return True
+    # The same gate stage continuing after a fix round, held for its pre-flight: still its turn.
+    return (st.get("status") == "held" and not st.get("lock_wait")
+            and int(st.get("fix_round") or 0) > 0)
 
 
 async def _take_project_lock(s, directory: str, run_id: str, i: int) -> bool:
@@ -421,7 +433,8 @@ async def _project_lock_free(s, directory: str, run_id: str, i: int) -> bool:
 
 def _lock_hold(run, i: int, st: dict) -> None:
     """Hold gate stage i until the project's checks are free. Its hand-out and progress are
-    kept; the tick hands it out again when the lock is free (never a failure)."""
+    kept; the tick hands it out again when the lock is free (never a failure). A fix round
+    held here keeps fix_pending, so the fix (not the gate) starts when the lock is free."""
     if not st.get("lock_wait"):
         runlog.append(run, f"{_label(run, i)} held: waiting for checks from another run in this project")
     st.update(status="held", reason=LOCK_WORDS, lock_wait=True)
@@ -883,7 +896,7 @@ class WorkflowRunner:
 
         await self._locked(run_id, fn)
 
-    async def _ahead_target(self, s, run_id: str, i: int):
+    async def _ahead_target(self, s, run_id: str, i: int, withdraw: bool = False):
         run = await s.get(WorkflowRun, run_id)
         if run is None:
             raise ValueError("run not found")
@@ -894,7 +907,11 @@ class WorkflowRunner:
         if run.stages[i].get("ahead") is False:
             raise ValueError(AHEAD_REFUSED)
         if i <= run.current_stage:
-            raise ValueError("this step has already been reached")
+            # A step reached but held (pre-flight) is still undecided: its early approval
+            # may be withdrawn, never given.
+            held = i == run.current_stage and get_state(run, i).get("status") == "held"
+            if not (withdraw and held):
+                raise ValueError("this step has already been reached")
         return run
 
     async def approve_ahead(self, run_id: str, i: int, user) -> None:
@@ -920,7 +937,7 @@ class WorkflowRunner:
 
         async def fn(pre):
             async with SessionLocal() as s:
-                run = await self._ahead_target(s, run_id, i)
+                run = await self._ahead_target(s, run_id, i, withdraw=True)
                 st = get_state(run, i)
                 if "ahead" not in st:
                     return
@@ -1172,6 +1189,8 @@ class WorkflowRunner:
                 if project is not None and (project.directory or "").strip() and not await _project_lock_free(
                         s, project.directory, run_id, i):
                     return None
+                if st.get("fix_pending"):
+                    return _Fix(i, st.get("handout"), int(st.get("fix_pending") or 0))
                 st.update(status="waiting", reason=None)
                 _put_state(run, i, st)
                 await s.commit()
@@ -1316,7 +1335,7 @@ class WorkflowRunner:
                 return False
             if st.get("status") == "fixing":
                 return not st.get("fix_task")
-            return st.get("status") == "budget" and int(st.get("fix_pending") or 0) == fx.round
+            return st.get("status") in ("budget", "held") and int(st.get("fix_pending") or 0) == fx.round
 
         # Phase 1: read, no lock.
         async with SessionLocal() as s:
@@ -1363,12 +1382,21 @@ class WorkflowRunner:
                     await s.commit()
                     return None
                 ok, spent, remaining = await _budget_ok(s, run)
+                # Remember what failed: a hold's own reason replaces it on screen.
+                fr = st.get("fail_reason") if st.get("status") in ("budget", "held") else st.get("reason")
                 if not ok:
-                    # Remember what failed: the hold's own reason replaces it on screen.
-                    fr = st.get("fail_reason") if st.get("status") == "budget" else st.get("reason")
                     _budget_hold(run, i, {**st, "fix_pending": fx.round, "fail_reason": fr}, spent)
                     await s.commit()
                     release_project_locks(run_id, i)  # a person must raise the limit: free the folder
+                    return None
+                # The fix round works in the folder: it holds the project's check lock (taken
+                # again after a budget hold let it go; busy -> held until it is free).
+                project = await s.get(Project, stage.get("project")) if stage.get("project") else None
+                if project is not None and (project.directory or "").strip() and not await _take_project_lock(
+                        s, project.directory, run_id, i):
+                    hold = {**st, "fix_pending": fx.round, "fail_reason": fr}
+                    _lock_hold(run, i, hold)
+                    await s.commit()
                     return None
                 from .config import settings
 
@@ -1403,9 +1431,10 @@ class WorkflowRunner:
                 # A new dict: build_task flushed, so an in-place change would look unchanged.
                 # Drop "budget reached" but keep the stage's failure reason ("What failed").
                 reason = st.get("reason")
-                if st.get("status") == "budget":
+                if st.get("status") in ("budget", "held"):
                     reason = st.get("fail_reason")
                 st.pop("fail_reason", None)
+                st.pop("lock_wait", None)
                 _put_state(run, i, {**st, "status": "fixing", "fix_task": task.id, "reason": reason})
                 if run.status == RUN_PAUSED:
                     run.status = RUN_RUNNING  # the cap was raised: resume
@@ -1565,10 +1594,15 @@ class WorkflowRunner:
                     _step["proc"] = proc
 
                 try:
-                    out = await executor.run_command(
-                        step["cmd"], cwd=step["cwd"], env=step["env"], log_path=step["log_path"],
-                        timeout_s=step["timeout_s"], on_spawn=on_spawn,
-                    )
+                    _IN_FLIGHT.add(key)
+                    try:
+                        out = await executor.run_command(
+                            step["cmd"], cwd=step["cwd"], env=step["env"], log_path=step["log_path"],
+                            timeout_s=step["timeout_s"], on_spawn=on_spawn,
+                        )
+                    finally:
+                        # run_command returns (or re-raises a cancel) only after the process ended
+                        _IN_FLIGHT.discard(key)
                     try:
                         await asyncio.to_thread(executor.prune_logs, run_id, i, LOGS_KEEP)
                     except Exception:  # noqa: BLE001

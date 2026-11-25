@@ -36,6 +36,18 @@ async def _gate_row(rid, i, attempt, ms):
         await s.commit()
 
 
+async def _all_tasks(s, rid):
+    from sqlalchemy import select
+
+    return (await s.execute(select(Task).where(Task.workflow_run_id == rid))).scalars().all()
+
+
+async def _all_gates(s, rid):
+    from sqlalchemy import select
+
+    return (await s.execute(select(WorkflowGateRun).where(WorkflowGateRun.run_id == rid))).scalars().all()
+
+
 def test_per_step_newest_attempt_and_seconds(client):
     async def go():
         pid = await _project()
@@ -55,7 +67,7 @@ def test_per_step_newest_attempt_and_seconds(client):
             from app.models import WorkflowRun
 
             run = await s.get(WorkflowRun, rid)
-            return await totals.per_step(s, run)
+            return await totals.per_step(s, run, await _all_tasks(s, rid), await _all_gates(s, rid))
 
     u = asyncio.run(go())
     assert u[0] == {"cost_usd": 0.15, "input_tokens": 1010, "output_tokens": 220, "seconds": 95}
@@ -79,7 +91,8 @@ def test_failed_steps_without_a_finish_time(client):
         async with SessionLocal() as s:
             from app.models import WorkflowRun
 
-            return await totals.per_step(s, await s.get(WorkflowRun, rid))
+            return await totals.per_step(s, await s.get(WorkflowRun, rid), await _all_tasks(s, rid),
+                                         await _all_gates(s, rid))
 
     u = asyncio.run(go())
     assert u[0]["seconds"] == 70 and u[0]["cost_usd"] == 0.5
@@ -140,3 +153,67 @@ def test_log_line_for_a_gate_named_gate(fakes):
         assert has(run, "Step gate failed: pytest -q, exit 1") and not has(run, "(gate)")
 
     asyncio.run(go())
+
+
+def test_step_usage_follows_what_the_viewer_may_see(client, monkeypatch):
+    """A viewer who cannot see one project gets null for its gate step and for an agent step
+    whose tasks are all in it, and sums only the tasks it may see."""
+    import uuid as _uuid
+
+    from conftest import login_as
+    from test_gates_api import _grant
+
+    r = WorkflowRunner(FakeWorker(), 999)
+    use_runner(monkeypatch, r)
+    seen = client.post("/projects", json={"name": f"r7a-{_uuid.uuid4().hex[:8]}"}).json()["id"]
+    unseen = client.post("/projects", json={"name": f"r7a-{_uuid.uuid4().hex[:8]}"}).json()["id"]
+
+    async def setup():
+        gpid = await _project()
+        stages = [{"name": "Dev", "items": [{"agent": "x", "prompt": "p"}]},
+                  {"name": "Secret", "items": [{"agent": "x", "prompt": "p"}]},
+                  gate(gpid, name="Hidden gate")]
+        state = {str(i): {"attempt": 0, "status": "done", "started_at": _iso(T),
+                          "finished_at": _iso(T + timedelta(seconds=10))} for i in range(3)}
+        rid = await make_run(stages, [seen, unseen, gpid], status="completed", current=2, state=state)
+        async with SessionLocal() as s:
+            for i, pid, cost in ((0, seen, 0.25), (0, unseen, 7.0), (1, unseen, 3.0)):
+                s.add(Task(title="t", prompt="p", status=Status.COMPLETED, workflow_run_id=rid, stage_index=i,
+                           stage_attempt=0, total_cost_usd=cost, input_tokens=1, output_tokens=1, project_id=pid))
+            await s.commit()
+        return rid
+
+    rid = asyncio.run(setup())
+    viewer = login_as(f"r7a-{_uuid.uuid4().hex[:8]}@test.local")
+    _grant(client, seen, viewer.user_id, "contributor")
+    u = viewer.get(f"/workflows/runs/{rid}").json()["step_usage"]
+    assert u[0] == {"cost_usd": 0.25, "input_tokens": 1, "output_tokens": 1, "seconds": 10}
+    assert u[1] is None and u[2] is None
+    full = client.get(f"/workflows/runs/{rid}").json()["step_usage"]
+    assert full[0]["cost_usd"] == 7.25 and full[1]["cost_usd"] == 3.0 and full[2] is not None
+
+
+def test_status_word_between_commands_stays_running(client, monkeypatch):
+    """A gate whose task is alive but has no process right now (between commands, probing the
+    guard) is "Running", never "Interrupted"."""
+    r = WorkflowRunner(FakeWorker(), 999)
+    use_runner(monkeypatch, r)
+
+    async def setup():
+        pid = await _project()
+        return await make_run([gate(pid)], [pid], status="running", state={
+            "0": {"attempt": 0, "status": "running", "handout": "h", "passed_cmds": [0], "started_at": _iso(T)}})
+
+    rid = asyncio.run(setup())
+    loop = asyncio.new_event_loop()
+    try:
+        alive = loop.create_task(asyncio.Event().wait())
+        r._gates[(rid, 0)] = alive
+        assert client.get(f"/workflows/runs/{rid}").json()["stage_state"]["0"]["status_word"] == "Running"
+        alive.cancel()
+        loop.run_until_complete(asyncio.gather(alive, return_exceptions=True))
+        assert client.get(f"/workflows/runs/{rid}").json()["stage_state"]["0"]["status_word"] == \
+            "Interrupted — will continue"
+    finally:
+        r._gates.clear()
+        loop.close()

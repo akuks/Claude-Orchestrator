@@ -123,7 +123,7 @@ def test_refused_while_active_or_from_a_step_never_reached(fakes, agents):
     asyncio.run(go())
 
 
-def test_run_again_drops_later_approvals_given_ahead(fakes, agents):
+def test_run_again_resets_later_approvals_given_ahead(fakes, agents):
     async def go():
         rid = await make_run([agent("Plan", agents[0]), approval("Approve plan"), agent("Build", agents[1])])
         r = WorkflowRunner(FakeWorker(), 999)
@@ -136,7 +136,8 @@ def test_run_again_drops_later_approvals_given_ahead(fakes, agents):
         assert (await _run(rid)).status == "completed"
         await r.rerun_from(rid, 0, ANN)
         run = await _run(rid)
-        assert has(run, "Approve plan: early approval dropped (run again from Plan)")
+        # It was used, not dropped: no "dropped" line; the step simply needs approving again.
+        assert not has(run, "early approval dropped")
         assert run.stage_state["1"] == {"attempt": 1}
         await _finish_tasks(rid, 0)
         await r._advance(rid)
@@ -211,3 +212,21 @@ def test_api_rerun(client, fakes, agents, monkeypatch):
     # Stop the gate it handed out (in the app's loop) before the fakes are undone.
     assert client.post(f"/workflows/runs/{rid}/cancel").status_code == 200
     assert not [t for t in r._gates.values() if not t.done()]
+
+
+def test_run_again_drops_an_unused_early_approval_with_a_line(fakes, agents):
+    """An early approval still unused on a later step when the run failed is dropped then (the
+    stop path); run again from an earlier step never reports a used one as dropped."""
+    async def go():
+        rid = await make_run([agent("Plan", agents[0]), agent("Build", agents[1]), approval("Sign")])
+        r = WorkflowRunner(FakeWorker(), 999)
+        await r.start_run(rid)
+        await r.approve_ahead(rid, 2, ANN)
+        await _finish_tasks(rid, 0, Status.FAILED, "x")
+        await r._advance(rid)
+        run = await _run(rid)
+        assert texts(run).count("Sign: early approval dropped (the run failed)") == 1
+        await r.rerun_from(rid, 0, ANN)
+        assert texts(await _run(rid)).count("Sign: early approval dropped (the run failed)") == 1
+
+    asyncio.run(go())

@@ -125,23 +125,23 @@ def line(t: dict) -> str:
     return out
 
 
-async def per_step(s, run, gate_rows=None) -> list[dict | None]:
-    """Time and spend per step for its newest attempt (F66), computed on read:
+async def per_step(s, run, tasks, gate_rows, hidden=frozenset()) -> list[dict | None]:
+    """Time and spend per step for its newest attempt (F66), computed on read, for one viewer:
     {"cost_usd", "input_tokens", "output_tokens", "seconds"}, or None for a step that has not
-    started and has no tasks. Cost and tokens sum the step's tasks of that attempt (None counts
-    as 0). Seconds: started_at -> finished_at; while the run is on the step, up to now; for a
-    step that ended without a finish time (a failure), its gate runs' durations or its tasks'
-    last completion. `gate_rows` are the run's WorkflowGateRun rows when already loaded."""
-    from ..models import WorkflowGateRun
-
+    started, a gate step in `hidden` (a project the viewer cannot see) or a step whose tasks of
+    that attempt are all hidden from the viewer.
+    `tasks` are the run's tasks the viewer may see and `gate_rows` the run's WorkflowGateRun rows,
+    both already loaded by the caller; only the (stage, attempt) of every task is read here.
+    Cost and tokens sum the visible tasks of that attempt (None counts as 0). Seconds:
+    started_at -> finished_at; while the run is on the step, up to now; for a step that ended
+    without a finish time (a failure), its gate runs' durations or its tasks' last completion."""
     stages = run.stages or []
     state = run.stage_state or {}
     now = datetime.now(timezone.utc)
-    tasks = (await s.execute(select(Task).where(Task.workflow_run_id == run.id))).scalars().all()
-    if gate_rows is None:
-        gate_rows = (
-            await s.execute(select(WorkflowGateRun).where(WorkflowGateRun.run_id == run.id))
-        ).scalars().all()
+    every = (
+        await s.execute(select(Task.stage_index, Task.stage_attempt).where(Task.workflow_run_id == run.id))
+    ).all()
+    have = {(i, a or 0) for i, a in every if i is not None}
     live = run.status not in ("completed", "failed")
     out: list[dict | None] = []
     for i in range(len(stages)):
@@ -152,7 +152,7 @@ async def per_step(s, run, gate_rows=None) -> list[dict | None]:
             attempt = 0
         mine = [t for t in tasks if t.stage_index == i and (t.stage_attempt or 0) == attempt]
         a, b = _parse(st.get("started_at")), _parse(st.get("finished_at"))
-        if not a and not mine:
+        if i in hidden or ((i, attempt) in have and not mine) or (not a and not mine):
             out.append(None)
             continue
         seconds = 0.0

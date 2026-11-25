@@ -620,6 +620,11 @@ async def get_run(run_id: str, request: Request):
         if held:
             others = await _held_others(s, p, run, visible)
         run_active = run.status in ACTIVE_RUN
+        gate_tasks = getattr(runner, "_gates", None) or {}
+
+        def task_alive(i: int) -> bool:
+            t = gate_tasks.get((run.id, i))
+            return t is not None and not t.done()
         for i, st in enumerate(run.stages or []):
             kind = spec.stage_kind(st)
             if str(i) in stage_state:
@@ -632,7 +637,7 @@ async def get_run(run_id: str, request: Request):
             if kind == "agent":
                 if str(i) in stage_state:
                     stage_state[str(i)].pop("expects", None)  # internal: task ids -> output names
-                    word = _status_word(kind, stage_state[str(i)], False, run_active and i == run.current_stage)
+                    word = _status_word(kind, stage_state[str(i)], False, run_active and i == run.current_stage, False)
                     if word:
                         stage_state[str(i)]["status_word"] = word
                 continue
@@ -641,7 +646,8 @@ async def get_run(run_id: str, request: Request):
             if kind == "gate":
                 lv = live if live and live.get("stage_index") == i else None
                 entry["status_text"] = gate_status_text(st, entry, lv)
-            word = _status_word(kind, entry, bool(lv), run_active and i == run.current_stage)
+            word = _status_word(kind, entry, bool(lv), run_active and i == run.current_stage,
+                                kind == "gate" and task_alive(i))
             if word:
                 entry["status_word"] = word
             if i in hidden:
@@ -653,7 +659,7 @@ async def get_run(run_id: str, request: Request):
                 entry["others"], entry["others_more"] = others
         tot = await totals.compute(s, run)
         tot["line"] = totals.line(tot)
-        step_usage = await totals.per_step(s, run)
+        step_usage = await totals.per_step(s, run, tasks, grows, hidden)
     out = run_out.model_dump()
     out["stage_state"] = stage_state
     return {
@@ -669,12 +675,13 @@ async def get_run(run_id: str, request: Request):
     }
 
 
-def _status_word(kind: str, entry: dict, live: bool, current: bool) -> str | None:
-    """Plain status words for the run view (F127). "Running" only while this server has
-    the gate's process; a gate marked running with no process is "Interrupted — will
-    continue" (the runner resumes it). None when the screen's own word fits."""
+def _status_word(kind: str, entry: dict, live: bool, current: bool, working: bool = False) -> str | None:
+    """Plain status words for the run view (F127). "Running" while this server has the gate's
+    process, or its gate task between commands (`working`); a gate marked running with
+    neither is "Interrupted — will continue" (the runner resumes it). None when the screen's
+    own word fits."""
     status = entry.get("status")
-    if live:
+    if live or (working and status in ("waiting", "running")):
         return "Running"
     if status == "held":
         return "Waiting its turn"

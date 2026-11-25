@@ -244,3 +244,89 @@ def test_api_needs_manage_role(client, fakes, agents, monkeypatch, tmp_path):
             return (await s.get(WorkflowRun, rid)).stage_state["1"]["ahead"]["by"]
 
     assert asyncio.run(check()) == maint.user_id
+
+
+# --- fix round 1: an early approval on the current step held for pre-flight ----------------
+
+
+def _held_ahead_run():
+    held = {"name": "Release", "kind": "approval", "message": "ok?", "before": ["clean tree"]}
+    return [approval("First"), held]
+
+
+async def _reach_held(fakes, r):
+    fakes.pre = ["the branch is not clean"]
+    rid = await make_run(_held_ahead_run())
+    await r.start_run(rid)
+    await r.approve_ahead(rid, 1, ANN)
+    await r.approve_stage(rid, 0, ANN)
+    await r._advance(rid)
+    run = await _run(rid)
+    st = run.stage_state["1"]
+    assert run.current_stage == 1 and st["status"] == "held" and "ahead" in st
+    return rid
+
+
+def test_held_current_step_ahead_dropped_on_cancel(fakes):
+    async def go():
+        r = WorkflowRunner(FakeWorker(), 999)
+        rid = await _reach_held(fakes, r)
+        assert await r.cancel_run(rid)
+        run = await _run(rid)
+        assert "ahead" not in run.stage_state["1"]
+        assert has(run, "Release: early approval dropped (the run was cancelled)")
+
+    asyncio.run(go())
+
+
+def test_held_current_step_ahead_dropped_on_failure(fakes):
+    async def go():
+        r = WorkflowRunner(FakeWorker(), 999)
+        rid = await _reach_held(fakes, r)
+
+        async def fail():
+            from app.workflow_runner import _fail_run
+
+            async with SessionLocal() as s:
+                run = await s.get(WorkflowRun, rid)
+                _fail_run(run)
+                await s.commit()
+
+        await r._locked(rid, lambda pre: fail())
+        run = await _run(rid)
+        assert run.status == "failed" and "ahead" not in run.stage_state["1"]
+        assert has(run, "Release: early approval dropped (the run failed)")
+
+    asyncio.run(go())
+
+
+def test_withdraw_while_held_then_it_waits_for_a_person(fakes):
+    async def go():
+        r = WorkflowRunner(FakeWorker(), 999)
+        rid = await _reach_held(fakes, r)
+        with pytest.raises(ValueError, match="already been reached"):
+            await r.approve_ahead(rid, 1, ANN)  # never given once reached
+        await r.withdraw_ahead(rid, 1, BOB)
+        run = await _run(rid)
+        assert "ahead" not in run.stage_state["1"] and run.stage_state["1"]["status"] == "held"
+        assert has(run, "Release: early approval withdrawn by Bob")
+        fakes.pre = [None]
+        await r._advance(rid)
+        run = await _run(rid)
+        assert run.status == "paused" and run.stage_state["1"]["status"] == "waiting_approval"
+
+    asyncio.run(go())
+
+
+def test_applied_early_approval_is_kept_on_cancel(fakes, agents):
+    async def go():
+        rid = await make_run([approval("One"), agent("Build", agents[0])])
+        r = WorkflowRunner(FakeWorker(), 999)
+        await r.start_run(rid)
+        await r.approve_stage(rid, 0, ANN)
+        run = await _run(rid)
+        assert run.current_stage == 1
+        assert await r.cancel_run(rid)
+        assert not has(await _run(rid), "dropped")
+
+    asyncio.run(go())
