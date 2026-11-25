@@ -55,6 +55,46 @@ function Item({ it, project, isAdmin, reload }) {
   )
 }
 
+function UiChecks({ project, canEdit }) {
+  const [busy, setBusy] = useState(false)
+  const [err, setErr] = useState('')
+  const [task, setTask] = useState(null)
+  const start = async () => {
+    setBusy(true)
+    setErr('')
+    try {
+      setTask(await api.setupUiChecks(project.id))
+    } catch (e) {
+      setErr(plainError(e))
+    } finally {
+      setBusy(false)
+    }
+  }
+  return (
+    <div className="co-surface co-rec-item" data-testid="rec-ui-checks">
+      <div className="co-rec-head">
+        <span className="co-rec-name">UI checks</span>
+        <span>
+          {task ? (
+            <span data-testid="rec-ui-checks-done">
+              <Tag color="green">Task started</Tag>
+              <a href={`#/tasks/${encodeURIComponent(task.id)}`} data-testid="rec-ui-checks-link">Open the task</a>
+            </span>
+          ) : canEdit ? (
+            <Popconfirm title="Start a task that adds the UI checks to this project? It commits on the current branch and never overwrites files." okText="Start" cancelText="Cancel" onConfirm={start}>
+              <Button size="small" loading={busy} data-testid="rec-ui-checks-setup">Set up UI checks</Button>
+            </Popconfirm>
+          ) : (
+            <span className="co-rec-muted">Ask a maintainer to set up UI checks.</span>
+          )}
+        </span>
+      </div>
+      <div className="co-rec-why">Adds screenshot, accessibility and Lighthouse checks to this project as a task you can review.</div>
+      {err && <Typography.Text type="danger" className="co-rec-err" data-testid="rec-ui-checks-error">{err}</Typography.Text>}
+    </div>
+  )
+}
+
 export default function RecommendedSection({ project, data, reload, canEdit, isAdmin }) {
   const [brand, setBrand] = useState(data?.brand_skill || '')
   const [brandErr, setBrandErr] = useState('')
@@ -91,6 +131,7 @@ export default function RecommendedSection({ project, data, reload, canEdit, isA
           <Item key={it.key} it={it} project={project} isAdmin={isAdmin} reload={reload} />
         ))}
       </div>
+      <UiChecks project={project} canEdit={canEdit} />
       <div className="co-surface co-rec-settings">
         <Space>
           <Switch checked={!!data.ui_skills} disabled={!canEdit || busy} onChange={toggle} aria-label="Tell agents to use the design skills" data-testid="rec-ui-skills" />

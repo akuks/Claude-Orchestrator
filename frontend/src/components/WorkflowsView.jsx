@@ -310,7 +310,7 @@ function WorkflowEditor({ open, workflow, prefill, hint, missing = [], agents, o
             <InputNumber min={1} max={4} precision={0} style={{ width: 90 }} aria-label="Steps at the same time" data-testid="workflow-parallel" />
           </Form.Item>
         </div>
-        {hint && <Alert data-testid="template-hint" type="info" showIcon message={hint} style={{ marginBottom: 10 }} />}
+        {hint && <Alert data-testid="template-hint" type="info" showIcon message={hint} style={{ marginBottom: 10, overflowWrap: 'anywhere', whiteSpace: 'normal' }} />}
         {missing.length > 0 && (
           <Alert
             data-testid="missing-agents"

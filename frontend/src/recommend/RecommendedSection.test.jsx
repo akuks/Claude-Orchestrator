@@ -2,7 +2,7 @@ import { act } from 'react'
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
 import { flush, render } from '../home/testRender'
 
-vi.mock('../api', () => ({ api: { updateProject: vi.fn(), createServer: vi.fn() } }))
+vi.mock('../api', () => ({ api: { updateProject: vi.fn(), createServer: vi.fn(), setupUiChecks: vi.fn() } }))
 import { api } from '../api'
 import RecommendedSection from './RecommendedSection'
 
@@ -117,5 +117,35 @@ describe('RecommendedSection', () => {
     await mount({ data: d })
     expect(q('rec-item-browser-playwright').textContent).toContain('Needs Node 20')
     expect(q('rec-item-browser-devtools').textContent).not.toContain('Needs Node')
+  })
+
+  it('starts the UI checks task and links to it', async () => {
+    api.setupUiChecks.mockResolvedValue({ id: 'T9', title: 'Set up UI checks' })
+    await mount()
+    expect(q('rec-ui-checks').textContent).toContain('screenshot, accessibility and Lighthouse')
+    await click(q('rec-ui-checks-setup'))
+    await flush()
+    const ok = [...document.querySelectorAll('.ant-popover button')].find((b) => /Start/.test(b.textContent))
+    await click(ok)
+    await flush()
+    expect(api.setupUiChecks).toHaveBeenCalledWith('p1')
+    expect(q('rec-ui-checks-done').textContent).toContain('Task started')
+    expect(q('rec-ui-checks-link').getAttribute('href')).toBe('#/tasks/T9')
+  })
+
+  it('says it plainly when setup fails', async () => {
+    api.setupUiChecks.mockRejectedValue(Object.assign(new Error('x'), { status: 500 }))
+    await mount()
+    await click(q('rec-ui-checks-setup'))
+    await flush()
+    await click([...document.querySelectorAll('.ant-popover button')].find((b) => /Start/.test(b.textContent)))
+    await flush()
+    expect(q('rec-ui-checks-error').textContent).toContain("didn't work")
+  })
+
+  it('asks non-maintainers to get a maintainer', async () => {
+    await mount({ canEdit: false })
+    expect(q('rec-ui-checks-setup')).toBeNull()
+    expect(q('rec-ui-checks').textContent).toContain('Ask a maintainer to set up UI checks.')
   })
 })
