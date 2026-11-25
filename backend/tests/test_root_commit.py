@@ -13,11 +13,13 @@ from app import gitsafe, rootcommit
 from app.health import checks
 from conftest import login_as
 
+
 ENV = {"PATH": os.environ.get("PATH", ""), "GIT_CONFIG_GLOBAL": os.devnull, "GIT_CONFIG_NOSYSTEM": "1",
        "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t", "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@t",
        "HOME": os.devnull}
 
-pytestmark = pytest.mark.skipif(not gitsafe.git_available(), reason="git is not installed")
+pytestmark = [pytest.mark.skipif(not gitsafe.git_available(), reason="git is not installed"),
+              pytest.mark.usefixtures("fail_after_60s")]  # a lock wait fails the test instead of hanging CI
 
 
 def run(coro):

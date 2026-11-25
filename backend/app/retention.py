@@ -218,17 +218,31 @@ def live_line(etype: str, p: dict) -> str | None:
     return clean_text(redact(text, []), LINE_MAX)
 
 
+LOCK_TIMEOUT = "5s"  # Postgres: a per-task transaction never waits longer than this for a lock ...
+STATEMENT_TIMEOUT = "60s"  # ... or for one statement; either error skips that task (logged)
+
+
+async def _bounded(s) -> None:
+    """Postgres: bound this transaction's lock waits and statements (SET LOCAL ends with the transaction)."""
+    if s.bind.dialect.name == "postgresql":
+        await s.execute(text(f"SET LOCAL lock_timeout = '{LOCK_TIMEOUT}'"))
+        await s.execute(text(f"SET LOCAL statement_timeout = '{STATEMENT_TIMEOUT}'"))
+
+
 def _finished_before(cutoff: datetime):
     return (Task.status.in_(Status.TERMINAL), Task.completed_at.is_not(None), Task.completed_at < cutoff)
 
 
 async def _summarise(tid: str, cutoff: datetime, days: int) -> bool:
-    """Tidy one task in its own short transaction. The task row is locked first (Postgres: a Retry's or
-    Continue's UPDATE of it waits for this commit) and the delete re-checks it is still finished (SQLite: the
-    delete takes the write lock, so nothing commits between that check and this commit)."""
+    """Tidy one task in its own short transaction (nothing else of the pass holds a transaction meanwhile).
+    The task row is locked first with FOR NO KEY UPDATE (Postgres: a Retry's or Continue's UPDATE of it waits
+    for this commit, while inserts that only reference it, such as a new event, do not wait) and the delete
+    re-checks it is still finished (SQLite: the delete takes the write lock, so nothing commits between that
+    check and this commit). Lock waits and statements are bounded on Postgres (``_bounded``)."""
     async with SessionLocal() as s:
+        await _bounded(s)
         still = (await s.execute(select(Task.id).where(Task.id == tid, *_finished_before(cutoff))
-                                 .with_for_update())).first()
+                                 .with_for_update(key_share=True))).first()
         if still is None:
             return False
         groups = (await s.execute(
@@ -309,6 +323,7 @@ async def _prune_handoffs(cutoff: datetime, only=None) -> int:
     n = 0
     while True:
         async with SessionLocal() as s:
+            await _bounded(s)
             ids = (await s.execute(select(TaskHandoff.id).where(*cond).order_by(TaskHandoff.id)
                                    .limit(BATCH))).scalars().all()
             if ids:
@@ -358,7 +373,10 @@ async def tidy(days: int, only=None) -> dict:
         if not await _still_on(days):
             out["stopped"] = True
             return out
-        out["handoffs"] = await _prune_handoffs(cutoff, only)
+        try:
+            out["handoffs"] = await _prune_handoffs(cutoff, only)
+        except Exception:  # noqa: BLE001 - a lock or statement timeout: the next pass tries again
+            log.exception("retention: could not tidy closed handoffs; skipped")
         return out
     finally:
         _preview_cache.clear()

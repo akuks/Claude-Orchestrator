@@ -201,3 +201,21 @@ def time_limit(limit: float):
     yield
     wall, cpu = time.monotonic() - w, time.process_time() - c
     assert wall < limit or cpu < limit, f"wall {wall:.2f}s and cpu {cpu:.2f}s both >= {limit}s"
+
+
+@pytest.fixture
+def fail_after_60s():
+    """Fail a test that runs over 60 s (e.g. a lock wait on Postgres) instead of freezing the run; SIGALRM, main
+    thread only. Use with ``pytestmark = pytest.mark.usefixtures("fail_after_60s")``."""
+    import signal
+
+    def boom(*_):
+        raise TimeoutError("test ran over 60 s (a lock wait?)")
+
+    old = signal.signal(signal.SIGALRM, boom)
+    signal.alarm(60)
+    try:
+        yield
+    finally:
+        signal.alarm(0)
+        signal.signal(signal.SIGALRM, old)

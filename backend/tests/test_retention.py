@@ -2,6 +2,7 @@
 tasks older than N days keep one ``summary`` event and their closed handoffs drop the previous version."""
 
 import asyncio
+import os
 import time
 import uuid
 from datetime import datetime, timedelta, timezone
@@ -13,6 +14,8 @@ from app import retention
 from app.database import SessionLocal
 from app.models import ProjectDecision, Task, TaskEvent, TaskHandoff
 from app.resume import handoff, logfmt
+
+pytestmark = pytest.mark.usefixtures("fail_after_60s")  # a lock wait fails the test instead of hanging CI
 
 
 def run(coro):
@@ -277,13 +280,20 @@ def test_switch_off_writes_nothing_from_loop_get_post_or_tidy(client):
     assert _counts() == before
 
 
-class _HookedSession:
-    """SessionLocal whose sessions call ``hook`` just before a DELETE of task events runs."""
+_POSTGRES = os.environ.get("CO_DATABASE_URL", "").startswith("postgresql")
 
-    def __init__(self, hook):
+
+class _HookedSession:
+    """SessionLocal whose sessions call ``hook`` (with a fresh session factory; the hook must COMMIT its own
+    work) just before a statement runs: ``when="delete"`` the DELETE of task events, ``when="lock"`` the task's
+    row-lock SELECT. On Postgres a hook at "delete" runs while the tidy holds the task's row lock: it may insert
+    rows that reference the task (no wait under FOR NO KEY UPDATE) but must never UPDATE the task row, which
+    would wait on its own caller forever."""
+
+    def __init__(self, hook, when="delete"):
         from app.database import SessionLocal as real
 
-        self._real, self._hook = real, hook
+        self._real, self._hook, self._when = real, hook, when
 
     def __call__(self):
         outer = self
@@ -298,7 +308,9 @@ class _HookedSession:
             async def execute(self, stmt, *a, **kw):
                 from sqlalchemy.sql.dml import Delete
 
-                if isinstance(stmt, Delete) and stmt.table.name == "task_events":
+                lock = getattr(stmt, "_for_update_arg", None) is not None
+                delete = isinstance(stmt, Delete) and stmt.table.name == "task_events"
+                if (outer._when == "delete" and delete) or (outer._when == "lock" and lock):
                     await outer._hook(outer._real)
                 return await self._s.execute(stmt, *a, **kw)
 
@@ -315,11 +327,8 @@ class _HookedSession:
         return CM()
 
 
-def test_a_retry_racing_the_tidy_keeps_its_events(client, monkeypatch):
-    """A person's Retry commits between the re-check and the delete: the queued task is left alone."""
+def _retry_hook(tid):
     from app.constants import Status
-
-    tid = mk(events=10)
 
     async def retry(real):
         async with real() as other:
@@ -327,12 +336,35 @@ def test_a_retry_racing_the_tidy_keeps_its_events(client, monkeypatch):
             t.status, t.completed_at, t.started_at = Status.QUEUED, None, None
             await other.commit()
 
-    run(retention.save_settings(enabled=True, days=60, by=None))
-    monkeypatch.setattr(retention, "SessionLocal", _HookedSession(retry))
-    out = run(retention.tidy(days=60, only=[tid]))
+    return retry
+
+
+def _assert_untouched_retry(tid, out):
+    from app.constants import Status
+
     assert out["tasks"] == 0
     assert task_of(tid).status == Status.QUEUED
     assert len(events_of(tid)) == 10 and "summary" not in {e.type for e in events_of(tid)}
+
+
+def test_a_retry_committed_after_the_pick_keeps_its_events(client, monkeypatch):
+    """A person's Retry commits after the pass chose the task and just before its row lock (runs on SQLite
+    and Postgres: the Retry commits before the lock is taken, so nothing waits)."""
+    tid = mk(events=10)
+    run(retention.save_settings(enabled=True, days=60, by=None))
+    monkeypatch.setattr(retention, "SessionLocal", _HookedSession(_retry_hook(tid), when="lock"))
+    _assert_untouched_retry(tid, run(retention.tidy(days=60, only=[tid])))
+
+
+@pytest.mark.skipif(_POSTGRES, reason="on Postgres the tidy holds the task's row lock here, so a Retry waits for "
+                    "its commit and this interleave cannot happen (the hook would wait on its own caller)")
+def test_a_retry_racing_the_delete_keeps_its_events(client, monkeypatch):
+    """SQLite: no row lock; a Retry committed between the re-check and the delete is caught by the delete's
+    own condition."""
+    tid = mk(events=10)
+    run(retention.save_settings(enabled=True, days=60, by=None))
+    monkeypatch.setattr(retention, "SessionLocal", _HookedSession(_retry_hook(tid), when="delete"))
+    _assert_untouched_retry(tid, run(retention.tidy(days=60, only=[tid])))
 
 
 def test_an_event_after_the_read_is_kept_after_the_summary(client, monkeypatch):
