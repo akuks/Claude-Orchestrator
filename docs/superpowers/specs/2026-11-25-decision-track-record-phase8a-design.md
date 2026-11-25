@@ -14,15 +14,20 @@ after agents were shown it, and flag decisions that keep being followed by troub
 
 ## Outcomes
 
-- Settled when the task finishes (a small job next to the existing after-run job, also for failed tasks) and again
-  when its workflow stage settles:
-  - `failed` — the task failed, or its workflow stage's gate finally failed;
-  - `fixed` — its stage needed a fix-it round (stage `fix_round` ≥ 1, or a `fix`-tagged task for the same run, stage
-    and attempt);
-  - `passed` — its stage's gate passed with no fix round;
-  - `completed` — a task outside a workflow that completed.
+- Settled when the task finishes (a small job next to the existing after-run job, also for failed tasks; ad-hoc
+  steps of a project thread count under the thread's project) and again when its workflow stage settles. A
+  workflow step's "gate" is the gate step that waits for it directly:
+  - `failed` — the task failed, or its gate finally failed on a real check;
+  - `fixed` — its gate needed a fix-it round (gate `fix_round` ≥ 1, or a `fix`-tagged task for the same run, gate
+    stage and attempt);
+  - `passed` — its gate passed with no fix round;
+  - `completed` — a task outside a workflow (or a workflow step with no gate after it) that completed.
   - `retried` — the task had automatic retries.
-- Cancelled tasks: outcome stays null (not counted).
+- A fix task (tagged `fix`) is judged by its gate's final result (design ruling, 2026-11-25): `passed` if the gate finally
+  passed (the fix worked), `failed` if it finally failed; never `fixed`.
+- No outcome (not counted): cancelled tasks; a gate not settled yet; a gate stopped by cancel or by its own
+  infrastructure (internal error, guard refusal, missing command or folder, fixer not available); tasks of an
+  older attempt of their step.
 
 ## Score (computed on read)
 

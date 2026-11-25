@@ -504,6 +504,7 @@ class DecisionShowing(Base):
     __table_args__ = (
         UniqueConstraint("task_id", "decision_number", name="uq_decision_showings_task_number"),
         Index("ix_decision_showings_project_number", "project_id", "decision_number"),
+        Index("ix_decision_showings_project_shown", "project_id", "shown_at"),
     )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)

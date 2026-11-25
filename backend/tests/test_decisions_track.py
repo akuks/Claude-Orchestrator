@@ -408,3 +408,217 @@ def test_backfill_twice_adds_no_duplicates(client, world):
 
     assert _run(count()) == 2
     assert client.post(f"/projects/{uuid.uuid4().hex}/decisions/track/backfill").status_code == 404
+
+
+# ---- fix round 1 ------------------------------------------------------------------------------------------
+
+
+async def _fix_task(pid, rid, attempt=0):
+    tid = await _task(pid, status=Status.COMPLETED, workflow_run_id=rid, stage_index=1, stage_attempt=attempt,
+                      tags=["workflow", "fix"])
+    await track.record_shown(tid, [5])
+    return tid
+
+
+@pytest.mark.parametrize("gate_state,want", [
+    ({"status": "passed", "fix_round": 1}, "passed"),
+    ({"status": "failed", "fix_round": 2, "reason": "exit 1"}, "failed"),
+    ({"status": "fixing", "fix_round": 1}, None),
+])
+def test_fix_task_judged_by_its_gate_final_result(client, gate_state, want):
+    """I2 (design ruling, 2026-11-25): a fix task is never `fixed`: passed when its fix worked, failed when the gate failed."""
+
+    async def go():
+        pid = await _project()
+        rid, tids = await _wf(pid, gate_state)
+        fx = await _fix_task(pid, rid)
+        await track.settle_task(fx)
+        return await _outcome(fx), await _outcome(tids[0])
+
+    fix_out, dev_out = _run(go())
+    assert fix_out == [(5, want, False)]
+    assert dev_out == [(1, {"passed": "fixed", "failed": "failed"}.get(want, "fixed"), False)]
+
+
+@pytest.mark.parametrize("reason", [
+    "the gate could not run (internal error)", "blocked by the guard: no network", "the fixer agent is not available",
+    "the gate has no command to run", "the gate's project is missing or has no directory", "cancelled",
+])
+def test_gate_infrastructure_failure_is_not_counted(client, reason):
+    async def go():
+        pid = await _project()
+        rid, tids = await _wf(pid, {"status": "failed", "reason": reason})
+        await track.settle_run(rid)
+        return await _outcome(tids[0])
+
+    assert _run(go()) == [(1, None, False)]
+
+
+def test_infra_reasons_match_the_runner():
+    from app import workflow_runner as wr
+
+    exact, _ = track._infra_reasons()
+    assert {wr.GATE_ERROR_WORDS, wr.FIXER_GONE_WORDS} <= exact
+    assert track._real_failure({"status": "failed", "reason": wr.FIX_UNFINISHED_WORDS})
+
+
+def test_older_step_attempt_takes_no_outcome(client):
+    async def go():
+        pid = await _project()
+        rid, tids = await _wf(pid, {"status": "passed"})
+        async with SessionLocal() as s:
+            run = await s.get(WorkflowRun, rid)
+            run.stage_state = {"0": {"status": "done", "attempt": 1}, "1": {"status": "passed"}}
+            await s.commit()
+        new = await _task(pid, status=Status.COMPLETED, workflow_run_id=rid, stage_index=0, stage_attempt=1)
+        await track.record_shown(new, [1])
+        await track.settle_run(rid)
+        return await _outcome(tids[0]), await _outcome(new)
+
+    assert _run(go()) == ([(1, None, False)], [(1, "passed", False)])
+
+
+async def _thread_step(pid, status="running"):
+    root = await _task(pid, status=Status.COMPLETED)
+    tid = uuid.uuid4().hex
+    async with SessionLocal() as s:
+        s.add(Task(id=tid, title="t", prompt="p", root_id=root, parent_task_id=root, status=status))
+        await s.commit()
+    return tid
+
+
+def test_ad_hoc_thread_step_counts_under_thread_project(client):
+    """I1: a step with no project of its own, in a project thread, records and settles under that project."""
+    from app.worker import WorkerManager
+
+    async def go():
+        pid = await _project()
+        tid = await _thread_step(pid)
+        await track.record_shown(tid, [6])
+        await WorkerManager()._finish(tid, Status.COMPLETED)
+        await track.drain()
+        rows = await _rows(tid)
+        return pid, [(r.project_id, r.decision_number, r.outcome) for r in rows]
+
+    pid, rows = _run(go())
+    assert rows == [(pid, 6, "completed")]
+
+
+def test_backfill_counts_thread_steps(client, world):
+    w = world
+
+    async def seed():
+        tid = await _thread_step(w["pid"], status=Status.FAILED)
+        async with SessionLocal() as s:
+            s.add(TaskEvent(task_id=tid, seq=1, type="decision_note", payload={"ids": [1], "path": "x"}))
+            await s.commit()
+        return tid
+
+    tid = _run(seed())
+    assert client.post(f"{w['base']}/track/backfill").json() == {"added": 1}
+    assert _run(_outcome(tid)) == [(1, "failed", False)]
+
+
+def test_backfill_batches_thousands_of_events(client, world):
+    """I3: read by id in batches, one insert per batch; earliest showing kept; twice adds nothing."""
+    from sqlalchemy import insert
+
+    w = world
+    n_tasks, per_task = 30, 100  # 3,000 events, 3 batches
+
+    async def seed():
+        tids = [await _task(w["pid"], status=Status.COMPLETED) for _ in range(n_tasks)]
+        base = datetime.now(timezone.utc) - timedelta(days=2)
+        rows = [{"task_id": t, "seq": k + 1, "type": "decision_note",
+                 "payload": {"ids": [1 + (k % 4)], "path": "x"}, "created_at": base + timedelta(seconds=k)}
+                for t in tids for k in range(per_task)]
+        async with SessionLocal() as s:
+            await s.execute(insert(TaskEvent), rows)
+            await s.commit()
+        return tids, base
+
+    tids, base = _run(seed())
+    assert track.BATCH == 1000
+    url = f"{w['base']}/track/backfill"
+    assert client.post(url).json() == {"added": n_tasks * 4}
+    assert client.post(url).json() == {"added": 0}
+    rows = _run(_rows(tids[0]))
+    assert [(r.decision_number, r.outcome) for r in rows] == [(1, "completed"), (2, "completed"),
+                                                              (3, "completed"), (4, "completed")]
+    got = rows[0].shown_at if rows[0].shown_at.tzinfo else rows[0].shown_at.replace(tzinfo=timezone.utc)
+    assert abs((got - base).total_seconds()) < 1
+
+
+def test_settles_of_one_run_are_serialized_and_coalesced(client, monkeypatch):
+    """M1/M2: one settle of a run in flight, at most one waiting; the rest are dropped; nothing overlaps."""
+    calls, live, peak = [], [0], [0]
+    real = track._settle_run_now
+
+    mine = []
+
+    async def counting(rid):
+        if rid not in mine:  # other runs (the app's own runner) settle as usual
+            return await real(rid)
+        live[0] += 1
+        peak[0] = max(peak[0], live[0])
+        calls.append(rid)
+        await asyncio.sleep(0.05)
+        await real(rid)
+        live[0] -= 1
+
+    monkeypatch.setattr(track, "_settle_run_now", counting)
+
+    async def go():
+        pid = await _project()
+        rid, tids = await _wf(pid, {"status": "fixing", "fix_round": 1})
+        mine.append(rid)
+        await asyncio.gather(*(track.settle_run(rid) for _ in range(10)))
+        out = await _outcome(tids[0])
+        return out, rid
+
+    out, rid = _run(go())
+    assert out == [(1, "fixed", False)]
+    assert len(calls) == 2 and peak[0] == 1
+    assert rid not in track._RUN_QUEUED and rid not in track._RUN_LOCKS
+
+
+def test_repeat_notes_skip_the_database(client, monkeypatch):
+    """M4: numbers this run already recorded are not written again; an emit that raises still records."""
+    from app import worker as worker_mod
+    from app.usage.tracker import UsageTracker
+
+    seen = []
+    real = track.record_shown
+
+    async def spy(tid, nums, shown_at=None):
+        seen.append(list(nums))
+        await real(tid, nums, shown_at)
+
+    monkeypatch.setattr(track, "record_shown", spy)
+
+    async def go():
+        pid = await _project()
+        return await _task(pid)
+
+    tid = _run(go())
+    w = worker_mod.WorkerManager()
+    w._usage[tid] = UsageTracker()
+    w._usage_spool[tid] = w._new_usage_spool()
+    boom = [True]
+
+    async def emit(etype, payload):
+        if boom[0]:
+            boom[0] = False
+            raise RuntimeError("emit failed")
+
+    d = guard_runtime.make_task_dir(tid)
+    spool = d / guard_runtime.SPOOL_NAME
+    line = json.dumps({"event": "PreToolUse", "nudge": "decisions", "ids": [8], "path": "a.py"}) + "\n"
+    spool.write_text(line)
+    _run(w._ingest_usage_spool(tid, emit))  # the emit raises: still recorded
+    assert _run(_rows(tid)) and seen == [[8]]
+    with open(spool, "a", encoding="utf-8") as f:
+        f.write(line)
+    _run(w._ingest_usage_spool(tid, emit))  # the note left over and a repeat: no new write
+    assert seen == [[8]]
+    guard_runtime.remove_task_dir(tid)

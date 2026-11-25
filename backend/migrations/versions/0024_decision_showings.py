@@ -33,10 +33,12 @@ def upgrade() -> None:
         sa.UniqueConstraint("task_id", "decision_number", name="uq_decision_showings_task_number"),
     )
     op.create_index("ix_decision_showings_project_number", "decision_showings", ["project_id", "decision_number"])
+    op.create_index("ix_decision_showings_project_shown", "decision_showings", ["project_id", "shown_at"])
 
 
 def downgrade() -> None:
     if "decision_showings" not in _tables():
         return
+    op.drop_index("ix_decision_showings_project_shown", table_name="decision_showings")
     op.drop_index("ix_decision_showings_project_number", table_name="decision_showings")
     op.drop_table("decision_showings")
