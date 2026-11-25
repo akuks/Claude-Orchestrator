@@ -379,6 +379,11 @@ _GATE_STATE = {
 }
 
 
+def _in_flight(status) -> bool:
+    """A step started and not finished (successfully or not)."""
+    return status not in (None, "done", "passed", "approved", "failed", "rejected")
+
+
 def _gate_stage_state(status, index: int, current: int) -> str:
     """Live state of a gate/approval stage from its stage_state status."""
     if status in _GATE_STATE:
@@ -447,12 +452,13 @@ async def live_runs(request: Request):
             stages = []
             for i, st in enumerate(run.stages or []):
                 sts = by_stage.get(i, [])
+                status = ((run.stage_state or {}).get(str(i)) or {}).get("status")
+                # Several steps can be in flight at once (7b): each is "current".
+                cur = i if _in_flight(status) else run.current_stage
                 if spec.stage_kind(st) != "agent":
-                    state = _gate_stage_state(
-                        ((run.stage_state or {}).get(str(i)) or {}).get("status"), i, run.current_stage
-                    )
+                    state = _gate_stage_state(status, i, cur)
                 else:
-                    state = _stage_state(sts, i, run.current_stage)
+                    state = _stage_state(sts, i, cur)
                 stages.append(
                     LiveStageOut(
                         name=(st.get("name") if isinstance(st, dict) else None) or f"Stage {i + 1}",
@@ -631,6 +637,11 @@ async def get_run(run_id: str, request: Request):
         live = await _live_with_progress(runner, run.id)
         if live and live.get("stage_index") in hidden:
             live = None
+        # Every gate command running now (several when branches run side by side, 7b); the
+        # lowest one carries the progress line as before.
+        lives = {g["stage_index"]: g for g in (getattr(runner, "live_gates", None) or (lambda _r: []))(run.id)}
+        if live:
+            lives[live["stage_index"]] = live
         stage_state = {k: dict(v) if isinstance(v, dict) else {} for k, v in (run.stage_state or {}).items()}
         held = [
             k for k, v in stage_state.items()
@@ -657,17 +668,20 @@ async def get_run(run_id: str, request: Request):
             if kind == "agent":
                 if str(i) in stage_state:
                     stage_state[str(i)].pop("expects", None)  # internal: task ids -> output names
-                    word = _status_word(kind, stage_state[str(i)], False, run_active and i == run.current_stage, False)
+                    word = _status_word(kind, stage_state[str(i)], False, run_active and (
+                        i == run.current_stage or _in_flight(stage_state[str(i)].get("status"))), False)
                     stage_state[str(i)].pop("_lock_wait", None)
                     if word:
                         stage_state[str(i)]["status_word"] = word
                 continue
             entry = stage_state.setdefault(str(i), {})
             lv = None
+            if kind == "gate" and i not in hidden:
+                lv = lives.get(i)
             if kind == "gate":
-                lv = live if live and live.get("stage_index") == i else None
                 entry["status_text"] = gate_status_text(st, entry, lv)
-            word = _status_word(kind, entry, bool(lv), run_active and i == run.current_stage,
+            word = _status_word(kind, entry, bool(lv), run_active and (
+                                    i == run.current_stage or _in_flight(entry.get("status"))),
                                 kind == "gate" and task_alive(i))
             entry.pop("_lock_wait", None)
             if word:
