@@ -22,7 +22,7 @@ export function visiblePages(isAdmin) {
 }
 
 export function buildCommands({ projects = [], tasks = [], runs = [], workflows = [], isAdmin = false, actions = {} } = {}) {
-  const { navigate = () => {}, newTask, runWorkflow, toggleNight, openCredentials, openPreferences } = actions
+  const { navigate = () => {}, newTask, runWorkflow, toggleNight, openCredentials, openPreferences, openConnectEditor } = actions
   const cmds = []
 
   for (const p of visiblePages(isAdmin)) {
@@ -79,6 +79,8 @@ export function buildCommands({ projects = [], tasks = [], runs = [], workflows 
   if (newTask) cmds.push({ id: 'action:new-task', label: 'New task…', group: 'Actions', run: newTask })
   if (openPreferences)
     cmds.push({ id: 'action:preferences', label: 'My preferences', group: 'Actions', keywords: 'how i like to work notes', run: openPreferences })
+  if (openConnectEditor)
+    cmds.push({ id: 'action:connect-editor', label: 'Connect my editor', group: 'Actions', keywords: 'claude code cursor mcp key decisions', run: openConnectEditor })
   if (openCredentials)
     cmds.push({ id: 'action:credentials', label: 'My credentials', group: 'Actions', keywords: 'claude key token', run: openCredentials })
   if (toggleNight)

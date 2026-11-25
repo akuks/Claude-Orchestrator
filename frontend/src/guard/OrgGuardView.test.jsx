@@ -9,6 +9,8 @@ vi.mock('../api', () => ({
     guardOrgSettings: vi.fn(),
     saveGuardOrgSettings: vi.fn(),
     guardHealth: vi.fn(async () => ({ hook_errors: { count: 0, window_hours: 48 } })),
+    adminEditorKeys: vi.fn(async () => []),
+    adminRevokeEditorKey: vi.fn(async () => null),
   },
 }))
 
@@ -89,7 +91,7 @@ describe('OrgGuardView (Settings → Agent guard)', () => {
   it('saves the ground rules with all nine keys and shows the 400', async () => {
     api.guardOrgSettings.mockImplementation(async () => ({
       disabled_rules: [], dev_db_patterns: [],
-      ground_rules: { grounding: true, short_answers: true, usage_care: true, notes: true, questions: true, decisions: true, local_first: true, personal_prefs: true, extra: '' },
+      ground_rules: { grounding: true, short_answers: true, usage_care: true, notes: true, questions: true, decisions: true, local_first: true, personal_prefs: true, editor_connections: false, extra: '' },
     }))
     api.saveGuardOrgSettings.mockImplementation(async (b) => b)
     const c = await mount({ isAdmin: true })
@@ -97,7 +99,7 @@ describe('OrgGuardView (Settings → Agent guard)', () => {
     await click(q(c, 'ground-rules-save'))
     await flush()
     expect(api.saveGuardOrgSettings).toHaveBeenCalledWith({
-      ground_rules: { grounding: true, short_answers: false, usage_care: true, notes: true, questions: true, decisions: true, local_first: true, personal_prefs: true, extra: '' },
+      ground_rules: { grounding: true, short_answers: false, usage_care: true, notes: true, questions: true, decisions: true, local_first: true, personal_prefs: true, editor_connections: false, extra: '' },
     })
     api.saveGuardOrgSettings.mockImplementation(async () => {
       throw Object.assign(new Error('extra is at most 2000 characters'), { status: 400 })
@@ -111,7 +113,7 @@ describe('OrgGuardView (Settings → Agent guard)', () => {
   it('keeps decisions off when saving another switch', async () => {
     api.guardOrgSettings.mockImplementation(async () => ({
       disabled_rules: [], dev_db_patterns: [],
-      ground_rules: { grounding: true, short_answers: true, usage_care: true, notes: true, questions: true, decisions: false, local_first: true, personal_prefs: true, extra: '' },
+      ground_rules: { grounding: true, short_answers: true, usage_care: true, notes: true, questions: true, decisions: false, local_first: true, personal_prefs: true, editor_connections: false, extra: '' },
     }))
     api.saveGuardOrgSettings.mockImplementation(async (b) => b)
     const c = await mount({ isAdmin: true })
@@ -119,14 +121,14 @@ describe('OrgGuardView (Settings → Agent guard)', () => {
     await click(q(c, 'ground-rules-save'))
     await flush()
     expect(api.saveGuardOrgSettings).toHaveBeenCalledWith({
-      ground_rules: { grounding: true, short_answers: true, usage_care: true, notes: false, questions: true, decisions: false, local_first: true, personal_prefs: true, extra: '' },
+      ground_rules: { grounding: true, short_answers: true, usage_care: true, notes: false, questions: true, decisions: false, local_first: true, personal_prefs: true, editor_connections: false, extra: '' },
     })
   })
 
   it('keeps the personal preferences switch off when saving another switch', async () => {
     api.guardOrgSettings.mockImplementation(async () => ({
       disabled_rules: [], dev_db_patterns: [],
-      ground_rules: { grounding: true, short_answers: true, usage_care: true, notes: true, questions: true, decisions: true, local_first: true, personal_prefs: false, extra: '' },
+      ground_rules: { grounding: true, short_answers: true, usage_care: true, notes: true, questions: true, decisions: true, local_first: true, personal_prefs: false, editor_connections: false, extra: '' },
     }))
     api.saveGuardOrgSettings.mockImplementation(async (b) => b)
     const c = await mount({ isAdmin: true })
@@ -140,8 +142,40 @@ describe('OrgGuardView (Settings → Agent guard)', () => {
     expect(api.saveGuardOrgSettings.mock.calls.at(-1)[0].ground_rules.personal_prefs).toBe(true)
   })
 
+  it('sends editor_connections explicitly, off by default, and shows the help', async () => {
+    api.guardOrgSettings.mockImplementation(async () => ({
+      disabled_rules: [], dev_db_patterns: [],
+      ground_rules: { grounding: true, extra: '' },
+    }))
+    api.saveGuardOrgSettings.mockImplementation(async (b) => b)
+    const c = await mount({ isAdmin: true })
+    expect(c.textContent).toContain('Let people connect their own Claude Code or Cursor to read decisions of projects they can see.')
+    await click(q(c, 'ground-notes'))
+    await click(q(c, 'ground-rules-save'))
+    await flush()
+    expect(api.saveGuardOrgSettings.mock.calls.at(-1)[0].ground_rules.editor_connections).toBe(false)
+    await click(q(c, 'ground-editor_connections'))
+    await click(q(c, 'ground-rules-save'))
+    await flush()
+    expect(api.saveGuardOrgSettings.mock.calls.at(-1)[0].ground_rules.editor_connections).toBe(true)
+  })
+
+  it('lists editor keys for admins and turns one off', async () => {
+    api.adminEditorKeys.mockImplementation(async () => [
+      { id: 7, user_id: 1, owner_name: 'Asha', name: 'Laptop', prefix: 'coe_ab12', created_at: null, last_used_at: null, expires_at: '2027-01-01T00:00:00', revoked_at: null, use_count: 0, projects: null },
+    ])
+    const c = await mount({ isAdmin: true })
+    expect(q(c, 'editor-key-7').textContent).toContain('Asha')
+    expect(q(c, 'editor-key-7').textContent).toContain('coe_ab12')
+    await click(q(c, 'editor-key-off-7'))
+    const ok = [...document.querySelectorAll('.ant-popconfirm .ant-btn-primary')].pop()
+    await click(ok)
+    await flush()
+    expect(api.adminRevokeEditorKey).toHaveBeenCalledWith(7)
+  })
+
   it('a parent reload with the same ground rules keeps unsaved edits', async () => {
-    const rules = { grounding: true, short_answers: true, usage_care: true, notes: true, questions: true, decisions: true, local_first: true, personal_prefs: true, extra: '' }
+    const rules = { grounding: true, short_answers: true, usage_care: true, notes: true, questions: true, decisions: true, local_first: true, personal_prefs: true, editor_connections: false, extra: '' }
     view = await render(<GroundRulesCard canEdit initial={{ ...rules }} />)
     const c = view.container
     await click(q(c, 'ground-notes'))

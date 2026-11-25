@@ -75,6 +75,11 @@ export const api = {
   resetUserPassword: (id, password) => req('POST', `/users/${id}/reset-password`, { password }),
   userDirectory: () => req('GET', '/users/directory'),
 
+  myEditorKeys: () => req('GET', '/me/editor-keys'),
+  createEditorKey: (payload) => req('POST', '/me/editor-keys', payload),
+  revokeEditorKey: (id) => req('DELETE', `/me/editor-keys/${id}`),
+  adminEditorKeys: () => req('GET', '/admin/editor-keys'),
+  adminRevokeEditorKey: (id) => req('DELETE', `/admin/editor-keys/${id}`),
   getMyPreferences: () => req('GET', '/me/preferences'),
   saveMyPreferences: (payload) => req('PUT', '/me/preferences', payload),
   // ---- Personal credentials (write-only: responses carry presence/kind only) ----
