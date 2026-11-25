@@ -1347,8 +1347,9 @@ Phase 7a of the forge port. Four things on a workflow run, all on the run's own 
   ("Waiting for checks from another run in this project to finish.") and tries again; it never
   fails because of it. Agent steps are not locked.
 - **Run again from a step.** On a finished (completed or failed) run, "Run again from here" in a
-  started step restarts from that step (`POST /workflows/runs/{id}/stages/{i}/rerun`). Earlier
-  steps keep their results; later steps start over; old tasks stay in the history. The
+  started step restarts from that step (`POST /workflows/runs/{id}/stages/{i}/rerun`). That step and the
+  steps that wait for it start over; steps that don't wait for it keep their results (on a failed
+  run, other unfinished branches start over too); old tasks stay in the history. The
   spending limit still applies. The failed-step Retry is unchanged.
 - **Time and spend per step.** Each run box shows a small line such as "4 min · $0.12"; tokens
   are under the step's Details. A check step's card leads with "Waiting its turn" (another run's

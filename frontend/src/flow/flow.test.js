@@ -303,7 +303,8 @@ describe('steps side by side: editing keeps the waits right', () => {
   it('deleting a step removes it from every wait and re-numbers', () => {
     const d = removeStep(DIAMOND, 1)
     expect(d.map((s) => s.name)).toEqual(['A', 'C', 'D'])
-    expect(after(d)).toEqual([[], [0], [1]])
+    // D waited for B and C: it now also waits for what B waited for (A)
+    expect(after(d)).toEqual([[], [0], [0, 1]])
     // never points later or nowhere
     d.forEach((s, i) => (s.after || []).forEach((j) => expect(j).toBeLessThan(i)))
   })
@@ -325,5 +326,20 @@ describe('steps side by side: editing keeps the waits right', () => {
     expect(after(insertStep(DIAMOND, 4, 'gate'))).toEqual([[], [0], [0], [1, 2], [3]])
     const mid = insertStep(DIAMOND, 3, 'gate')
     expect(after(mid)).toEqual([[], [0], [0], [1, 2], [3]])
+  })
+})
+
+describe('steps side by side: guards', () => {
+  const E = (name, after) => ({ name, kind: 'approval', message: 'm', after })
+  it('deleting a join never lets a step start earlier', () => {
+    // A -> B; C waits for B and for Z (which starts at once); delete B
+    const list = [E('A', []), E('Z', []), E('B', [0]), E('C', [1, 2])]
+    const d = removeStep(list, 2)
+    expect(d.map((s) => [s.name, s.after])).toEqual([['A', []], ['Z', []], ['C', [0, 1]]])
+  })
+  it('refuses to insert between steps that run side by side', () => {
+    const diamond = [E('A', []), E('B', [0]), E('C', [0]), E('D', [1, 2])]
+    expect(insertStep(diamond, 2, 'gate')).toEqual(diamond)
+    expect(insertStep(diamond, 3, 'gate')).toHaveLength(5)
   })
 })

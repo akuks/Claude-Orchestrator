@@ -331,6 +331,10 @@ export function insertStep(stages, index, kind) {
     return list
   }
   const old = explicit(list)
+  // Between two steps that run side by side there is no "in sequence": leave the list
+  // as it is. (The canvas only offers "+" on a single line or at the end, so the UI
+  // never asks for this.)
+  if (at > 0 && at < old.length && !old[at].after.includes(at - 1)) return list
   const next = old.map((st) => ({ ...st, after: st.after.map((j) => (j >= at ? j + 1 : j)) }))
   const waits = at < old.length ? old[at].after : stepSinks(old)
   next.splice(at, 0, { ...newStep(kind), after: [...waits] })
@@ -370,8 +374,7 @@ export function moveStep(stages, index, dir) {
   return next
 }
 
-// Takes a step out. Steps that waited for it wait for what it waited for when
-// that is all they had; otherwise just lose it. A plain line stays plain.
+// Takes a step out. Steps that waited for it wait for what it waited for instead. A plain line stays plain.
 export function removeStep(stages, index) {
   const list = Array.isArray(stages) ? stages : []
   if (!usesAfter(list)) return list.filter((_, i) => i !== index)
@@ -381,10 +384,8 @@ export function removeStep(stages, index) {
     .filter((_, i) => i !== index)
     .map((st) => {
       let a = st.after
-      if (a.includes(index)) {
-        a = a.filter((j) => j !== index)
-        if (!a.length) a = [...gone]
-      }
+      // It inherits what the deleted step waited for, so it never starts earlier than before.
+      if (a.includes(index)) a = [...a.filter((j) => j !== index), ...gone]
       return { ...st, after: uniqSorted(a.map((j) => (j > index ? j - 1 : j))) }
     })
 }
