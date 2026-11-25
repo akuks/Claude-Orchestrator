@@ -135,3 +135,11 @@ describe('phase 5c payload', () => {
     expect(earlierOutputs(stages, 3).map((o) => o.text)).toEqual(['{{stage1.plan_path}}', '{{stage1.summary}}', '{{stage3.branch}}'])
   })
 })
+
+describe('approval ahead round trip', () => {
+  it('keeps ahead only when on', () => {
+    expect(stagePayload(formStage({ name: 'Plan', kind: 'approval', message: 'm', ahead: true }), [])).toMatchObject({ ahead: true })
+    expect(stagePayload(formStage({ name: 'Rel', kind: 'approval', message: 'm' }), [])).not.toHaveProperty('ahead')
+    expect(stagePayload(formStage({ name: 'Rel', kind: 'approval', message: 'm', ahead: false }), [])).not.toHaveProperty('ahead')
+  })
+})

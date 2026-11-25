@@ -157,4 +157,11 @@ describe('HandoffCard', () => {
     expect(q(c, 'handoff-files-count').textContent).toContain('8 files touched. Newest 5:')
     expect(q(c, 'handoff-files-rest').querySelector('summary').textContent).toBe('The full list')
   })
+
+  it('a 404 on the first load is the normal empty state, with no error text', async () => {
+    api.getHandoff.mockRejectedValue(Object.assign(new Error('No handoff for this thread yet'), { status: 404 }))
+    const c = await mount()
+    expect(q(c, 'handoff-empty')).not.toBeNull()
+    expect(q(c, 'handoff-error')).toBeNull()
+  })
 })

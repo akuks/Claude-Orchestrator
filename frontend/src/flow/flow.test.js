@@ -185,6 +185,8 @@ describe('usageLine / plainDuration', () => {
     expect(plainDuration(3600)).toBe('1 h')
     expect(plainDuration(7500)).toBe('2 h 5 min')
     expect(plainDuration(null)).toBeNull()
+    expect(plainDuration(26 * 3600)).toBe('1 d 2 h')
+    expect(plainDuration(48 * 3600)).toBe('2 d')
   })
   it('joins time and cost, hides a zero cost, and nothing for a step not started', () => {
     expect(usageLine({ seconds: 250, cost_usd: 0.123 })).toBe('4 min · $0.12')

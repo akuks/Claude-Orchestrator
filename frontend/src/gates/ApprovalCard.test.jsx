@@ -58,7 +58,7 @@ describe('ApprovalCard: approve ahead', () => {
     view = null
   })
   const mount = async (props = {}) => {
-    view = await render(<ApprovalCard runId="r1" index={2} stage={{ name: 'Approve plan' }} state={{}} future canDecide {...props} />)
+    view = await render(<ApprovalCard runId="r1" index={2} stage={{ name: 'Approve plan', ahead: true }} state={{}} future canDecide {...props} />)
     await flush()
     return view.container
   }
@@ -84,8 +84,8 @@ describe('ApprovalCard: approve ahead', () => {
     expect(q(c, 'approval-ahead-btn')).toBeNull()
   })
 
-  it('is hidden on a step that never allows it, with a grey note instead', async () => {
-    const c = await mount({ stage: { name: 'Approve release', ahead: false } })
+  it.each([{ name: 'Approve release' }, { name: 'Approve release', ahead: false }])('is hidden on a step not marked as allowing it, with a grey note instead', async (stage) => {
+    const c = await mount({ stage })
     expect(q(c, 'approval-ahead-btn')).toBeNull()
     expect(q(c, 'approval-needs-you').textContent).toBe('Needs you when the run gets here')
   })
@@ -130,5 +130,11 @@ describe('ApprovalCard: approve ahead', () => {
     await press([...pops[pops.length - 1].querySelectorAll('button')].find((b) => b.textContent.includes('Approve ahead')))
     expect(err).toHaveBeenLastCalledWith("That didn't work. Try again.")
     err.mockRestore()
+  })
+
+  it('keeps the note and Withdraw while the step is held', async () => {
+    const c = await mount({ future: false, state: { status: 'held', ahead: { by_name: 'Asha' } } })
+    expect(q(c, 'approval-ahead').textContent).toContain('Approved ahead by Asha')
+    expect(q(c, 'approval-withdraw')).not.toBeNull()
   })
 })

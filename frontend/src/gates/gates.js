@@ -144,7 +144,7 @@ export function stagePayload(st, agents) {
       ...(fixPayload(st.fix, st.project, agents) ? { fix: fixPayload(st.fix, st.project, agents) } : {}),
     }
   }
-  return { ...base, message: st.message || '', ...(st.project ? { project: st.project } : {}) }
+  return { ...base, message: st.message || '', ...(st.project ? { project: st.project } : {}), ...(st.ahead === true ? { ahead: true } : {}) }
 }
 
 // API stage -> form values (agent stages get an explicit kind for the select).

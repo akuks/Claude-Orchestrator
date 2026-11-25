@@ -47,6 +47,7 @@ export default function ApprovalCard({ runId, index, stage, state, canDecide = t
 
   const ahead = st.ahead && typeof st.ahead === 'object' ? st.ahead : null
   const waitsAhead = future && !st.status && !st.decided_by // not reached, not yet applied
+  const showAhead = !!ahead && (waitsAhead || st.status === 'held')
   const stepName = stage?.name || 'this step'
 
   return (
@@ -58,7 +59,7 @@ export default function ApprovalCard({ runId, index, stage, state, canDecide = t
         <p className="co-approval-msg" data-testid="approval-ahead-note">The run will go straight past this step.</p>
       )}
       {stage?.message && <p className="co-approval-msg" data-testid="approval-message">{stage.message}</p>}
-      {waitsAhead && ahead && (
+      {showAhead && (
         <div className="co-approval-ahead" data-testid="approval-ahead">
           <Tag color="success">Approved ahead by {ahead.by_name}</Tag>
           {canDecide && (
@@ -68,12 +69,12 @@ export default function ApprovalCard({ runId, index, stage, state, canDecide = t
           )}
         </div>
       )}
-      {waitsAhead && !ahead && stage?.ahead === false && (
+      {waitsAhead && !ahead && stage?.ahead !== true && (
         <div className="co-approval-muted" data-testid="approval-needs-you">
           Needs you when the run gets here
         </div>
       )}
-      {waitsAhead && !ahead && stage?.ahead !== false && canDecide && (
+      {waitsAhead && !ahead && stage?.ahead === true && canDecide && (
         <div className="co-approval-actions">
           <Popconfirm
             title={`Approve ${stepName} now? The run will go straight past it.`}

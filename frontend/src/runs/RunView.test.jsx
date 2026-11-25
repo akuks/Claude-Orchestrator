@@ -572,7 +572,7 @@ describe('RunView: run control (approve ahead, run again, time and spend)', () =
     await act(async () => el.dispatchEvent(new MouseEvent('click', { bubbles: true })))
     await flush()
   }
-  const STAGES = [{ name: 'Plan', items: [{ agent: 'Planner', prompt: 'p' }] }, { name: 'Sign-off', kind: 'approval', message: 'ok?' }, { name: 'Ship', kind: 'approval', ahead: false }]
+  const STAGES = [{ name: 'Plan', items: [{ agent: 'Planner', prompt: 'p' }] }, { name: 'Sign-off', kind: 'approval', message: 'ok?', ahead: true }, { name: 'Ship', kind: 'approval' }]
   const base = (over = {}) => ({
     run: run({ status: 'running', current_stage: 0, stages: STAGES, ...(over.run || {}) }),
     tasks: [t('a', 0, 'running', { title: '[Feature flow] Planner: plan' })],
@@ -684,5 +684,15 @@ describe('RunView: run control (approve ahead, run again, time and spend)', () =
     expect(c.querySelector('[data-testid="approval-lead"]').textContent).toBe('Approved ahead')
     expect(c.querySelector('[data-testid="approval-ahead-note"]').textContent).toBe('The run will go straight past this step.')
     expect(c.querySelector('[data-testid="run-stage-state"]')).toBeNull() // the card heading already says it
+  })
+
+  it('a step status word goes on the main box only, not the fixer or a parallel agent', async () => {
+    api.getWorkflowRun.mockImplementation(async () => ({
+      run: run({ current_stage: 0, stages: [{ name: 'Two', items: [{ agent: 'A', prompt: 'p' }, { agent: 'B', prompt: 'p' }] }] }),
+      tasks: [],
+      stage_state: { 0: { status_word: 'Failed' } },
+    }))
+    const c = await mount()
+    for (const b of c.querySelectorAll('[data-testid="flow-box"]')) expect(b.getAttribute('aria-label')).not.toContain('Failed')
   })
 })

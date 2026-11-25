@@ -70,8 +70,9 @@ export function gateLead(state, rows = [], stage = null) {
     if (last && TIMED_OUT.has(last.outcome)) return { tone: 'failed', text: 'Failed — the check did not finish in time' }
     return { tone: 'failed', text: 'Failed — the check did not pass' }
   }
-  if (status === 'running') return { tone: 'running', text: 'Running the check…' }
-  if (status === 'held') return { tone: 'waiting', text: 'On hold — waiting until it is ready to run' }
+  const word = state?.status_word
+  if (status === 'running') return { tone: 'running', text: word || 'Running the check…' }
+  if (status === 'held') return { tone: 'waiting', text: word || 'On hold — waiting until it is ready to run' }
   if (status === 'needs_approval') return { tone: 'waiting', text: 'Needs your OK before it runs' }
   if (status === 'waiting') return { tone: 'waiting', text: 'Not started yet' }
   const s = status.replace(/_/g, ' ')

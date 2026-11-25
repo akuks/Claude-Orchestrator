@@ -52,7 +52,11 @@ export default function HandoffCard({ taskId, onHandoff, canManage = false, stat
     api
       .getHandoff(taskId)
       .then((h) => live && apply(h))
-      .catch((e) => live && (setError(plainError(e)), apply(null)))
+      .catch((e) => {
+        if (!live) return
+        if (e?.status !== 404) setError(plainError(e)) // 404: nothing saved yet, the normal state
+        apply(null)
+      })
     return () => {
       live = false
     }

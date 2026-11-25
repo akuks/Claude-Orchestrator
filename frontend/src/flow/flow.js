@@ -295,6 +295,11 @@ export function plainDuration(seconds) {
   if (s < 60 || m < 1) return 'under a minute'
   if (m < 60) return `${m} min`
   const h = Math.floor(m / 60)
+  if (h >= 24) {
+    const d = Math.floor(h / 24)
+    const rh = h % 24
+    return rh ? `${d} d ${rh} h` : `${d} d`
+  }
   const r = m % 60
   return r ? `${h} h ${r} min` : `${h} h`
 }

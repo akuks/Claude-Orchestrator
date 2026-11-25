@@ -304,6 +304,15 @@ function ApprovalFields({ name, projects }) {
       <Form.Item name={[name, 'message']} label="What should they check?" rules={[{ max: 2000 }]} style={{ marginBottom: 14 }}>
         <Input.TextArea autoSize={{ minRows: 2, maxRows: 6 }} maxLength={2000} placeholder="e.g. Read the summary and check that the new page looks right." />
       </Form.Item>
+      <Form.Item
+        name={[name, 'ahead']}
+        valuePropName="checked"
+        label="Can be approved ahead"
+        extra="Lets someone approve this step before the run reaches it. Leave off for release approvals."
+        style={{ marginBottom: 14 }}
+      >
+        <Switch data-testid="approval-ahead-switch" />
+      </Form.Item>
       <MoreOptions name={name} kind="approval">
         <ProjectSelect name={name} projects={projects} required={false} label="Project (optional)" />
         <BeforeList name={name} />

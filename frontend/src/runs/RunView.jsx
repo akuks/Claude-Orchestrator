@@ -242,7 +242,7 @@ export default function RunView({ id, user, projects = [], navigate, onOpenCrede
   )
   const stepUsage = data?.step_usage
   const usageOf = useCallback((i) => usageLine(Array.isArray(stepUsage) ? stepUsage[i] : null), [stepUsage])
-  const wordOf = useCallback((i) => sstate?.[String(i)]?.status_word || null, [sstate])
+  const wordOf = useCallback((i, item) => (item === 'fix' || (typeof item === 'number' && (run?.stages?.[i]?.items?.length || 0) > 1) ? null : sstate?.[String(i)]?.status_word || null), [sstate, run?.stages])
   const aheadOf = useCallback((i) => !!sstate?.[String(i)]?.ahead && sstate[String(i)].status !== 'approved', [sstate])
   const selStage = stageIdx != null && stageIdx < stages.length ? stageIdx : head >= 0 ? head : null
   const curAttempt = selStage == null ? 0 : stageAttempt(sstate, selStage)
@@ -388,7 +388,7 @@ export default function RunView({ id, user, projects = [], navigate, onOpenCrede
   const selUsage = usageLine(selRaw)
   const selStats =
     selRaw && (Number(selRaw.input_tokens) > 0 || Number(selRaw.output_tokens) > 0)
-      ? `${compact(Number(selRaw.input_tokens) || 0)} tokens in, ${compact(Number(selRaw.output_tokens) || 0)} tokens out · ${plainDuration(selRaw.seconds) || ''}`
+      ? `${compact(Number(selRaw.input_tokens) || 0)} tokens in, ${compact(Number(selRaw.output_tokens) || 0)} tokens out${plainDuration(selRaw.seconds) ? ` · ${plainDuration(selRaw.seconds)}` : ''}`
       : null
   const futureOpen = run.status === 'running' || run.status === 'paused'
   const canRerun = manage && (run.status === 'completed' || run.status === 'failed') && selStage != null && selStage <= run.current_stage
