@@ -252,6 +252,11 @@ a server that skipped several releases runs each of them in turn. **Take your us
 database backup first** whenever an entry names a migration. The server must stay a
 single process (no `--workers`, no replicas).
 
+### Capacity and activity (phase 7g)
+
+- **No migration.** **System health** gains a **Capacity** card, and each project gets an **Activity** tab. Nothing
+  to configure.
+
 ### UI checks (phase 7f)
 
 - **No migration.** The built-in **ui** workflow template changed (see [Workflow templates](#workflow-templates)).
@@ -2058,6 +2063,15 @@ recorded decisions for the files an answer names, and labels for old code.
 
 ---
 
+## Activity tab
+
+A project's **Activity** tab shows what changed in its git history: a small bar chart of commits per day, a
+7 / 30 / 90 day picker, an **Only bigger changes** switch (commits touching at least 50 lines), the commits
+grouped by day (title, author, "+12 −3 in 4 files") and a small table of contributors. A commit made by one of
+the app's tasks says "Made by task ..." and links to it. The short commit id sits under **Details**. It only
+reads the project's git history (`GET /projects/{id}/activity?days=30&min_lines=0`), and only when the tab is
+open. A folder that is not a git repository says so; a long history is cut to the newest 2,000 commits.
+
 ## Database tab
 
 A project's **Database** tab shows its tables as cards: the columns, a key mark on the
@@ -2286,6 +2300,9 @@ Admins get a **System health** page (nav entry, `#/health`). It shows one overal
 check, problems first. Each card has a coloured dot, a plain title, one sentence and a
 collapsed **Details** with versions, timings and a suggested fix.
 
+- **Capacity.** A card (`GET /admin/health/capacity`) saying how many more runs fit at once, for example "Room
+  for about 3 more runs at once (1 running, 2 waiting)", with plain tips. If free memory can't be read it says
+  so. **Details** show the run slots, free and total memory and the machine load.
 - **The fifteen checks.** Claude is installed; Python; Git; Node; The guard is intact;
   The guard blocks what it should; Guard errors in the last 7 days; The app can write its
   folders; Database is up to date; Connected tools; Skill packs; Code map; Project folders (a warning when a
@@ -2785,6 +2802,8 @@ are, treat what they show as unconfirmed. Tick them off on your first live runs.
   [Deploying for a team](#deploying-for-a-team)), decisions (kept in the database,
   not a `decisions.md` file; see [Decision memory](#decision-memory)) and a code
   index through an outside tool ([Code map](#code-map)).
+- **Parked:** council mode (several helpers voting) and secrets kept by name were never built in this app;
+  they are not planned.
 - **Deferred:** an audit log, sign-in with GitHub / SSO, `docker-compose`, auto
   codebase overviews, full-text search, per-project task serialization, and
   OS-level isolation per task ([Seatbelt limits](#seatbelt-limits)).

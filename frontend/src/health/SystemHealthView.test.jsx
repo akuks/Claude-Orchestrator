@@ -2,7 +2,7 @@ import { act } from 'react'
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
 import { flush, render } from '../home/testRender'
 
-vi.mock('../api', () => ({ api: { systemHealth: vi.fn(), retention: vi.fn(), saveRetention: vi.fn(), runRetention: vi.fn(), acceptRootCommit: vi.fn() } }))
+vi.mock('../api', () => ({ api: { systemHealth: vi.fn(), retention: vi.fn(), saveRetention: vi.fn(), runRetention: vi.fn(), acceptRootCommit: vi.fn(), capacity: vi.fn() } }))
 
 import { api } from '../api'
 import SystemHealthView from './SystemHealthView'
@@ -22,6 +22,7 @@ const DATA = {
 }
 
 const RET = { enabled: false, days: 60, choices: [30, 60, 90], tasks: 12, bytes: 12400000, last_run: null, last_count: null, running: false }
+const CAP = { slots: 4, running: 1, queued: 2, memory: { total: 17179869184, free: 8589934592 }, load: { one: 0.5, five: 0.75, cores: 8 }, fits: 3, tips: ['Close other apps.'] }
 let view
 beforeAll(() => {
   window.matchMedia ||= () => ({ matches: false, addListener() {}, removeListener() {}, addEventListener() {}, removeEventListener() {} })
@@ -30,6 +31,7 @@ beforeEach(() => {
   vi.clearAllMocks()
   api.systemHealth.mockResolvedValue(DATA)
   api.retention.mockResolvedValue(RET)
+  api.capacity.mockResolvedValue(CAP)
 })
 afterEach(async () => {
   await view?.unmount()
@@ -204,3 +206,18 @@ describe('re-clone warning', () => {
   })
 })
 
+
+describe('capacity card', () => {
+  it('sits before Run history and says it plainly', async () => {
+    const c = await mount()
+    expect(q(c, 'health-capacity').nextElementSibling).toBe(q(c, 'health-run-history'))
+    expect(q(c, 'health-capacity').textContent).toContain('Room for about 3 more runs at once (1 running, 2 waiting).')
+    expect(q(c, 'health-capacity').textContent).toContain('Close other apps.')
+    expect(q(c, 'health-capacity').textContent).toContain('8.0 GB of 16.0 GB')
+  })
+  it('handles unreadable memory', async () => {
+    api.capacity.mockResolvedValue({ ...CAP, memory: null, load: null, fits: null, tips: [] })
+    const c = await mount()
+    expect(q(c, 'health-capacity').textContent).toContain("1 running, 2 waiting. Free memory couldn't be read.")
+  })
+})
