@@ -1603,9 +1603,10 @@ Admins get a **System health** page (nav entry, `#/health`). It shows one overal
 check, problems first. Each card has a coloured dot, a plain title, one sentence and a
 collapsed **Details** with versions, timings and a suggested fix.
 
-- **The fourteen checks.** Claude is installed; Python; Git; Node; The guard is intact;
+- **The fifteen checks.** Claude is installed; Python; Git; Node; The guard is intact;
   The guard blocks what it should; Guard errors in the last 7 days; The app can write its
-  folders; Database is up to date; Connected tools; Skill packs; Code map; Docker (for 'wait until
+  folders; Database is up to date; Connected tools; Skill packs; Code map; Project folders (a warning when a
+  folder now holds a different repository, see "Upkeep"); Docker (for 'wait until
   ready' checks); Free disk space. A missing Node or Docker is only "attention"; a
   missing Claude or Git is a problem.
 - **When it runs.** Only when an admin opens the page or presses **Check again**; there
@@ -1953,11 +1954,58 @@ recorded decisions for the files an answer names, and labels for old code.
   orchestrator checkout used as a project, and settings in a project's env, can still
   influence the build. (`CO_TOOL_RUN_DIR` moves only the connected tools' folders, not
   the build's.)
-- **"How far behind" is not told to the agent.** Only the three lines above are.
+- **The exact commit list is not told to the agent.** It gets a short note (current, N commits behind
+  with up to 10 changed files, a different history, or could not check); see "Upkeep".
 - **No index of our own.** The app does not build or store a map; it depends on the
   outside tool.
 - **A separate copy.** The freshness line reports on the project folder, even when a
   task works in a separate copy of it.
+
+## Upkeep: closed handoffs, tidying, sharper notes
+
+- **Closed handoffs stay closed.** Closing a thread's handoff now sticks: a heartbeat, a
+  saved note or the end of the same run no longer reopens it. A new run of the thread
+  (Continue, Retry, a follow-up) does. When a task **completes** and nothing is left open
+  (no open question, no open to-do, no step still running), its handoff is closed by the
+  system. Failed, cancelled and waiting tasks stay open. Notes are kept.
+- **Tidying old run history (off until an admin switches it on).** In **System health**, the
+  **Run history** card has the switch **Tidy old run history**, **Keep full history for:
+  30 / 60 / 90 days** (60 by default), "N tasks could be tidied (about X MB)", "Last tidied
+  <date>: N tasks" and **Tidy now**. When on, a daily job handles tasks that **finished** more
+  than that many days ago: their run events are replaced by one short summary (how many
+  events of each kind, first and last time, and the last 20 log lines as plain text), and the
+  previous version of their **closed** handoffs is dropped (the current one stays). It never
+  touches running, queued, waiting or unfinished tasks, and never deletes a task, handoff,
+  note or decision. **It can't be undone**: what it replaced does not come back (the summary
+  stays). The run log shows the summary as "Older run history kept as a summary (N events)."
+  with the kept lines under **Details**. API (admin): `GET/PATCH /admin/health/retention`,
+  `POST /admin/health/retention/run`.
+- **Sharper code-map notes.** At task start the app compares the code map's indexed commit
+  with the folder's current one, and the agent is told one of: current; N commits behind with up
+  to 10 changed files; built on a different history; could not check. A reference project that
+  changed since its map was built says so, and references with no map yet are listed once.
+  Only a few read-only git commands are allowed for this.
+- **Decisions before shell commands.** When a shell command is allowed and writes files, the
+  decisions recorded for up to 50 of those files are shown before it runs, as for Edit/Write.
+- **Re-clone warning.** Each project remembers its repository's first commit (set when the
+  project is created, when its folder changes, and at the first task start if empty). If a later
+  task finds a different first commit, the run shows "This folder now holds a different repository
+  than before (it may have been cloned again). Decisions and the code map may not apply." and
+  **System health** shows a **Project folders** warning. A maintainer presses **This is
+  expected** (`POST /projects/{id}/root-commit/accept`) to store the new one; nothing else
+  changes it. A folder that is not a git repository, a missing git, or a shallow clone with no
+  root gives no warning and stores nothing.
+
+### To know
+
+- Tidying is off until switched on; once on, it cannot bring back what it replaced. A Continue
+  of a tidied thread rebuilds from the summary, so things worked out from events (files touched,
+  step progress) start empty.
+- The code-map note is worked out at task start, so within a long session it can be up to one
+  task old.
+- The re-clone check looks at the folder when a task starts and when System health is opened; it
+  is not a background watch.
+- Not run against the real `claude` CLI.
 
 ## Database tab
 
