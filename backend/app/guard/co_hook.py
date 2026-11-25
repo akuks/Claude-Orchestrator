@@ -234,7 +234,7 @@ _TOKEN_SHAPES = re.compile("|".join((
     r"\bsk-[A-Za-z0-9_\-]{20,}",
     r"gh[pousr]_[A-Za-z0-9]{30,}",
     r"github_pat_[A-Za-z0-9_]{30,}",
-    rf"(?<![{_URLSAFE}])co_[{_URLSAFE}]{{43}}(?![{_URLSAFE}])",
+    rf"(?<![{_URLSAFE}])coe?_[{_URLSAFE}]{{43}}(?![{_URLSAFE}])",
     r"\b(?:AKIA|ASIA)[0-9A-Z]{16}\b",
     r"\bxox[abposr]-[A-Za-z0-9\-]{6,}",
     r"\beyJ[A-Za-z0-9_\-]+\.eyJ[A-Za-z0-9_\-]+\.[A-Za-z0-9_\-]*",

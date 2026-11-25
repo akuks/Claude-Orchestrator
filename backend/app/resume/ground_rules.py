@@ -2,13 +2,17 @@
 
 Org settings (``GuardOrgSettings.ground_rules``, admin-only to change):
 ``{"grounding": bool, "short_answers": bool, "usage_care": bool, "notes": bool, "questions": bool, "decisions": bool,
-"local_first": bool, "personal_prefs": bool, "extra": str}``.
+"local_first": bool, "personal_prefs": bool, "editor_connections": bool, "extra": str}``.
 
 ``local_first`` (phase 6c, F105; main session and helpers): keep a copy in the project of anything published
 elsewhere. Settings stored before it existed read it as on (``normalized``).
 
 ``personal_prefs`` (phase 8b, settings label "People's own preferences") adds no text here either: when on, the
 worker adds the task starter's own preferences (``app.preferences``) to the main session's system prompt.
+
+``editor_connections`` (phase 8c, settings label "Editor connections", default **off**) adds no text and is not
+about agents: it is the org switch for ``POST /mcp`` (``app.editor_mcp``), where people's own editors read the
+decisions of projects they can see. It lives here because this is where the org's switches are stored and merged.
 
 ``decisions`` (phase 4a) adds no text here: when on, an own project's decisions go into the policy and the run's
 system prompt gets their index (``policy_inputs.gather``); ``included`` leaves it out.
@@ -32,9 +36,10 @@ from ..redaction import clean_text
 
 GROUND_EXTRA_MAX = 2000
 SWITCHES = ("grounding", "short_answers", "usage_care", "notes", "questions", "decisions", "local_first",
-            "personal_prefs")
+            "personal_prefs", "editor_connections")
 DEFAULTS = {"grounding": True, "short_answers": True, "usage_care": True, "notes": True, "questions": True,
-            "decisions": True, "local_first": True, "personal_prefs": True, "extra": ""}
+            "decisions": True, "local_first": True, "personal_prefs": True, "editor_connections": False,
+            "extra": ""}
 # the switches with a rule text
 TEXT_SWITCHES = ("grounding", "short_answers", "usage_care", "notes", "questions", "local_first")
 

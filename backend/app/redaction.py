@@ -43,7 +43,8 @@ _SENSITIVE_NAME_RE = re.compile(
 )
 
 # Known token shapes. co_ matches auth.mint_token exactly: "co_" +
-# secrets.token_urlsafe(32), i.e. 43 urlsafe-base64 chars. The rest follow
+# secrets.token_urlsafe(32), i.e. 43 urlsafe-base64 chars; coe_ (an editor key,
+# app.editor_mcp.keys) is "coe_" + the same. The rest follow
 # jspark-forge's scripts/lib/redact.js (v0.6.0, MIT) - generic sk- keys, AWS
 # key ids (AKIA, and ASIA for temporary ones), Slack tokens, JWTs - plus PEM
 # private key blocks (to the end of the text when the END line was cut off).
@@ -56,7 +57,7 @@ TOKEN_SHAPES = re.compile(
             r"\bsk-[A-Za-z0-9_\-]{20,}",
             r"gh[pousr]_[A-Za-z0-9]{30,}",
             r"github_pat_[A-Za-z0-9_]{30,}",
-            rf"(?<![{_URLSAFE}])co_[{_URLSAFE}]{{43}}(?![{_URLSAFE}])",
+            rf"(?<![{_URLSAFE}])coe?_[{_URLSAFE}]{{43}}(?![{_URLSAFE}])",
             r"\b(?:AKIA|ASIA)[0-9A-Z]{16}\b",
             r"\bxox[abposr]-[A-Za-z0-9\-]{6,}",
             r"\beyJ[A-Za-z0-9_\-]+\.eyJ[A-Za-z0-9_\-]+\.[A-Za-z0-9_\-]*",
