@@ -137,6 +137,34 @@ cost caps, security reviews, and reusable agent roles.
 
 ---
 
+## Claude plan limits
+
+Claude subscriptions (not API keys) have usage limits. The app now records what Claude reports about the plan and
+reacts to it:
+
+- A banner at the top says when your plan limit was reached ("Work starts again at 14:05") or is close.
+- Work that needs a limited credential waits instead of failing: tasks show "Paused" with the time they start again,
+  and workflow steps are held, then continue after the reset. Nothing is switched to the org fallback key.
+- The Usage page has a "Claude plan" card (status, reset time, last checked; raw figures under "Details").
+- Admins see a tag per person on the Users page and a "Try now" button that clears a stale hold.
+
+To know:
+
+- Not run against the real `claude` CLI. The event's exact shape and when it is sent come from the documentation.
+- There is no live "% of your 5-hour window" between events: the headless stream does not give one reliably.
+- No automatic fallback to the org key.
+- The 3rd limit hit in a row stops the task ("Stopped — the Claude plan limit was reached three times in a row.").
+- A hold that is not confirmed is capped at 6 hours and re-checked every few minutes.
+- API keys and the org fallback key are never held: plan limits do not apply to them.
+
+Owner checklist, on one real run with a subscription token:
+
+1. Does the run emit a `rate_limit_event` at all (a setup-token run may not)?
+2. Is `resetsAt` in seconds or milliseconds (the app guesses: above 10^12 means milliseconds)?
+3. What scale is `utilization` (0-1 or 0-100)? It is shown only under "Details".
+4. Which window does it describe (5-hour or 7-day)?
+5. What does a run that hits the limit print, and is it recognised (task pauses with the right time)?
+
 ## Architecture
 
 ```

@@ -14,6 +14,7 @@ import mimetypes
 import os
 import signal
 import time
+import uuid
 from collections import Counter
 from types import SimpleNamespace
 from datetime import datetime, timedelta, timezone
@@ -21,7 +22,7 @@ from pathlib import Path
 
 from sqlalchemy import func, select
 
-from . import auth, context_store, mcp_manager, memory, notifications, security
+from . import auth, context_store, mcp_manager, memory, notifications, planlimits, security
 from .access import effective_project_id
 from .agent_env import PROJECT_ENV_BLOCKED, MissingCredential, build_agent_env, credential_ref
 from .config import settings
@@ -241,6 +242,8 @@ class WorkerManager:
         # and ids a recover() is working on (never two side by side)
         self._active: set[str] = set()
         self._recovering: set[str] = set()
+        # task_id -> the timer of a queued task waiting for its Claude plan's reset time (phase 7c)
+        self._waits: dict[str, asyncio.Task] = {}
         self._dispatcher: asyncio.Task | None = None
         self._sweeper: asyncio.Task | None = None
 
@@ -302,6 +305,40 @@ class WorkerManager:
         proc = self._running.get(task_id)
         if proc:
             self._signal_group(proc, signal.SIGTERM)
+        if task_id in self._waits:  # waiting for a plan reset: it ends now, not at the reset time
+            await self.wake([task_id])
+
+    async def wake(self, task_ids) -> list[str]:
+        """Queued tasks waiting for their plan's reset time start being picked again now ("Try now"): their
+        timers stop and they are queued (the start check runs again). Returns the ids woken."""
+        woken = []
+        for tid in task_ids:
+            timer = self._waits.pop(tid, None)
+            if timer is None:
+                continue
+            timer.cancel()
+            woken.append(tid)
+        if woken:
+            async with SessionLocal() as s:
+                rows = (await s.execute(select(Task.id, Task.priority, Task.created_at)
+                                        .where(Task.id.in_(woken)))).all()
+            for tid, priority, created_at in rows:
+                await self.submit(tid, priority, created_at)
+        return woken
+
+    def _wait_then_submit(self, task_id: str, delay: float, priority, created_at) -> None:
+        """Queue the task again after ``delay`` seconds (a plan-limit wait); one timer per task."""
+        old = self._waits.pop(task_id, None)
+        if old is not None:
+            old.cancel()
+        timer = asyncio.create_task(self._retry_after(task_id, max(0.0, delay), priority, created_at))
+        self._waits[task_id] = timer
+
+        def _done(t, tid=task_id):
+            if self._waits.get(tid) is t:
+                self._waits.pop(tid, None)
+
+        timer.add_done_callback(_done)
 
     async def _end_cancelled_queued(self, s, task: Task) -> None:
         """A cancelled step that never runs again (cancelled while queued or in a retry backoff): CANCELLED,
@@ -415,6 +452,11 @@ class WorkerManager:
             await self._finish(task_id, Status.FAILED, error="Task owner is disabled")
             return
 
+        # Claude plan limits (7c): a task waiting for its plan's reset time, or whose credential's plan is
+        # at its limit now, stays queued and is picked again after the reset time + 1 minute.
+        if task_id not in self._cancelled and await self._plan_wait(task_id, emit):
+            return
+
         # Load + mark running (or short-circuit if cancelled while queued).
         async with SessionLocal() as s:
             task = await s.get(Task, task_id)
@@ -425,6 +467,7 @@ class WorkerManager:
                 return
             task.status = Status.RUNNING
             task.started_at = _now()
+            task.not_before = task.wait_reason = None
             task.run_pgid = task.run_proc_start = None  # this run's are recorded at spawn
             try:  # launch list: a linked open item becomes started; never fails the task
                 async with s.begin_nested():
@@ -521,6 +564,7 @@ class WorkerManager:
         # credential, by the person who continues the thread. The check reads the
         # stored credential_ref, so it runs before this run's ref is stored.
         cred_ref = credential_ref(sub_env)
+        plan_owner = planlimits.owner_of_env(sub_env, task_owner, cred_ref)
         async with SessionLocal() as s:
             t = await s.get(Task, task_id)
             resume_session_id, fresh_reason = await prompting.decide_session(
@@ -799,6 +843,8 @@ class WorkerManager:
                       "proc": proc, "emit": emit,
                       "spool": guard_runtime.task_dir(task_id) / guard_runtime.SPOOL_NAME},
         }
+        # Claude plan limits (7c): whose plan this run uses and what the stream said about it
+        ctx["plan"] = self._new_plan_ctx(plan_owner)
         ctx["edit_calls"] = self._run_edits.setdefault(task_id, [])  # shared with the earlier attempts
         self._run_ctx[task_id] = ctx  # _finish reads its edit calls (critical-path warning)
         watch = asyncio.create_task(self._guard_watch(ctx))
@@ -847,12 +893,31 @@ class WorkerManager:
         artifacts = [] if project_id else _collect_artifacts(workspace, before)
         failed = result["is_error"] or (exit_code not in (0, None))
 
+        # Claude plan limit reached (7c): with a known reset time the task waits for it (not a retry
+        # attempt); without one it takes the transient backoff below.
+        # Only a strong signal (a rejected rate_limit_event, or the limit sentence in an error result) on a
+        # plan (not an API key) holds work; weak ones (stderr 429, api_retry / assistant rate_limit) take
+        # the old backoff and write nothing owner-wide.
+        plan_hit = self._plan_limit_hit(ctx, result, "".join(stderr_buf)) if failed else None
+        plan_owner_ = (ctx.get("plan") or {}).get("owner") or {}
+        if plan_hit == "strong" and plan_owner_ and not plan_owner_.get("api_key"):
+            row = await self._plan_record_hit(ctx, result, "".join(stderr_buf))
+            if planlimits.is_holding(row):
+                hits = await self._count_plan_hit(task_id)
+                if hits >= planlimits.REQUEUE_MAX:
+                    await self._stop_for_plan(task_id, emit, exit_code, result, artifacts, run_secrets)
+                    return
+                await self._requeue_for_plan(task_id, row, emit)
+                return
+        else:
+            await self._count_plan_hit(task_id, reset=True)  # the run got past the limit
+
         # Auto-retry transient failures (rate limits / overload / network) with
         # exponential backoff, up to the configured attempt limit.
         if (
             failed
             and attempt < settings.retry_max_attempts
-            and _is_transient("".join(stderr_buf))
+            and (plan_hit or _is_transient("".join(stderr_buf)))
         ):
             backoff = settings.retry_backoff_seconds * (2**attempt)
             await emit(
@@ -1526,14 +1591,25 @@ class WorkerManager:
     async def _handle_stream_event(self, obj: dict, emit, result, ctx) -> None:
         await self._guard_on_event(obj, ctx)
         etype = obj.get("type")
-        if etype == "system":
+        if etype == "rate_limit_event":
+            await self._on_rate_limit(obj.get("rate_limit_info"), emit, ctx)
+        elif etype == "system":
             if str(obj.get("subtype") or "").startswith("hook_"):
                 return  # hook activity: co-guard's records come from its spool / live report
             sid = obj.get("session_id")
-            await emit("system", {"subtype": obj.get("subtype"), "session_id": sid})
+            payload = {"subtype": obj.get("subtype"), "session_id": sid}
+            if obj.get("subtype") == "api_retry":  # every documented field (7c)
+                for k in self.API_RETRY_FIELDS:
+                    if k in obj:
+                        payload[k] = obj[k]
+                if obj.get("error") == "rate_limit" and ctx.get("plan") is not None:
+                    ctx["plan"]["rate_limited"] = True
+            await emit("system", payload)
             if sid:
                 await self._store_session_id(ctx["task_id"], sid)
         elif etype == "assistant":
+            if obj.get("error") == "rate_limit" and ctx.get("plan") is not None:
+                ctx["plan"]["rate_limited"] = True
             usage = ctx.get("usage")
             if usage is not None:
                 usage.on_assistant(obj)
@@ -1582,6 +1658,7 @@ class WorkerManager:
             result["total_cost_usd"] = obj.get("total_cost_usd")
             result["duration_ms"] = obj.get("duration_ms")
             result["is_error"] = bool(obj.get("is_error"))
+            result["api_error_status"] = obj.get("api_error_status")
             usage = obj.get("usage") or {}
             # Count cache reads/creations as input so totals reflect real usage.
             result["input_tokens"] = (
@@ -1592,6 +1669,175 @@ class WorkerManager:
             result["output_tokens"] = usage.get("output_tokens")
         if etype in ("assistant", "user") and ctx.get("usage") is not None:
             await self._usage_tick(ctx)
+
+    # ---- Claude plan limits (phase 7c) --------------------------------------------------
+
+    API_RETRY_FIELDS = ("attempt", "max_retries", "retry_delay_ms", "error_status", "error")
+
+    @staticmethod
+    def _new_plan_ctx(owner) -> dict:
+        """A run's plan-limit state: whose plan, its own run ref (confirmation by a second run), the reset
+        times of its last rejected / allowed_warning events, the signals seen."""
+        return {"owner": owner, "run_ref": uuid.uuid4().hex, "rejected": False, "rejected_reset": None,
+                "warning_reset": None, "rate_limited": False, "last_status": None, "warned": False}
+
+    async def _on_rate_limit(self, info, emit, ctx) -> None:
+        """A ``rate_limit_event``: the owner's latest status is stored (latest wins) and the task gets a
+        ``plan_limit`` event when the status changes within the run; ``allowed_warning`` adds the warning
+        sentence once; ``rejected`` marks the run as at the limit."""
+        plan = ctx.get("plan")
+        if plan is None:
+            plan = ctx["plan"] = self._new_plan_ctx(None)
+        read = planlimits.reading(info)
+        await planlimits.record(plan["owner"], read, ctx.get("task_id"), run_ref=plan.get("run_ref"))
+        status, resets = read["status"], read["resets_at"]
+        if status == planlimits.REJECTED:
+            plan["rejected"] = True
+            plan["rejected_reset"] = resets  # the last rejected event's reset time wins (M5)
+        elif status == planlimits.WARNING and resets is not None:
+            plan["warning_reset"] = resets
+        if status == plan["last_status"]:
+            return
+        plan["last_status"] = status
+        payload = {"status": status, "resets_at": resets.isoformat() if resets else None,
+                   "utilization": read["utilization"], "raw": read["raw"],
+                   "credential_owner": (plan["owner"] or {}).get("owner")}
+        if status == planlimits.WARNING:
+            if plan["warned"]:
+                return
+            plan["warned"] = True
+            payload["warning"] = True
+            payload["text"] = (planlimits.WARNING_TEXT.format(hhmm=planlimits.hhmm(resets)) if resets
+                               else planlimits.WARNING_TEXT_NO_TIME)
+        await emit(planlimits.EVENT, payload)
+
+    @staticmethod
+    def _plan_limit_hit(ctx, result: dict, stderr: str) -> str | None:
+        """How surely the failed run hit the Claude plan limit: "strong" (a rejected rate_limit_event, or a
+        plan-limit sentence in an error result), "weak" (an api_retry / assistant ``rate_limit`` error or
+        the stderr rate-limit markers: the old backoff only), or None."""
+        plan = ctx.get("plan") or {}
+        if (plan.get("rejected") or planlimits.limit_text_in(stderr)
+                or (result.get("is_error") and planlimits.limit_text_in(result.get("result_text")))):
+            return "strong"
+        if plan.get("rate_limited") or planlimits.stderr_says_limit(stderr):
+            return "weak"
+        return None
+
+    async def _plan_record_hit(self, ctx, result: dict, stderr: str = ""):
+        """A strong hit: the owner's row says ``rejected`` until the reset time of the run's last rejected
+        event (else its last allowed_warning event; never an allowed one), confirmed by a limit sentence in
+        the error result. No reset time from this run: the owner's row as stored. Returns the row."""
+        plan = ctx.get("plan") or {}
+        owner = plan.get("owner")
+        resets = plan.get("rejected_reset") or plan.get("warning_reset")
+        sentence = bool((result.get("is_error") and planlimits.limit_text_in(result.get("result_text")))
+                        or planlimits.limit_text_in(stderr))
+        if resets is not None and resets > _now():
+            raw = None if plan.get("last_status") == planlimits.REJECTED else {"noticed_by": "run_end"}
+            return await planlimits.record(owner, {"status": planlimits.REJECTED, "resets_at": resets,
+                                                   "utilization": None, "raw": raw},
+                                           ctx.get("task_id"), run_ref=plan.get("run_ref"), confirmed=sentence)
+        try:
+            async with SessionLocal() as s:
+                return await planlimits.hold_for(s, owner)
+        except Exception:  # noqa: BLE001
+            return None
+
+    @staticmethod
+    async def _count_plan_hit(task_id: str, reset: bool = False) -> int:
+        """Plan-limit hits in a row: +1 (or back to 0 when ``reset``); returns the new count."""
+        async with SessionLocal() as s:
+            t = await s.get(Task, task_id)
+            if t is None:
+                return 0
+            n = 0 if reset else (t.plan_requeues or 0) + 1
+            if (t.plan_requeues or 0) != n:
+                t.plan_requeues = n
+                await s.commit()
+            return n
+
+    async def _stop_for_plan(self, task_id, emit, exit_code, result, artifacts, secrets) -> None:
+        """The third plan-limit hit in a row: the task fails with the plain sentence."""
+        text = planlimits.STOPPED_TEXT
+        await emit("error", {"message": text})
+        await self._emit_critical_paths(task_id, self._run_ctx.get(task_id) or {}, emit)
+        await emit("completed", {"status": Status.FAILED, "num_turns": result["num_turns"],
+                                 "cost": result["total_cost_usd"], "artifacts": len(artifacts)})
+        await self._finish(task_id, Status.FAILED, exit_code=exit_code, result_text=result["result_text"],
+                           num_turns=result["num_turns"], total_cost_usd=result["total_cost_usd"],
+                           duration_ms=result["duration_ms"], input_tokens=result["input_tokens"],
+                           output_tokens=result["output_tokens"], error=text, artifacts=artifacts,
+                           secrets=secrets)
+
+    async def _requeue_for_plan(self, task_id: str, row, emit) -> None:
+        """Back to queued, starting at the row's hold time + 1 minute; not counted as a retry attempt."""
+        until = planlimits.hold_until(row)
+        start = planlimits.start_after(until)
+        text = planlimits.paused_text(until)
+        await emit(planlimits.EVENT, {"paused": True, "text": text,
+                                      "resets_at": planlimits._aware(row.resets_at).isoformat(),
+                                      "not_before": start.isoformat()})
+        async with SessionLocal() as s:
+            t = await s.get(Task, task_id)
+            priority, created_at = (t.priority, t.created_at) if t is not None else (Priority.NORMAL, None)
+            if t is not None:
+                t.status = Status.QUEUED
+                t.not_before = start
+                t.wait_reason = text
+                t.run_pgid = t.run_proc_start = t.heartbeat_at = None
+            await auth.revoke_task_tokens(s, task_id)  # this attempt is over
+            await s.commit()
+        self._usage.pop(task_id, None)  # the next attempt counts afresh
+        self._run_ctx.pop(task_id, None)
+        self._usage_spool.pop(task_id, None)
+        self._wait_then_submit(task_id, min(planlimits.CHECK_EVERY, (start - _now()).total_seconds()),
+                               priority, created_at)
+
+    _keeps_own_wait = staticmethod(planlimits.keeps_own_wait)
+
+    async def _plan_wait(self, task_id: str, emit) -> bool:
+        """Before a queued task starts (and every CHECK_EVERY seconds while it waits): True when its
+        credential's plan holds work now - it stays queued with the paused sentence and a timer checks
+        again. When nothing holds any more (reset passed, row removed, credential changed, API key) the
+        wait is cleared and it runs. Never raises (a failed check lets the task run)."""
+        try:
+            async with SessionLocal() as s:
+                t = await s.get(Task, task_id)
+                if t is None or t.status != Status.QUEUED:
+                    return False
+                now = _now()
+                who = await planlimits.credential_owner(s, t.created_by)
+                row = await planlimits.hold_for(s, who, now)
+                own = planlimits._aware(t.not_before)
+                priority, created_at = t.priority, t.created_at
+                if row is None:
+                    if own is not None and own > now and t.wait_reason and await self._keeps_own_wait(s, who):
+                        # its own reset time is still ahead and the owner's row only moved on (e.g. an
+                        # allowed event from another model's task): it keeps waiting, checked again
+                        self._wait_then_submit(task_id, min(planlimits.CHECK_EVERY, (own - now).total_seconds()),
+                                               priority, created_at)
+                        return True
+                    if t.not_before is not None or t.wait_reason is not None:
+                        t.not_before = t.wait_reason = None
+                        await s.commit()
+                    return False
+                until = planlimits.hold_until(row)
+                start = planlimits.start_after(until)
+                text = planlimits.paused_text(until)
+                new_event = text != t.wait_reason
+                t.not_before, t.wait_reason = start, text
+                await s.commit()
+                resets = planlimits._aware(row.resets_at)
+            if new_event:
+                await emit(planlimits.EVENT, {"paused": True, "text": text, "resets_at": resets.isoformat(),
+                                              "not_before": start.isoformat()})
+            self._wait_then_submit(task_id, min(planlimits.CHECK_EVERY, (start - _now()).total_seconds()),
+                                   priority, created_at)
+            return True
+        except Exception:  # noqa: BLE001 - the check never stops a run
+            log.warning("plan limits: start check failed for %s", task_id, exc_info=True)
+            return False
 
     # ---- critical-path warning (phase 5b, F64) -----------------------------------
 

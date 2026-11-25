@@ -48,6 +48,7 @@ import { interceptHashLinks, redirectIfForbidden, returnTo, useRoute } from './s
 import { buildCommands, isPaletteShortcut } from './shell/commands'
 import Rail from './shell/Rail'
 import TopBar from './shell/TopBar'
+import PlanBanner from './plan/PlanBanner'
 import CommandPalette from './shell/CommandPalette'
 import { pendingApprovalTotal } from './guard/guard'
 import { answerableCount } from './questions/questions'
@@ -406,6 +407,7 @@ function AppInner({ user, onLogout }) {
         />
 
         <main className="co-content" data-testid={`page-${page}`}>
+          <div style={{ marginBottom: 12 }}><PlanBanner /></div>
           {noCredential && (
             <Alert
               data-testid="no-credential-banner"

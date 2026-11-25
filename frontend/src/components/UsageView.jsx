@@ -12,6 +12,7 @@ import {
 } from 'antd'
 import ReactECharts from 'echarts-for-react'
 import { api } from '../api'
+import PlanCard from '../plan/PlanCard'
 import { modeTokens, palette } from '../theme/tokens'
 import { useThemeMode } from '../theme/ThemeModeContext.jsx'
 
@@ -138,6 +139,7 @@ export default function UsageView() {
 
   return (
     <>
+      <PlanCard />
       <SummaryCards s={summary} />
 
       <Row gutter={12} style={{ marginBottom: 16 }}>

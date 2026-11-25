@@ -83,6 +83,34 @@ describe('TaskDetail inline: live stream lifecycle', () => {
   })
 })
 
+describe('TaskDetail: plan limit pause', () => {
+  let view
+  const RealWS = globalThis.WebSocket
+  afterEach(async () => {
+    await view?.unmount()
+    view = null
+    globalThis.WebSocket = RealWS
+    FakeSocket.all = []
+  })
+  it('shows the paused message with local time from not_before, and plan_limit events as plain lines', async () => {
+    globalThis.WebSocket = FakeSocket
+    const nb = new Date(Date.now() + 2 * 3600e3).toISOString()
+    api.getTask.mockImplementationOnce(async (id) => ({ id, title: 'T', status: 'queued', prompt: 'p', not_before: nb, wait_reason: 'server 03:33' }))
+    view = await render(<TaskDetail inline taskId="a" />)
+    await flush()
+    const m = view.container.querySelector('[data-testid="task-plan-paused"]')
+    expect(m.textContent).toMatch(/Paused — your Claude plan limit was reached\. Starts again at (tomorrow |\d+ \w+, )?\d{2}:\d{2}\./)
+    expect(m.textContent).not.toContain('03:33')
+    await act(async () => FakeSocket.all.at(-1).onmessage({ data: JSON.stringify({ seq: 1, type: 'plan_limit', payload: { status: 'rejected', resets_at: nb, raw: { a: 1 } } }) }))
+    const l = view.container.querySelector('[data-testid="plan-limit-line"]')
+    expect(l.textContent).toMatch(/^Your Claude plan limit was reached\. Work starts again at/)
+    expect(l.textContent).not.toMatch(/[{}"]/)
+    const calls = api.getTask.mock.calls.length
+    await act(async () => FakeSocket.all.at(-1).onmessage({ data: JSON.stringify({ seq: 2, type: 'plan_limit', payload: { paused: true, not_before: nb } }) }))
+    expect(api.getTask.mock.calls.length).toBe(calls + 1)
+  })
+})
+
 describe('TaskDetail: co-guard lines', () => {
   let view
   const RealWS = globalThis.WebSocket

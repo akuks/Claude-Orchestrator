@@ -32,6 +32,7 @@ export default defineConfig({
       '/teams': { target, changeOrigin: true },
       '/me/': { target, changeOrigin: true },
       '/admin/': { target, changeOrigin: true },
+      '/plan': { target, changeOrigin: true },
       '/health': { target, changeOrigin: true },
     },
   },

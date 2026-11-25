@@ -12,7 +12,7 @@ from sqlalchemy.orm import Session
 from app import models
 from app.database import _alembic_cfg, _baseline_metadata, run_migrations
 
-HEAD = "0020"  # the latest revision
+HEAD = "0021"  # the latest revision
 
 
 def _tables(db) -> set[str]:
@@ -702,3 +702,51 @@ def test_migration_0020_upgrade_downgrade(scratch_url):
                 sc.exec_driver_sql("SELECT version_num FROM alembic_version").scalar())
 
     assert _inspect(url, check_down) == ("old-p", "0019")
+
+
+def test_migration_0021_upgrade_downgrade(scratch_url):
+    from alembic import command
+
+    url = scratch_url
+    command.upgrade(_alembic_cfg(url), "0020")
+
+    def old_rows(sc, insp):  # a task from before 0021 (every NOT NULL column without a default)
+        sc.exec_driver_sql(
+            "INSERT INTO tasks (id, title, prompt, status, priority, tags, model, max_turns, attempt, allow_remote,"
+            " read_only, requires_approval, risk, created_at, origin, recoveries, auto_continued, stage_attempt)"
+            " VALUES ('t21', 'old', 'p', 'queued', 'normal', '[]', '', 25, 0, true, false, false, 'info',"
+            " CURRENT_TIMESTAMP, 'user', 0, false, 0)")
+
+    _inspect(url, old_rows)
+    command.upgrade(_alembic_cfg(url), "0021")
+
+    def check(sc, insp):
+        cols = {c["name"] for c in insp.get_columns("tasks")}
+        assert {"not_before", "wait_reason", "plan_requeues"} <= cols
+        pcols = {c["name"] for c in insp.get_columns("plan_limit_status")}
+        assert {"id", "credential_owner", "status", "resets_at", "utilization", "raw", "api_key",
+                "credential_ref", "confirmed", "run_ref", "seen_at", "task_id"} <= pcols
+        sc.exec_driver_sql(
+            "INSERT INTO plan_limit_status (credential_owner, status, resets_at, utilization, raw, api_key, seen_at,"
+            " task_id) VALUES ('u1', 'rejected', CURRENT_TIMESTAMP, 0.97, '{\"status\": \"rejected\"}', false,"
+            " CURRENT_TIMESTAMP, 't21')")
+        sc.exec_driver_sql(
+            "INSERT INTO plan_limit_status (credential_owner, status, raw, seen_at)"
+            " VALUES ('org', 'allowed', '{}', CURRENT_TIMESTAMP)")
+        assert sc.exec_driver_sql("SELECT plan_requeues FROM tasks WHERE id='t21'").scalar() == 0
+        assert not sc.exec_driver_sql("SELECT confirmed FROM plan_limit_status WHERE credential_owner='org'").scalar()
+        return (sc.exec_driver_sql("SELECT not_before, wait_reason FROM tasks WHERE id='t21'").one(),
+                sc.exec_driver_sql("SELECT api_key FROM plan_limit_status WHERE credential_owner='org'").scalar(),
+                sc.exec_driver_sql("SELECT version_num FROM alembic_version").scalar())
+
+    (nb, why), org_key, ver = _inspect(url, check)
+    assert nb is None and why is None and org_key is not None and not org_key and ver == "0021"
+    command.downgrade(_alembic_cfg(url), "0020")
+
+    def check_down(sc, insp):
+        assert "plan_limit_status" not in insp.get_table_names()
+        assert not ({"not_before", "wait_reason", "plan_requeues"} & {c["name"] for c in insp.get_columns("tasks")})
+        return (sc.exec_driver_sql("SELECT title FROM tasks WHERE id='t21'").scalar(),
+                sc.exec_driver_sql("SELECT version_num FROM alembic_version").scalar())
+
+    assert _inspect(url, check_down) == ("old", "0020")

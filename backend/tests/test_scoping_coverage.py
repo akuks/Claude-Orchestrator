@@ -51,6 +51,7 @@ NOT_PROJECT_BOUND = {
     # Personal credentials: always the caller's own record (no user id anywhere).
     ("GET", "/me/credentials"): "the caller's own credential status, never another user's",
     ("PUT", "/me/credentials"): "writes the caller's own credentials only",
+    ("GET", "/plan/status"): "the caller's own Claude plan status, never another user's",
     ("DELETE", "/me/credentials/claude"): "removes the caller's own Claude credential only",
     ("DELETE", "/me/credentials/github"): "removes the caller's own GitHub token only",
     ("POST", "/me/credentials/test"): "probes the caller's own credentials, no project data",
@@ -62,6 +63,8 @@ NOT_PROJECT_BOUND = {
 # Admin-only routes with no project binding: the outsider must get 403.
 ADMIN_ONLY = {
     ("GET", "/users"),
+    ("GET", "/plan/status/all"),
+    ("DELETE", "/plan/status/{owner}"),
     ("POST", "/users"),
     ("PATCH", "/users/{user_id}"),
     ("POST", "/users/{user_id}/reset-password"),
@@ -221,6 +224,7 @@ def world(client, tmp_path_factory):
         "template_id": template["id"],
         "filename": "out.txt",
         "user_id": outsider.user_id,
+        "owner": outsider.user_id,
         "team_id": team["id"],
         "approval_id": approval_id,
         "rule_id": rule["id"],

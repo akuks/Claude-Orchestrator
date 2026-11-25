@@ -74,6 +74,10 @@ class TaskOut(BaseModel):
     recovery: Optional[dict] = None
     brief: Optional[dict] = None
     brief_bounds: list = []
+    # Claude plan limits (7c): a queued task waiting for its plan's reset time does not start before
+    # not_before; wait_reason is the sentence to show ("Paused — your Claude plan limit was reached. ...").
+    not_before: Optional[datetime] = None
+    wait_reason: Optional[str] = None
     # per viewer, set on the task and thread reads only: may the viewer follow up / Continue, and own the session
     can_manage: bool = False
     can_resume: bool = False

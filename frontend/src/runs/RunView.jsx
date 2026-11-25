@@ -28,6 +28,7 @@ import { revealHidden } from '../guard/guard'
 import FlowCanvas from '../flow/FlowCanvas'
 import { plainDuration, runBoxStatuses, usageLine } from '../flow/flow'
 import { plainError } from './plainError'
+import { stepWaitText } from '../plan/plan'
 import './run.css'
 
 dayjs.extend(relativeTime)
@@ -395,6 +396,7 @@ export default function RunView({ id, user, projects = [], navigate, onOpenCrede
       !stageDef?.project ||
       projects.length === 0 ||
       projects.some((p) => p.id === stageDef.project && p.my_role === 'maintainer'))
+  const planWaiting = selStage != null && !!stepWaitText(sstate?.[String(selStage)])
   const selWord = selStage == null ? null : sstate?.[String(selStage)]?.status_word || null
   const selRaw = selStage != null && Array.isArray(data?.step_usage) ? data.step_usage[selStage] : null
   const selUsage = usageLine(selRaw)
@@ -558,8 +560,8 @@ export default function RunView({ id, user, projects = [], navigate, onOpenCrede
                 </span>
               )}
               {kind === 'agent' && (
-                <Tag color={STAGE_TAG[stage.state]} data-testid="run-stage-state">
-                  {selWord || STEP_STATE_TEXT[stage.state] || stateLabel(stage.state)}
+                <Tag color={planWaiting ? 'gold' : STAGE_TAG[stage.state]} data-testid="run-stage-state">
+                  {planWaiting ? 'Waiting for plan limit' : selWord || STEP_STATE_TEXT[stage.state] || stateLabel(stage.state)}
                 </Tag>
               )}
               {selUsage && (
@@ -568,6 +570,11 @@ export default function RunView({ id, user, projects = [], navigate, onOpenCrede
                 </span>
               )}
             </header>
+            {stepWaitText(sstate?.[String(selStage)]) && (
+              <div className="co-run-stopped" data-testid="run-stage-plan-wait">
+                {stepWaitText(sstate[String(selStage)])}
+              </div>
+            )}
             {stage.state === 'stopped' && (
               <div className="co-run-stopped" data-testid="run-stage-stopped">
                 {sstate?.[String(selStage)]?.reason || 'Stopped because another step failed.'}
@@ -590,7 +597,7 @@ export default function RunView({ id, user, projects = [], navigate, onOpenCrede
               <ApprovalCard runId={id} index={selStage} stage={stageDef} state={sstate?.[String(selStage)]} canDecide={manage} future={futureOpen && selStage > run.current_stage} onChanged={load} />
             ) : stageTasks.length ? (
               <ul className="co-run-tasks">{stageTasks.map(taskButton)}</ul>
-            ) : (
+            ) : planWaiting ? null : (
               <div className="co-run-empty">
                 Not started yet
                 {stageDef?.items?.length ? (

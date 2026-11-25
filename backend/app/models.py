@@ -126,6 +126,12 @@ class Task(Base):
     head_at_start: Mapped[str | None] = mapped_column(String(64), nullable=True)
     # Token care (phase 3b): this step was queued by the automatic fresh continue.
     auto_continued: Mapped[bool] = mapped_column(Boolean, default=False, server_default=false())
+    # Claude plan limits (phase 7c): a queued task does not start before not_before, and wait_reason is
+    # the plain sentence shown while it waits ("Paused — your Claude plan limit was reached. ...").
+    not_before: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    wait_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # plan-limit hits in a row (reset when a run gets past the limit); the third stops the task
+    plan_requeues: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
 
     events: Mapped[list["TaskEvent"]] = relationship(
         back_populates="task", cascade="all, delete-orphan"
@@ -378,6 +384,28 @@ class TaskUsage(Base):
     breakdown: Mapped[dict] = mapped_column(JSON, default=dict, server_default="{}")
     bands: Mapped[list] = mapped_column(JSON, default=list, server_default="[]")
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now, onupdate=_now)
+
+
+class PlanLimitStatus(Base):
+    """The latest Claude plan-limit reading per credential owner (phase 7c): a user id, or "org" for the
+    org fallback key. ``raw`` is the stream's rate_limit_info (capped at 2 KB); ``credential_ref`` is the
+    credential's keyed fingerprint (never the credential)."""
+
+    __tablename__ = "plan_limit_status"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    credential_owner: Mapped[str] = mapped_column(String(32), unique=True)
+    status: Mapped[str] = mapped_column(String(32))
+    resets_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    utilization: Mapped[float | None] = mapped_column(Float, nullable=True)
+    raw: Mapped[dict] = mapped_column(JSON, default=dict)
+    api_key: Mapped[bool] = mapped_column(Boolean, default=False, server_default=false())
+    credential_ref: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    # a rejected hold beyond 6 hours counts in full only once confirmed; run_ref: the run that wrote it
+    confirmed: Mapped[bool] = mapped_column(Boolean, default=False, server_default=false())
+    run_ref: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+    task_id: Mapped[str | None] = mapped_column(String(32), nullable=True)
 
 
 class TaskQuestion(Base):
