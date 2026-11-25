@@ -55,7 +55,8 @@ async def guard_verdict(s, project, cmd: str):
     """The guard's verdict on one command. Runs even when the project's guard is off."""
     cwd = Path(project.directory)
     task = SimpleNamespace(id="gate", root_id="gate")
-    inputs = await policy_inputs.gather(s, task=task, project=project, owner_id=None, mcp=None)
+    inputs = await policy_inputs.gather(s, task=task, project=project, owner_id=None, mcp=None,
+                                        freshness=False)  # a gate never reads the code map's freshness
     policy = guard_runtime.build_policy(task_id="gate", project=project, workspace=cwd, cwd=cwd,
                                         claude_config_dir=None, mcp_tools=None, extra=inputs.policy)
     policy["guard_enabled"] = True

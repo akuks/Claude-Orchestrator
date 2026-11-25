@@ -13,7 +13,9 @@ docstring) and says what the worker must add to the ``claude`` command:
   ``trust`` other than ``own`` means ``external`` and ``on_no_answer`` other
   than ``deny_and_resume`` means ``deny``.
   ``code_map`` / ``code_map_refs`` (phase 6b) only for a switched-on project with an ``ok`` index and a
-  registered code map server.
+  registered code map server; with them (phase 7d) ``code_map.fresh`` (how fresh the map is, worked out here at
+  task start with the safe git helper, bounded in time), each reference's ``changed`` and
+  ``code_map_unmapped`` (the names of the references without a usable map).
 * ``add_dirs`` - the reference projects' folders, for ``--add-dir``.
 * ``decisions_index`` - the same index, for the worker to append after the ground rules, or None.
 * ``data_line`` - ``co_hook.DATA_LINE`` for an external project (the worker
@@ -47,6 +49,7 @@ never opened). ``grants`` are the thread's live grants
 from __future__ import annotations
 
 import asyncio
+import functools
 import os
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -173,11 +176,62 @@ async def _ok_index(s, project_id: str, *, need_sha: bool = True):
     return row if row is not None and row.status == "ok" and (row.sha or not need_sha) else None
 
 
-async def _code_map(s, project, ref_projects: list) -> dict:
-    """Phase 6b: ``code_map`` {sha, indexed_at, prefix} and ``code_map_refs`` [{dir, sha}] for co-guard's code
-    map answers, only when the project is switched on, its index is ``ok`` (with or without a sha: none means
-    freshness unknown) and a code map server is registered for it (an old project: nothing). A reference is
-    listed only with its own ``ok`` index and a sha."""
+FRESH_WAIT = 3.0  # seconds gather waits for all the freshness checks (each is bounded by its own budget)
+
+
+def _fresh_unknown() -> dict:
+    return {"state": "unknown", "behind": None, "changed": [], "more": 0, "head": None}
+
+
+FRESH_WORKERS = 4
+_fresh_pool = None
+
+
+def _pool():
+    """The freshness checks' own small thread pool (not asyncio's default one, which the rest of the app uses)."""
+    global _fresh_pool
+    if _fresh_pool is None:
+        from concurrent.futures import ThreadPoolExecutor
+
+        _fresh_pool = ThreadPoolExecutor(max_workers=FRESH_WORKERS, thread_name_prefix="co-freshness")
+    return _fresh_pool
+
+
+async def _freshness(checks: list) -> list[dict]:
+    """Phase 7d: ``freshness.freshness`` for each (directory, sha, files), side by side on ``_pool()``; all of
+    them together wait at most FRESH_WAIT seconds, and one that fails or is still running says unknown."""
+    from ..codemap import freshness  # lazy, like the status module
+
+    loop = asyncio.get_running_loop()
+
+    async def one(directory, sha, files):
+        if not sha or not directory:
+            return _fresh_unknown()
+        return await loop.run_in_executor(_pool(), functools.partial(freshness.freshness, directory, sha,
+                                                                     files=files))
+
+    tasks = [asyncio.ensure_future(one(*c)) for c in checks]
+    if not tasks:
+        return []
+    await asyncio.wait(tasks, timeout=FRESH_WAIT)
+    out = []
+    for t in tasks:
+        if t.done() and not t.cancelled() and t.exception() is None and isinstance(t.result(), dict):
+            out.append(t.result())
+        else:
+            t.cancel()  # the thread itself ends within its own budget
+            out.append(_fresh_unknown())
+    return out
+
+
+async def _code_map(s, project, ref_projects: list, check: bool = True) -> dict:
+    """Phase 6b: ``code_map`` {sha, indexed_at, prefix, fresh} and ``code_map_refs`` [{dir, sha, changed}] for
+    co-guard's code map answers, only when the project is switched on, its index is ``ok`` (with or without a
+    sha: none means freshness unknown) and a code map server is registered for it (an old project: nothing). A
+    reference is listed only with its own ``ok`` index and a sha; the names of the others are in
+    ``code_map_unmapped`` (phase 7d: the hook lists them once at session start). ``fresh`` is
+    ``freshness.freshness`` of the project's folder (with the changed files); a reference's ``changed`` is true
+    when its HEAD moved since its index (``ahead`` or ``different``). ``check`` False runs no git: unknown."""
     if project is None or getattr(project, "code_map", False) is not True:
         return {}
     row = await _ok_index(s, project.id, need_sha=False)
@@ -190,14 +244,21 @@ async def _code_map(s, project, ref_projects: list) -> dict:
         [m for m in servers if m.scope != "project" or m.project == project.name])
     if server is None:
         return {}
-    refs = []
+    refs, unmapped = [], []
     for real, ref in ref_projects:
-        if getattr(ref, "code_map", False) is True:
-            rrow = await _ok_index(s, ref.id)
-            if rrow is not None:
-                refs.append({"dir": real, "sha": rrow.sha})
-    return {"code_map": {"sha": row.sha, "indexed_at": _iso(row.indexed_at), "prefix": cm_status.tool_prefix(server)},
-            "code_map_refs": refs}
+        rrow = await _ok_index(s, ref.id) if getattr(ref, "code_map", False) is True else None
+        if rrow is None:
+            if ref.name not in unmapped:
+                unmapped.append(ref.name)
+            continue
+        refs.append({"dir": real, "sha": rrow.sha})
+    checks = [(getattr(project, "directory", None), row.sha, True)] + [(r["dir"], r["sha"], False) for r in refs]
+    fresh = await _freshness(checks) if check else [_fresh_unknown() for _c in checks]
+    for r, f in zip(refs, fresh[1:]):
+        r["changed"] = f["state"] in ("ahead", "different")
+    return {"code_map": {"sha": row.sha, "indexed_at": _iso(row.indexed_at), "prefix": cm_status.tool_prefix(server),
+                         "fresh": fresh[0]},
+            "code_map_refs": refs, "code_map_unmapped": unmapped}
 
 
 async def _ui_skills(project) -> str | None:
@@ -214,7 +275,9 @@ async def _ui_skills(project) -> str | None:
         return None
 
 
-async def gather(s, *, task, project, owner_id: str | None, mcp: dict | None) -> PolicyInputs:
+async def gather(s, *, task, project, owner_id: str | None, mcp: dict | None,
+                 freshness: bool = True) -> PolicyInputs:
+    """See the module doc. ``freshness`` False (the gate runner) skips the code map freshness git checks."""
     events: list[dict] = []
     if project is None:
         trust, quarantine, on_no_answer = "own", False, "deny"  # an ad-hoc sandbox: our own workspace
@@ -271,7 +334,7 @@ async def gather(s, *, task, project, owner_id: str | None, mcp: dict | None) ->
         if snap and index:
             policy["decisions"] = snap
             policy["decisions_index"] = index
-    policy.update(await _code_map(s, project, ref_projects))
+    policy.update(await _code_map(s, project, ref_projects, freshness))
     main_text, helper_text = ground_rules.main_text(ground), policy["helper_context"]
     ui_text = await _ui_skills(project)
     included = list(ground_rules.included(ground))

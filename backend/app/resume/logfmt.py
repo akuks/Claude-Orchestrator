@@ -116,6 +116,10 @@ def _kind(ev: dict) -> tuple[str, str] | None:
         return _band(p)
     if etype == "auto_continue":
         return "AUTO", p.get("text") or ""
+    if etype == "summary":  # phase 7d: older history tidied into one event (app.retention)
+        n = p.get("events")
+        n = n if isinstance(n, int) and not isinstance(n, bool) else 0
+        return "TIDIED", f"older run history kept as a summary ({n} events)"
     return None
 
 

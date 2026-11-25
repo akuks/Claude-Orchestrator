@@ -581,3 +581,37 @@ describe('TaskDetail: launch item and risk', () => {
     expect(view.container.querySelector('.co-terminal').textContent).toContain('Marked critical: critical path src/billing')
   })
 })
+
+describe('summary run-log line', () => {
+  it('is one plain line, never JSON', () => {
+    const l = renderLine({ type: 'summary', payload: { events: 30, counts: { text_output: 30 }, lines: ['a'], kept_days: 60 } })
+    expect(l.text).toBe('Older run history kept as a summary (30 events).')
+    expect(l.text).not.toContain('{')
+  })
+})
+
+describe('summary line Details toggle', () => {
+  let view
+  const RealWS = globalThis.WebSocket
+  afterEach(async () => {
+    await view?.unmount()
+    view = null
+    globalThis.WebSocket = RealWS
+    FakeSocket.all = []
+  })
+  it('shows the kept lines as plain text under a collapsed Details', async () => {
+    globalThis.WebSocket = FakeSocket
+    view = await render(<TaskDetail inline taskId="a" />)
+    await flush()
+    await act(async () =>
+      FakeSocket.all.at(-1).onmessage({ data: JSON.stringify({ seq: 1, type: 'summary', payload: { events: 3, counts: { text_output: 3 }, lines: ['first kept line', 'second {kept} line'] } }) }),
+    )
+    const d = view.container.querySelector('[data-testid="summary-details"]')
+    expect(d.open).toBe(false)
+    expect(d.querySelector('summary').textContent).toBe('Details')
+    expect(d.textContent).toContain('first kept line')
+    expect(d.textContent).toContain('second {kept} line')
+    expect(view.container.textContent).toContain('Older run history kept as a summary (3 events).')
+    expect(view.container.textContent).not.toContain('"counts"')
+  })
+})

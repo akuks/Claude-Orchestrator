@@ -1,169 +1,108 @@
 # Claude-Orchestrator
 
-A self-hosted, **team orchestration layer for Claude Code** — run, stream, govern,
-and audit Claude Code tasks from a web dashboard instead of one-off terminal
-sessions. Where `claude` runs one agent locally, this runs *many* — with a queue,
-isolation, project memory, scheduling, human approvals, MCP credential governance,
-cost caps, security reviews, and reusable agent roles.
+A self-hosted web app for running Claude Code as a team. People start, watch,
+approve, continue and review Claude Code tasks from a browser instead of one-off
+terminal sessions. Where `claude` runs one agent on your machine, this runs many,
+with a queue, a login per person, project memory, schedules and workflows, human
+approvals, a guard that checks every tool call, cost and plan-limit care, security
+reviews and reusable agent roles.
 
-> **Status:** Phases 1–5 complete, plus agents, security reviews, cost tracking,
-> reports, headless deploy, and CI. Remaining: Team & Auth. Full roadmap in
-> `claude-orchestrator-features.md`.
+Most of the agent-side features (the guard, handoffs, token care, decisions,
+command gates, the code map and more) are a port of the open-source
+**jspark-forge** Claude Code plugin (MIT), adapted to a multi-user server. The
+port map is in
+[`docs/research/jspark-forge-feature-inventory.md`](docs/research/jspark-forge-feature-inventory.md).
 
-> **Upgrading to the guard release?** Every task now runs under **co-guard**,
-> a hook that checks each tool call before it runs. What changes for you:
->
-> - **The guard is on for every project** (Project → Guard). Turning it off
->   switches off the built-in command rules only; MCP approvals/blocks and the
->   orchestrator's self-protection always apply.
-> - **MCP tools set to "Require approval" now pause the run** for up to the
->   project's approval wait (default **300 s**, 60–900) until a person decides in
->   **Approvals → Actions**; if nobody answers, the call is **denied**. Change a
->   tool to **Auto-approve** in MCP Servers if it must run unattended.
-> - **Some commands need a person's approval, some are always denied** (see
->   [Agent guard](#agent-guard-co-guard)) — e.g. `git reset --hard`, force-push to
->   main, `rm -rf` outside the project (temp dirs are fine) need approval;
->   `rm -rf ~` / `rm -rf /` and touching the orchestrator's own files are denied.
-> - **Inline `` !`cmd` `` in skills, slash commands and skill packs is disabled**
->   (`disableSkillShellExecution`), and the **PowerShell tool is disallowed**.
-> - **Rarely, project settings are dropped for a run** (`--setting-sources
->   user`): when a project's `.claude/settings*.json` would switch hooks off.
-> - **`CO_BIND_HOST` / `CO_BACKEND_PORT` are now load-bearing**: they are the
->   approval address the hook calls. Use a literal IP for `CO_BIND_HOST`.
-> - **Tools co-guard does not know** (e.g. new ones after a Claude Code CLI
->   update) **need approval** until co-guard learns them.
-> - It is a **seatbelt, not a sandbox** — see the accepted limits below.
+> **Status:** multi-user login and roles, PostgreSQL, the co-guard agent guard and
+> forge port phases 1 to 7d are in. The newest are workflow run control, steps side
+> by side, Claude plan limits and upkeep. Several parts are tested only against a
+> mock `claude`: see [Check on a real run](#check-on-a-real-run). Upgrading? Read
+> [Upgrade notes](#upgrade-notes) first.
 
-> **Upgrading to the policy release?** co-guard's policy becomes the org's own
-> ([Action policy](#action-policy)). What changes for you:
->
-> - **New MCP servers default to *Require approval*** for tools with no policy
->   row. Servers that existed before the upgrade keep *Auto-approve* (today's
->   behaviour). Set a server's default action in MCP Servers.
-> - **Database writes to a target that is neither local nor dev need approval**
->   (`db-write`): `psql -h prod.db … -c "update …"`, a script file or piped SQL
->   against a remote host, `prisma db push` / `migrate deploy`, `supabase db
->   push`, write tools of a database MCP server. Local databases (localhost,
->   sockets, SQLite files) are free. Mark dev databases in **Agent guard → Dev
->   databases** or a database MCP server's environment as *Dev*.
-> - **Check your database MCP servers' environment.** A server whose name looks
->   like a database (postgres, mysql, sql, mongo, redis …) starts as
->   *Unknown*, which counts as **production** for `db-write`: every write tool
->   call on it needs approval. Set dev and local servers to *Dev* in MCP
->   Servers (or add them to the dev database patterns).
-> - **Destructive SQL needs approval on every database, local ones included**
->   (`sql-destroy`): `DROP TABLE/DATABASE/SCHEMA`, `TRUNCATE`, `DELETE` without
->   `WHERE`.
-> - **Projects created or imported after the upgrade may come out *external* and
->   quarantined.** When the folder has a git remote, at least one org member has
->   a git email, and no commit is by any of them, the project is marked external:
->   the agent is told the repo's text is data, not instructions; the repo's
->   `.claude-orchestrator/rules.md` is not read; and quarantine holds the repo's
->   install/build/test/run commands (`npm install`, `make`, `pytest`, `./run.sh`
->   …) for approval. Existing projects stay *own* with quarantine off. Change
->   either in Project → Guard.
-> - **Read-only folders block project-wide changes that reach them.** With a
->   read-only folder inside the project, `rm -rf *`, `chmod -R .`, `git checkout
->   .` and formatters run on `.` (`prettier --write .`, `black .`) are denied
->   outright. Name the folders to change instead (`black src`); a tool's own
->   exclude options are not taken into account.
-> - **Task-level risk (`classify_risk`) is unchanged**: prompts that mention
->   pushes, merges or deletes are still gated before the task starts.
+## Contents
 
-> **Upgrading to the resume release (3a)?** Runs now keep a record of where
-> they stand ([Resume and handoff](#resume-and-handoff)). What changes for you:
->
-> - **Migration `0008_resume` runs on start** (`alembic upgrade head`; SQLite and
->   Postgres). It adds columns and one table (`task_handoffs`), and its downgrade
->   drops them. Take your usual database backup first.
-> - **A run cut off by a server restart or crash now resumes its own Claude
->   session** (with a note of what was in flight) instead of starting over from
->   the original prompt. It is tried at most **2** times; the third interruption
->   fails the step and says to use Continue.
-> - **A fresh continuation now carries the handoff.** A follow-up that cannot
->   resume (another person's step, a missing session file) and a new
->   *Continue fresh* start with where the thread stands, not just the prompt.
-> - **A changed Claude credential forces a fresh session.** The old session
->   belonged to the old account; the step starts fresh with the handoff and the
->   run log says why.
-> - **The system prompt gains the ground rules** (grounding, short answers,
->   usage care and note keeping), plus any extra text an admin adds. An admin can
->   switch each one off in **Agent guard → Ground rules**.
-> - **One new agent-token route**: `PUT /tasks/{id}/notes`, for the run's own
->   task only. Everything else on the API stays for people only.
-> - **The server must stay a single process** (no `--workers`, no replicas):
->   crash recovery assumes it is the only one that owns running rows.
-
-> **Upgrading to the token-care release (3b)?** Steps now report their token
-> use and agents can ask you questions ([Token care and questions](#token-care-and-questions)).
-> What changes for you:
->
-> - **Migration `0009_tokens` runs on start** (SQLite and Postgres). It adds the
->   per-step usage and question tables and a few columns; its downgrade drops
->   them. Take your usual database backup first.
-> - **Every later step of a thread now keeps its parent's `max_budget_usd`**
->   (follow-up, Continue, automatic Continue, answer and co-guard follow-up
->   steps), as it already kept the model and max turns. Before, a later step of
->   a thread ran with no budget cap. **Duplicate** now copies the source's
->   budget too, or applies `CO_DEFAULT_TASK_BUDGET_USD` when the source had none,
->   the way a new task does.
-> - **The system prompt gains a *Questions* ground rule** (file a blocking
->   question with a recommendation, then end the turn). An admin can switch it
->   off in **Agent guard → Ground rules**.
-> - **Two new agent-token routes**, for the run's own task only:
->   `POST /tasks/{id}/questions` and `GET /tasks/{id}/questions`. An agent can
->   never answer or dismiss a question.
-> - **Nothing continues on its own until you set it**: the automatic fresh
->   Continue needs a project's *Fresh session at* setting, which is off by default.
-> - **The figures are not yet checked against the real `claude` CLI** (see the
->   section): treat them as estimates until your first live run confirms them.
+- **Start here:** [What it does](#what-it-does) · [Architecture](#architecture) ·
+  [Quickstart](#quickstart) · [Deploying for a team](#deploying-for-a-team) ·
+  [Configuration](#configuration-backendenv-prefix-co_) · [Upgrade notes](#upgrade-notes)
+- **Guard:** [Agent guard (co-guard)](#agent-guard-co-guard) ·
+  [Action policy](#action-policy) · [Seatbelt limits](#seatbelt-limits)
+- **Tasks and threads:** [Resume and handoff](#resume-and-handoff) ·
+  [Token care and questions](#token-care-and-questions) ·
+  [Claude plan limits](#claude-plan-limits) · [Ask about this run](#ask-about-this-run)
+- **Memory and decisions:** [Decision memory](#decision-memory) ·
+  [Suggested decisions](#suggested-decisions) ·
+  [Helper tiers and briefs](#helper-tiers-and-briefs)
+- **Workflows:** [Command gates](#command-gates) ·
+  [Workflow run control](#workflow-run-control) ·
+  [Steps side by side](#steps-side-by-side) · [Workflow templates](#workflow-templates) ·
+  [Typed outputs, retry and budget](#typed-outputs-retry-and-budget)
+- **Projects and code:** [Launch list](#launch-list) · [Code map](#code-map) ·
+  [Database tab](#database-tab) ·
+  [Recommended tools](#recommended-tools-for-projects-with-a-user-interface) ·
+  [Where connected tools start](#where-connected-tools-start) ·
+  [Published outside the project](#published-outside-the-project)
+- **System and upkeep:** [System health](#system-health) ·
+  [Licence hints](#licence-hints) · [Rules export](#rules-export) ·
+  [Skill lint](#skill-lint) · [Updating skill packs](#updating-skill-packs) ·
+  [Upkeep](#upkeep-closed-handoffs-tidying-sharper-notes)
+- **Security, agents and ops:** [Security reviews](#security-reviews-vapt--stqc) ·
+  [Agents](#agents) · [Personal automations](#personal-automations-life-dashboard) ·
+  [Remote Ops](#remote-ops-ssh-troubleshooting)
+- **Reference:** [REST API](#rest-api) · [Testing](#testing) ·
+  [Check on a real run](#check-on-a-real-run) ·
+  [Scope notes & limitations](#scope-notes--limitations) · [Operations](#operations)
 
 ---
 
 ## What it does
 
-| Area | Capabilities |
-|---|---|
-| **Tasks** | Queue + isolated worker pool, live WebSocket streaming, cancel / retry / duplicate / delete, **follow-up threads** (resume a Claude session), input files, artifacts |
-| **Projects & memory** | Projects mapped to repos, **Discover** existing Claude Code dirs, repo-backed runs, **context assembly** (instructions + living memory + relevant past summaries), auto-updated `memory.md` |
-| **MCP governance** | Server registry (3 scopes), **AES-256-GCM credential vault**, tool policies (auto-approve / require-approval / **block**), connection testing + tool discovery, call observability |
-| **Scheduling** | Cron schedules (presets + raw), next-run preview, pause/resume, run-now, run history, reusable **templates** + 6 automation presets, Slack notifications |
-| **Approvals** | Human-in-the-loop **inbox**, **auto-gate critical-risk** tasks, blast-radius context, approve/reject + reason, bulk approve, timeout auto-reject |
-| **Agents** | Reusable, **governed roles** — system prompt + model + budget + optional project — run under all guardrails |
-| **Security** | **VAPT/STQC security reviews** (read-only), a **findings tracker** (severity, CWE, status lifecycle, recurrence), and **GitHub PR → auto-review** webhooks |
-| **Cost & reliability** | Token/cost capture, **Usage dashboard**, per-project budgets + over-budget flags, **hard spend caps** (`--max-budget-usd`), **auto-retry** transient failures, fallback model |
-| **Reports** | Download any task's result as **PDF or DOCX** |
-| **Ops** | Headless auth (`ANTHROPIC_API_KEY`), readiness endpoint, `start.sh`, pytest suite + GitHub Actions CI |
+| Area | Capability | Read more |
+|---|---|---|
+| **Tasks & threads** | Queue with an isolated worker pool, live WebSocket streaming, cancel / retry / duplicate / delete | [Architecture](#architecture) |
+| | Follow-up threads that resume a Claude session; input files, output files (artifacts) | [REST API](#rest-api) |
+| | **Continue** a stopped step (resume or fresh), crash recovery, a **Where it stands** handoff card, the agent's own notes, ground rules in every system prompt | [Resume and handoff](#resume-and-handoff) |
+| | Token and cost figures per step, budget warnings to the agent, an automatic fresh session when the context grows | [Token care and questions](#token-care-and-questions) |
+| | A **Questions** inbox for agents' blocking questions; **Open handoffs** on Home | [Token care and questions](#token-care-and-questions) |
+| | A private, cheap **Ask about this run** card that answers from the run's record | [Ask about this run](#ask-about-this-run) |
+| **Guard & approvals** | **co-guard** checks every tool call before it runs: allow, ask a person, or deny | [Agent guard](#agent-guard-co-guard) |
+| | Org, project and repo rules; own vs external trust and quarantine; read-only folders and reference projects; dev databases | [Action policy](#action-policy) |
+| | Approval inbox: tasks (critical risk auto-gated, blast-radius context, bulk approve, timeout auto-reject) and single agent actions (approve once or for the run) | [Agent guard](#agent-guard-co-guard) |
+| | MCP governance: server registry (3 scopes), AES-256-GCM credential vault, tool policies (auto-approve / require approval / block), connection test, tool discovery, call observability | [Action policy](#action-policy) |
+| **Memory & decisions** | Projects mapped to repos, **Discover** existing Claude Code folders, context assembly (instructions + living memory + relevant past summaries), auto-updated `memory.md` | [REST API](#rest-api) |
+| | Numbered project decisions (`D-001`), shown to agents before they edit the files they cover, with a health check | [Decision memory](#decision-memory) |
+| | Suggested decisions from runs, thread lessons and answers; "may be out of date" flags | [Suggested decisions](#suggested-decisions) |
+| | Model tiers (strongest / standard / light), helper presets, task **briefs** that co-guard enforces for file tools | [Helper tiers and briefs](#helper-tiers-and-briefs) |
+| **Workflows** | Workflows drawn as a connected flow, in plain words, with built-in templates, export and import | [Workflow templates](#workflow-templates) |
+| | **Run a check** steps (the server runs commands; the exit code decides) and **Ask a person** steps; retry round, fix-it round, pre-flight, flaky tests named | [Command gates](#command-gates) |
+| | Approve ahead, one check at a time per project, run again from a step, time and spend per step | [Workflow run control](#workflow-run-control) |
+| | Steps that run side by side (up to 4 at once) | [Steps side by side](#steps-side-by-side) |
+| | Named outputs between steps, "Try once more if it fails", a spending limit per run | [Typed outputs, retry and budget](#typed-outputs-retry-and-budget) |
+| | Cron schedules (presets + raw), next-run preview, pause / resume, run now, run history, reusable templates + 6 automation presets, Slack notifications | [Agents](#agents) |
+| **Projects & code** | A launch list per project, a scope nudge on new tasks, critical-path warnings | [Launch list](#launch-list) |
+| | A code map (an outside indexing tool) with freshness, decisions and old-code notes on each answer | [Code map](#code-map) |
+| | A **Database** tab drawn from the project's SQL migration files | [Database tab](#database-tab) |
+| | Recommended tools and design-skill text for projects with a user interface | [Recommended tools](#recommended-tools-for-projects-with-a-user-interface) |
+| | Connected tools start from a private folder, not the project folder | [Where connected tools start](#where-connected-tools-start) |
+| | A card listing what a run published outside the project, and whether a copy is kept | [Published outside the project](#published-outside-the-project) |
+| **Usage, limits & cost** | Token / cost capture, **Usage** dashboard, per-project budgets and over-budget flags, hard spend caps (`--max-budget-usd`), auto-retry of transient failures, fallback model | [Configuration](#configuration-backendenv-prefix-co_) |
+| | Claude plan limits: a banner, and work waits for the reset instead of failing | [Claude plan limits](#claude-plan-limits) |
+| | Budget bands and the so-far line per thread | [Token care and questions](#token-care-and-questions) |
+| | A spending limit per workflow run | [Typed outputs, retry and budget](#typed-outputs-retry-and-budget) |
+| **System & upkeep** | A **System health** page for admins (15 checks, including a guard self-test) | [System health](#system-health) |
+| | Licence hints on projects | [Licence hints](#licence-hints) |
+| | Download the rules agents work under as `rules.md` | [Rules export](#rules-export) |
+| | Skill template and lint; check and update installed skill packs (pinned superpowers preset) | [Skill lint](#skill-lint), [Updating skill packs](#updating-skill-packs) |
+| | Closed handoffs stay closed, optional tidying of old run history, re-clone warning | [Upkeep](#upkeep-closed-handoffs-tidying-sharper-notes) |
+| **Security & reports** | VAPT / STQC security reviews (read-only), a findings tracker (severity, CWE, status, recurrence), GitHub PR auto-review webhooks | [Security reviews](#security-reviews-vapt--stqc) |
+| | Download any task's result as PDF or DOCX | [REST API](#rest-api) |
+| | Agents: reusable, governed roles (system prompt + model + budget + optional project) run under every guardrail | [Agents](#agents) |
+| | Personal automations (a daily Morning Brief) | [Personal automations](#personal-automations-life-dashboard) |
+| **Ops** | Multi-user login, PostgreSQL, HTTPS through a reverse proxy | [Deploying for a team](#deploying-for-a-team) |
+| | Headless auth (`ANTHROPIC_API_KEY`), readiness endpoint, `start.sh` | [Quickstart](#quickstart) |
+| | SSH troubleshooting agents (read-only diagnosis, approved remediation) | [Remote Ops](#remote-ops-ssh-troubleshooting) |
+| | pytest suite + GitHub Actions CI | [Testing](#testing) |
 
 ---
-
-## Claude plan limits
-
-Claude subscriptions (not API keys) have usage limits. The app now records what Claude reports about the plan and
-reacts to it:
-
-- A banner at the top says when your plan limit was reached ("Work starts again at 14:05") or is close.
-- Work that needs a limited credential waits instead of failing: tasks show "Paused" with the time they start again,
-  and workflow steps are held, then continue after the reset. Nothing is switched to the org fallback key.
-- The Usage page has a "Claude plan" card (status, reset time, last checked; raw figures under "Details").
-- Admins see a tag per person on the Users page and a "Try now" button that clears a stale hold.
-
-To know:
-
-- Not run against the real `claude` CLI. The event's exact shape and when it is sent come from the documentation.
-- There is no live "% of your 5-hour window" between events: the headless stream does not give one reliably.
-- No automatic fallback to the org key.
-- The 3rd limit hit in a row stops the task ("Stopped — the Claude plan limit was reached three times in a row.").
-- A hold that is not confirmed is capped at 6 hours and re-checked every few minutes.
-- API keys and the org fallback key are never held: plan limits do not apply to them.
-
-Owner checklist, on one real run with a subscription token:
-
-1. Does the run emit a `rate_limit_event` at all (a setup-token run may not)?
-2. Is `resetsAt` in seconds or milliseconds (the app guesses: above 10^12 means milliseconds)?
-3. What scale is `utilization` (0-1 or 0-100)? It is shown only under "Details".
-4. Which window does it describe (5-hour or 7-day)?
-5. What does a run that hits the limit print, and is it recognised (task pauses with the right time)?
 
 ## Architecture
 
@@ -305,6 +244,363 @@ guardrails.
 
 ---
 
+## Upgrade notes
+
+What changes for people already running the app, newest release first. Database
+migrations run on start (`alembic upgrade head`; SQLite and Postgres), in order, so
+a server that skipped several releases runs each of them in turn. **Take your usual
+database backup first** whenever an entry names a migration. The server must stay a
+single process (no `--workers`, no replicas).
+
+### Upkeep (phase 7d)
+
+See [Upkeep](#upkeep-closed-handoffs-tidying-sharper-notes).
+
+- **Migration `0022_upkeep` runs on start.** It adds the tidying setting,
+  `projects.root_commit` and indexes on `task_events` (`created_at`, and `task_id`
+  where a database lacks it). On a large run history the first start can take a few
+  minutes while the index is built. Take your usual database backup first.
+- **Handoffs now close on their own after a success.** When a task completes and
+  nothing is left open (no open question, no open to-do, no step still running), the
+  system closes its handoff, so the thread leaves **Home → Open handoffs**. A closed
+  handoff stays closed until a new run of the thread (Continue, Retry, a follow-up).
+  Failed, cancelled and waiting tasks stay open.
+- **Tidying is off by default.** Nothing in the run history changes until an admin
+  switches on **Tidy old run history** in **System health**. Once on, it cannot bring
+  back what it replaced.
+- **Decisions now show before shell commands that write files**, not only before
+  `Edit` / `Write`.
+- **Re-clone warning.** Each project now remembers its repository's first commit. A
+  folder that later holds a different repository shows a warning on the run and in
+  **System health → Project folders** until a maintainer presses **This is expected**.
+- **The code-map note at task start is sharper**: current, N commits behind (with up
+  to 10 changed files), a different history, or could not check.
+
+### Claude plan limits (phase 7c)
+
+See [Claude plan limits](#claude-plan-limits).
+
+- **Migration `0021_plan_limits` runs on start.** It adds `plan_limit_status` (the
+  latest reading per credential owner) and `tasks.not_before` / `tasks.wait_reason`.
+  Take your usual database backup first.
+- **Work on a subscription credential that hits its plan limit now waits instead of
+  failing.** Tasks show "Paused" with the time they start again; workflow steps are
+  held and continue after the reset. The 3rd limit hit in a row stops the task.
+- **Holds are per credential owner.** One hit holds every task on that person's
+  credential. API keys and the org fallback key are never held, and nothing is
+  switched to the org key. A hold that is not confirmed lasts at most 6 hours; admins
+  can clear a stale one with **Try now** on the Users page.
+- **New on screen:** a banner when the limit is reached or close, and a "Claude plan"
+  card on the Usage page.
+
+### Steps side by side (phase 7b)
+
+See [Steps side by side](#steps-side-by-side). No migration.
+
+- **Existing workflows keep running one step after another**, exactly as before.
+- A step can now say which earlier steps it **waits for**; **Steps at the same time**
+  defaults to 2 (1 to 4). Once any step says what it waits for, a step cannot be
+  moved above a step it waits for.
+- **A failing step stops the other steps that are working**, the same way Cancel
+  does; Retry continues.
+
+### Workflow run control (phase 7a)
+
+See [Workflow run control](#workflow-run-control). No migration.
+
+- **Approve ahead is opt-in per step.** Workflows saved before this update have no
+  step marked "Can be approved ahead" until you switch it on in the step's form. The
+  built-in template marks only "Approve plan".
+- **Check steps now take a lock on the project folder.** A check waits ("Waiting its
+  turn") while another run's checks hold the same project; it never fails because of
+  it. Agent steps are not locked.
+- **New:** "Run again from here" on a finished run, and a time and spend line on each
+  step. The handoff card lists "Re-check before acting" items and the newest 5 files.
+
+### Database tab, recommended tools and published links (phase 6c)
+
+See [Database tab](#database-tab),
+[Recommended tools](#recommended-tools-for-projects-with-a-user-interface) and
+[Published outside the project](#published-outside-the-project).
+
+- **Migration `0020_ui_skills` runs on start.** It adds `projects.ui_skills` (on for
+  every existing project) and `projects.brand_skill`. Take your usual database
+  backup first.
+- **Projects with a user interface get one extra sentence** in agents' start text,
+  asking them to load the frontend-design skill (and a brand skill), from the first
+  task after the update. Switch it off per project on the **Recommended** tab.
+- **The "Keep a copy in the project" ground rule is on for everyone.** An admin can
+  switch it off in **Agent guard → Ground rules**.
+- The **Database** tab only reads SQL migration files and never connects to a
+  database. The **Recommended** tab adds a tool only on an admin's click.
+
+### Connected tools start from a private folder
+
+See [Where connected tools start](#where-connected-tools-start).
+
+- **Migration `0019_mcp_cwd` runs on start.** It adds `mcp_servers.start_in_project`
+  (off). Take your usual database backup first.
+- **Every connected tool that runs as a program (stdio) now starts from a private
+  folder**, not the project folder, from its next task. Nothing needs doing. If a tool
+  stops working, turn on its **Start in the project folder** switch (admins, under
+  **More options**).
+- **A command that starts with `./` needs that switch**; the form refuses to save it
+  otherwise.
+- **Tools use their own npm cache and an empty npm global folder**
+  (`workspaces/_mcp_cache/`), not the server user's `~/.npm`. A package installed
+  with `npm install -g` is no longer picked up by `npx`.
+- **The guard now refuses**, in folders above the tool folders, direct writes of
+  launcher files (`package.json`, `.npmrc`, `node_modules` …) and package installs. The
+  task's own project works as before.
+- The tool settings folder of a task is removed when the task ends.
+- **A project folder can no longer be the orchestrator's own code**, migrations,
+  venv or private `workspaces/_…` folders (422).
+- Optional: `CO_TOOL_RUN_DIR` for a stricter setup.
+
+### Code map (phase 6b)
+
+See [Code map](#code-map).
+
+- **Migration `0018_codemap` runs on start.** It adds `projects.code_map` and the
+  `project_indexes` table. Take your usual database backup first.
+- **Nothing is built until two people opt in**: an admin adds the **Code map**
+  connected tool, and a maintainer switches the map on for a project.
+- **System health** gains a **Code map** card.
+
+### System health, licence hints, rules export, skill packs (phase 6a)
+
+See [System health](#system-health), [Licence hints](#licence-hints),
+[Rules export](#rules-export) and [Updating skill packs](#updating-skill-packs).
+
+- **Migration `0017_health` runs on start.** It adds `projects.licence`,
+  `skill_packs.latest_sha` and `skill_packs.checked_at`. Take your usual database
+  backup first.
+- **Licence badges are worked out when a project is created, imported or moved.**
+  An existing project gets one when its folder changes or a maintainer presses
+  **Check again**.
+- Admins get the **System health** page. It runs only when opened.
+- **Skill packs are never updated on their own.** An admin uses **Check for update**
+  and **Update**. The superpowers preset installs a pinned commit.
+- Anyone signed in can download the rules as `rules.md`.
+
+### Typed outputs, retry and spending limit (phase 5c)
+
+See [Typed outputs, retry and budget](#typed-outputs-retry-and-budget).
+
+- **Migration `0016_stages` runs on start.** It adds `tasks.outputs`,
+  `workflows.budget_usd` / `workflow_runs.budget_usd` and
+  `project_launches.raise_risk`. Take your usual database backup first.
+- **`{{prev}}` typed into a run's input is no longer expanded** (before 5c it was),
+  and placeholders inside outputs or results are never expanded. A prompt with no
+  placeholder still gets the run input appended.
+- **Existing workflows have no named outputs, no "Try once more", no spending limit
+  and no fixer agent** until an admin adds them in the editor.
+- The "treat tasks that mention a critical file as high risk" switch is off by
+  default. A task can now be linked to a launch item after it was created.
+
+### Plain-language workflow screens and the flow canvas
+
+No migration; the screens only.
+
+- The workflow editor, list, template picker and run page use plain words ("Run a
+  check", "Ask a person") and draw the steps as a connected flow. Technical details
+  sit under **Details**.
+
+### Launch list, workflow templates, skill lint (phase 5b)
+
+See [Launch list](#launch-list), [Workflow templates](#workflow-templates) and
+[Skill lint](#skill-lint).
+
+- **Migration `0015_launch` runs on start.** It adds `project_launches`,
+  `launch_items`, `projects.launch_seq` and `tasks.launch_item_id`. Take your usual
+  database backup first.
+- **In a project with a launch list, the new-task form may show a scope nudge.** It
+  never blocks. Own projects with a launch list also give agents a short launch block.
+- **A task cancelled during the retry wait now ends `cancelled`**, instead of being
+  left queued.
+- New: **New from template**, workflow export and import (admins), and the skill lint
+  panel on the **Skills** tab.
+
+### Command gates (phase 5a)
+
+See [Command gates](#command-gates).
+
+- **Migration `0014_gates` runs on start.** It adds run stage state and log,
+  `tasks.stage_attempt` and the `workflow_gate_runs` table. Take your usual database
+  backup first.
+- **Existing stages stay agent stages** (`kind` defaults to `agent`).
+- **Retrying a run no longer deletes the failed stage's tasks.** Earlier attempts are
+  kept and shown collapsed; `{{prev}}` / `{{stageN}}` use the current attempt.
+- **Git is stricter on project repos.** Repo-defined filter drivers are switched off
+  and submodules are never entered, so a dirty submodule is not reported.
+- Agent runs that run tests get a "Tests: …" line in the run log.
+
+### Helper tiers and briefs (phase 4c)
+
+See [Helper tiers and briefs](#helper-tiers-and-briefs).
+
+- **Migration `0013_briefs` runs on start.** It adds the org model tiers,
+  `agents.tier` and task briefs. Take your usual database backup first.
+- **Agents keep their own model.** The tiers default to `opus`, `sonnet` and `haiku`.
+- **Read-only now carries through.** A read-only agent stays read-only as a
+  workflow step or a dispatched child, and follow-ups, Continue and Duplicate of a
+  read-only task stay read-only.
+- The agent form shows lint warnings; a save is never refused for them.
+
+### Suggested decisions (phase 4b)
+
+See [Suggested decisions](#suggested-decisions).
+
+- **Migration `0012_proposals` runs on start.** It adds `decision_proposals` and the
+  decision stale flags. Take your usual database backup first.
+- **After a run that commits on an own project, one cheap model call** (`haiku`, on
+  the run owner's credential) may suggest up to 2 decisions; closing a thread asks one
+  call for lessons. Set `CO_PROPOSALS_ENABLED=false` to stop the automatic part.
+- **Nothing becomes a decision until a maintainer accepts it.**
+
+### Decision memory (phase 4a)
+
+See [Decision memory](#decision-memory).
+
+- **Migration `0011_decisions` runs on start.** It adds `project_decisions` and
+  `projects.decision_seq`. Take your usual database backup first.
+- The new **Decisions** ground-rules switch is on. Runs change only on own projects
+  that have decisions: their agents get a short index and notes before edits.
+
+### Ask about this run (phase 3c)
+
+See [Ask about this run](#ask-about-this-run).
+
+- **Migration `0010_asks` runs on start.** It adds `run_asks`. Take your usual
+  database backup first.
+- **An ask is paid by the asker's own Claude credential** (or the org fallback key).
+  `CO_ASK_ENABLED` is on by default.
+- Fixes to 3b: the task page waits for the final status, so the closing question
+  shows; a retried step's earlier final-text questions are dismissed; **Open
+  handoffs** pages through more candidates.
+
+### Token care (phase 3b)
+
+Steps now report their token use and agents can ask you questions
+([Token care and questions](#token-care-and-questions)).
+
+- **Migration `0009_tokens` runs on start** (SQLite and Postgres). It adds the
+  per-step usage and question tables and a few columns; its downgrade drops
+  them. Take your usual database backup first.
+- **Every later step of a thread now keeps its parent's `max_budget_usd`**
+  (follow-up, Continue, automatic Continue, answer and co-guard follow-up
+  steps), as it already kept the model and max turns. Before, a later step of
+  a thread ran with no budget cap. **Duplicate** now copies the source's
+  budget too, or applies `CO_DEFAULT_TASK_BUDGET_USD` when the source had none,
+  the way a new task does.
+- **The system prompt gains a *Questions* ground rule** (file a blocking
+  question with a recommendation, then end the turn). An admin can switch it
+  off in **Agent guard → Ground rules**.
+- **Two new agent-token routes**, for the run's own task only:
+  `POST /tasks/{id}/questions` and `GET /tasks/{id}/questions`. An agent can
+  never answer or dismiss a question.
+- **Nothing continues on its own until you set it**: the automatic fresh
+  Continue needs a project's *Fresh session at* setting, which is off by default.
+- **The figures are not yet checked against the real `claude` CLI** (see the
+  section and [Check on a real run](#check-on-a-real-run)): treat them as estimates
+  until your first live run confirms them.
+
+### Resume and handoff (phase 3a)
+
+Runs now keep a record of where they stand ([Resume and handoff](#resume-and-handoff)).
+
+- **Migration `0008_resume` runs on start** (`alembic upgrade head`; SQLite and
+  Postgres). It adds columns and one table (`task_handoffs`), and its downgrade
+  drops them. Take your usual database backup first.
+- **A run cut off by a server restart or crash now resumes its own Claude
+  session** (with a note of what was in flight) instead of starting over from
+  the original prompt. It is tried at most **2** times; the third interruption
+  fails the step and says to use Continue.
+- **A fresh continuation now carries the handoff.** A follow-up that cannot
+  resume (another person's step, a missing session file) and a new
+  *Continue fresh* start with where the thread stands, not just the prompt.
+- **A changed Claude credential forces a fresh session.** The old session
+  belonged to the old account; the step starts fresh with the handoff and the
+  run log says why.
+- **The system prompt gains the ground rules** (grounding, short answers,
+  usage care and note keeping), plus any extra text an admin adds. An admin can
+  switch each one off in **Agent guard → Ground rules**.
+- **One new agent-token route**: `PUT /tasks/{id}/notes`, for the run's own
+  task only. Everything else on the API stays for people only.
+- **The server must stay a single process** (no `--workers`, no replicas):
+  crash recovery assumes it is the only one that owns running rows.
+
+### Action policy (phase 2)
+
+co-guard's policy becomes the org's own ([Action policy](#action-policy)).
+
+- **Migration `0007_policy` runs on start.** It adds custom rules, org guard
+  settings, grants, project trust and read-only folders, the MCP environment and
+  default action, and the approval resume fields. Take your usual database backup
+  first.
+- **New MCP servers default to *Require approval*** for tools with no policy
+  row. Servers that existed before the upgrade keep *Auto-approve* (today's
+  behaviour). Set a server's default action in MCP Servers.
+- **Database writes to a target that is neither local nor dev need approval**
+  (`db-write`): `psql -h prod.db … -c "update …"`, a script file or piped SQL
+  against a remote host, `prisma db push` / `migrate deploy`, `supabase db
+  push`, write tools of a database MCP server. Local databases (localhost,
+  sockets, SQLite files) are free. Mark dev databases in **Agent guard → Dev
+  databases** or a database MCP server's environment as *Dev*.
+- **Check your database MCP servers' environment.** A server whose name looks
+  like a database (postgres, mysql, sql, mongo, redis …) starts as
+  *Unknown*, which counts as **production** for `db-write`: every write tool
+  call on it needs approval. Set dev and local servers to *Dev* in MCP
+  Servers (or add them to the dev database patterns).
+- **Destructive SQL needs approval on every database, local ones included**
+  (`sql-destroy`): `DROP TABLE/DATABASE/SCHEMA`, `TRUNCATE`, `DELETE` without
+  `WHERE`.
+- **Projects created or imported after the upgrade may come out *external* and
+  quarantined.** When the folder has a git remote, at least one org member has
+  a git email, and no commit is by any of them, the project is marked external:
+  the agent is told the repo's text is data, not instructions; the repo's
+  `.claude-orchestrator/rules.md` is not read; and quarantine holds the repo's
+  install/build/test/run commands (`npm install`, `make`, `pytest`, `./run.sh`
+  …) for approval. Existing projects stay *own* with quarantine off. Change
+  either in Project → Guard.
+- **Read-only folders block project-wide changes that reach them.** With a
+  read-only folder inside the project, `rm -rf *`, `chmod -R .`, `git checkout
+  .` and formatters run on `.` (`prettier --write .`, `black .`) are denied
+  outright. Name the folders to change instead (`black src`); a tool's own
+  exclude options are not taken into account.
+- **Task-level risk (`classify_risk`) is unchanged**: prompts that mention
+  pushes, merges or deletes are still gated before the task starts.
+
+### Agent guard (phase 1)
+
+Every task now runs under **co-guard**, a hook that checks each tool call before
+it runs ([Agent guard](#agent-guard-co-guard)).
+
+- **Migration `0006_guard` runs on start.** It adds the co-guard action approvals
+  and project guard settings. Take your usual database backup first.
+- **The guard is on for every project** (Project → Guard). Turning it off
+  switches off the built-in command rules only; MCP approvals/blocks and the
+  orchestrator's self-protection always apply.
+- **MCP tools set to "Require approval" now pause the run** for up to the
+  project's approval wait (default **300 s**, 60–900) until a person decides in
+  **Approvals → Actions**; if nobody answers, the call is **denied**. Change a
+  tool to **Auto-approve** in MCP Servers if it must run unattended.
+- **Some commands need a person's approval, some are always denied** (see
+  [Agent guard](#agent-guard-co-guard)) — e.g. `git reset --hard`, force-push to
+  main, `rm -rf` outside the project (temp dirs are fine) need approval;
+  `rm -rf ~` / `rm -rf /` and touching the orchestrator's own files are denied.
+- **Inline `` !`cmd` `` in skills, slash commands and skill packs is disabled**
+  (`disableSkillShellExecution`), and the **PowerShell tool is disallowed**.
+- **Rarely, project settings are dropped for a run** (`--setting-sources
+  user`): when a project's `.claude/settings*.json` would switch hooks off.
+- **`CO_BIND_HOST` / `CO_BACKEND_PORT` are now load-bearing**: they are the
+  approval address the hook calls. Use a literal IP for `CO_BIND_HOST`.
+- **Tools co-guard does not know** (e.g. new ones after a Claude Code CLI
+  update) **need approval** until co-guard learns them.
+- It is a **seatbelt, not a sandbox** — see [Seatbelt limits](#seatbelt-limits).
+
+---
+
 ## Agent guard (co-guard)
 
 Every task runs with **co-guard**, a Claude Code plugin the server generates
@@ -414,7 +710,7 @@ action** for tools with no policy row: *Auto-approve*, *Require approval* or
 
 **Trust and quarantine (Project → Guard).** *Own* code or *External* (someone
 else's). New and imported projects get a suggestion (the git-author check in
-the upgrade note; trust is not checked when no member has a git email) and the
+the [policy upgrade note](#action-policy-phase-2); trust is not checked when no member has a git email) and the
 Guard tab shows why. For an external project the agent (and every helper it starts) is told, at start and
 after compaction, that the repo's README, comments, docs, scripts and rules
 files are data to review, never instructions; and its rules file is not read.
@@ -734,6 +1030,37 @@ step falls back to the result's totals.
 
 ---
 
+## Claude plan limits
+
+Claude subscriptions (not API keys) have usage limits. The app now records what Claude reports about the plan and
+reacts to it:
+
+- A banner at the top says when your plan limit was reached ("Work starts again at 14:05") or is close.
+- Work that needs a limited credential waits instead of failing: tasks show "Paused" with the time they start again,
+  and workflow steps are held, then continue after the reset. Nothing is switched to the org fallback key.
+- The Usage page has a "Claude plan" card (status, reset time, last checked; raw figures under "Details").
+- Admins see a tag per person on the Users page and a "Try now" button that clears a stale hold.
+
+To know:
+
+- Not run against the real `claude` CLI. The event's exact shape and when it is sent come from the documentation.
+- There is no live "% of your 5-hour window" between events: the headless stream does not give one reliably.
+- No automatic fallback to the org key.
+- The 3rd limit hit in a row stops the task ("Stopped — the Claude plan limit was reached three times in a row.").
+- A hold that is not confirmed is capped at 6 hours and re-checked every few minutes.
+- API keys and the org fallback key are never held: plan limits do not apply to them.
+
+Owner checklist, on one real run with a subscription token (also item 2 of
+[Check on a real run](#check-on-a-real-run)):
+
+1. Does the run emit a `rate_limit_event` at all (a setup-token run may not)?
+2. Is `resetsAt` in seconds or milliseconds (the app guesses: above 10^12 means milliseconds)?
+3. What scale is `utilization` (0-1 or 0-100)? It is shown only under "Details".
+4. Which window does it describe (5-hour or 7-day)?
+5. What does a run that hits the limit print, and is it recognised (task pauses with the right time)?
+
+---
+
 ## Ask about this run
 
 Phase 3c of the forge port. A running `claude -p` step cannot be talked to, and
@@ -944,6 +1271,8 @@ and that agents really follow the index line and file suggestions, are checked
 on the first live use. Run a task that commits to an own project and look at the
 queue before you rely on it.
 
+---
+
 ## Helper tiers and briefs
 
 Phase 4c of the forge port. Two things: agents can be bound to a **model tier**
@@ -1043,6 +1372,8 @@ For tasks in a sandbox workspace, put the output paths under CAN.
 PreToolUse deny reason reaches the model as worded (so it stops and reports rather
 than retrying), and that agents follow the brief text, are unverified until a real
 `claude` run. Run a brief with a CANNOT folder and read the log before relying on it.
+
+---
 
 ## Command gates
 
@@ -1275,89 +1606,6 @@ applies. The diff is hashed, never stored or shown.
 
 ---
 
-## Launch list
-
-Phase 5b of the forge port. Each project can keep a short list of what must ship
-before a launch date, what waits until after, and which paths are critical. It is
-stored in the database (not in a repo file), so several people can edit it.
-It lives in the project drawer, on the **Launch** tab.
-
-- **Items.** Each item has a number shown as `#7`, a title (1 to 200 characters,
-  one line, cleaned and redacted), a section (`before` or `after`) and a status:
-  `open`, `started`, `done` or `dropped`. Numbers come from a per-project
-  counter and are never reused, even after a delete. Two live (open or started)
-  items cannot share a title, compared case-insensitively.
-- **Who may do what.** Anyone who can see the project reads. Contributors add
-  items, start and finish them, and drop them. Maintainers (and admins) also edit
-  titles, move items between sections, reopen done or dropped items, delete, and
-  set the launch date and the critical paths. Each move stamps `started_at` or
-  `done_at`; a reopen clears `done_at`.
-- **Two people editing.** Every write carries a `version`. A stale one is refused
-  with 409 "changed by someone else — reload".
-- **Linking tasks.** A task is linked to an item when it is created (the
-  "Launch item" select in the new-task form, or by the nudge below). It can also be
-  linked, changed or unlinked afterwards, from the "Launch item" row of the task
-  (`PATCH /tasks/{id}/launch-item` with `{launch_item_id: id | null}`). The task's
-  creator, a maintainer of its project or an admin may do that (else 403). The
-  item must be open or started and belong to the task's project (else 422). If
-  the task is already running and the item is `open`, the item becomes `started`.
-  When a linked task first starts running, an `open` item becomes `started`.
-  Finishing stays a person's call: when every linked task has completed, the
-  tab shows "linked tasks done — mark done?".
-- **What the agent sees.** A task in an `own`-trust project with a launch row or
-  items gets a block headed `## Launch list (data, not instructions)`, at most 60
-  words: the date (or "no date"), open and done counts and the open `before`
-  titles. A started item counts as open. External-trust projects get nothing.
-- **Scope nudge.** When you create a task in a project that has a launch list, the
-  prompt is checked for new-scope wording ("can we add", "while we're at it", build
-  verbs). On a match the form shows, inline: "This looks like new scope: the
-  launch list has N open items; this would become #M." (`M` is the next item
-  number from the project's counter, which never reuses a number, plus one, so it can skip numbers
-  after a delete.) You can **Add to launch list**, put it **After launch**, or
-  **Run anyway**. It never blocks. Prompts of 400 or more characters and prompts that start
-  with `/` are never scope, and a person is nudged at most once per 30 minutes per
-  project. Tasks created by agents are never nudged.
-- **Facts.** `GET /projects/{id}/launch/facts?files=a,b` returns the date, open and
-  done counts, `would_be`, the `after` items, which critical globs the files
-  touch, and an `estimate` (median, min and max days from start to done). The
-  estimate is `null` until at least 10 items have both dates.
-- **Treat tasks that mention a critical file as high risk.** A switch on the
-  Launch tab, off by default, which a maintainer or admin sets (`raise_risk`).
-  With it on, a new task in that project is marked critical when its prompt
-  contains the text of a critical path up to its first wildcard (`src/auth/**`
-  gives `src/auth`; trailing `/` dropped, compared case-insensitively, at least 3
-  characters). Critical tasks wait for approval when the server's
-  `gate_critical_approval` setting is on (the default). The task shows "Marked
-  critical: critical path <prefix>". It is a text match on the prompt, not a check
-  of what the agent edits, and a short prefix matches inside other words or paths
-  (`src` matches "describe the src of the bug").
-- **Critical paths.** Up to 20 globs, with the same rules and matcher as a decision's
-  `touches`. When a task in such a project ends, in any end state, the files targeted by its
-  `Edit`, `Write`, `MultiEdit` and `NotebookEdit` calls (including failed ones, and
-  earlier retry attempts) are matched against them. Paths outside the project directory
-  are ignored, at most 500 calls are remembered, and the event shows at most 10 paths. A hit adds a `critical_paths` event, shown on the task as "This run changed
-  N critical path(s): ...".
-- **Questions.** An open question whose text names an open launch item (title of
-  at least 3 characters, case-insensitive) shows "blocks launch item #3: Title".
-- A task cancelled during the retry backoff is ended as `cancelled` when the backoff
-  elapses, not left queued.
-
-### Not covered
-
-- **Repo-file sync.** There is no `launch.md` sync, and items that arrived with git
-  are not picked up.
-- **Critical paths raise risk only when the switch above is on, and only from
-  the prompt text.** After a run they warn about the files it changed. Short prefixes
-  over-match.
-- **Shell-command edits.** A change made by a shell command (`sed -i`, `git apply`)
-  is not seen by the critical-path check.
-- **Done dates.** A finished task does not mark its item done.
-- **The nudge cooldown** is in memory per server process, so a restart forgets it.
-- **Duplicate titles** are checked by reading first, so two identical adds at the same
-  instant could both pass (their numbers stay distinct).
-
----
-
 ## Workflow run control
 
 Phase 7a of the forge port. Four things on a workflow run, all on the run's own page.
@@ -1567,287 +1815,88 @@ cost of every task of the run, every attempt, fix tasks included.
 
 ---
 
-## Skill lint
+## Launch list
 
-The **Skills** tab has a **Skill template & lint** panel, ported from jspark-forge's
-skill lint. It shows a template `SKILL.md` and a box where you paste your own.
-**Lint** reports problems by line.
+Phase 5b of the forge port. Each project can keep a short list of what must ship
+before a launch date, what waits until after, and which paths are critical. It is
+stored in the database (not in a repo file), so several people can edit it.
+It lives in the project drawer, on the **Launch** tab.
 
-- **Rules.** The file starts with frontmatter that has `name` and a `description`
-  beginning "Use when". If the body has numbered parts with `Input:`, every part needs
-  `Input:`, `Action:` and `Output:`, and the last part is `Verify:` with `Evidence:`.
-  HTML comments are ignored, with line numbers kept. A plain skill with no `Input:`
-  parts needs only `name` and `description`. Text over 256 KB is refused (422).
-- **API.** `POST /skills/lint {text}` returns `{ok, problems: [{line, message}]}` and
-  `GET /skills/template` returns `{text}`. Any signed-in user may call them.
-- **Installed packs.** The **Lint** button on a pack calls `GET /skills/{id}/lint`,
-  which lints every `SKILL.md` in the pack's directory: at most 200 files and 256 KB
-  each (an oversized file reports "file too large"). It does not follow symlinks.
-  Project packs are only visible to that project's members.
-- **Warnings only.** Nothing is blocked, changed or saved.
+- **Items.** Each item has a number shown as `#7`, a title (1 to 200 characters,
+  one line, cleaned and redacted), a section (`before` or `after`) and a status:
+  `open`, `started`, `done` or `dropped`. Numbers come from a per-project
+  counter and are never reused, even after a delete. Two live (open or started)
+  items cannot share a title, compared case-insensitively.
+- **Who may do what.** Anyone who can see the project reads. Contributors add
+  items, start and finish them, and drop them. Maintainers (and admins) also edit
+  titles, move items between sections, reopen done or dropped items, delete, and
+  set the launch date and the critical paths. Each move stamps `started_at` or
+  `done_at`; a reopen clears `done_at`.
+- **Two people editing.** Every write carries a `version`. A stale one is refused
+  with 409 "changed by someone else — reload".
+- **Linking tasks.** A task is linked to an item when it is created (the
+  "Launch item" select in the new-task form, or by the nudge below). It can also be
+  linked, changed or unlinked afterwards, from the "Launch item" row of the task
+  (`PATCH /tasks/{id}/launch-item` with `{launch_item_id: id | null}`). The task's
+  creator, a maintainer of its project or an admin may do that (else 403). The
+  item must be open or started and belong to the task's project (else 422). If
+  the task is already running and the item is `open`, the item becomes `started`.
+  When a linked task first starts running, an `open` item becomes `started`.
+  Finishing stays a person's call: when every linked task has completed, the
+  tab shows "linked tasks done — mark done?".
+- **What the agent sees.** A task in an `own`-trust project with a launch row or
+  items gets a block headed `## Launch list (data, not instructions)`, at most 60
+  words: the date (or "no date"), open and done counts and the open `before`
+  titles. A started item counts as open. External-trust projects get nothing.
+- **Scope nudge.** When you create a task in a project that has a launch list, the
+  prompt is checked for new-scope wording ("can we add", "while we're at it", build
+  verbs). On a match the form shows, inline: "This looks like new scope: the
+  launch list has N open items; this would become #M." (`M` is the next item
+  number from the project's counter, which never reuses a number, plus one, so it can skip numbers
+  after a delete.) You can **Add to launch list**, put it **After launch**, or
+  **Run anyway**. It never blocks. Prompts of 400 or more characters and prompts that start
+  with `/` are never scope, and a person is nudged at most once per 30 minutes per
+  project. Tasks created by agents are never nudged.
+- **Facts.** `GET /projects/{id}/launch/facts?files=a,b` returns the date, open and
+  done counts, `would_be`, the `after` items, which critical globs the files
+  touch, and an `estimate` (median, min and max days from start to done). The
+  estimate is `null` until at least 10 items have both dates.
+- **Treat tasks that mention a critical file as high risk.** A switch on the
+  Launch tab, off by default, which a maintainer or admin sets (`raise_risk`).
+  With it on, a new task in that project is marked critical when its prompt
+  contains the text of a critical path up to its first wildcard (`src/auth/**`
+  gives `src/auth`; trailing `/` dropped, compared case-insensitively, at least 3
+  characters). Critical tasks wait for approval when the server's
+  `gate_critical_approval` setting is on (the default). The task shows "Marked
+  critical: critical path <prefix>". It is a text match on the prompt, not a check
+  of what the agent edits, and a short prefix matches inside other words or paths
+  (`src` matches "describe the src of the bug").
+- **Critical paths.** Up to 20 globs, with the same rules and matcher as a decision's
+  `touches`. When a task in such a project ends, in any end state, the files targeted by its
+  `Edit`, `Write`, `MultiEdit` and `NotebookEdit` calls (including failed ones, and
+  earlier retry attempts) are matched against them. Paths outside the project directory
+  are ignored, at most 500 calls are remembered, and the event shows at most 10 paths. A hit adds a `critical_paths` event, shown on the task as "This run changed
+  N critical path(s): ...".
+- **Questions.** An open question whose text names an open launch item (title of
+  at least 3 characters, case-insensitive) shows "blocks launch item #3: Title".
+- A task cancelled during the retry backoff is ended as `cancelled` when the backoff
+  elapses, not left queued.
 
 ### Not covered
 
-- **Writing skills.** The server writes no skill, brief or workflow into a project
-  directory; copy the template yourself.
-- **Other lint.** Briefs are checked by their own validator (phase 4c); agent and
-  graph file lint from forge are not ported.
-- **Packs on disk only.** Files beyond the 200-file cap are not checked.
+- **Repo-file sync.** There is no `launch.md` sync, and items that arrived with git
+  are not picked up.
+- **Critical paths raise risk only when the switch above is on, and only from
+  the prompt text.** After a run they warn about the files it changed. Short prefixes
+  over-match.
+- **Shell-command edits.** A change made by a shell command (`sed -i`, `git apply`)
+  is not seen by the critical-path check.
+- **Done dates.** A finished task does not mark its item done.
+- **The nudge cooldown** is in memory per server process, so a restart forgets it.
+- **Duplicate titles** are checked by reading first, so two identical adds at the same
+  instant could both pass (their numbers stay distinct).
 
 ---
-
-## System health
-
-Admins get a **System health** page (nav entry, `#/health`). It shows one overall line
-("Everything looks good", "2 things need attention" or "1 problem") and a card for each
-check, problems first. Each card has a coloured dot, a plain title, one sentence and a
-collapsed **Details** with versions, timings and a suggested fix.
-
-- **The fourteen checks.** Claude is installed; Python; Git; Node; The guard is intact;
-  The guard blocks what it should; Guard errors in the last 7 days; The app can write its
-  folders; Database is up to date; Connected tools; Skill packs; Code map; Docker (for 'wait until
-  ready' checks); Free disk space. A missing Node or Docker is only "attention"; a
-  missing Claude or Git is a problem.
-- **When it runs.** Only when an admin opens the page or presses **Check again**; there
-  is no background job. Results are reused for 30 seconds (per server process), and
-  **Check again** skips that reuse (`GET /admin/health?refresh=true`).
-- **Time limits.** Each check gets 10 seconds and the whole run 60. A check that fails,
-  times out or does not finish shows as a problem with the summary "could not check".
-- **What it runs.** The only Claude command is `claude --version`; a prompt is never
-  sent. It also runs `git --version`, `node --version` and `docker version`.
-- **Guard self-test.** It feeds the guard's hook one harmless command and one
-  dangerous command (`rm -rf /`) and checks the answers are allow and deny. The
-  dangerous command is only evaluated, never executed. The test uses a throw-away
-  policy and a throw-away folder, and is pointed away from the real server.
-- **Secrets.** Every summary and detail is scrubbed: known secrets are masked and home
-  folders show as `~`. Text is cut at 500 characters.
-- **API.** `GET /admin/health` returns `{checked_at, overall, checks}`. Admin only.
-
-### Not covered
-
-- **No auto-fix.** It reports and suggests; it changes nothing.
-- **No background monitoring and no alerts.** Nothing is recorded between visits and
-  nothing is sent when a check fails.
-
-## Licence hints
-
-A project shows a small licence badge when its code might not be yours to reuse freely.
-The badge shows on the project card, the table row and the drawer title. The project
-drawer also has a "Licence:" line.
-
-- **When the badge shows.** For every project whose trust is `external`, and for any
-  project whose licence is share-alike (copyleft), proprietary, or missing. Your own
-  project with a permissive or unrecognised licence shows nothing. The wording is the
-  licence name (for example "MIT"), "GPL-3.0 — share-alike", "All rights reserved" or
-  "… — not free for commercial use", "No licence found", or "Licence not recognised".
-  The tooltip says "A hint, not legal advice."
-- **Kinds.** `permissive`, `copyleft`, `proprietary` (this includes non-commercial
-  licences and "All rights reserved"), `none` and `unknown`.
-- **When it is worked out.** When a project is created, when projects are imported,
-  when a project's directory changes, and when a maintainer presses **Check again**
-  (`POST /projects/{id}/licence/refresh`). It is stored on the project and is never
-  recomputed on a page load, so a licence file you edit later is not seen until one of
-  those happens.
-- **File rules.** Only the project's root folder is looked at. The first file, in name
-  order, whose name starts with `LICENSE`, `LICENCE` or `COPYING` is used. It must be a
-  regular file (a symlink or other special file is not followed and gives
-  "not recognised"), and only the first 64 KB is read.
-- **A hint, not legal advice.** The classifier is a small port of jspark-forge's. It
-  matches licence text and can be wrong.
-
-### Not covered
-
-- **Sub-folder licences.** Licence files in sub-folders, and licences of dependencies,
-  are not read.
-- **Compatibility.** Nothing checks whether one licence is compatible with another or
-  with how you use the code.
-
-## Rules export
-
-The rules agents work under can be downloaded as one plain-text Markdown file
-(`rules.md`).
-
-- **Where.** A **Download the rules as a file** button on the organisation Guard page
-  (the whole organisation) and in each project's guard settings (that project).
-  API: `GET /guard/export.md`, with `?project_id=` for a project.
-- **What it contains.** A header line ("Rules for agents working on … generated …. For
-  use outside the orchestrator; inside it these are enforced, not just written."), then:
-  1. **Ground rules** that are switched on.
-  2. **Always blocked** and **Needs a person's OK**: the built-in rules, one line each,
-     in words.
-  3. The organisation's own custom rules, or for a project, **This project's own
-     rules**.
-  4. For your own projects, rules from the project's rules file, if it has one.
-  5. For your own projects, the project's active **Decisions** (number, title and why).
-
-  Custom rules are shown as written. At most 500 rules and 100 decisions are listed,
-  with an "and N more not shown" line.
-- **Guard off for a project.** The built-in rules section is replaced by a sentence
-  saying the guard is switched off for that project and the built-in rules are not
-  enforced there. The ground rules, custom rules and decisions are still listed.
-- **Who can download.** Any signed-in person. For a project they must be able to see it,
-  otherwise the answer is 404. Agent tokens are refused.
-- **Secrets.** The project's environment values are masked wherever they appear, and
-  hidden characters are cleaned from the text. No environment value is written out.
-
-### Not covered
-
-- **A copy, not enforcement.** The file is for use elsewhere, such as another tool or
-  a human reader. Nothing enforces it outside the orchestrator.
-
-## Updating skill packs
-
-The **Skills** tab lists installed packs. An admin sees an **Updates** column for each
-pack that has a source address.
-
-- **Check for update.** Asks the pack's stored source address which commit its main
-  branch is on (`git ls-remote`, 20 second limit, https or ssh addresses only) and
-  compares it with the commit installed. The answer is saved on the pack. If a newer
-  commit exists, the row shows **Update to** the short commit; clicking it asks you to
-  confirm, and **Update** goes ahead.
-- **What Update refuses.** A pack with local changes (any uncommitted change in its
-  folder); a pack with no source address, or one that is not https or ssh; a pack that
-  is not a git checkout; a pack whose git settings were changed by hand (its
-  `.git/config` may only hold the settings a plain clone writes, so things like a
-  custom ssh command, an address rewrite or an include are refused, and so is
-  **Check for update**); a pack that is not behind the remote; and anything that is not a
-  fast-forward, meaning the remote history no longer continues from the installed
-  commit. A refusal changes nothing and says why.
-- **Nothing from the pack is run.** Git hooks are switched off, no credential helpers
-  or prompts are used, and only fetch, status, rev-parse, config, ls-remote and a
-  fast-forward-only merge are issued (plus a checkout when a preset is installed at its
-  pinned commit). Any filter programs the pack defines are switched off, and git never
-  follows an HTTP redirect to another address. Only one update per pack runs at a time.
-- **Shallow packs.** Installs download only the latest commit. A pack in that state
-  downloads its full history on its first update, so the first update can be slower
-  and larger.
-- **After an update.** The pack's lint is run again (see Skill lint) and any warnings
-  are shown; the pack's version is re-read from its plugin file and the page refreshes.
-- **API.** `POST /skills/{id}/check-update` and `POST /skills/{id}/update`. Admin only.
-- **The superpowers preset.** The preset list includes **superpowers**
-  (`https://github.com/obra/superpowers`) with a pinned commit (`22f0b463...`, the
-  superpowers 7.0.2 plugin). An admin chooses to install it; nothing is installed
-  automatically. Installing from the preset checks out exactly that commit (the
-  Skills page sends it with the install request; if it cannot be fetched or checked
-  out, the install fails and the folder is removed). **Check for update** then reports
-  any newer commits, and **Update** moves the pack to the remote's newest commit, only
-  when the admin chooses. Installing a pack by URL without a pinned commit still takes
-  the repository's current latest commit.
-
-### Not covered
-
-- **Automatic updates.** Nothing checks or updates on a schedule.
-- **Rollback.** There is no undo to an earlier commit.
-- **Pack code is not reviewed.** The lint checks the shape of skill files only.
-- **Update uses the stored source address.** It does not read the pack's own git remote.
-- **SSH uses the server's own keys.** A pack whose address is an ssh address is
-  fetched with the SSH keys and agent of the account the server runs as (host keys must
-  already be trusted; there are no prompts). Anyone who can add such a pack makes the
-  server use those keys.
-
-## Where connected tools start
-
-A connected tool that runs as a program on the server (the "stdio" kind) used to start
-inside the project's own folder. Some launchers (such as `npx`) read files from the
-folder they start in. So a file in the project, committed or written by an agent in an
-earlier task, could decide what ran as the tool, before any tool call and outside the
-agent guard.
-
-- **What changed.** Every such tool now starts from a private folder that holds only a
-  few inert marker files, made for that task and that tool, and then runs its own command unchanged (a small launcher,
-  `backend/app/mcp_launch.py`, changes folder and starts the command). The tool is also
-  told where the project is, in the environment variable `CO_PROJECT_DIR`, when the task
-  has a project folder. Web (HTTP) tools, the **Test** button and the policies are not
-  changed.
-- **Marker files.** The tool's folder holds an empty `node_modules/`, an empty `.npmrc`
-  and an empty `uv.toml`, so `npm`, `npx` and `uv` treat the folder itself as the project
-  instead of looking for one in the folders above. There is deliberately no
-  `package.json` (one would let a `package.json` higher up adopt the folder as a
-  workspace).
-- **The folders above.** npm also puts the `node_modules/.bin` of every folder above on
-  the tool's PATH, and no marker can stop that. So the agent guard refuses, in any folder
-  above the tool folders and the Code map build folder (up to `/`), direct writes of the
-  files that steer launchers (`package.json`, `package-lock.json`, `node_modules`,
-  `.npmrc`, `pnpm-workspace.yaml`, `.pnpmfile.cjs`, `uv.toml`, `bunfig.toml`,
-  `.yarnrc.yml` and `pyproject.toml`), package-manager installs there (`npm`/`pnpm`/
-  `yarn`/`bun` install, add, ci, link, update - also run through `npx`, `npm exec`,
-  `pnpm dlx` or `corepack`), and `init`/`create`/`npm pkg set` writing a `package.json`
-  there. The folder comes from `--prefix`, `--dir`, `--cwd`, `-C`, or the folder after a
-  `cd`. In the task's own project or workspace all of these work as before; the project
-  folder is also the exception for the folders above (see below). A `package.json` that
-  already exists in a folder above (put there by a person, for example `~/package.json`)
-  still makes a plain `npm install` land in that folder; `CO_TOOL_RUN_DIR` is the stricter
-  option.
-- **Own package cache and global folder.** Tools use their own npm cache,
-  `workspaces/_mcp_cache/npm`, and their own empty npm global folder,
-  `workspaces/_mcp_cache/npm-global` (both owner-only; agents cannot write them),
-  instead of the server user's `~/.npm` and global packages, unless the tool's own
-  settings set `npm_config_cache` / `npm_config_prefix`. So a package an agent installs
-  with `npm install -g` is not picked up by `npx`. The Code map build has its own cache
-  (under `_codemap/_home/`) and uses the same empty global folder.
-- **A stricter setup.** `CO_TOOL_RUN_DIR` (unset by default) puts the tools' per-task
-  start folders in a folder of the admin's choice instead of under `workspaces/`. Point
-  it at a folder whose parent folders the server user cannot write (for example one an
-  administrator creates under `/var/lib` and hands to the server user); then nothing can
-  be planted above a tool folder at all, whatever the guard sees. The tool folders go in
-  its own subfolder, `co-tool-folders/`; the same protection and cleanup apply there, and
-  the cleanup only ever removes folders named like a task id, so other files in the
-  configured folder are never touched.
-- **The switch.** On a tool's form, under **More options**, **Start in the project
-  folder** (admins only, stdio tools only, off by default). Use it only for a tool that
-  must start inside the project; the project's own files can then change what the tool
-  runs. With it on the tool starts exactly as before, and the list shows a small tag,
-  "Starts in the project folder". The **System health** page counts such tools under
-  **Connected tools**.
-- **A command that starts with `./`** (a file in the project) cannot work from the tool's
-  own folder. The form refuses to save it unless the switch is on: "A command that starts
-  with ./ needs 'Start in the project folder'". A bare name such as `npx` or an absolute
-  path is fine.
-- **Tools already added** move to the new behaviour on their next task. Nothing needs
-  doing.
-- **Cleanup.** The tool settings folder for a task (the tool config and the tools' start
-  folders) is removed when the task ends. Before this change it was left behind.
-
-### Not covered / to know
-
-- **This has not been run against the real `claude` command-line tool or real connected
-  tools.** The change is a plain change of folder followed by the tool's command. If a
-  tool stops working, turn its **Start in the project folder** switch on.
-- **The guard is a seatbelt, not a sandbox.** A tool can still read the project: it is
-  told where it is and runs as the same user, with the same credentials as before. The
-  folder a tool starts in, its package cache and its global folder are out of agents'
-  reach. The folders above it are protected only as far as the agent guard sees the
-  write: archive and tree-copy tools (`tar -C`, `unzip`, `rsync`, `cp -r` into a parent),
-  inline scripts and paths hidden behind unknown variables are known limits, as they are
-  for the rest of the guard. Use `CO_TOOL_RUN_DIR` (above) to close this without relying
-  on the guard.
-- **A project whose folder contains the workspaces folder** (the orchestrator checkout
-  itself, used as a project) keeps its own `package.json`, `node_modules`, `.npmrc` and
-  the like writable, because they are its own work. Its agents can therefore still
-  influence what every connected tool and the Code map build run, in every project.
-  Its agents can also change `start.sh`, `frontend/`, `backend/scripts/` and
-  `backend/tests/` without approval; the server's code (`backend/app`, migrations, the
-  venv, `.env`) stays protected.
-- **Settings an admin puts in a project's env** (for example `NODE_OPTIONS`,
-  `NODE_PATH`, `PATH_PREPEND` or any `npm_config_*` value) reach the Code map build, and
-  reach tools if `claude` passes its environment on. Point them only at folders agents
-  cannot write.
-- **`npx` and `uvx` are covered best.** `pnpm dlx` and `bunx` get the protected names
-  above, but have not been looked at as closely. `uvx` still reads the server user's own
-  `~/.config/uv/uv.toml` and uv cache.
-- `npx` still reads the server user's own `~/.npmrc` (needed for private registries).
-- If the server stops in the middle of a task, that task's folder may stay on disk; it is
-  removed the next time the server starts.
-
-### Project folders that are part of the orchestrator
-
-A project's folder cannot be the server's own code, migrations or virtual environment
-(`backend/app`, `backend/migrations`, the venv) or one of the app's private
-`workspaces/_…` folders, or any folder inside them. Creating, importing or moving a
-project there answers 422 "That folder is part of the orchestrator itself". A folder
-that only contains them (the orchestrator checkout, `backend/`, `workspaces/`) is
-allowed, and saving a project with an unchanged folder is never refused. Whatever the
-folder, the server's own code stays protected from the project's agents.
 
 ## Code map
 
@@ -1953,11 +2002,14 @@ recorded decisions for the files an answer names, and labels for old code.
   orchestrator checkout used as a project, and settings in a project's env, can still
   influence the build. (`CO_TOOL_RUN_DIR` moves only the connected tools' folders, not
   the build's.)
-- **"How far behind" is not told to the agent.** Only the three lines above are.
+- **The exact commit list is not told to the agent.** It gets a short note (current, N commits behind
+  with up to 10 changed files, a different history, or could not check); see "Upkeep".
 - **No index of our own.** The app does not build or store a map; it depends on the
   outside tool.
 - **A separate copy.** The freshness line reports on the project folder, even when a
   task works in a separate copy of it.
+
+---
 
 ## Database tab
 
@@ -1994,6 +2046,8 @@ files in order. It never connects to a database and never runs anything. With mo
   statements are counted, not applied.
 - A very large single statement can run a few seconds past the time limit.
 
+---
+
 ## Recommended tools for projects with a user interface
 
 A project that has a user interface (a front-end dependency such as `react`, `next`,
@@ -2027,6 +2081,114 @@ Projects without one do not show it (`GET /projects/{id}/recommended` says `has_
   Recommended tab.
 - None of this has been run against the real `claude` CLI.
 
+---
+
+## Where connected tools start
+
+A connected tool that runs as a program on the server (the "stdio" kind) used to start
+inside the project's own folder. Some launchers (such as `npx`) read files from the
+folder they start in. So a file in the project, committed or written by an agent in an
+earlier task, could decide what ran as the tool, before any tool call and outside the
+agent guard.
+
+- **What changed.** Every such tool now starts from a private folder that holds only a
+  few inert marker files, made for that task and that tool, and then runs its own command unchanged (a small launcher,
+  `backend/app/mcp_launch.py`, changes folder and starts the command). The tool is also
+  told where the project is, in the environment variable `CO_PROJECT_DIR`, when the task
+  has a project folder. Web (HTTP) tools, the **Test** button and the policies are not
+  changed.
+- **Marker files.** The tool's folder holds an empty `node_modules/`, an empty `.npmrc`
+  and an empty `uv.toml`, so `npm`, `npx` and `uv` treat the folder itself as the project
+  instead of looking for one in the folders above. There is deliberately no
+  `package.json` (one would let a `package.json` higher up adopt the folder as a
+  workspace).
+- **The folders above.** npm also puts the `node_modules/.bin` of every folder above on
+  the tool's PATH, and no marker can stop that. So the agent guard refuses, in any folder
+  above the tool folders and the Code map build folder (up to `/`), direct writes of the
+  files that steer launchers (`package.json`, `package-lock.json`, `node_modules`,
+  `.npmrc`, `pnpm-workspace.yaml`, `.pnpmfile.cjs`, `uv.toml`, `bunfig.toml`,
+  `.yarnrc.yml` and `pyproject.toml`), package-manager installs there (`npm`/`pnpm`/
+  `yarn`/`bun` install, add, ci, link, update - also run through `npx`, `npm exec`,
+  `pnpm dlx` or `corepack`), and `init`/`create`/`npm pkg set` writing a `package.json`
+  there. The folder comes from `--prefix`, `--dir`, `--cwd`, `-C`, or the folder after a
+  `cd`. In the task's own project or workspace all of these work as before; the project
+  folder is also the exception for the folders above (see below). A `package.json` that
+  already exists in a folder above (put there by a person, for example `~/package.json`)
+  still makes a plain `npm install` land in that folder; `CO_TOOL_RUN_DIR` is the stricter
+  option.
+- **Own package cache and global folder.** Tools use their own npm cache,
+  `workspaces/_mcp_cache/npm`, and their own empty npm global folder,
+  `workspaces/_mcp_cache/npm-global` (both owner-only; agents cannot write them),
+  instead of the server user's `~/.npm` and global packages, unless the tool's own
+  settings set `npm_config_cache` / `npm_config_prefix`. So a package an agent installs
+  with `npm install -g` is not picked up by `npx`. The Code map build has its own cache
+  (under `_codemap/_home/`) and uses the same empty global folder.
+- **A stricter setup.** `CO_TOOL_RUN_DIR` (unset by default) puts the tools' per-task
+  start folders in a folder of the admin's choice instead of under `workspaces/`. Point
+  it at a folder whose parent folders the server user cannot write (for example one an
+  administrator creates under `/var/lib` and hands to the server user); then nothing can
+  be planted above a tool folder at all, whatever the guard sees. The tool folders go in
+  its own subfolder, `co-tool-folders/`; the same protection and cleanup apply there, and
+  the cleanup only ever removes folders named like a task id, so other files in the
+  configured folder are never touched.
+- **The switch.** On a tool's form, under **More options**, **Start in the project
+  folder** (admins only, stdio tools only, off by default). Use it only for a tool that
+  must start inside the project; the project's own files can then change what the tool
+  runs. With it on the tool starts exactly as before, and the list shows a small tag,
+  "Starts in the project folder". The **System health** page counts such tools under
+  **Connected tools**.
+- **A command that starts with `./`** (a file in the project) cannot work from the tool's
+  own folder. The form refuses to save it unless the switch is on: "A command that starts
+  with ./ needs 'Start in the project folder'". A bare name such as `npx` or an absolute
+  path is fine.
+- **Tools already added** move to the new behaviour on their next task. Nothing needs
+  doing.
+- **Cleanup.** The tool settings folder for a task (the tool config and the tools' start
+  folders) is removed when the task ends. Before this change it was left behind.
+
+### Not covered / to know
+
+- **This has not been run against the real `claude` command-line tool or real connected
+  tools.** The change is a plain change of folder followed by the tool's command. If a
+  tool stops working, turn its **Start in the project folder** switch on.
+- **The guard is a seatbelt, not a sandbox.** A tool can still read the project: it is
+  told where it is and runs as the same user, with the same credentials as before. The
+  folder a tool starts in, its package cache and its global folder are out of agents'
+  reach. The folders above it are protected only as far as the agent guard sees the
+  write: archive and tree-copy tools (`tar -C`, `unzip`, `rsync`, `cp -r` into a parent),
+  inline scripts and paths hidden behind unknown variables are known limits, as they are
+  for the rest of the guard. Use `CO_TOOL_RUN_DIR` (above) to close this without relying
+  on the guard.
+- **A project whose folder contains the workspaces folder** (the orchestrator checkout
+  itself, used as a project) keeps its own `package.json`, `node_modules`, `.npmrc` and
+  the like writable, because they are its own work. Its agents can therefore still
+  influence what every connected tool and the Code map build run, in every project.
+  Its agents can also change `start.sh`, `frontend/`, `backend/scripts/` and
+  `backend/tests/` without approval; the server's code (`backend/app`, migrations, the
+  venv, `.env`) stays protected.
+- **Settings an admin puts in a project's env** (for example `NODE_OPTIONS`,
+  `NODE_PATH`, `PATH_PREPEND` or any `npm_config_*` value) reach the Code map build, and
+  reach tools if `claude` passes its environment on. Point them only at folders agents
+  cannot write.
+- **`npx` and `uvx` are covered best.** `pnpm dlx` and `bunx` get the protected names
+  above, but have not been looked at as closely. `uvx` still reads the server user's own
+  `~/.config/uv/uv.toml` and uv cache.
+- `npx` still reads the server user's own `~/.npmrc` (needed for private registries).
+- If the server stops in the middle of a task, that task's folder may stay on disk; it is
+  removed the next time the server starts.
+
+### Project folders that are part of the orchestrator
+
+A project's folder cannot be the server's own code, migrations or virtual environment
+(`backend/app`, `backend/migrations`, the venv) or one of the app's private
+`workspaces/_…` folders, or any folder inside them. Creating, importing or moving a
+project there answers 422 "That folder is part of the orchestrator itself". A folder
+that only contains them (the orchestrator checkout, `backend/`, `workspaces/`) is
+allowed, and saving a project with an unchanged folder is never refused. Whatever the
+folder, the server's own code stays protected from the project's agents.
+
+---
+
 ## Published outside the project
 
 When a run puts something somewhere else (a page, a document, a pull request), the task
@@ -2055,64 +2217,241 @@ they publish inside the project.
 
 ---
 
-## REST API
+## System health
 
-Full interactive docs at `/docs`. Highlights:
+Admins get a **System health** page (nav entry, `#/health`). It shows one overall line
+("Everything looks good", "2 things need attention" or "1 problem") and a card for each
+check, problems first. Each card has a coloured dot, a plain title, one sentence and a
+collapsed **Details** with versions, timings and a suggested fix.
 
-**Tasks**
+- **The fifteen checks.** Claude is installed; Python; Git; Node; The guard is intact;
+  The guard blocks what it should; Guard errors in the last 7 days; The app can write its
+  folders; Database is up to date; Connected tools; Skill packs; Code map; Project folders (a warning when a
+  folder now holds a different repository, see "Upkeep"); Docker (for 'wait until
+  ready' checks); Free disk space. A missing Node or Docker is only "attention"; a
+  missing Claude or Git is a problem.
+- **When it runs.** Only when an admin opens the page or presses **Check again**; there
+  is no background job. Results are reused for 30 seconds (per server process), and
+  **Check again** skips that reuse (`GET /admin/health?refresh=true`).
+- **Time limits.** Each check gets 10 seconds and the whole run 60. A check that fails,
+  times out or does not finish shows as a problem with the summary "could not check".
+- **What it runs.** The only Claude command is `claude --version`; a prompt is never
+  sent. It also runs `git --version`, `node --version` and `docker version`.
+- **Guard self-test.** It feeds the guard's hook one harmless command and one
+  dangerous command (`rm -rf /`) and checks the answers are allow and deny. The
+  dangerous command is only evaluated, never executed. The test uses a throw-away
+  policy and a throw-away folder, and is pointed away from the real server.
+- **Secrets.** Every summary and detail is scrubbed: known secrets are masked and home
+  folders show as `~`. Text is cut at 500 characters.
+- **API.** `GET /admin/health` returns `{checked_at, overall, checks}`. Admin only.
 
-| Method | Path | Description |
-|---|---|---|
-| `POST` / `GET` | `/tasks` | Create + queue (optional `brief`) / list (`?status=`, `?project_id=`, `?roots_only=`) |
-| `GET` | `/tasks/{id}` · `/events` | Detail / full event log (`?after_seq=`) |
-| `POST` | `/tasks/{id}/cancel` · `/retry` · `/duplicate` · `/followup` | Lifecycle actions |
-| `POST` | `/tasks/{id}/continue` | Continue a stopped step (`mode`: `auto`, `resume`, `fresh`) |
-| `GET` · `POST` | `/tasks/{id}/handoff` · `/handoff/refresh` · `/handoff/close` | Where the thread stands |
-| `GET` · `PUT` | `/tasks/{id}/notes` | The agent's notes (`PUT` is also open to the run's own agent token) |
-| `GET` | `/tasks/{id}/usage` | The step's token figures, the thread's so-far totals and tips |
-| `GET` · `POST` | `/tasks/{id}/questions` | The thread's questions / file one (also open to the run's own agent token) |
-| `GET` | `/questions` | Questions you can see (`?status=open\|answered\|dismissed\|all`, default `open`) |
-| `POST` | `/questions/{id}/answer` · `/dismiss` | Answer (`{"answer": …}` or `{"accept": true}`) and continue the thread / close it |
-| `GET` · `POST` | `/tasks/{id}/asks` | Your private asks on a step (newest 20) / ask a question about the run (202; 409, 422, 429 limits) |
-| `GET` · `POST` | `/projects/{id}/decisions` | Decisions (`?status=active\|all`, `?kind=`) / add one (maintainer) |
-| `GET` · `PATCH` | `/projects/{id}/decisions/{n}` | One decision / edit it (send its `version`; 409 when stale or not active) |
-| `POST` | `/projects/{id}/decisions/{n}/verify` · `/retire` · `/supersede` | Mark checked / retire / supersede (`{"by": n}`) |
-| `GET` | `/projects/{id}/decisions/health` | Which active decisions may be out of date |
-| `GET` · `POST` | `/projects/{id}/decisions/proposals` | Suggested decisions (`?status=pending\|all`, newest 100) / add one (contributor; 429 when 50 are pending) |
-| `POST` | `/projects/{id}/decisions/proposals/{pid}/accept` · `/reject` | Accept (send the final fields; makes a decision) / reject (maintainer; 409 when already reviewed) |
-| `POST` | `/tasks/{id}/decision-proposals` | Suggest a decision (also open to the run's own agent token; 3 per task) |
-| `GET` | `/handoffs/open` | Threads to pick up again (Home) |
-| `DELETE` | `/tasks/{id}` | Delete a task (or thread); cleans sandbox workspace |
-| `GET` | `/tasks/{id}/report?format=pdf\|docx` | Download the result as PDF / DOCX |
-| `GET` | `/tasks/{id}/artifacts[/{path}]` | List / download output files |
-| `GET` | `/tasks/stats` | Dashboard stats |
-| `WS` | `/tasks/{id}/stream` | Live event stream (`?last_seq=` to resume) |
+### Not covered
 
-**Projects & memory** — `/projects` CRUD · `/projects/discover` · `/projects/import`
-· `/projects/{id}/memory[/regenerate]` · `/projects/{id}/summaries` · `/projects/{id}/stats`
+- **No auto-fix.** It reports and suggests; it changes nothing.
+- **No background monitoring and no alerts.** Nothing is recorded between visits and
+  nothing is sent when a check fails.
 
-**MCP** — `/mcp/servers` CRUD · `/mcp/servers/{id}/test` · `/mcp/servers/{id}/policies`
-· `/mcp/observability`
+---
 
-**Scheduling / templates / approvals** — `/schedules` CRUD + `/run` + `/runs` +
-`/preview` · `/templates` + `/presets` + `/run` · `/approvals` + `/{id}/approve|reject`
+## Licence hints
 
-**Agents** — `/agents` CRUD (`tier`; responses carry `lint`) · `/agents/presets` · `/agents/{id}/run` and `/agents/dispatch` (with optional project/prompt override and `brief`)
+A project shows a small licence badge when its code might not be yours to reuse freely.
+The badge shows on the project card, the table row and the drawer title. The project
+drawer also has a "Licence:" line.
 
-**Security & usage** — `/findings` + `/summary` + `PATCH /{id}` · `/usage/summary`
-· `/usage/timeseries` · `/usage/by-project` · `/usage/by-model`
+- **When the badge shows.** For every project whose trust is `external`, and for any
+  project whose licence is share-alike (copyleft), proprietary, or missing. Your own
+  project with a permissive or unrecognised licence shows nothing. The wording is the
+  licence name (for example "MIT"), "GPL-3.0 — share-alike", "All rights reserved" or
+  "… — not free for commercial use", "No licence found", or "Licence not recognised".
+  The tooltip says "A hint, not legal advice."
+- **Kinds.** `permissive`, `copyleft`, `proprietary` (this includes non-commercial
+  licences and "All rights reserved"), `none` and `unknown`.
+- **When it is worked out.** When a project is created, when projects are imported,
+  when a project's directory changes, and when a maintainer presses **Check again**
+  (`POST /projects/{id}/licence/refresh`). It is stored on the project and is never
+  recomputed on a page load, so a licence file you edit later is not seen until one of
+  those happens.
+- **File rules.** Only the project's root folder is looked at. The first file, in name
+  order, whose name starts with `LICENSE`, `LICENCE` or `COPYING` is used. It must be a
+  regular file (a symlink or other special file is not followed and gives
+  "not recognised"), and only the first 64 KB is read.
+- **A hint, not legal advice.** The classifier is a small port of jspark-forge's. It
+  matches licence text and can be wrong.
 
-**Webhooks / system** — `POST /webhooks/github` · `GET /system/claude` · `GET /health`
+### Not covered
 
-```bash
-curl -X POST localhost:8200/tasks -H 'Content-Type: application/json' -d '{
-  "prompt": "Write a haiku about orchestration to haiku.txt",
-  "model": "sonnet", "priority": "high", "max_turns": 10, "max_budget_usd": 0.5
-}'
-```
+- **Sub-folder licences.** Licence files in sub-folders, and licences of dependencies,
+  are not read.
+- **Compatibility.** Nothing checks whether one licence is compatible with another or
+  with how you use the code.
 
-Streamed events are normalized to: `started`, `context`, `mcp`, `system`,
-`text_output`, `tool_use`, `tool_result`, `retry`, `log`, `error`, `completed`.
+---
+
+## Rules export
+
+The rules agents work under can be downloaded as one plain-text Markdown file
+(`rules.md`).
+
+- **Where.** A **Download the rules as a file** button on the organisation Guard page
+  (the whole organisation) and in each project's guard settings (that project).
+  API: `GET /guard/export.md`, with `?project_id=` for a project.
+- **What it contains.** A header line ("Rules for agents working on … generated …. For
+  use outside the orchestrator; inside it these are enforced, not just written."), then:
+  1. **Ground rules** that are switched on.
+  2. **Always blocked** and **Needs a person's OK**: the built-in rules, one line each,
+     in words.
+  3. The organisation's own custom rules, or for a project, **This project's own
+     rules**.
+  4. For your own projects, rules from the project's rules file, if it has one.
+  5. For your own projects, the project's active **Decisions** (number, title and why).
+
+  Custom rules are shown as written. At most 500 rules and 100 decisions are listed,
+  with an "and N more not shown" line.
+- **Guard off for a project.** The built-in rules section is replaced by a sentence
+  saying the guard is switched off for that project and the built-in rules are not
+  enforced there. The ground rules, custom rules and decisions are still listed.
+- **Who can download.** Any signed-in person. For a project they must be able to see it,
+  otherwise the answer is 404. Agent tokens are refused.
+- **Secrets.** The project's environment values are masked wherever they appear, and
+  hidden characters are cleaned from the text. No environment value is written out.
+
+### Not covered
+
+- **A copy, not enforcement.** The file is for use elsewhere, such as another tool or
+  a human reader. Nothing enforces it outside the orchestrator.
+
+---
+
+## Skill lint
+
+The **Skills** tab has a **Skill template & lint** panel, ported from jspark-forge's
+skill lint. It shows a template `SKILL.md` and a box where you paste your own.
+**Lint** reports problems by line.
+
+- **Rules.** The file starts with frontmatter that has `name` and a `description`
+  beginning "Use when". If the body has numbered parts with `Input:`, every part needs
+  `Input:`, `Action:` and `Output:`, and the last part is `Verify:` with `Evidence:`.
+  HTML comments are ignored, with line numbers kept. A plain skill with no `Input:`
+  parts needs only `name` and `description`. Text over 256 KB is refused (422).
+- **API.** `POST /skills/lint {text}` returns `{ok, problems: [{line, message}]}` and
+  `GET /skills/template` returns `{text}`. Any signed-in user may call them.
+- **Installed packs.** The **Lint** button on a pack calls `GET /skills/{id}/lint`,
+  which lints every `SKILL.md` in the pack's directory: at most 200 files and 256 KB
+  each (an oversized file reports "file too large"). It does not follow symlinks.
+  Project packs are only visible to that project's members.
+- **Warnings only.** Nothing is blocked, changed or saved.
+
+### Not covered
+
+- **Writing skills.** The server writes no skill, brief or workflow into a project
+  directory; copy the template yourself.
+- **Other lint.** Briefs are checked by their own validator (phase 4c); agent and
+  graph file lint from forge are not ported.
+- **Packs on disk only.** Files beyond the 200-file cap are not checked.
+
+---
+
+## Updating skill packs
+
+The **Skills** tab lists installed packs. An admin sees an **Updates** column for each
+pack that has a source address.
+
+- **Check for update.** Asks the pack's stored source address which commit its main
+  branch is on (`git ls-remote`, 20 second limit, https or ssh addresses only) and
+  compares it with the commit installed. The answer is saved on the pack. If a newer
+  commit exists, the row shows **Update to** the short commit; clicking it asks you to
+  confirm, and **Update** goes ahead.
+- **What Update refuses.** A pack with local changes (any uncommitted change in its
+  folder); a pack with no source address, or one that is not https or ssh; a pack that
+  is not a git checkout; a pack whose git settings were changed by hand (its
+  `.git/config` may only hold the settings a plain clone writes, so things like a
+  custom ssh command, an address rewrite or an include are refused, and so is
+  **Check for update**); a pack that is not behind the remote; and anything that is not a
+  fast-forward, meaning the remote history no longer continues from the installed
+  commit. A refusal changes nothing and says why.
+- **Nothing from the pack is run.** Git hooks are switched off, no credential helpers
+  or prompts are used, and only fetch, status, rev-parse, config, ls-remote and a
+  fast-forward-only merge are issued (plus a checkout when a preset is installed at its
+  pinned commit). Any filter programs the pack defines are switched off, and git never
+  follows an HTTP redirect to another address. Only one update per pack runs at a time.
+- **Shallow packs.** Installs download only the latest commit. A pack in that state
+  downloads its full history on its first update, so the first update can be slower
+  and larger.
+- **After an update.** The pack's lint is run again (see Skill lint) and any warnings
+  are shown; the pack's version is re-read from its plugin file and the page refreshes.
+- **API.** `POST /skills/{id}/check-update` and `POST /skills/{id}/update`. Admin only.
+- **The superpowers preset.** The preset list includes **superpowers**
+  (`https://github.com/obra/superpowers`) with a pinned commit (`22f0b463...`, the
+  superpowers 7.0.2 plugin). An admin chooses to install it; nothing is installed
+  automatically. Installing from the preset checks out exactly that commit (the
+  Skills page sends it with the install request; if it cannot be fetched or checked
+  out, the install fails and the folder is removed). **Check for update** then reports
+  any newer commits, and **Update** moves the pack to the remote's newest commit, only
+  when the admin chooses. Installing a pack by URL without a pinned commit still takes
+  the repository's current latest commit.
+
+### Not covered
+
+- **Automatic updates.** Nothing checks or updates on a schedule.
+- **Rollback.** There is no undo to an earlier commit.
+- **Pack code is not reviewed.** The lint checks the shape of skill files only.
+- **Update uses the stored source address.** It does not read the pack's own git remote.
+- **SSH uses the server's own keys.** A pack whose address is an ssh address is
+  fetched with the SSH keys and agent of the account the server runs as (host keys must
+  already be trusted; there are no prompts). Anyone who can add such a pack makes the
+  server use those keys.
+
+---
+
+## Upkeep: closed handoffs, tidying, sharper notes
+
+- **Closed handoffs stay closed.** Closing a thread's handoff now sticks: a heartbeat, a
+  saved note or the end of the same run no longer reopens it. A new run of the thread
+  (Continue, Retry, a follow-up) does. When a task **completes** and nothing is left open
+  (no open question, no open to-do, no step still running), its handoff is closed by the
+  system. Failed, cancelled and waiting tasks stay open. Notes are kept.
+- **Tidying old run history (off until an admin switches it on).** In **System health**, the
+  **Run history** card has the switch **Tidy old run history**, **Keep full history for:
+  30 / 60 / 90 days** (60 by default), "N tasks could be tidied (about X MB)", "Last tidied
+  <date>: N tasks" and **Tidy now**. When on, a daily job handles tasks that **finished** more
+  than that many days ago: their run events are replaced by one short summary (how many
+  events of each kind, first and last time, and the last 20 log lines as plain text), and the
+  previous version of their **closed** handoffs is dropped (the current one stays). It never
+  touches running, queued, waiting or unfinished tasks, and never deletes a task, handoff,
+  note or decision. **It can't be undone**: what it replaced does not come back (the summary
+  stays). The run log shows the summary as "Older run history kept as a summary (N events)."
+  with the kept lines under **Details**. API (admin): `GET/PATCH /admin/health/retention`,
+  `POST /admin/health/retention/run`.
+- **Sharper code-map notes.** At task start the app compares the code map's indexed commit
+  with the folder's current one, and the agent is told one of: current; N commits behind with up
+  to 10 changed files; built on a different history; could not check. A reference project that
+  changed since its map was built says so, and references with no map yet are listed once.
+  Only a few read-only git commands are allowed for this.
+- **Decisions before shell commands.** When a shell command is allowed and writes files, the
+  decisions recorded for up to 50 of those files are shown before it runs, as for Edit/Write.
+- **Re-clone warning.** Each project remembers its repository's first commit (set when the
+  project is created, when its folder changes, and at the first task start if empty). If a later
+  task finds a different first commit, the run shows "This folder now holds a different repository
+  than before (it may have been cloned again). Decisions and the code map may not apply." and
+  **System health** shows a **Project folders** warning. A maintainer presses **This is
+  expected** (`POST /projects/{id}/root-commit/accept`) to store the new one; nothing else
+  changes it. A folder that is not a git repository, a missing git, or a shallow clone with no
+  root gives no warning and stores nothing.
+
+### To know
+
+- Tidying is off until switched on; once on, it cannot bring back what it replaced. Continuing a thread whose history was tidied rebuilds its handoff from the summary only — files touched and step progress start empty.
+- The first start after this update builds an index on the task history table; on a large history it can
+  take a few minutes.
+- After tidying, the database reuses the freed space but the disk file does not shrink.
+- Shallow clones are not checked for re-clones (their oldest commit moves with every fetch), so they get no
+  warning and nothing is stored.
+- The code-map note is worked out at task start, so within a long session it can be up to one
+  task old.
+- The re-clone check looks at the folder when a task starts and when System health is opened; it
+  is not a background watch.
+- Not run against the real `claude` CLI.
 
 ---
 
@@ -2218,18 +2557,129 @@ dedicated read-only SSH user with no sudo on the server.
 
 ---
 
+## REST API
+
+Full interactive docs at `/docs`. Highlights:
+
+**Tasks**
+
+| Method | Path | Description |
+|---|---|---|
+| `POST` / `GET` | `/tasks` | Create + queue (optional `brief`) / list (`?status=`, `?project_id=`, `?roots_only=`) |
+| `GET` | `/tasks/{id}` · `/events` | Detail / full event log (`?after_seq=`) |
+| `POST` | `/tasks/{id}/cancel` · `/retry` · `/duplicate` · `/followup` | Lifecycle actions |
+| `POST` | `/tasks/{id}/continue` | Continue a stopped step (`mode`: `auto`, `resume`, `fresh`) |
+| `GET` · `POST` | `/tasks/{id}/handoff` · `/handoff/refresh` · `/handoff/close` | Where the thread stands |
+| `GET` · `PUT` | `/tasks/{id}/notes` | The agent's notes (`PUT` is also open to the run's own agent token) |
+| `GET` | `/tasks/{id}/usage` | The step's token figures, the thread's so-far totals and tips |
+| `GET` · `POST` | `/tasks/{id}/questions` | The thread's questions / file one (also open to the run's own agent token) |
+| `GET` | `/questions` | Questions you can see (`?status=open\|answered\|dismissed\|all`, default `open`) |
+| `POST` | `/questions/{id}/answer` · `/dismiss` | Answer (`{"answer": …}` or `{"accept": true}`) and continue the thread / close it |
+| `GET` · `POST` | `/tasks/{id}/asks` | Your private asks on a step (newest 20) / ask a question about the run (202; 409, 422, 429 limits) |
+| `GET` · `POST` | `/projects/{id}/decisions` | Decisions (`?status=active\|all`, `?kind=`) / add one (maintainer) |
+| `GET` · `PATCH` | `/projects/{id}/decisions/{n}` | One decision / edit it (send its `version`; 409 when stale or not active) |
+| `POST` | `/projects/{id}/decisions/{n}/verify` · `/retire` · `/supersede` | Mark checked / retire / supersede (`{"by": n}`) |
+| `GET` | `/projects/{id}/decisions/health` | Which active decisions may be out of date |
+| `GET` · `POST` | `/projects/{id}/decisions/proposals` | Suggested decisions (`?status=pending\|all`, newest 100) / add one (contributor; 429 when 50 are pending) |
+| `POST` | `/projects/{id}/decisions/proposals/{pid}/accept` · `/reject` | Accept (send the final fields; makes a decision) / reject (maintainer; 409 when already reviewed) |
+| `POST` | `/tasks/{id}/decision-proposals` | Suggest a decision (also open to the run's own agent token; 3 per task) |
+| `GET` | `/handoffs/open` | Threads to pick up again (Home) |
+| `DELETE` | `/tasks/{id}` | Delete a task (or thread); cleans sandbox workspace |
+| `GET` | `/tasks/{id}/report?format=pdf\|docx` | Download the result as PDF / DOCX |
+| `GET` | `/tasks/{id}/artifacts[/{path}]` | List / download output files |
+| `GET` | `/tasks/stats` | Dashboard stats |
+| `WS` | `/tasks/{id}/stream` | Live event stream (`?last_seq=` to resume) |
+
+**Projects & memory** — `/projects` CRUD · `/projects/discover` · `/projects/import`
+· `/projects/{id}/memory[/regenerate]` · `/projects/{id}/summaries` · `/projects/{id}/stats`
+
+**MCP** — `/mcp/servers` CRUD · `/mcp/servers/{id}/test` · `/mcp/servers/{id}/policies`
+· `/mcp/observability`
+
+**Scheduling / templates / approvals** — `/schedules` CRUD + `/run` + `/runs` +
+`/preview` · `/templates` + `/presets` + `/run` · `/approvals` + `/{id}/approve|reject`
+
+**Agents** — `/agents` CRUD (`tier`; responses carry `lint`) · `/agents/presets` · `/agents/{id}/run` and `/agents/dispatch` (with optional project/prompt override and `brief`)
+
+**Security & usage** — `/findings` + `/summary` + `PATCH /{id}` · `/usage/summary`
+· `/usage/timeseries` · `/usage/by-project` · `/usage/by-model`
+
+**Webhooks / system** — `POST /webhooks/github` · `GET /system/claude` · `GET /health`
+
+```bash
+curl -X POST localhost:8200/tasks -H 'Content-Type: application/json' -d '{
+  "prompt": "Write a haiku about orchestration to haiku.txt",
+  "model": "sonnet", "priority": "high", "max_turns": 10, "max_budget_usd": 0.5
+}'
+```
+
+Streamed events are normalized to: `started`, `context`, `mcp`, `system`,
+`text_output`, `tool_use`, `tool_result`, `retry`, `log`, `error`, `completed`.
+
+---
+
 ## Testing
 
 ```bash
-cd backend && python -m pytest -q      # 20 tests: units + API integration (mock claude)
+cd backend && python -m pytest -q      # units + API integration (mock claude)
 ```
 
 Unit tests cover the vault, risk classification, transient-failure detection,
 finding fingerprints, prompts, webhook signatures, and report generation.
 Integration tests exercise the task lifecycle, approval auto-gate/approve/reject,
 reports, usage, agents, schedules-run-agents, and the GitHub webhook — all against a mock `claude`
-binary. **GitHub Actions** (`.github/workflows/ci.yml`) runs the backend suite and
+binary. Each feature section above has its own tests, also against the mock; what
+still needs a real `claude` is listed in [Check on a real run](#check-on-a-real-run).
+**GitHub Actions** (`.github/workflows/ci.yml`) runs the backend suite and
 the frontend build on every push/PR.
+
+---
+
+## Check on a real run
+
+The tests and the end-to-end checks use a mock `claude`. These parts have not yet
+been checked against the real `claude` CLI (or the real outside tool). Until they
+are, treat what they show as unconfirmed. Tick them off on your first live runs.
+
+1. **Token care:** the per-message token figures, the price-table estimate, and
+   whether the result's totals include helper agents' tokens. Compare a finished
+   step's panel and cost with what Claude reports.
+   ([Token care and questions](#token-care-and-questions))
+2. **Claude plan limits:** whether a run sends `rate_limit_event` at all, the unit of
+   `resetsAt`, the scale of `utilization`, which window it describes, and what a run
+   that hits the limit prints. ([Claude plan limits](#claude-plan-limits))
+3. **Ask about this run:** that the `--output-format json` result carries `result` and
+   `total_cost_usd`, and that the disallowed tools are really off.
+   ([Ask about this run](#ask-about-this-run))
+4. **Decision memory:** that the notes co-guard adds before an edit reach the model and
+   that agents stop and ask when a change would contradict one.
+   ([Decision memory](#decision-memory))
+5. **Suggested decisions:** that `claude` answers the two suggestion prompts in the
+   format the parser expects, what they cost, and that agents file suggestions from
+   the index line. ([Suggested decisions](#suggested-decisions))
+6. **Briefs:** that the "Outside the task brief" deny reason reaches the model as
+   worded (so it stops and reports), and that agents follow the brief text.
+   ([Helper tiers and briefs](#helper-tiers-and-briefs))
+7. **Command gates:** check commands against a real project and test runner (only
+   `true` / `false` were run end to end). ([Command gates](#command-gates))
+8. **Workflow run control:** approve ahead, the project check lock and "Run again from
+   here" on a run with real agents. ([Workflow run control](#workflow-run-control))
+9. **Steps side by side:** several real agent steps running at once, and a failure
+   stopping the others. ([Steps side by side](#steps-side-by-side))
+10. **Code map:** the default build command
+    (`npx -y codebase-memory-mcp@0.12.1 cli index_repository`) against the real tool.
+    ([Code map](#code-map))
+11. **Connected tools:** real stdio tools starting from their private folder; if one
+    stops working, turn on **Start in the project folder**.
+    ([Where connected tools start](#where-connected-tools-start))
+12. **Recommended tools:** the Chrome DevTools (`chrome-devtools-mcp@1.13.0`) and
+    shadcn (`shadcn@4.23.0 mcp`) presets, and that agents load the design skills.
+    ([Recommended tools](#recommended-tools-for-projects-with-a-user-interface))
+13. **Published links:** that real tools' answers carry the link the card looks for.
+    ([Published outside the project](#published-outside-the-project))
+14. **Upkeep:** handoffs closing after a real success, the code-map note at task start,
+    and decisions shown before a real shell write.
+    ([Upkeep](#upkeep-closed-handoffs-tidying-sharper-notes))
 
 ---
 
@@ -2240,8 +2690,13 @@ the frontend build on every push/PR.
   person ([Agent guard](#agent-guard-co-guard)) — a seatbelt, not a sandbox.
 - **MCP** is injected per task (stateless), not run as long-lived shared daemons;
   HTTP-transport health checks aren't validated yet.
-- **Deferred:** Team & Auth (login/roles/audit), `docker-compose`, `decisions.md`,
-  auto codebase overviews, full-text search, and per-project task serialization.
+- **Done since this list was written:** Team & Auth (login, roles, teams; see
+  [Deploying for a team](#deploying-for-a-team)), decisions (kept in the database,
+  not a `decisions.md` file; see [Decision memory](#decision-memory)) and a code
+  index through an outside tool ([Code map](#code-map)).
+- **Deferred:** an audit log, sign-in with GitHub / SSO, `docker-compose`, auto
+  codebase overviews, full-text search, per-project task serialization, and
+  OS-level isolation per task ([Seatbelt limits](#seatbelt-limits)).
 
 ---
 

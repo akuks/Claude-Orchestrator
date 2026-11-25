@@ -12,7 +12,7 @@ from sqlalchemy.orm import Session
 from app import models
 from app.database import _alembic_cfg, _baseline_metadata, run_migrations
 
-HEAD = "0021"  # the latest revision
+HEAD = "0022"  # the latest revision
 
 
 def _tables(db) -> set[str]:
@@ -750,3 +750,84 @@ def test_migration_0021_upgrade_downgrade(scratch_url):
                 sc.exec_driver_sql("SELECT version_num FROM alembic_version").scalar())
 
     assert _inspect(url, check_down) == ("old", "0020")
+
+
+def test_migration_0022_upgrade_downgrade(scratch_url):
+    from alembic import command
+
+    url = scratch_url
+    command.upgrade(_alembic_cfg(url), "0021")
+
+    def old_rows(sc, insp):  # org settings and an event from before 0022 (real booleans where there are any)
+        sc.exec_driver_sql(
+            "INSERT INTO guard_org_settings (id, disabled_rules, dev_db_patterns, ground_rules, model_tiers, updated_at)"
+            " VALUES (1, '[]', '[]', '{}', '{}', CURRENT_TIMESTAMP)")
+        sc.exec_driver_sql(
+            "INSERT INTO tasks (id, title, prompt, status, priority, tags, model, max_turns, attempt, allow_remote,"
+            " read_only, requires_approval, risk, created_at, origin, recoveries, auto_continued, stage_attempt,"
+            " plan_requeues) VALUES ('t22', 'old', 'p', 'completed', 'normal', '[]', '', 25, 0, true, false, false,"
+            " 'info', CURRENT_TIMESTAMP, 'user', 0, false, 0, 0)")
+        sc.exec_driver_sql("INSERT INTO task_events (task_id, seq, type, payload, created_at)"
+                           " VALUES ('t22', 1, 'text_output', '{}', CURRENT_TIMESTAMP)")
+
+    _inspect(url, old_rows)
+    command.upgrade(_alembic_cfg(url), "0022")
+
+    def check(sc, insp):
+        assert "retention" in {c["name"] for c in insp.get_columns("guard_org_settings")}
+        assert "root_commit" in {c["name"] for c in insp.get_columns("projects")}
+        idx = {i["name"]: i["column_names"] for i in insp.get_indexes("task_events")}
+        assert idx.get("ix_task_events_created_at") == ["created_at"]
+        assert idx.get("ix_task_events_task_id") == ["task_id"]
+        return (sc.exec_driver_sql("SELECT retention FROM guard_org_settings WHERE id=1").scalar(),
+                sc.exec_driver_sql("SELECT version_num FROM alembic_version").scalar())
+
+    kept, ver = _inspect(url, check)
+    assert (json.loads(kept) if isinstance(kept, str) else kept) == {}
+    assert ver == "0022"
+    command.downgrade(_alembic_cfg(url), "0021")
+
+    def check_down(sc, insp):
+        assert "retention" not in {c["name"] for c in insp.get_columns("guard_org_settings")}
+        assert "root_commit" not in {c["name"] for c in insp.get_columns("projects")}
+        idx = {i["name"] for i in insp.get_indexes("task_events")}
+        assert "ix_task_events_created_at" not in idx and "ix_task_events_task_id" in idx
+        return (sc.exec_driver_sql("SELECT type FROM task_events WHERE task_id='t22'").scalar(),
+                sc.exec_driver_sql("SELECT version_num FROM alembic_version").scalar())
+
+    assert _inspect(url, check_down) == ("text_output", "0021")
+
+
+def test_migration_0022_is_one_transaction_and_skips_what_is_there(scratch_url, caplog):
+    """No autocommit / CONCURRENTLY step (all-or-nothing at start); a database that already has a 0022 column
+    or index (a hand fix, a repaired legacy DB) still upgrades; the index build is announced in the log."""
+    import logging
+    import pathlib
+
+    from alembic import command
+
+    src = (pathlib.Path(__file__).parent.parent / "migrations" / "versions" / "0022_upkeep.py").read_text()
+    assert "autocommit_block" not in src and "concurrently" not in src.lower()
+    url = scratch_url
+    command.upgrade(_alembic_cfg(url), "0021")
+
+    def partial(sc, insp):
+        sc.exec_driver_sql("ALTER TABLE projects ADD COLUMN root_commit VARCHAR(40)")
+        sc.exec_driver_sql("CREATE INDEX ix_task_events_created_at ON task_events (created_at)")
+
+    _inspect(url, partial)
+    with caplog.at_level(logging.WARNING):
+        command.upgrade(_alembic_cfg(url), "0022")
+    assert not any("task history table" in r.getMessage() for r in caplog.records)  # the index was there
+
+    def check(sc, insp):
+        assert "retention" in {c["name"] for c in insp.get_columns("guard_org_settings")}
+        assert "root_commit" in {c["name"] for c in insp.get_columns("projects")}
+        return sc.exec_driver_sql("SELECT version_num FROM alembic_version").scalar()
+
+    assert _inspect(url, check) == "0022"
+    command.downgrade(_alembic_cfg(url), "0021")
+    caplog.clear()
+    with caplog.at_level(logging.WARNING):
+        command.upgrade(_alembic_cfg(url), "0022")
+    assert any("task history table" in r.getMessage() for r in caplog.records)

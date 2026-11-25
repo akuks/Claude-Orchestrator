@@ -40,3 +40,21 @@ export function detailRows(detail) {
   if (!detail || typeof detail !== 'object') return []
   return Object.entries(detail).map(([k, v]) => [k.replace(/_/g, ' '), detailText(v)])
 }
+
+// "12 MB", "340 KB" (decimal, rounded) for the tidying preview.
+export function sizeText(bytes) {
+  const b = Number(bytes) || 0
+  if (b >= 1e9) return `${(b / 1e9).toFixed(1)} GB`
+  if (b >= 1e6) return `${Math.round(b / 1e6)} MB`
+  if (b >= 1e3) return `${Math.round(b / 1e3)} KB`
+  return `${b} bytes`
+}
+
+const plural = (n, one, many) => `${n} ${n === 1 ? one : many}`
+
+// "3 tasks could be tidied (about 12 MB of history)" / "Nothing to tidy yet".
+export function tidyPreviewLine(r) {
+  const n = Number(r?.tasks) || 0
+  if (!n) return 'Nothing to tidy yet'
+  return `${plural(n, 'task', 'tasks')} could be tidied (about ${sizeText(r.bytes)} of history)`
+}

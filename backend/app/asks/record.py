@@ -56,6 +56,11 @@ def _event_line(ev: TaskEvent, secrets) -> str | None:
         return f"started: model {_txt(p.get('model'), secrets, 60)}"
     if t == "usage_band":
         return f"budget band: {_txt(p.get('band'), secrets, 20)}"
+    if t == "summary":  # phase 7d: the run's older history, tidied (app.retention)
+        lines = [x for x in (p.get("lines") or []) if isinstance(x, str)]
+        tail = "; ".join(lines[-5:])
+        return (f"history tidied: {_txt(p.get('events'), secrets, 12)} events"
+                + (f", last lines: {_txt(tail, secrets, TEXT_MAX)}" if tail else ""))
     return None  # other event types are not worth a line
 
 

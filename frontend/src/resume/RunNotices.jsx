@@ -8,6 +8,7 @@ const TYPE = {
   credentials_changed: 'info',
   outside_commits: 'info',
   gave_up: 'error',
+  repo_changed: 'warning',
   history_rewritten: 'warning',
   no_commits: 'warning',
   temp_files: 'warning',

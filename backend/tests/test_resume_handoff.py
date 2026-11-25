@@ -660,14 +660,18 @@ def test_snapshot_versioning_and_prev(client, tmp_path):
     assert c.version == 2 and c.prev_text == b.text and c.prev_content["last_reply"] is None
     assert c.content["last_reply"] == "new progress"
 
-    async def close():
+    async def close(started=None):
         async with SessionLocal() as s:
             row = await s.get(TaskHandoff, c.id)
-            row.status = "closed"
+            row.status, row.closed_at = "closed", datetime.now(timezone.utc)
+            if started is not None:
+                (await s.get(Task, tid)).started_at = started
             await s.commit()
 
     run(close())
-    assert run(handoff.snapshot(tid, "manual")).status == "open"  # a later snapshot reopens it
+    assert run(handoff.snapshot(tid, "manual")).status == "closed"  # no new run: stays closed (phase 7d)
+    run(close(started=datetime.now(timezone.utc) + timedelta(seconds=1)))
+    assert run(handoff.snapshot(tid, "manual")).status == "open"  # a run started after the close reopens it
 
 
 # ---- the worker: spawn, heartbeat, finish ------------------------------------------------------
@@ -853,13 +857,15 @@ def test_handoff_routes_permissions(client):
     assert got.status_code == 200, got.text
     body = got.json()
     assert set(body) == {"content", "text", "version", "status", "reason", "saved_at", "prev_available"}
-    assert body["status"] == "open" and body["reason"] == "run ended" and body["prev_available"] is False
+    # the step completed with nothing open: closed automatically (phase 7d)
+    assert body["status"] in ("open", "closed") and body["reason"] == "run ended" and body["prev_available"] is False
     assert viewer.post(f"/tasks/{tid}/handoff/close").status_code == 403
     assert viewer.post(f"/tasks/{tid}/handoff/refresh").status_code == 403
     closed = owner.post(f"/tasks/{tid}/handoff/close")
     assert closed.status_code == 200 and closed.json()["status"] == "closed"
     fresh = owner.post(f"/tasks/{tid}/handoff/refresh")
-    assert fresh.status_code == 200 and fresh.json()["reason"] == "manual" and fresh.json()["status"] == "open"
+    # a person's Refresh updates the content; no new run of the thread, so it stays closed (phase 7d)
+    assert fresh.status_code == 200 and fresh.json()["reason"] == "manual" and fresh.json()["status"] == "closed"
     assert outsider.get(f"/tasks/{tid}/handoff").status_code == 404
     assert outsider.post(f"/tasks/{tid}/handoff/close").status_code == 404
 

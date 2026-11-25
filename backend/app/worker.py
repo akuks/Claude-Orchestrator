@@ -22,7 +22,7 @@ from pathlib import Path
 
 from sqlalchemy import func, select
 
-from . import auth, context_store, mcp_manager, memory, notifications, planlimits, security
+from . import auth, context_store, mcp_manager, memory, notifications, planlimits, rootcommit, security
 from .access import effective_project_id
 from .agent_env import PROJECT_ENV_BLOCKED, MissingCredential, build_agent_env, credential_ref
 from .config import settings
@@ -778,6 +778,14 @@ class WorkerManager:
         # outside-commit base held for the whole run, and handoff.md from the
         # stored handoff (so an early compaction finds it).
         since = await self._spawn_handoff(task_id, workspace, run_secrets)
+        # A folder that holds another repository than before (cloned again): a notice; the first start stores it.
+        try:
+            if proj is not None:
+                changed = await asyncio.wait_for(rootcommit.at_task_start(proj.id, proj.directory), 6)
+                if changed:
+                    await emit("repo_changed", {"message": changed})
+        except Exception:  # noqa: BLE001 - never stops a run
+            log.debug("root commit check failed for %s", task_id, exc_info=True)
 
         try:
             proc = await asyncio.create_subprocess_exec(
@@ -2254,6 +2262,12 @@ class WorkerManager:
                 log.warning("codemap: refresh trigger failed for %s: %s", task_id, e)
         # token care: a step that crossed the fresh-session threshold continues in a fresh session
         await self._maybe_auto_continue(task_id)
+        # phase 7d: a step that completed with nothing left open closes its thread's handoff (after the
+        # automatic Continue, whose queued step keeps it open)
+        try:
+            await handoff.auto_close(task_id)
+        except Exception as e:  # noqa: BLE001 - never breaks a finish
+            log.warning("handoff: auto close failed for %s: %s", task_id, e)
 
     AUTO_CONTINUE_MAX = 3  # automatic continues in a row per thread
 

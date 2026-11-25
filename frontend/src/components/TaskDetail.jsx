@@ -200,6 +200,12 @@ export function renderLine(ev) {
     case 'risk':
       text = p.risk_reason ? `Marked critical: ${p.risk_reason}` : 'Marked critical'
       break
+    case 'summary':
+      text = `Older run history kept as a summary (${Number(p.events) || 0} events).`
+      break
+    case 'repo_changed':
+      text = p.message
+      break
     case 'output':
       text = `Published: ${publishedName(p)}`
       break
@@ -769,10 +775,21 @@ export default function TaskDetail({ taskId, onClose, onChanged, onOpenTask, onO
           const u = usageLine(ev)
           if (u) return <UsageLine key={i} line={u} />
           const line = renderLine(ev)
+          const kept = ev.type === 'summary' && Array.isArray(ev.payload?.lines) ? ev.payload.lines : []
           return (
             <div key={i} style={{ color: line.color }}>
               {line.prefix ? `${line.prefix} ` : ''}
               {line.text}
+              {kept.length > 0 && (
+                <details data-testid="summary-details" style={{ marginTop: 2 }}>
+                  <summary style={{ cursor: 'pointer', fontSize: 12 }}>Details</summary>
+                  {kept.map((l, j) => (
+                    <div key={j} style={{ whiteSpace: 'pre-wrap' }}>
+                      {String(l)}
+                    </div>
+                  ))}
+                </details>
+              )}
             </div>
           )
         })}
