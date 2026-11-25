@@ -4,7 +4,7 @@ import os
 import re
 import sys
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from fastapi import APIRouter, HTTPException, Request
@@ -27,7 +27,7 @@ from ..access import (
 from ..guard import custom as guard_custom
 from ..guard import policy_store
 from ..guard import trust as guard_trust
-from ..resume import gitfacts
+from ..resume import activity, gitfacts
 from ..models import ActionRule, McpServer, Project, ProjectDecision, ProjectMember, Task, TaskSummary, Team, User, UserCredential
 from ..schemas import (
     MemberIn,
@@ -769,6 +769,26 @@ async def get_git_state(project_id: str, request: Request):
     f = await asyncio.to_thread(gitfacts.facts, project.directory, gitfacts.Budget())
     return {"is_repo": f.is_repo, "no_commits": f.no_commits, "branch": f.branch, "head": f.head,
             "dirty": f.dirty, "dirty_capped": f.dirty_capped, "error": f.error}
+
+
+@router.get("/{project_id}/activity")
+async def get_activity(project_id: str, request: Request, days: int = 30, min_lines: int = 0):
+    """What was built: commits of the last ``days`` days (1-365) with +/- counts, per-day and per-person
+    totals, and the task that made each commit when a run recorded it. Bounded; never raises."""
+    async with SessionLocal() as s:
+        await require_project_role(s, request.state.principal, project_id)
+        project = await _get_or_404(s, project_id)
+    days = max(1, min(365, days))
+    now = datetime.now(timezone.utc)
+    h = await asyncio.to_thread(activity.history, project.directory, days, gitfacts.Budget(), now)
+    commits = [c for c in h["commits"] if c["added"] + c["removed"] >= min_lines]
+    tasks = await activity.task_map(project_id, now - timedelta(days=days), [c["sha"] for c in commits])
+    by_day, people = activity.summarize(commits, days, now)
+    for c in commits:
+        c.pop("_when", None)
+        c["task"] = tasks.get(c["sha"])
+    return {"days": days, "is_repo": h["is_repo"], "commits": commits, "by_day": by_day,
+            "contributors": people, "truncated": h["truncated"]}
 
 
 @router.get("/{project_id}/servers", response_model=list[ServerEntry])

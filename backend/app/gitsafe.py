@@ -55,6 +55,8 @@ remote's lazy fetch of a missing object), so every such call goes through
 * the code map freshness check (phase 7d): ``diff --name-only -z <hex> HEAD``, exactly that order (the caller
   bounds it with its timeout and reads only what it needs), and the repository's first commit: ``rev-list
   --max-parents=0 HEAD``, exactly;
+* the activity history (phase 7g): ``log --no-merges --numstat --format=<ACTIVITY_FORMAT> --since=<YYYY-MM-DD> -n
+  <1-5 digits>``, exactly that order (no patch text is produced; --numstat prints only counts and names);
 * the typed stage outputs' commit check: ``rev-parse --verify --quiet
   <hex>^{commit}``, exactly that order (hex is 7-40 lowercase digits).
 
@@ -114,6 +116,7 @@ class GitResult:
     err: str = ""
     code: int | None = None  # exit code; None when git did not finish
     missing: bool = False  # no git executable
+    capped: bool = False  # output cut at ``max_bytes`` (the command was stopped)
 
 
 # log / rev-list options a caller may pass (exact, or a prefix ending in "=").
@@ -127,6 +130,9 @@ STATUS_OPTIONS = ("--porcelain=v1", "-z", "--untracked-files=all", "--no-renames
 _HEX = r"[0-9a-f]{7,40}"
 _REV_RE = re.compile(rf"^(HEAD|{_HEX}(\.\.{_HEX})?)$")
 _SHA_RE = re.compile(rf"^{_HEX}$")
+ACTIVITY_FORMAT = "--format=%H%x1f%aI%x1f%an%x1f%ae%x1f%s"
+_ACTIVITY_SINCE_RE = re.compile(r"--since=\d{4}-\d{2}-\d{2}")
+_ACTIVITY_N_RE = re.compile(r"\d{1,5}")
 _COMMIT_REV_RE = re.compile(rf"{_HEX}\^\{{commit\}}")  # used with fullmatch
 
 
@@ -164,6 +170,10 @@ def check_args(args) -> None:
     if cmd == "symbolic-ref" and rest == ["-q", "--short", "HEAD"]:
         return
     if cmd == "config" and len(rest) == 2 and rest[0] == "--get":
+        return
+    if cmd == "log" and len(rest) == 6 and rest[0] == "--no-merges" and rest[1] == "--numstat" \
+            and rest[2] == ACTIVITY_FORMAT and _ACTIVITY_SINCE_RE.fullmatch(rest[3]) and rest[4] == "-n" \
+            and _ACTIVITY_N_RE.fullmatch(rest[5]):
         return
     if cmd in ("log", "rev-list"):
         for a in rest:
@@ -229,11 +239,12 @@ def _filter_overrides(exe: str, directory, timeout: float) -> list[str] | GitRes
     return over
 
 
-def run_git(directory, *args: str, timeout: float, strip: bool = True) -> GitResult:
+def run_git(directory, *args: str, timeout: float, strip: bool = True, max_bytes: int | None = None) -> GitResult:
     """Run ``git <SAFE_ARGS> <args>`` in ``directory`` (see the module doc);
     ValueError for a command outside the allowlist. The filter-driver listing and the
     command each get ``timeout`` (so at most twice it in all). ``strip=False`` keeps the
-    output as git wrote it (``-z`` output whose first name may start with a space)."""
+    output as git wrote it (``-z`` output whose first name may start with a space). ``max_bytes`` stops
+    reading at that many bytes (git is killed; ``capped`` true, the output ends mid-record)."""
     check_args(args)
     exe = shutil.which("git")
     if exe is None:
@@ -245,6 +256,8 @@ def run_git(directory, *args: str, timeout: float, strip: bool = True) -> GitRes
         # a submodule's own config could define filter or diff drivers that git's child processes would run
         extra = ("--ignore-submodules=dirty", "--submodule=short") if args[0] == "diff" else ("--ignore-submodules=dirty",)
         args = (args[0], *extra, *args[1:])
+    if max_bytes is not None:
+        return _run_capped(exe, over, args, directory, timeout, strip, max_bytes)
     try:
         r = subprocess.run(
             [exe, *SAFE_ARGS, *over, *args], cwd=str(Path(directory)), stdin=subprocess.DEVNULL,
@@ -259,3 +272,47 @@ def run_git(directory, *args: str, timeout: float, strip: bool = True) -> GitRes
         r.returncode == 0, out.strip() if strip else out, r.returncode < 0,
         r.stderr.decode("utf-8", "replace").strip(), r.returncode,
     )
+
+
+def _run_capped(exe, over, args, directory, timeout: float, strip: bool, max_bytes: int) -> GitResult:
+    """Like the plain run but stdout is read in chunks and git is killed once ``max_bytes`` were read."""
+    import threading
+
+    try:
+        p = subprocess.Popen([exe, *SAFE_ARGS, *over, *args], cwd=str(Path(directory)), stdin=subprocess.DEVNULL,
+                             stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=git_env(directory))
+    except (OSError, ValueError) as e:
+        return GitResult(False, "", True, str(e))
+    chunks: list[bytes] = []
+    state = {"n": 0, "capped": False}
+
+    def pump():
+        while True:
+            b = p.stdout.read(65536)
+            if not b:
+                return
+            state["n"] += len(b)
+            if state["n"] > max_bytes:
+                chunks.append(b[: len(b) - (state["n"] - max_bytes)])
+                state["capped"] = True
+                p.kill()
+                return
+            chunks.append(b)
+
+    t = threading.Thread(target=pump, daemon=True)
+    t.start()
+    try:
+        p.wait(timeout=max(0.01, timeout))
+    except subprocess.TimeoutExpired:
+        p.kill()
+        p.wait()
+        t.join(1)
+        return GitResult(False, "", True, "timed out")
+    t.join(5)
+    err = (p.stderr.read(65536) or b"").decode("utf-8", "replace").strip()
+    for f in (p.stdout, p.stderr):
+        f.close()
+    out = b"".join(chunks).decode("utf-8", "replace")
+    if state["capped"]:
+        return GitResult(True, out.strip() if strip else out, False, err, 0, capped=True)
+    return GitResult(p.returncode == 0, out.strip() if strip else out, p.returncode < 0, err, p.returncode)

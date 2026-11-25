@@ -7,8 +7,14 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
+from sqlalchemy import func, select
+
 from .. import auth, retention
-from ..health import runner
+from ..config import settings
+from ..database import SessionLocal
+from ..health import capacity, runner
+from ..constants import Status
+from ..models import Task
 
 router = APIRouter(prefix="/admin/health", tags=["health"], dependencies=[Depends(auth.require_admin)])
 
@@ -20,6 +26,17 @@ async def system_health(refresh: bool = False):
     """Runs the checks now (no background job). Cached 30 s per process;
     ``?refresh=true`` ("Check again") skips the cache."""
     return await runner.run_all(force=refresh)
+
+
+@router.get("/capacity")
+async def get_capacity():
+    """Run slots and (when readable) memory and load: ``{slots, running, queued, memory, load, fits, tips}``."""
+    async with SessionLocal() as s:
+        rows = (await s.execute(select(Task.status, func.count()).where(
+            Task.status.in_([Status.RUNNING, Status.QUEUED])).group_by(Task.status))).all()
+    n = {str(getattr(st, "value", st)): c for st, c in rows}
+    return await asyncio.to_thread(capacity.readout, settings.worker_concurrency, n.get("running", 0),
+                                   n.get("queued", 0))
 
 
 class RetentionPatch(BaseModel):

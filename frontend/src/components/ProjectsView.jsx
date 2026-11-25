@@ -26,6 +26,7 @@ import {
   ApiOutlined,
   BulbOutlined,
   DatabaseOutlined,
+  HistoryOutlined,
   DeleteOutlined,
   EditOutlined,
   PlusOutlined,
@@ -48,6 +49,7 @@ import { canEditGuard } from '../guard/guard'
 import DecisionsPane from '../decisions/DecisionsPane'
 import LaunchTab from '../launch/LaunchTab'
 import CodeMapSection from '../codemap/CodeMapSection'
+import ActivitySection from '../activity/ActivitySection'
 import DatabaseSection from '../schema/DatabaseSection'
 import RecommendedSection from '../recommend/RecommendedSection'
 import { FRESH_SUGGEST, freshSessionError } from '../usage/usage'
@@ -561,6 +563,15 @@ export function ProjectDrawer({ project, tab, onTab, currentUser, onClose, onSav
                 </span>
               ),
               children: <DatabaseSection key={project.id} active={tab === 'database'} project={project} />,
+            },
+            {
+              key: 'activity',
+              label: (
+                <span>
+                  <HistoryOutlined /> Activity
+                </span>
+              ),
+              children: <ActivitySection key={project.id} active={tab === 'activity'} project={project} />,
             },
             ...(rec === null || rec?.has_ui
               ? [
