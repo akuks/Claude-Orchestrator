@@ -130,6 +130,8 @@ class Task(Base):
     # the plain sentence shown while it waits ("Paused — your Claude plan limit was reached. ...").
     not_before: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     wait_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # plan-limit hits in a row (reset when a run gets past the limit); the third stops the task
+    plan_requeues: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
 
     events: Mapped[list["TaskEvent"]] = relationship(
         back_populates="task", cascade="all, delete-orphan"
@@ -399,6 +401,9 @@ class PlanLimitStatus(Base):
     raw: Mapped[dict] = mapped_column(JSON, default=dict)
     api_key: Mapped[bool] = mapped_column(Boolean, default=False, server_default=false())
     credential_ref: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    # a rejected hold beyond 6 hours counts in full only once confirmed; run_ref: the run that wrote it
+    confirmed: Mapped[bool] = mapped_column(Boolean, default=False, server_default=false())
+    run_ref: Mapped[str | None] = mapped_column(String(32), nullable=True)
     seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
     task_id: Mapped[str | None] = mapped_column(String(32), nullable=True)
 

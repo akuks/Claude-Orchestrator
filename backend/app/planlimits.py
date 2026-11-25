@@ -36,6 +36,9 @@ ALLOWED = "allowed"
 RAW_MAX = 2048  # bytes of the stored raw rate_limit_info
 RESUME_AFTER = timedelta(minutes=1)  # a held task starts at the reset time + 1 minute
 WARNING_FRESH = timedelta(hours=5)  # a warning older than this is not shown as a banner
+UNCONFIRMED_MAX = timedelta(hours=6)  # a hold further ahead needs confirming (see hold_until)
+REQUEUE_MAX = 3  # plan-limit hits in a row before a task stops
+CHECK_EVERY = 300.0  # seconds: a waiting task's hold is checked again this often
 _PAST = timedelta(days=1)
 _AHEAD = timedelta(days=8)
 
@@ -47,6 +50,7 @@ WARNING_TEXT_NO_TIME = "Your Claude plan is close to its limit."
 BANNER_LIMIT = "Your Claude plan limit was reached. Work starts again at {hhmm}."
 BANNER_WARNING = WARNING_TEXT
 STEP_HELD = "waiting for the Claude plan limit to reset"
+STOPPED_TEXT = "Stopped — the Claude plan limit was reached three times in a row."
 
 # A run's own words for a plan limit ("You've hit your session limit", "...weekly limit", "...Opus limit",
 # "...Sonnet limit"), any apostrophe.
@@ -117,7 +121,13 @@ def cap_raw(info) -> dict:
         text = str(info)
     if len(text.encode()) <= RAW_MAX:
         return info
-    return {"truncated": True, "text": text.encode()[: RAW_MAX - 64].decode(errors="ignore")}
+    cut = text[:RAW_MAX]
+    while True:  # the stored JSON (with its escaping) fits RAW_MAX bytes
+        out = {"truncated": True, "text": cut}
+        size = len(json.dumps(out).encode())
+        if size <= RAW_MAX:
+            return out
+        cut = cut[: max(0, len(cut) - max(1, (size - RAW_MAX + 5) // 2))]
 
 
 def reading(info, now: datetime | None = None) -> dict:
@@ -203,17 +213,35 @@ def row_out(row: PlanLimitStatus | None, now: datetime | None = None) -> dict | 
         "api_key": bool(row.api_key),
         "seen_at": _aware(row.seen_at).isoformat() if row.seen_at else None,
         "task_id": row.task_id,
+        "confirmed": bool(row.confirmed),
+        "hold_until": hold_until(row).isoformat() if hold_until(row) else None,
         "held": is_holding(row, now),
         "banner": banner(row, now),
     }
 
 
-def is_holding(row: PlanLimitStatus | None, now: datetime | None = None) -> bool:
-    """Rejected with a reset time still ahead. A stale row (its reset time passed) holds nothing."""
+def hold_until(row: PlanLimitStatus | None) -> datetime | None:
+    """Until when a rejected row holds work: its reset time, but at most 6 hours after it was seen unless
+    the hold is confirmed (a limit sentence in an error result, or rejected events from two different
+    runs); it is checked again then. None: not a rejected row with a reset time."""
     if row is None or row.status != REJECTED:
-        return False
+        return None
     resets = _aware(row.resets_at)
-    return resets is not None and resets > (now or _now())
+    if resets is None:
+        return None
+    seen = _aware(row.seen_at)
+    if not row.confirmed and seen is not None and resets > seen + UNCONFIRMED_MAX:
+        return seen + UNCONFIRMED_MAX
+    return resets
+
+
+def is_holding(row: PlanLimitStatus | None, now: datetime | None = None) -> bool:
+    """Rejected with a hold time still ahead, on a plan (never an API key: plan limits do not apply, and the
+    org key is shared by many people; such rows are kept for display only). A stale row holds nothing."""
+    if row is None or row.api_key:
+        return False
+    until = hold_until(row)
+    return until is not None and until > (now or _now())
 
 
 def banner(row: PlanLimitStatus | None, now: datetime | None = None) -> dict | None:
@@ -221,10 +249,10 @@ def banner(row: PlanLimitStatus | None, now: datetime | None = None) -> dict | N
     if row is None:
         return None
     if is_holding(row, now):
-        return {"kind": "limit", "text": BANNER_LIMIT.format(hhmm=hhmm(start_after(row.resets_at))),
+        return {"kind": "limit", "text": BANNER_LIMIT.format(hhmm=hhmm(start_after(hold_until(row)))),
                 "resets_at": _aware(row.resets_at).isoformat()}
     seen = _aware(row.seen_at)
-    if row.status == WARNING and seen is not None and now - seen <= WARNING_FRESH:
+    if row.status == WARNING and not row.api_key and seen is not None and now - seen <= WARNING_FRESH:
         resets = _aware(row.resets_at)
         if resets is not None and resets <= now:
             return None  # the window it warned about has reset
@@ -234,34 +262,54 @@ def banner(row: PlanLimitStatus | None, now: datetime | None = None) -> dict | N
     return None
 
 
-async def record(owner: dict, read: dict, task_id: str | None) -> None:
-    """Latest wins: one row per owner, updated in place. Never raises."""
+async def record(owner: dict, read: dict, task_id: str | None, run_ref: str | None = None,
+                 confirmed: bool = False) -> PlanLimitStatus | None:
+    """Latest wins: one row per owner, updated in place. A ``rejected`` reading is confirmed by
+    ``confirmed`` (a limit sentence in an error result) or by the owner's row already being rejected by a
+    different run (``run_ref``); ``raw`` None keeps the stored raw. Returns the stored row (detached), or
+    None. Never raises."""
     if not owner or not owner.get("owner"):
-        return
+        return None
     for attempt in range(2):
         try:
             async with SessionLocal() as s:
                 row = (await s.execute(select(PlanLimitStatus).where(
                     PlanLimitStatus.credential_owner == owner["owner"]))).scalar_one_or_none()
+                rejected = read["status"] == REJECTED
+                before_rejected = row is not None and row.status == REJECTED
+                other_run = (before_rejected and run_ref is not None and row.run_ref is not None
+                             and row.run_ref != run_ref)
+                was_confirmed = bool(before_rejected and row.confirmed and run_ref is not None
+                                     and row.run_ref == run_ref)
                 if row is None:
-                    row = PlanLimitStatus(credential_owner=owner["owner"])
+                    row = PlanLimitStatus(credential_owner=owner["owner"], raw={})
                     s.add(row)
                 row.status = read["status"]
                 row.resets_at = read["resets_at"]
                 row.utilization = read["utilization"]
-                row.raw = read["raw"]
+                if read.get("raw") is not None:
+                    row.raw = read["raw"]
                 row.api_key = bool(owner.get("api_key"))
                 row.credential_ref = owner.get("ref")
                 row.seen_at = _now()
                 row.task_id = task_id
+                row.confirmed = bool(rejected and (confirmed or other_run or was_confirmed))
+                if run_ref is not None or not rejected:
+                    row.run_ref = run_ref if rejected else None
                 await s.commit()
-            return
+                await s.refresh(row)
+                s.expunge(row)
+            if rejected:
+                log.info("plan limits: %s rejected until %s (confirmed: %s), written by task %s",
+                         owner["owner"], read["resets_at"], row.confirmed, task_id)
+            return row
         except IntegrityError:
             if attempt:
                 log.warning("plan limits: could not store the status for %s", owner["owner"])
         except Exception:  # noqa: BLE001 - recording never breaks a run
             log.warning("plan limits: could not store the status for %s", owner["owner"], exc_info=True)
-            return
+            return None
+    return None
 
 
 async def get_row(s, owner: str) -> PlanLimitStatus | None:
@@ -287,6 +335,7 @@ async def hold_for_user(s, user_id: str | None, now: datetime | None = None) -> 
 
 
 def start_after(resets_at: datetime) -> datetime:
+    """The time a held task starts again (its hold time + 1 minute)."""
     return _aware(resets_at) + RESUME_AFTER
 
 

@@ -80,6 +80,13 @@ def _runs() -> list[str]:
     return f.read_text().split() if f.exists() else []
 
 
+def _ref(uid):
+    async def go():
+        async with SessionLocal() as s:
+            return (await pl.credential_owner(s, uid))["ref"]
+    return asyncio.run(go())
+
+
 def _store(owner, status, resets, ref=None, api_key=False):
     asyncio.run(pl.record({"owner": owner, "api_key": api_key, "ref": ref},
                           {"status": status, "resets_at": resets, "utilization": None, "raw": {}}, None))
@@ -96,8 +103,7 @@ def _drive(events, owner):
         got.append((t, p))
 
     ctx = {"task_id": "t-" + uuid.uuid4().hex[:8], "mcp_ids": {}, "secrets": [], "model_stored": True,
-           "plan": {"owner": owner, "rejected": False, "resets_at": None, "rate_limited": False,
-                    "last_status": None, "warned": False}}
+           "plan": WorkerManager._new_plan_ctx(owner)}
     result = {"is_error": False}
 
     async def go():
@@ -128,7 +134,7 @@ def test_rate_limit_event_is_stored_and_logged(unit):
     assert ev == [{"status": "rejected", "resets_at": when.isoformat(), "utilization": 1.0,
                    "raw": {"status": "rejected", "resetsAt": value, "utilization": 1.0},
                    "credential_owner": owner["owner"]}]
-    assert ctx["plan"]["rejected"] is True and ctx["plan"]["resets_at"] == when
+    assert ctx["plan"]["rejected"] is True and ctx["plan"]["rejected_reset"] == when
 
 
 @pytest.mark.parametrize("value", [None, 4102444800, 10 ** 18, "soon"])
@@ -138,7 +144,7 @@ def test_absurd_or_missing_reset_is_stored_as_none(value):
     row = _row(owner["owner"])
     assert row.status == "rejected" and row.resets_at is None
     assert not pl.is_holding(row)  # no reset time: never holds work
-    assert ctx["plan"]["resets_at"] is None
+    assert ctx["plan"]["rejected_reset"] is None
 
 
 def test_warning_is_one_event_and_no_pause():
@@ -176,12 +182,14 @@ def test_assistant_error_rate_limit_is_noticed():
 
 def test_what_counts_as_a_limit_hit():
     hit = WorkerManager._plan_limit_hit
-    assert hit({"plan": {"rejected": True}}, {}, "")
-    assert hit({"plan": {"rate_limited": True}}, {}, "")
-    assert hit({"plan": {}}, {"is_error": True, "result_text": "You've hit your session limit"}, "")
-    assert not hit({"plan": {}}, {"is_error": False, "result_text": "You've hit your session limit"}, "")
-    assert hit({"plan": {}}, {}, "API Error: 429 rate limit")
-    assert not hit({"plan": {}}, {"is_error": True, "result_text": "tests failed"}, "boom")
+    assert hit({"plan": {"rejected": True}}, {}, "") == "strong"
+    assert hit({"plan": {}}, {"is_error": True, "result_text": "You've hit your session limit"}, "") == "strong"
+    # weak signals: the old backoff only, never an owner-wide hold
+    assert hit({"plan": {"rate_limited": True}}, {}, "") == "weak"
+    assert hit({"plan": {}}, {}, "API Error: 429 rate limit") == "weak"
+    assert hit({"plan": {}}, {}, "Error at line 4290: something") == "weak"
+    assert hit({"plan": {}}, {"is_error": False, "result_text": "You've hit your session limit"}, "") is None
+    assert hit({"plan": {}}, {"is_error": True, "result_text": "tests failed"}, "boom") is None
 
 
 def test_api_key_and_ownerless_runs_store_nothing_without_an_event():
@@ -272,36 +280,182 @@ def test_stale_rejected_status_holds_nothing(client):
     assert done["status"] == "completed" and done["wait_reason"] is None
 
 
-def test_start_check_respects_not_before(client):
-    """A queued task whose not_before is ahead waits (a timer queues it again); one whose not_before passed
-    (e.g. after a restart) starts and loses the wait."""
-    u = _user()
-
+def _queued(uid, nb):
     async def go():
-        ahead, past = uuid.uuid4().hex, uuid.uuid4().hex
+        tid = uuid.uuid4().hex
         async with SessionLocal() as s:
-            for tid, nb in ((ahead, _now() + timedelta(hours=1)), (past, _now() - timedelta(minutes=1))):
-                s.add(Task(id=tid, title="t", prompt="p", root_id=tid, status="queued", created_by=u.user_id,
-                           not_before=nb, wait_reason="Paused — x"))
+            s.add(Task(id=tid, title="t", prompt="p", root_id=tid, status="queued", created_by=uid,
+                       not_before=nb, wait_reason="Paused — x" if nb else None))
             await s.commit()
+        return tid
+    return asyncio.run(go())
+
+
+def _check(tid):
+    """_plan_wait once: (waits?, a timer was set, events, not_before, wait_reason)."""
+    async def go():
         w = WorkerManager()
         got = []
 
         async def emit(t, p):
-            got.append(t)
+            got.append((t, p))
 
-        waits = await w._plan_wait(ahead, emit)
-        timer = w._waits.get(ahead)
-        runs = await w._plan_wait(past, emit)
+        waits = await w._plan_wait(tid, emit)
+        timer = w._waits.get(tid)
         if timer is not None:
             timer.cancel()
         async with SessionLocal() as s:
-            p = await s.get(Task, past)
-            return waits, timer is not None, runs, p.not_before, p.wait_reason, got
+            t = await s.get(Task, tid)
+            return waits, timer is not None, got, _aware(t.not_before), t.wait_reason
+    return asyncio.run(go())
 
-    waits, timed, runs, nb, why, got = asyncio.run(go())
-    assert waits is True and timed is True and got == []  # no new sentence: no second event
-    assert runs is False and nb is None and why is None
+
+def test_start_check_follows_the_owners_row(client):
+    """M2: a waiting task is checked against the owner's row every time, not only once its time passed:
+    while the row holds it waits (with not_before = hold time + 1 min); once the row is gone, or for a
+    credential that no longer matches, the wait is cleared and it runs."""
+    u = _user()
+    resets = (_now() + timedelta(hours=1)).replace(microsecond=0)
+    _store(u.user_id, "rejected", resets, ref=_ref(u.user_id))
+    tid = _queued(u.user_id, _now() + timedelta(hours=1))
+    waits, timed, got, nb, why = _check(tid)
+    assert waits is True and timed is True and nb == resets + timedelta(minutes=1)
+    assert why == pl.paused_text(resets) and [t for t, _ in got] == ["plan_limit"]
+    again = _check(tid)
+    assert again[0] is True and again[2] == []  # same sentence: no second event
+
+    client.delete(f"/plan/status/{u.user_id}")  # the row goes (no live timer in the app's worker)
+    waits, timed, got, nb, why = _check(tid)
+    assert waits is False and nb is None and why is None
+
+    past = _queued(u.user_id, _now() - timedelta(minutes=1))
+    assert _check(past)[0] is False and _check(past)[3] is None
+
+    # a row for the person's old credential holds nothing
+    _store(u.user_id, "rejected", resets, ref="0" * 24)
+    assert _check(_queued(u.user_id, None))[0] is False
+    client.delete(f"/plan/status/{u.user_id}")
+
+
+def test_waiting_timer_checks_again_within_check_every(client):
+    u = _user()
+    _store(u.user_id, "rejected", _now() + timedelta(hours=5), ref=_ref(u.user_id))
+    tid = _queued(u.user_id, None)
+    seen = {}
+
+    async def go():
+        w = WorkerManager()
+
+        def spy(task_id, delay, priority, created_at):
+            seen["delay"] = delay
+
+        w._wait_then_submit = spy
+
+        async def emit(t, p):
+            pass
+
+        return await w._plan_wait(tid, emit)
+
+    assert asyncio.run(go()) is True and 0 < seen["delay"] <= pl.CHECK_EVERY
+    client.delete(f"/plan/status/{u.user_id}")
+
+
+def test_weak_signals_never_hold_the_owner(client):
+    """I1: an allowed event's reset time plus a 429 (stderr, api_retry rate_limit, error result) is the old
+    backoff: nothing owner-wide, the person's other work runs."""
+    u = _user()
+    when = int((_now() + timedelta(days=6)).timestamp())
+    done = wait_task(u, u.post("/tasks", json={"prompt": f"go [plan-limit:weak:{when}]"}).json()["id"])
+    assert done["status"] == "failed" and done["not_before"] is None and done["wait_reason"] is None
+    row = _row(u.user_id)
+    assert row.status == "allowed" and not pl.is_holding(row)
+    assert not [p for _, p in _events(done["id"], "plan_limit") if p.get("paused")]
+    nxt = wait_task(u, u.post("/tasks", json={"prompt": "next [plan-limit:allowed:none]"}).json()["id"])
+    assert nxt["status"] == "completed"
+
+
+def test_reset_time_never_comes_from_an_allowed_event():
+    owner = {"owner": "u-" + uuid.uuid4().hex[:8], "api_key": False, "ref": None}
+    far = int((_now() + timedelta(days=6)).timestamp())
+    _, ctx, _ = _drive([_rle("allowed", far)], owner)
+    assert ctx["plan"]["rejected_reset"] is None and ctx["plan"]["warning_reset"] is None
+
+    async def go():
+        return await WorkerManager()._plan_record_hit(
+            ctx, {"is_error": True, "result_text": "You've hit your session limit"})
+
+    assert asyncio.run(go()) is None  # no reset time: no owner-wide row written
+    assert _row(owner["owner"]).status == "allowed"
+
+
+def test_last_rejected_reset_wins():
+    """M5: the reset of the last rejected event, not a later warning's."""
+    owner = {"owner": "u-" + uuid.uuid4().hex[:8], "api_key": False, "ref": None}
+    r1 = (_now() + timedelta(hours=2)).replace(microsecond=0)
+    r2 = (_now() + timedelta(hours=4)).replace(microsecond=0)
+    r3 = (_now() + timedelta(hours=1)).replace(microsecond=0)
+    _, ctx, _ = _drive([_rle("rejected", int(r1.timestamp())), _rle("allowed_warning", int(r2.timestamp())),
+                        _rle("rejected", int(r3.timestamp()))], owner)
+
+    async def go():
+        return await WorkerManager()._plan_record_hit(ctx, {"is_error": True, "result_text": "x"})
+
+    row = asyncio.run(go())
+    assert _aware(row.resets_at) == r3 and row.status == "rejected"
+
+
+def test_api_key_runs_are_not_requeued(client, monkeypatch):
+    """I2: an API key's own rejected event is kept for display, never holds, and the run takes the backoff."""
+    monkeypatch.setattr(settings, "retry_max_attempts", 0)
+    k = _user("api_key")
+    when = int((_now() + timedelta(hours=1)).timestamp())
+    done = wait_task(k, k.post("/tasks", json={"prompt": f"go [plan-limit:rejected:{when}]"}).json()["id"])
+    assert done["status"] == "failed" and done["not_before"] is None
+    row = _row(k.user_id)
+    assert row.status == "rejected" and row.api_key and not pl.is_holding(row)
+    nxt = wait_task(k, k.post("/tasks", json={"prompt": "next [plan-limit:allowed:none]"}).json()["id"])
+    assert nxt["status"] == "completed"
+
+
+def test_org_row_never_holds_fallback_users(client):
+    """I2: the org key is shared: one run's rejected never holds other people on it."""
+    a = login_as(f"wpl-fa-{uuid.uuid4().hex[:8]}@test.local")
+    b = login_as(f"wpl-fb-{uuid.uuid4().hex[:8]}@test.local")
+    _store("org", "rejected", _now() + timedelta(days=7), api_key=True)
+    try:
+        async def holds(uid):
+            async with SessionLocal() as s:
+                return await pl.hold_for_user(s, uid)
+        assert asyncio.run(holds(a.user_id)) is None and asyncio.run(holds(b.user_id)) is None
+        assert a.get("/plan/status").json()["status"]["held"] is False
+    finally:
+        client.delete("/plan/status/org")
+
+
+def test_three_hits_in_a_row_stop_the_task(client, monkeypatch):
+    """I3: requeued twice; the third hit in a row fails the task with the plain sentence."""
+    monkeypatch.setattr(pl, "RESUME_AFTER", timedelta(0))
+    u = _user()
+    before = len(_runs())
+    tid = u.post("/tasks", json={"prompt": "go [plan-limit:rejected:p2]"}).json()["id"]
+    done = wait_task(u, tid, timeout=40)
+    assert done["status"] == "failed", done["status"]
+    assert done["error"] == "Stopped — the Claude plan limit was reached three times in a row."
+    assert len(_runs()) - before == 3
+    assert len([p for _, p in _events(tid, "plan_limit") if p.get("paused")]) == 2
+    assert done["attempt"] == 0
+    client.delete(f"/plan/status/{u.user_id}")
+
+
+def test_hit_count_resets_when_a_run_gets_past_the_limit(client):
+    u = _user()
+    tid = _queued(u.user_id, None)
+
+    async def go():
+        c = WorkerManager._count_plan_hit
+        return [await c(tid), await c(tid), await c(tid, reset=True), await c(tid)]
+
+    assert asyncio.run(go()) == [1, 2, 0, 1]
 
 
 def test_warning_run_completes_with_one_warning(client):

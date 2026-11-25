@@ -318,6 +318,7 @@ def _budget_hold(run, i: int, st: dict, spent: float, reason: str | None = None)
     reason = reason or f"budget reached (${spent:.2f} of ${float(run.budget_usd or 0):.2f})"
     if st.get("status") != "budget" or st.get("reason") != reason:
         runlog.append(run, f"Step {_stage_name(run, i)} held: {reason}")
+    st = {k: v for k, v in st.items() if k not in PLAN_KEYS}  # not a plan hold any more
     st = {**st, "status": "budget", "reason": reason}
     if reason == RESERVE_WORDS:
         st["budget_reserve"] = True  # the UI's flag: not the spending limit, other steps' caps
@@ -374,19 +375,27 @@ async def _hold(s, run, i: int, st: dict, reason: str) -> None:
     # stays in stage_state.reason (filtered per viewer).
     if st.get("status") != "held" or st.get("reason") != reason:
         runlog.append(run, f"Step {_stage_name(run, i)} held: waiting for pre-flight")
+    for k in PLAN_KEYS:  # not a plan hold any more
+        st.pop(k, None)
     st.update(status="held", reason=reason)
     _put_state(run, i, st)
     if run.status == RUN_PAUSED:
         run.status = RUN_RUNNING
 
 
+PLAN_KEYS = ("plan_wait", "not_before")  # a step waiting for the Claude plan's reset (7c)
+
+
 def _plan_hold(run, i: int, st: dict, row) -> None:
     """Hold an agent step while the run owner's Claude plan is at its limit (7c): status "held" with the
-    paused sentence, never failed; _schedule tries it again and it starts after the reset time."""
-    reason = planlimits.paused_text(row.resets_at)
+    paused sentence, plan_wait and not_before (ISO UTC, when it may start), never failed; _schedule tries it
+    again and it starts after the hold time."""
+    until = planlimits.hold_until(row)
+    reason = planlimits.paused_text(until)
     if st.get("status") != "held" or st.get("reason") != reason:
         runlog.append(run, f"Step {_stage_name(run, i)} held: {planlimits.STEP_HELD}")
-    _put_state(run, i, {**st, "status": "held", "reason": reason, "plan_wait": True})
+    _put_state(run, i, {**st, "status": "held", "reason": reason, "plan_wait": True,
+                        "not_before": planlimits.start_after(until).isoformat()})
     if run.status == RUN_PAUSED:
         run.status = RUN_RUNNING
 
@@ -1620,6 +1629,7 @@ class WorkflowRunner:
                 return
             if st.pop("plan_wait", None):
                 st.pop("reason", None)
+                st.pop("not_before", None)
             st.update(status="done", finished_at=_iso())
             _put_state(run, i, st)
             _move_pointer(run)
@@ -1627,11 +1637,14 @@ class WorkflowRunner:
             runlog.append(run, f"Step {_stage_name(run, i)} done. {totals.line(t)}")
             return
         # A task waiting for its Claude plan's reset (7c): the step shows the paused sentence, still at work.
-        waits = [t.wait_reason for t in tasks if t.status == Status.QUEUED and t.wait_reason]
-        if waits and (st.get("reason") != waits[0] or not st.get("plan_wait")):
-            _put_state(run, i, {**st, "reason": waits[0], "plan_wait": True})
-        elif not waits and st.get("plan_wait"):
-            _put_state(run, i, {k: v for k, v in st.items() if k not in ("reason", "plan_wait")})
+        waits = [t for t in tasks if t.status == Status.QUEUED and t.wait_reason]
+        if waits:
+            nb = waits[0].not_before
+            nb = (nb.replace(tzinfo=timezone.utc) if nb.tzinfo is None else nb).isoformat() if nb else None
+            if (st.get("reason"), st.get("plan_wait"), st.get("not_before")) != (waits[0].wait_reason, True, nb):
+                _put_state(run, i, {**st, "reason": waits[0].wait_reason, "plan_wait": True, "not_before": nb})
+        elif st.get("plan_wait"):
+            _put_state(run, i, {k: v for k, v in st.items() if k not in ("reason", *PLAN_KEYS)})
         # Otherwise still running — make sure the run reflects that.
         if run.status == RUN_PAUSED:
             run.status = RUN_RUNNING

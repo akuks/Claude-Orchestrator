@@ -722,10 +722,10 @@ def test_migration_0021_upgrade_downgrade(scratch_url):
 
     def check(sc, insp):
         cols = {c["name"] for c in insp.get_columns("tasks")}
-        assert {"not_before", "wait_reason"} <= cols
+        assert {"not_before", "wait_reason", "plan_requeues"} <= cols
         pcols = {c["name"] for c in insp.get_columns("plan_limit_status")}
         assert {"id", "credential_owner", "status", "resets_at", "utilization", "raw", "api_key",
-                "credential_ref", "seen_at", "task_id"} <= pcols
+                "credential_ref", "confirmed", "run_ref", "seen_at", "task_id"} <= pcols
         sc.exec_driver_sql(
             "INSERT INTO plan_limit_status (credential_owner, status, resets_at, utilization, raw, api_key, seen_at,"
             " task_id) VALUES ('u1', 'rejected', CURRENT_TIMESTAMP, 0.97, '{\"status\": \"rejected\"}', false,"
@@ -733,6 +733,8 @@ def test_migration_0021_upgrade_downgrade(scratch_url):
         sc.exec_driver_sql(
             "INSERT INTO plan_limit_status (credential_owner, status, raw, seen_at)"
             " VALUES ('org', 'allowed', '{}', CURRENT_TIMESTAMP)")
+        assert sc.exec_driver_sql("SELECT plan_requeues FROM tasks WHERE id='t21'").scalar() == 0
+        assert not sc.exec_driver_sql("SELECT confirmed FROM plan_limit_status WHERE credential_owner='org'").scalar()
         return (sc.exec_driver_sql("SELECT not_before, wait_reason FROM tasks WHERE id='t21'").one(),
                 sc.exec_driver_sql("SELECT api_key FROM plan_limit_status WHERE credential_owner='org'").scalar(),
                 sc.exec_driver_sql("SELECT version_num FROM alembic_version").scalar())
@@ -743,7 +745,7 @@ def test_migration_0021_upgrade_downgrade(scratch_url):
 
     def check_down(sc, insp):
         assert "plan_limit_status" not in insp.get_table_names()
-        assert not ({"not_before", "wait_reason"} & {c["name"] for c in insp.get_columns("tasks")})
+        assert not ({"not_before", "wait_reason", "plan_requeues"} & {c["name"] for c in insp.get_columns("tasks")})
         return (sc.exec_driver_sql("SELECT title FROM tasks WHERE id='t21'").scalar(),
                 sc.exec_driver_sql("SELECT version_num FROM alembic_version").scalar())
 

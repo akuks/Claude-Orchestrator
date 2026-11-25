@@ -24,16 +24,20 @@ def upgrade() -> None:
         sa.Column("raw", sa.JSON(), nullable=False),
         sa.Column("api_key", sa.Boolean(), nullable=False, server_default=sa.false()),
         sa.Column("credential_ref", sa.String(32), nullable=True),
+        sa.Column("confirmed", sa.Boolean(), nullable=False, server_default=sa.false()),
+        sa.Column("run_ref", sa.String(32), nullable=True),
         sa.Column("seen_at", sa.DateTime(timezone=True), nullable=False),
         sa.Column("task_id", sa.String(32), nullable=True),
     )
     with op.batch_alter_table("tasks") as b:
         b.add_column(sa.Column("not_before", sa.DateTime(timezone=True), nullable=True))
         b.add_column(sa.Column("wait_reason", sa.Text(), nullable=True))
+        b.add_column(sa.Column("plan_requeues", sa.Integer(), nullable=False, server_default="0"))
 
 
 def downgrade() -> None:
     with op.batch_alter_table("tasks") as b:
+        b.drop_column("plan_requeues")
         b.drop_column("wait_reason")
         b.drop_column("not_before")
     op.drop_table("plan_limit_status")

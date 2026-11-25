@@ -8,7 +8,7 @@ from datetime import datetime, timedelta, timezone
 from app import planlimits as pl
 from app.constants import Status
 from app.database import SessionLocal
-from app.models import Task, WorkflowRun
+from app.models import PlanLimitStatus, Task, WorkflowRun
 from app.workflow_runner import WorkflowRunner
 from _runs7a import (  # noqa: F401 - fixtures
     FakeWorker, _end_runs, _finish_tasks, _run, _tasks, agent, agents, fakes, has,
@@ -49,7 +49,7 @@ def test_my_status_shapes(client):
     me = u.get("/plan/status").json()
     st = me["status"]
     assert set(st) == {"credential_owner", "status", "resets_at", "utilization", "raw", "api_key", "seen_at",
-                       "task_id", "held", "banner"}
+                       "task_id", "held", "banner", "confirmed", "hold_until"}
     assert st["status"] == "rejected" and st["held"] is True and st["utilization"] == 0.97
     assert datetime.fromisoformat(st["resets_at"]) == resets
     assert st["banner"]["kind"] == "limit"
@@ -155,8 +155,10 @@ def test_workflow_step_is_held_while_the_plan_is_at_its_limit(client, fakes, age
     (st, run_status, logged), started, after, after_status = asyncio.run(go())
     assert st["status"] == "held" and st["plan_wait"] is True
     assert st["reason"] == pl.paused_text(resets)
+    assert datetime.fromisoformat(st["not_before"]) == resets + timedelta(minutes=1)
     assert run_status == "running" and logged
     assert len(started) == 1 and after["status"] == "running" and "plan_wait" not in after
+    assert "not_before" not in after
     assert after_status == "running"
     client.delete(f"/plan/status/{u.user_id}")
 
@@ -166,6 +168,7 @@ def test_workflow_task_waiting_for_the_reset_shows_on_the_step(client, fakes, ag
     sentence, never failed, and finishes normally once the task does."""
     a, _ = agents
     u = _user()
+    nb = (_now() + timedelta(hours=1)).replace(microsecond=0)
 
     async def go():
         rid = await _make_run([agent("A", a)], u.user_id)
@@ -175,7 +178,7 @@ def test_workflow_task_waiting_for_the_reset_shows_on_the_step(client, fakes, ag
         async with SessionLocal() as s:
             row = await s.get(Task, t.id)
             row.status = Status.QUEUED
-            row.not_before = _now() + timedelta(hours=1)
+            row.not_before = nb
             row.wait_reason = "Paused — your Claude plan limit was reached. Starts again at 14:05."
             await s.commit()
         await r._advance(rid)
@@ -188,6 +191,28 @@ def test_workflow_task_waiting_for_the_reset_shows_on_the_step(client, fakes, ag
 
     (st, status), done, final = asyncio.run(go())
     assert st["status"] == "running" and st["plan_wait"] is True and st["reason"].startswith("Paused")
+    assert datetime.fromisoformat(st["not_before"]) == nb
     assert status == "running"
     assert done["status"] == "done" and "plan_wait" not in done and "reason" not in done
+    assert "not_before" not in done
     assert final == "completed"
+
+
+def test_other_holds_drop_the_plan_marks():
+    """M4: a pre-flight or budget hold that follows a plan hold is not shown as a plan wait."""
+    from app import workflow_runner as wr
+
+    row = PlanLimitStatus(credential_owner="x", status="rejected", resets_at=_now() + timedelta(hours=1),
+                          raw={}, seen_at=_now(), api_key=False, confirmed=False)
+    run = WorkflowRun(workflow_id="w", name="m4", input="", stages=[{"name": "A", "items": []}],
+                      project_ids=[], status="running", current_stage=0, stage_state={}, log=[], budget_usd=1.0)
+    wr._plan_hold(run, 0, {}, row)
+    assert run.stage_state["0"]["plan_wait"] is True and run.stage_state["0"]["not_before"]
+    asyncio.run(wr._hold(None, run, 0, dict(run.stage_state["0"]), "waiting for the brief"))
+    st = run.stage_state["0"]
+    assert st["status"] == "held" and st["reason"] == "waiting for the brief"
+    assert "plan_wait" not in st and "not_before" not in st
+    wr._plan_hold(run, 0, dict(st), row)
+    wr._budget_hold(run, 0, dict(run.stage_state["0"]), 2.0)
+    st = run.stage_state["0"]
+    assert st["status"] == "budget" and "plan_wait" not in st and "not_before" not in st

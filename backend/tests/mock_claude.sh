@@ -32,14 +32,17 @@ if [[ "$args" == *"stream-json"* && "$prompt" =~ \[prompt-probe:([A-Za-z0-9_-]+)
   printf '%s' "$prompt" >"__PROBES__/${BASH_REMATCH[1]}.prompt"
 fi
 # [plan-limit:MODE:RESETS] (stream-json): Claude plan-limit runs (phase 7c); RESETS goes verbatim into
-# rate_limit_info.resetsAt ("none" leaves it out). MODE rejected: a rejected rate_limit_event, an
+# rate_limit_info.resetsAt ("none" leaves it out; "pN" is now + N seconds). MODE rejected: a rejected rate_limit_event, an
 # assistant error rate_limit, an error result, exit 1. textonly: an allowed_warning event (the reset time),
 # then only an error result whose text says the limit was hit, exit 1, nothing on stderr. warning: two
-# allowed_warning events, then success. allowed: an allowed event, then success. Each run appends a line to
+# allowed_warning events, then success. allowed: an allowed event, then success. weak: an allowed event,
+# an api_retry rate_limit, an error result "API Error: 429", "429 rate limit" on stderr, exit 1 (no plan
+# hold: the old backoff). Each run appends a line to
 # PROBES/plan-runs.
 if [[ "$args" == *"stream-json"* && "$prompt" =~ \[plan-limit:([a-z]+):([0-9a-z.]+)\] ]]; then
   mode="${BASH_REMATCH[1]}"; at="${BASH_REMATCH[2]}"
   echo "$mode" >>"__PROBES__/plan-runs"
+  if [[ "$at" == p* ]]; then at=$(( $(date +%s) + ${at#p} )); fi
   if [[ "$at" == "none" ]]; then ra=""; else ra=",\"resetsAt\":$at"; fi
   printf '{"type":"system","subtype":"init","session_id":"plan-session"}\n'
   case "$mode" in
@@ -51,6 +54,12 @@ if [[ "$args" == *"stream-json"* && "$prompt" =~ \[plan-limit:([a-z]+):([0-9a-z.
     textonly)
       printf '{"type":"rate_limit_event","rate_limit_info":{"status":"allowed_warning"%s,"utilization":0.9},"uuid":"u1","session_id":"plan-session"}\n' "$ra"
       printf '{"type":"result","subtype":"success","is_error":true,"result":"You\u2019ve hit your weekly limit","num_turns":1,"total_cost_usd":0}\n'
+      exit 1 ;;
+    weak)
+      printf '{"type":"rate_limit_event","rate_limit_info":{"status":"allowed"%s},"uuid":"u1","session_id":"plan-session"}\n' "$ra"
+      printf '{"type":"system","subtype":"api_retry","attempt":1,"max_retries":10,"retry_delay_ms":500,"error_status":429,"error":"rate_limit","session_id":"plan-session"}\n'
+      printf '{"type":"result","subtype":"success","is_error":true,"result":"API Error: 429","num_turns":1,"total_cost_usd":0}\n'
+      echo "429 rate limit" >&2
       exit 1 ;;
     warning)
       printf '{"type":"rate_limit_event","rate_limit_info":{"status":"allowed_warning"%s,"utilization":0.85},"uuid":"u1","session_id":"plan-session"}\n' "$ra"
