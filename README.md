@@ -1195,7 +1195,7 @@ agents never write to it.
   preference that looks like a password or key is refused. Keep secrets out of preferences.
 - **Limits:** up to 12 preferences, 240 characters each, one line each. Each has its own on/off switch, and
   there is a master switch.
-- **Admin switch:** Guard, Ground rules, **People's own preferences** (on by default). Off means no one's
+- **Admin switch:** Agent guard → Ground rules, **People's own preferences** (on by default). Off means no one's
   preferences are added.
 - **Whose list:** a follow-up step uses the sender's list, a workflow step the list of whoever started the run.
   If someone else retries your task, it re-runs as yours, with your preferences and your credentials.

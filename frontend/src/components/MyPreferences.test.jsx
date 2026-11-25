@@ -47,7 +47,6 @@ describe('MyPreferences', () => {
     expect(body().textContent).toContain('Short notes about how you like to work.')
     expect(body().textContent).toContain('1 of 12')
     expect(q('pref-text-0').value).toBe('Short answers')
-    expect(body().textContent).toContain('Save to update')
   })
 
   it('saves the whole list and shows the server preview and the success line', async () => {
@@ -96,5 +95,26 @@ describe('MyPreferences', () => {
     await mount()
     await type(q('pref-text-0'), 'one\ntwo')
     expect(q('pref-text-0').value).toBe('one two')
+  })
+
+  it('keeps Save off when the list failed to load', async () => {
+    api.getMyPreferences.mockImplementation(async () => { throw new Error('boom') })
+    await mount()
+    expect(q('pref-save').disabled).toBe(true)
+    await click(q('pref-save'))
+    expect(api.saveMyPreferences).not.toHaveBeenCalled()
+  })
+
+  it('turns every kind of line break into a space', async () => {
+    await mount()
+    await type(q('pref-text-0'), 'a\rb\u000bc\u000cd\u0085e\u2028f\u2029g')
+    expect(q('pref-text-0').value).toBe('a b c d e f g')
+  })
+
+  it('shows "Save to update" only after a change', async () => {
+    await mount()
+    expect(body().textContent).not.toContain('Save to update')
+    await type(q('pref-text-0'), 'Something else')
+    expect(body().textContent).toContain('Save to update')
   })
 })

@@ -8,22 +8,27 @@ export const MAX_ITEMS = 12
 export const MAX_CHARS = 240
 
 // One line only: newlines (typed or pasted) become single spaces.
-const oneLine = (v) => String(v || '').replace(/[\r\n]+/g, ' ')
+const oneLine = (v) => String(v || '').replace(/[\r\n\v\f\u0085\u2028\u2029]+/g, ' ')
+const snap = (enabled, items) => JSON.stringify([enabled, items.map((i) => [i.id || null, i.text, i.on])])
 
 // "My preferences": short standing notes the signed-in person writes for their own tasks.
 export default function MyPreferences({ open, onClose }) {
   const [enabled, setEnabled] = useState(true)
   const [items, setItems] = useState([])
   const [preview, setPreview] = useState(null)
-  const [savedOnce, setSavedOnce] = useState(false)
+  const [base, setBase] = useState(null) // snapshot of the last loaded or saved state
+  const [loaded, setLoaded] = useState(false)
   const [loading, setLoading] = useState(false)
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState(null)
   const [done, setDone] = useState(false)
 
   const apply = (r) => {
-    setEnabled(r.enabled !== false)
-    setItems((r.items || []).map((i) => ({ id: i.id, text: i.text, on: i.on !== false })))
+    const en = r.enabled !== false
+    const its = (r.items || []).map((i) => ({ id: i.id, text: i.text, on: i.on !== false }))
+    setEnabled(en)
+    setItems(its)
+    setBase(snap(en, its))
     setPreview(r.preview || null)
   }
 
@@ -31,11 +36,12 @@ export default function MyPreferences({ open, onClose }) {
     if (!open) return
     setError(null)
     setDone(false)
-    setSavedOnce(false)
+    setLoaded(false)
+    setBase(null)
     setLoading(true)
     api
       .getMyPreferences()
-      .then(apply)
+      .then((r) => { apply(r); setLoaded(true) })
       .catch((e) => setError(e.message))
       .finally(() => setLoading(false))
   }, [open])
@@ -63,7 +69,6 @@ export default function MyPreferences({ open, onClose }) {
         items: items.map((i) => (i.id ? { id: i.id, text: i.text, on: i.on } : { text: i.text, on: i.on })),
       })
       apply(r)
-      setSavedOnce(true)
       setDone(true)
     } catch (e) {
       setError(e.message)
@@ -82,7 +87,7 @@ export default function MyPreferences({ open, onClose }) {
       footer={
         <Space>
           <Button onClick={onClose} data-testid="pref-cancel">Cancel</Button>
-          <Button type="primary" loading={saving} onClick={save} data-testid="pref-save">Save</Button>
+          <Button type="primary" loading={saving} disabled={loading || !loaded} onClick={save} data-testid="pref-save">Save</Button>
         </Space>
       }
     >
@@ -130,7 +135,7 @@ export default function MyPreferences({ open, onClose }) {
             label: 'What the agent sees',
             children: (
               <>
-                {!savedOnce && <Paragraph type="secondary">Save to update.</Paragraph>}
+                {loaded && snap(enabled, items) !== base && <Paragraph type="secondary">Save to update.</Paragraph>}
                 {preview ? <pre style={{ whiteSpace: 'pre-wrap', margin: 0 }} data-testid="pref-preview">{preview}</pre> : <Text type="secondary">Nothing would be added.</Text>}
               </>
             ),
