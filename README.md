@@ -252,6 +252,21 @@ a server that skipped several releases runs each of them in turn. **Take your us
 database backup first** whenever an entry names a migration. The server must stay a
 single process (no `--workers`, no replicas).
 
+### Small gaps (phase 7e)
+
+- **Migration `0023` runs on start.** It adds `mcp_servers.server_version`, filled in the next time each connected
+  tool is checked. Take your usual database backup first.
+- **System health** shows each connected tool's version (and a warning when it differs from the pinned one), the last
+  code-map error per project, a warning when two code-map engines are set up, a too-old Node warning, and two new
+  checks: **Agent tokens** and **Guard plugin**.
+- **Token care** shows how many tokens a step re-reads each time, for the main thread and each helper kind, and may
+  show up to four tips.
+- **A temp-folder document can be copied into the project** from the handoff card (**Copy into project**).
+- **The run log names a helper's model tier**, for example `Helper (Reviewer) [Standard]`.
+- **Security reviews** list the scanners found and never call unscanned code clean; the project's Claude settings are
+  checked for unsafe entries.
+- **A crashed tool call no longer stays "in flight"** (the guard hook also handles `PostToolUseFailure`).
+
 ### Upkeep (phase 7d)
 
 See [Upkeep](#upkeep-closed-handoffs-tidying-sharper-notes).
@@ -925,7 +940,11 @@ co-orchestrator the guard rails), listed as `precedence`.
 **Limits.** The handoff is a record rebuilt from the run's events and git, not
 a transcript: a long tool output or a file's content is not in it. Files
 written to a temp folder are listed
-as "may vanish". Secrets are masked with the same rules as the run log, which
+as "may vanish". **Copy into project** (people who can edit the task) copies one of them into
+the project: the file must be one the task recorded and still be in a temp folder, a plain file of 5 MB or less; the
+new name is inside the project (default `docs/<name>`, no `..`, the folder must exist), nothing is overwritten
+("A file with that name already exists."), and the task log records it
+(`POST /tasks/{id}/outside-docs/copy`). Secrets are masked with the same rules as the run log, which
 know common shapes only (see [Seatbelt limits](#seatbelt-limits)). Phase 3b
 (below) adds token care and the Questions inbox.
 
@@ -1015,6 +1034,11 @@ the threads you started or may manage whose latest step ended in the last 14
 days, is not running, and whose handoff is still open (an open todo, or a step
 that did not complete), each with its **Continue** button
 (`GET /handoffs/open`).
+
+**Re-read per step (7e).** The **Where the tokens went** panel says, for the main thread and each helper kind,
+"Re-reads about N tokens per step" (cache read divided by messages). A tip says so when it is 20,000 or more, a tip warns
+when a helper kind averages over 40 steps per start, and the fresh-session tip adds how many tokens a fresh session
+would save over the next 50 steps. Up to four tips show.
 
 **How far to trust the figures.** Token figures come from the per-message
 `usage` in Claude's stream (each message id counted once, with its last usage),
@@ -2241,6 +2265,13 @@ collapsed **Details** with versions, timings and a suggested fix.
   dangerous command (`rm -rf /`) and checks the answers are allow and deny. The
   dangerous command is only evaluated, never executed. The test uses a throw-away
   policy and a throw-away folder, and is pointed away from the real server.
+- **Tool versions and code map (7e).** **Connected tools** shows the version each tool told us
+  when it was last checked, and warns when a tool from a pinned preset runs a different version. **Code map**
+  shows each project's last error under **Details** and warns when more than one code-map engine is set up. **Node**
+  warns when it is older than 20 (the browser tools need 20).
+- **Two more self-tests (7e).** **Agent tokens** makes a throw-away task token, checks it works for that task only,
+  revokes it and checks it is refused. **Guard plugin** runs `claude plugin validate` on the guard plugin (20 seconds at
+  most); a Claude version without that command shows "not available in this Claude version".
 - **Secrets.** Every summary and detail is scrubbed: known secrets are masked and home
   folders show as `~`. Text is cut at 500 characters.
 - **API.** `GET /admin/health` returns `{checked_at, overall, checks}`. Admin only.
@@ -2467,6 +2498,15 @@ webhook to `/webhooks/github`, and every PR triggers a review whose findings lan
 in the tracker automatically. (Needs the server reachable by GitHub — deploy it or
 tunnel with smee.io / ngrok.)
 
+**Scanners and Claude settings (7e).** When a review prompt is built, the server looks (never runs anything) for
+`gitleaks`, `osv-scanner`, `trivy`, `semgrep`, `bandit` and `pip-audit` on its path, and for `npm audit` when the
+project has a `package-lock.json`. The prompt lists what it found and tells the agent to run them, and to say
+"Not scanned" rather than call code clean when none could run. The project's `.claude/settings.json`,
+`.claude/settings.local.json` and `.mcp.json` (no links followed, 256 KB at most, valid JSON) are checked for hooks, wide
+allows (`Bash(*)`, `*`, `Bash`), connected tools and values that look like tokens; these go into the prompt and the
+findings list as "Claude settings: …" (the value of a token is never shown). The scanners run in the agent's own
+session, not in the server.
+
 ---
 
 ## Agents
@@ -2680,6 +2720,9 @@ are, treat what they show as unconfirmed. Tick them off on your first live runs.
 14. **Upkeep:** handoffs closing after a real success, the code-map note at task start,
     and decisions shown before a real shell write.
     ([Upkeep](#upkeep-closed-handoffs-tidying-sharper-notes))
+15. **Small gaps (7e):** that `claude plugin validate` exists and answers as the **Guard plugin** check expects, and
+    that the CLI sends `PostToolUseFailure` for a failed tool call (the guard writes its "done" line from it).
+    ([System health](#system-health))
 
 ---
 
