@@ -409,6 +409,9 @@ describe('TaskDetail: the thread\'s questions (phase 3b)', () => {
 describe('decision_review run-log line', () => {
   it('renders the review line', () => {
     expect(renderLine({ type: 'decision_review', payload: { proposed: 2, stale: [4] } }).text).toBe('Suggested 2 decisions for review · flagged D-004 as maybe out of date')
+    expect(renderLine({ type: 'ground_rules', payload: { included: ['grounding', 'short_answers', 'personal_prefs'], personal_count: 3 } }).text).toBe("Ground rules added: stick to facts, short answers · The starter's preferences were added (3)")
+    expect(renderLine({ type: 'ground_rules', payload: { included: ['usage_care', 'extra'] } }).text).toBe("Ground rules added: careful with usage, your team's extra rules")
+    expect(renderLine({ type: 'ground_rules', payload: { included: [] } }).text).toBe('No ground rules added')
     expect(renderLine({ type: 'output', payload: { link: 'https://x.io/a', tool: 'mcp__n__create_page', title: 'Plan', local_file: null, kept: false } }).text).toBe('Published: Plan')
     expect(renderLine({ type: 'test_result', payload: { runner: 'pytest', passed: 61, failed: 2, skipped: 0, failing: ['a', 'b'] } }).text).toBe('Tests: 61 passed, 2 failed (a, b)')
     expect(renderLine({ type: 'test_result', payload: { runner: 'go', passed: null, failed: 0, skipped: 3, failing: [] } }).text).toBe('Tests: 3 skipped')

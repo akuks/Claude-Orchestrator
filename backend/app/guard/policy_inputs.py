@@ -81,6 +81,7 @@ class PolicyInputs:
     decisions_index: str | None = None  # the project's decision index (phase 4a), after the ground rules
     brief_text: str | None = None  # the task's brief for the system prompt (phase 4c), None without one
     brief_layers: list = field(default_factory=list)  # its scope layers for the policy (briefs.scope.layers)
+    personal_prefs: bool = True  # phase 8b: the org switch for adding the starter's own preferences
 
 
 def _epoch(dt: datetime) -> float:
@@ -353,4 +354,5 @@ async def gather(s, *, task, project, owner_id: str | None, mcp: dict | None,
         brief_layers = scope.layers(task.id, brief, bounds)
     return PolicyInputs(policy=policy, brief_text=brief_text, brief_layers=brief_layers or [], add_dirs=refs, data_line=DATA_LINE if trust == "external" else None,
                         events=events, main_text=main_text,
-                        ground_included=included, decisions_index=index)
+                        ground_included=included, decisions_index=index,
+                        personal_prefs=ground.get("personal_prefs") is True)

@@ -29,7 +29,7 @@ port map is in
 - **Tasks and threads:** [Resume and handoff](#resume-and-handoff) ·
   [Token care and questions](#token-care-and-questions) ·
   [Claude plan limits](#claude-plan-limits) · [Ask about this run](#ask-about-this-run)
-- **Memory and decisions:** [Decision memory](#decision-memory) ·
+- **Memory and decisions:** [Decision memory](#decision-memory) · [Personal preferences](#personal-preferences) ·
   [Suggested decisions](#suggested-decisions) ·
   [Helper tiers and briefs](#helper-tiers-and-briefs)
 - **Workflows:** [Command gates](#command-gates) ·
@@ -251,6 +251,14 @@ migrations run on start (`alembic upgrade head`; SQLite and Postgres), in order,
 a server that skipped several releases runs each of them in turn. **Take your usual
 database backup first** whenever an entry names a migration. The server must stay a
 single process (no `--workers`, no replicas).
+
+### Personal preferences (phase 8b)
+
+- **Migration `0025` runs on start.** It adds the table that holds each person's preferences. Take your usual
+  database backup first.
+- People add their own list under **My preferences**; it is added to the tasks they start. Admins can switch
+  this off for everyone under Ground rules (**People's own preferences**). See
+  [Personal preferences](#personal-preferences).
 
 ### Decision track record (phase 8a)
 
@@ -1169,6 +1177,31 @@ server start is marked failed (*interrupted*). Settings (`backend/.env`):
 disallowed tools are really off, are checked on the first live use. Try one
 ask on a real run and look at its answer and cost before you rely on it.
 Live steering of a running session is not part of this phase.
+
+---
+
+## Personal preferences
+
+Each person can keep a short list of standing notes about how they like to work (for example "keep answers
+short"). Open **My preferences** in the user menu (or the command palette), write them, and press Save.
+They are added to every task you start, in any project. Nobody else can read or change your list, and
+agents never write to it.
+
+- **Who sees what:** the agent sees the text. The task log shows only a count ("The starter's preferences
+  were added (3)"), never the words.
+- **Project rules come first:** the agent is told to follow your notes unless the task, the project's
+  instructions or a recorded decision says otherwise.
+- **Secrets are blanked:** a saved secret value is hidden from the text before the agent gets it, and a
+  preference that looks like a password or key is refused. Keep secrets out of preferences.
+- **Limits:** up to 12 preferences, 240 characters each, one line each. Each has its own on/off switch, and
+  there is a master switch.
+- **Admin switch:** Agent guard → Ground rules, **People's own preferences** (on by default). Off means no one's
+  preferences are added.
+- **Whose list:** a follow-up step uses the sender's list, a workflow step the list of whoever started the run.
+  If someone else retries your task, it re-runs as yours, with your preferences and your credentials.
+- **Good to know:** like the task brief, the preferences reach the agent as part of its start command. On a
+  server where several people's agents run at once under the same system account, another running agent could
+  read that command.
 
 ---
 
@@ -2806,6 +2839,8 @@ are, treat what they show as unconfirmed. Tick them off on your first live runs.
     Screenshot baselines depend on the operating system: record them on the system that runs the checks with
     `npm run test:ui:update`. Lighthouse needs the app to start on port 3000. Scores close to the thresholds can flicker
     from one run to the next. ([Workflow templates](#workflow-templates))
+17. **Personal preferences:** whether the installed Claude Code CLI accepts the system prompt from a file, so it no
+    longer appears in the start command. ([Personal preferences](#personal-preferences))
 
 ---
 

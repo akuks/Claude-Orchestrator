@@ -12,7 +12,7 @@ from sqlalchemy.orm import Session
 from app import models
 from app.database import _alembic_cfg, _baseline_metadata, run_migrations
 
-HEAD = "0024"  # the latest revision
+HEAD = "0025"  # the latest revision
 
 
 def _tables(db) -> set[str]:
@@ -926,3 +926,47 @@ def test_migration_0024_upgrade_downgrade(scratch_url):
                 sc.exec_driver_sql("SELECT version_num FROM alembic_version").scalar())
 
     assert _inspect(url, check_down) == ("old", "0023")
+
+
+def test_migration_0025_upgrade_downgrade(scratch_url):
+    import pathlib
+
+    from alembic import command
+
+    src = (pathlib.Path(__file__).parent.parent / "migrations" / "versions" / "0025_user_preferences.py").read_text()
+    assert "autocommit_block" not in src and 'down_revision = "0024"' in src
+    url = scratch_url
+    command.upgrade(_alembic_cfg(url), "0024")
+
+    def old_rows(sc, insp):  # a person from before 0025 (real booleans)
+        sc.exec_driver_sql(
+            "INSERT INTO users (id, email, name, password_hash, role, active, created_at)"
+            " VALUES ('u25', 'u25@test.local', 'u25', 'x', 'member', true, CURRENT_TIMESTAMP)")
+
+    _inspect(url, old_rows)
+    command.upgrade(_alembic_cfg(url), "0025")
+
+    def check(sc, insp):
+        assert "user_preferences" in insp.get_table_names()
+        cols = {c["name"]: c for c in insp.get_columns("user_preferences")}
+        assert {"user_id", "enabled", "items", "updated_at"} == set(cols)
+        assert not cols["enabled"]["nullable"] and not cols["items"]["nullable"]
+        assert insp.get_pk_constraint("user_preferences")["constrained_columns"] == ["user_id"]
+        fks = {tuple(fk["constrained_columns"]): (fk["referred_table"], (fk.get("options") or {}).get("ondelete"))
+               for fk in insp.get_foreign_keys("user_preferences")}
+        assert fks == {("user_id",): ("users", "CASCADE")}
+        sc.exec_driver_sql("INSERT INTO user_preferences (user_id, updated_at) VALUES ('u25', CURRENT_TIMESTAMP)")
+        row = sc.exec_driver_sql("SELECT enabled, items FROM user_preferences WHERE user_id='u25'").one()
+        items = row[1] if isinstance(row[1], list) else json.loads(row[1])
+        return (bool(row[0]), items, sc.exec_driver_sql("SELECT version_num FROM alembic_version").scalar())
+
+    assert _inspect(url, check) == (True, [], "0025")
+    command.upgrade(_alembic_cfg(url), "0025")  # again: nothing to do
+    command.downgrade(_alembic_cfg(url), "0024")
+
+    def check_down(sc, insp):
+        assert "user_preferences" not in insp.get_table_names()
+        return (sc.exec_driver_sql("SELECT email FROM users WHERE id='u25'").scalar(),
+                sc.exec_driver_sql("SELECT version_num FROM alembic_version").scalar())
+
+    assert _inspect(url, check_down) == ("u25@test.local", "0024")

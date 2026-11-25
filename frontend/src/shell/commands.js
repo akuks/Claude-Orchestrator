@@ -22,7 +22,7 @@ export function visiblePages(isAdmin) {
 }
 
 export function buildCommands({ projects = [], tasks = [], runs = [], workflows = [], isAdmin = false, actions = {} } = {}) {
-  const { navigate = () => {}, newTask, runWorkflow, toggleNight, openCredentials } = actions
+  const { navigate = () => {}, newTask, runWorkflow, toggleNight, openCredentials, openPreferences } = actions
   const cmds = []
 
   for (const p of visiblePages(isAdmin)) {
@@ -77,6 +77,8 @@ export function buildCommands({ projects = [], tasks = [], runs = [], workflows 
     run: () => navigate({ page: 'approvals' }),
   })
   if (newTask) cmds.push({ id: 'action:new-task', label: 'New task…', group: 'Actions', run: newTask })
+  if (openPreferences)
+    cmds.push({ id: 'action:preferences', label: 'My preferences', group: 'Actions', keywords: 'how i like to work notes', run: openPreferences })
   if (openCredentials)
     cmds.push({ id: 'action:credentials', label: 'My credentials', group: 'Actions', keywords: 'claude key token', run: openCredentials })
   if (toggleNight)

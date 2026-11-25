@@ -2,10 +2,13 @@
 
 Org settings (``GuardOrgSettings.ground_rules``, admin-only to change):
 ``{"grounding": bool, "short_answers": bool, "usage_care": bool, "notes": bool, "questions": bool, "decisions": bool,
-"local_first": bool, "extra": str}``.
+"local_first": bool, "personal_prefs": bool, "extra": str}``.
 
 ``local_first`` (phase 6c, F105; main session and helpers): keep a copy in the project of anything published
 elsewhere. Settings stored before it existed read it as on (``normalized``).
+
+``personal_prefs`` (phase 8b, settings label "People's own preferences") adds no text here either: when on, the
+worker adds the task starter's own preferences (``app.preferences``) to the main session's system prompt.
 
 ``decisions`` (phase 4a) adds no text here: when on, an own project's decisions go into the policy and the run's
 system prompt gets their index (``policy_inputs.gather``); ``included`` leaves it out.
@@ -28,9 +31,10 @@ from ..guard.co_hook import DATA_LINE, NOTES_LINE
 from ..redaction import clean_text
 
 GROUND_EXTRA_MAX = 2000
-SWITCHES = ("grounding", "short_answers", "usage_care", "notes", "questions", "decisions", "local_first")
+SWITCHES = ("grounding", "short_answers", "usage_care", "notes", "questions", "decisions", "local_first",
+            "personal_prefs")
 DEFAULTS = {"grounding": True, "short_answers": True, "usage_care": True, "notes": True, "questions": True,
-            "decisions": True, "local_first": True, "extra": ""}
+            "decisions": True, "local_first": True, "personal_prefs": True, "extra": ""}
 # the switches with a rule text
 TEXT_SWITCHES = ("grounding", "short_answers", "usage_care", "notes", "questions", "local_first")
 
@@ -123,9 +127,10 @@ def normalized(stored) -> dict:
     return out
 
 
-def validate(value) -> dict:
-    """A PUT body's ``ground_rules``: ValueError (the router's 400) for an unknown key, a non-bool switch or a long ``extra``. The result
-    replaces the stored object: a key left out takes its default."""
+def validate(value, stored=None) -> dict:
+    """A PUT body's ``ground_rules``: ValueError (the router's 400) for an unknown key, a non-bool switch or a long ``extra``. The body
+    is merged over what is stored (``normalized(stored)``): a key left out keeps its stored value (its default when
+    nothing is stored), so a screen that does not know a newer switch never turns it back on."""
     if not isinstance(value, dict):
         raise ValueError("ground_rules must be an object")
     unknown = sorted(str(k) for k in value if k not in DEFAULTS)
@@ -134,7 +139,7 @@ def validate(value) -> dict:
     for k in SWITCHES:
         if k in value and not isinstance(value[k], bool):
             raise ValueError(f"{k} must be true or false")
-    out = dict(DEFAULTS) | value
+    out = normalized(stored) | value
     if not isinstance(out["extra"], str):
         raise ValueError("extra must be text")
     out["extra"] = clean_text(out["extra"]).strip()

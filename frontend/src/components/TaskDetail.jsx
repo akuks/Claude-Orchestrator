@@ -174,6 +174,27 @@ function helperLine(p, tiers) {
   return `Helper (${kind})${word}: ${input.description || ''}`.trimEnd()
 }
 
+const PERSONAL_PREFS_LINE = (n) => `The starter's preferences were added (${Number(n) || 0})`
+
+const GROUND_WORDS = {
+  grounding: 'stick to facts',
+  short_answers: 'short answers',
+  usage_care: 'careful with usage',
+  notes: 'notes',
+  questions: 'questions',
+  decisions: 'decisions',
+  local_first: 'local first',
+  extra: "your team's extra rules",
+}
+
+export function groundRulesLine(p) {
+  const inc = Array.isArray(p?.included) ? p.included : []
+  const names = inc.filter((k) => k !== 'personal_prefs').map((k) => GROUND_WORDS[k] || String(k).replace(/_/g, ' '))
+  let text = names.length ? `Ground rules added: ${names.join(', ')}` : 'No ground rules added'
+  if (inc.includes('personal_prefs')) text += ` · ${PERSONAL_PREFS_LINE(p.personal_count)}`
+  return text
+}
+
 export function renderLine(ev, tiers) {
   const s = EVENT_STYLE[ev.type] || { color: 'var(--co-terminal-text)', prefix: '' }
   const p = ev.payload || {}
@@ -229,6 +250,9 @@ export function renderLine(ev, tiers) {
       break
     case 'summary':
       text = `Older run history kept as a summary (${Number(p.events) || 0} events).`
+      break
+    case 'ground_rules':
+      text = groundRulesLine(p)
       break
     case 'repo_changed':
       text = p.message
