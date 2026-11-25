@@ -1794,16 +1794,7 @@ class WorkerManager:
         self._wait_then_submit(task_id, min(planlimits.CHECK_EVERY, (start - _now()).total_seconds()),
                                priority, created_at)
 
-    @staticmethod
-    async def _keeps_own_wait(s, who) -> bool:
-        """A task waiting for its own reset time keeps waiting unless the owner's row is gone ("Try now"),
-        the credential changed since the row was written, or it is an API key."""
-        if not who or who.get("api_key"):
-            return False
-        row = await planlimits.get_row(s, who["owner"])
-        if row is None:
-            return False
-        return not (row.credential_ref and who.get("ref") and row.credential_ref != who["ref"])
+    _keeps_own_wait = staticmethod(planlimits.keeps_own_wait)
 
     async def _plan_wait(self, task_id: str, emit) -> bool:
         """Before a queued task starts (and every CHECK_EVERY seconds while it waits): True when its

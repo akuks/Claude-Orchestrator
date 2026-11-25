@@ -23,11 +23,16 @@ async def my_status(request: Request):
         row = await planlimits.get_row(s, who["owner"]) if who else None
         if row is not None and who and row.credential_ref and row.credential_ref != who["ref"]:
             row = None  # recorded for a credential this person no longer uses
+        status = planlimits.row_out(row)
+        if status is not None and who and who["owner"] == planlimits.ORG:
+            # the shared org key: the task and reading behind it are another person's
+            status.pop("task_id", None)
+            status.pop("raw", None)
         return {
             "owner": who["owner"] if who else None,
             "api_key": bool(who and who["api_key"]),
             "plan_applies": bool(who and not who["api_key"]),
-            "status": planlimits.row_out(row),
+            "status": status,
         }
 
 
@@ -42,6 +47,15 @@ async def all_status():
         for r in rows:
             u = users.get(r.credential_owner)
             item = planlimits.row_out(r)
+            item["stale"] = False
+            if r.credential_owner != planlimits.ORG:
+                try:
+                    who = await planlimits.credential_owner(s, r.credential_owner)
+                except Exception:  # noqa: BLE001 - an unreadable credential: not shown as holding
+                    who = None
+                if who is None or who["owner"] != r.credential_owner or planlimits.is_stale(r, who):
+                    # written for a credential this person no longer uses: holds nothing
+                    item.update(stale=True, held=False, banner=None)
             item["user_id"] = None if r.credential_owner == planlimits.ORG else r.credential_owner
             item["name"] = "Org fallback key" if r.credential_owner == planlimits.ORG else (
                 (u.name or u.email) if u is not None else None)

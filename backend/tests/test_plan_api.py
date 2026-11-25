@@ -144,9 +144,10 @@ def test_workflow_step_is_held_while_the_plan_is_at_its_limit(client, fakes, age
         assert await _tasks(rid) == []
         await r._advance(rid)  # still held: nothing starts, nothing fails
         assert await _tasks(rid) == []
-        # the limit is over (Try now / reset passed): the step starts
-        await pl.record({"owner": u.user_id, "api_key": False, "ref": ref},
-                        {"status": "allowed", "resets_at": None, "utilization": None, "raw": {}}, None)
+        # the limit is over ("Try now": the row is gone): the step starts
+        async with SessionLocal() as s:
+            await s.delete(await pl.get_row(s, u.user_id))
+            await s.commit()
         await r._advance(rid)
         started = await _tasks(rid)
         run = await _run(rid)
@@ -216,3 +217,82 @@ def test_other_holds_drop_the_plan_marks():
     wr._budget_hold(run, 0, dict(run.stage_state["0"]), 2.0)
     st = run.stage_state["0"]
     assert st["status"] == "budget" and "plan_wait" not in st and "not_before" not in st
+
+
+def test_org_status_shows_nothing_of_other_people(client):
+    """M3: the shared org row's task and reading belong to someone else."""
+    f = login_as(f"pla-org-{uuid.uuid4().hex[:8]}@test.local")
+    _store("org", "allowed_warning", _now() + timedelta(hours=1), api_key=True)
+    try:
+        st = f.get("/plan/status").json()["status"]
+        assert st is not None and st["status"] == "allowed_warning"
+        assert "task_id" not in st and "raw" not in st
+        own = _user()
+        _store(own.user_id, "allowed", None, ref=_ref(own.user_id))
+        mine = own.get("/plan/status").json()["status"]
+        assert mine["task_id"] == "task-x" and "raw" in mine  # a person's own row keeps them
+    finally:
+        client.delete("/plan/status/org")
+
+
+def test_all_marks_a_changed_credential_stale(client):
+    """M5: a row written for a credential the person no longer uses is not shown as holding."""
+    u = _user()
+    _store(u.user_id, "rejected", _now() + timedelta(hours=1), ref=_ref(u.user_id))
+    item = next(r for r in client.get("/plan/status/all").json() if r["credential_owner"] == u.user_id)
+    assert item["stale"] is False and item["held"] is True and item["banner"]["kind"] == "limit"
+    u.put("/me/credentials", json={"claude_token": "n" + uuid.uuid4().hex, "claude_kind": "oauth_token"})
+    item = next(r for r in client.get("/plan/status/all").json() if r["credential_owner"] == u.user_id)
+    assert item["stale"] is True and item["held"] is False and item["banner"] is None
+    client.delete(f"/plan/status/{u.user_id}")
+
+
+def test_held_step_keeps_its_own_time_when_the_row_moves_on(client, fakes, agents):
+    """M4: a step held before it starts keeps holding while its own not_before is ahead, though another
+    task's allowed event overwrote the owner's row; "Try now" (row gone) lets it start."""
+    a, _ = agents
+    u = _user()
+    ref = _ref(u.user_id)
+    resets = (_now() + timedelta(hours=1)).replace(microsecond=0)
+    _store(u.user_id, "rejected", resets, ref=ref)
+
+    async def go():
+        rid = await _make_run([agent("A", a)], u.user_id)
+        r = WorkflowRunner(FakeWorker(), 999)
+        await r.start_run(rid)
+        await pl.record({"owner": u.user_id, "api_key": False, "ref": ref},
+                        {"status": "allowed", "resets_at": None, "utilization": None, "raw": {}}, "other")
+        await r._advance(rid)
+        kept = (await _tasks(rid), dict((await _run(rid)).stage_state["0"]))
+        async with SessionLocal() as s:
+            row = await pl.get_row(s, u.user_id)
+            await s.delete(row)
+            await s.commit()
+        await r._advance(rid)
+        return kept, await _tasks(rid), dict((await _run(rid)).stage_state["0"])
+
+    (tasks0, st0), tasks1, st1 = asyncio.run(go())
+    assert tasks0 == [] and st0["status"] == "held" and st0["plan_wait"] is True
+    assert datetime.fromisoformat(st0["not_before"]) == resets + timedelta(minutes=1)
+    assert len(tasks1) == 1 and st1["status"] == "running" and "plan_wait" not in st1
+
+
+def test_unreadable_credential_never_stalls_a_step(client, fakes, agents):
+    """M2: a hold check that fails (a credential that cannot be decrypted) counts as not held."""
+    from app.models import UserCredential
+
+    a, _ = agents
+    u = _user()
+
+    async def go():
+        async with SessionLocal() as s:
+            row = await s.get(UserCredential, u.user_id)
+            row.claude_enc = "not-a-vault-blob"
+            await s.commit()
+        rid = await _make_run([agent("A", a)], u.user_id)
+        r = WorkflowRunner(FakeWorker(), 999)
+        await r.start_run(rid)
+        return await _tasks(rid), dict((await _run(rid)).stage_state["0"])
+
+    tasks, st = asyncio.run(go())
+    assert len(tasks) == 1 and st["status"] == "running"

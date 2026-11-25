@@ -331,6 +331,24 @@ async def hold_for(s, who: dict | None, now: datetime | None = None) -> PlanLimi
     return row
 
 
+async def keeps_own_wait(s, who: dict | None) -> bool:
+    """Something waiting for its own reset time (a task's not_before, a held workflow step's) keeps waiting
+    unless the owner's row is gone ("Try now"), the credential changed since the row was written, or it is
+    an API key - not merely because the row moved on (e.g. an allowed event from another model's task)."""
+    if not who or who.get("api_key"):
+        return False
+    row = await get_row(s, who["owner"])
+    if row is None:
+        return False
+    return not (row.credential_ref and who.get("ref") and row.credential_ref != who["ref"])
+
+
+def is_stale(row: PlanLimitStatus | None, who: dict | None) -> bool:
+    """The row was written for a credential the owner no longer uses."""
+    return bool(row is not None and who and row.credential_ref and who.get("ref")
+                and row.credential_ref != who["ref"])
+
+
 async def hold_for_user(s, user_id: str | None, now: datetime | None = None) -> PlanLimitStatus | None:
     return await hold_for(s, await credential_owner(s, user_id), now)
 

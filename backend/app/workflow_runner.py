@@ -650,10 +650,23 @@ async def _start_stage(s, run: WorkflowRun, stage_index: int, worker, pre: dict 
             return []
         if old.get("status") == "budget" and run.status == RUN_PAUSED:
             run.status = RUN_RUNNING  # the cap was raised: resume
-        plan_row = await planlimits.hold_for_user(s, run.created_by)
+        keep = False
+        try:
+            who = await planlimits.credential_owner(s, run.created_by)
+            plan_row = await planlimits.hold_for(s, who)
+            if plan_row is None and old.get("status") == "held" and old.get("plan_wait") and old.get("not_before"):
+                nb = datetime.fromisoformat(old["not_before"])
+                nb = nb if nb.tzinfo else nb.replace(tzinfo=timezone.utc)
+                # its own start time is still ahead and the owner's row only moved on: keep holding
+                keep = nb > _now() and await planlimits.keeps_own_wait(s, who)
+        except Exception:  # noqa: BLE001 - a failed check counts as not held (as the worker's start check)
+            log.warning("plan limits: hold check failed for run %s step %s", run.id, stage_index, exc_info=True)
+            plan_row, keep = None, False
         if plan_row is not None:
             _plan_hold(run, stage_index, old, plan_row)
             return []
+        if keep:
+            return []  # still held with its own sentence and not_before
 
     lines = list(stage.get("before") or [])
     reason = None
