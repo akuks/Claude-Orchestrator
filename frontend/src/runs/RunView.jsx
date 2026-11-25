@@ -243,6 +243,7 @@ export default function RunView({ id, user, projects = [], navigate, onOpenCrede
   const stepUsage = data?.step_usage
   const usageOf = useCallback((i) => usageLine(Array.isArray(stepUsage) ? stepUsage[i] : null), [stepUsage])
   const wordOf = useCallback((i) => sstate?.[String(i)]?.status_word || null, [sstate])
+  const aheadOf = useCallback((i) => !!sstate?.[String(i)]?.ahead && sstate[String(i)].status !== 'approved', [sstate])
   const selStage = stageIdx != null && stageIdx < stages.length ? stageIdx : head >= 0 ? head : null
   const curAttempt = selStage == null ? 0 : stageAttempt(sstate, selStage)
   const stageTasks = selStage == null ? [] : tasksOfStage(tasks, selStage, curAttempt)
@@ -520,6 +521,7 @@ export default function RunView({ id, user, projects = [], navigate, onOpenCrede
             onSelect={selectBox}
             usageOf={usageOf}
             wordOf={wordOf}
+            aheadOf={aheadOf}
             input={run.input}
             focusStep={head >= 0 ? head : null}
             label="Steps of this run"
@@ -541,7 +543,7 @@ export default function RunView({ id, user, projects = [], navigate, onOpenCrede
                   {stageDef.items.length} agents at once
                 </span>
               )}
-              {(kind === 'agent' || selWord) && (
+              {kind === 'agent' && (
                 <Tag color={STAGE_TAG[stage.state]} data-testid="run-stage-state">
                   {selWord || STEP_STATE_TEXT[stage.state] || stateLabel(stage.state)}
                 </Tag>
@@ -583,6 +585,7 @@ export default function RunView({ id, user, projects = [], navigate, onOpenCrede
             {canRerun && (
               <div className="co-run-rerun" data-testid="run-rerun">
                 <Popconfirm
+                  placement="bottomLeft"
                   title={`Run again from ${stage.name}? Later steps start over.`}
                   okText="Run again"
                   cancelText="Not now"

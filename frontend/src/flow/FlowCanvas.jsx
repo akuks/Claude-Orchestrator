@@ -33,7 +33,7 @@ export const ADD_CHOICES = [
   { kind: 'approval', label: 'Ask a person', icon: <UserOutlined /> },
 ]
 
-function Box({ word, kind, title, sub, mono, retry, handsOver, outputs, status, selected, error, label, onClick, mini, step, item, small }) {
+function Box({ aheadMark, word, kind, title, sub, mono, retry, handsOver, outputs, status, selected, error, label, onClick, mini, step, item, small }) {
   const cls = [
     'co-flow-box',
     `co-flow-k-${kind}`,
@@ -46,7 +46,7 @@ function Box({ word, kind, title, sub, mono, retry, handsOver, outputs, status, 
     .filter(Boolean)
     .join(' ')
   const badges = mini ? [] : badgeWords(kind, { retry, outputs: outputs || [] })
-  const words = [label, word || (status ? STATUS_WORD[status] : null), error ? 'needs attention' : null, ...badges.map((b) => b.toLowerCase())]
+  const words = [label, word || (status ? STATUS_WORD[status] : null), error ? 'needs attention' : null, aheadMark ? 'approved ahead' : null, ...badges.map((b) => b.toLowerCase())]
     .filter(Boolean)
     .join(', ')
   const retryWord = badges.find((b) => !b.startsWith('Hands over'))
@@ -81,6 +81,11 @@ function Box({ word, kind, title, sub, mono, retry, handsOver, outputs, status, 
       {status && status !== 'next' && (
         <span className={`co-flow-dot co-flow-dot-${status}`} aria-hidden="true">
           {STATUS_ICON[status] || null}
+        </span>
+      )}
+      {aheadMark && (!status || status === 'next') && (
+        <span className="co-flow-dot co-flow-dot-ahead" data-testid="flow-ahead" aria-hidden="true">
+          <CheckOutlined />
         </span>
       )}
       {error && <span className="co-flow-errdot" aria-hidden="true" title="Needs attention" />}
@@ -234,6 +239,7 @@ export default function FlowCanvas({
   center = false,
   usageOf,
   wordOf,
+  aheadOf,
 }) {
   const mini = size === 'mini'
   const edit = mode === 'edit' && !mini
@@ -359,6 +365,7 @@ export default function FlowCanvas({
                     <Box
                       key={k}
                       word={word}
+                      aheadMark={run && aheadOf ? !!aheadOf(i) : false}
                       kind={col.kind}
                       mini={mini}
                       step={i}

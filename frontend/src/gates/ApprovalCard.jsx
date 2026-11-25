@@ -52,8 +52,11 @@ export default function ApprovalCard({ runId, index, stage, state, canDecide = t
   return (
     <div className="co-approval" data-testid="approval-card">
       <div className={`co-approval-lead co-approval-lead-${st.status || 'waiting'}`} data-testid="approval-lead">
-        {approvalLead(st.status)}
+        {waitsAhead && ahead ? 'Approved ahead' : approvalLead(st.status)}
       </div>
+      {waitsAhead && ahead && (
+        <p className="co-approval-msg" data-testid="approval-ahead-note">The run will go straight past this step.</p>
+      )}
       {stage?.message && <p className="co-approval-msg" data-testid="approval-message">{stage.message}</p>}
       {waitsAhead && ahead && (
         <div className="co-approval-ahead" data-testid="approval-ahead">

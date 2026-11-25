@@ -672,4 +672,17 @@ describe('RunView: run control (approve ahead, run again, time and spend)', () =
     expect(c.querySelector('[data-testid="run-stage-state"]').textContent).toBe('Waiting its turn')
     expect(c.querySelector('[data-testid="flow-box"]').getAttribute('aria-label')).toContain('Waiting its turn')
   })
+
+  it('marks a step approved ahead on the canvas, and the card says so once', async () => {
+    api.getWorkflowRun.mockImplementation(async () => base({ stage_state: { 1: { ahead: { by_name: 'Asha' } } } }))
+    const c = await mount()
+    const box = [...c.querySelectorAll('[data-testid="flow-box"]')][1]
+    expect(box.querySelector('[data-testid="flow-ahead"]')).not.toBeNull()
+    expect(box.getAttribute('aria-label')).toContain('approved ahead')
+    expect([...c.querySelectorAll('[data-testid="flow-box"]')][2].querySelector('[data-testid="flow-ahead"]')).toBeNull()
+    await pickBox(c, 1)
+    expect(c.querySelector('[data-testid="approval-lead"]').textContent).toBe('Approved ahead')
+    expect(c.querySelector('[data-testid="approval-ahead-note"]').textContent).toBe('The run will go straight past this step.')
+    expect(c.querySelector('[data-testid="run-stage-state"]')).toBeNull() // the card heading already says it
+  })
 })
