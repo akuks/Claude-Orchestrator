@@ -389,6 +389,9 @@ async def retry_task(task_id: str, request: Request):
         task.duration_ms = None
         task.started_at = None
         task.completed_at = None
+        # a person's Retry starts fresh: no plan-limit wait, no earlier hits counted (7c)
+        task.plan_requeues = 0
+        task.not_before = task.wait_reason = None
         if isinstance(task.recovery, dict):
             # the record belongs to the automatic re-run of the crashed attempt (a compose failure keeps
             # it pending). A person's Retry starts the step over without it, and never resumes the

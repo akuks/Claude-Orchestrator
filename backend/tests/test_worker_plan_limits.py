@@ -190,6 +190,9 @@ def test_what_counts_as_a_limit_hit():
     assert hit({"plan": {}}, {}, "Error at line 4290: something") == "weak"
     assert hit({"plan": {}}, {"is_error": False, "result_text": "You've hit your session limit"}, "") is None
     assert hit({"plan": {}}, {"is_error": True, "result_text": "tests failed"}, "boom") is None
+    # N2: the limit sentence on stderr is strong; the bare markers stay weak
+    assert hit({"plan": {}}, {"is_error": True, "result_text": "x"},
+               "You've hit your session limit · resets 3pm") == "strong"
 
 
 def test_api_key_and_ownerless_runs_store_nothing_without_an_event():
@@ -501,3 +504,54 @@ def test_stored_rows_never_hold_a_secret(client):
     assert u.token not in text and "sk-test-fallback" not in text
     assert all(u.token not in repr(p) for _, p in _events(tid))
     client.delete(f"/plan/status/{u.user_id}")
+
+
+def test_waiting_task_keeps_its_own_reset_when_the_row_moves_on(client):
+    """N1: a task requeued on its own reset keeps waiting when another task of the owner reports
+    `allowed` (e.g. a Sonnet task while only the Opus limit was hit); "Try now" still releases it."""
+    u = _user()
+    ref = _ref(u.user_id)
+    own = (_now() + timedelta(hours=2)).replace(microsecond=0)
+    tid = _queued(u.user_id, own)
+    _store(u.user_id, "rejected", own, ref=ref)
+    _store(u.user_id, "allowed", None, ref=ref)  # latest wins: the row no longer holds anyone
+    waits, timed, got, nb, why = _check(tid)
+    assert waits is True and timed is True and nb == own and why == "Paused — x" and got == []
+    # the credential changed since: released
+    u.put("/me/credentials", json={"claude_token": "n" + uuid.uuid4().hex, "claude_kind": "oauth_token"})
+    assert _check(tid)[0] is False
+    # "Try now" (row gone): released
+    tid2 = _queued(u.user_id, own)
+    _store(u.user_id, "allowed", None, ref=_ref(u.user_id))
+    assert _check(tid2)[0] is True
+    client.delete(f"/plan/status/{u.user_id}")
+    assert _check(tid2)[0] is False and _task(tid2).not_before is None
+
+
+def test_api_key_task_never_keeps_a_wait(client):
+    k = _user("api_key")
+    _store(k.user_id, "allowed", None, ref=_ref(k.user_id), api_key=True)
+    tid = _queued(k.user_id, _now() + timedelta(hours=2))
+    assert _check(tid)[0] is False and _task(tid).not_before is None
+    client.delete(f"/plan/status/{k.user_id}")
+
+
+def test_retry_starts_fresh(client):
+    """N3: a person's Retry of a stopped task forgets the earlier hits and any wait."""
+    u = _user()
+
+    async def mk():
+        tid = uuid.uuid4().hex
+        async with SessionLocal() as s:
+            s.add(Task(id=tid, title="t", prompt="go [plan-limit:allowed:none]", root_id=tid, status="failed",
+                       created_by=u.user_id, plan_requeues=2, not_before=_now() + timedelta(hours=1),
+                       wait_reason="Paused — x", error=pl.STOPPED_TEXT))
+            await s.commit()
+        return tid
+
+    tid = asyncio.run(mk())
+    r = u.post(f"/tasks/{tid}/retry")
+    assert r.status_code == 200, r.text
+    assert r.json()["not_before"] is None and r.json()["wait_reason"] is None
+    done = wait_task(u, tid)
+    assert done["status"] == "completed" and _task(tid).plan_requeues == 0

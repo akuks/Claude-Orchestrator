@@ -94,14 +94,16 @@ def test_confirmation_by_sentence_or_a_second_run(client):
         out.append(r.confirmed)
         r = await pl.record(owner, rej, "t1", run_ref="run1")  # the same run again
         out.append(r.confirmed)
-        r = await pl.record(owner, rej, "t1", run_ref="run2")  # a second run says so too
+        r = await pl.record(owner, rej, "t1", run_ref="run2")  # a re-run of the same task: not enough (N4)
+        out.append(r.confirmed)
+        r = await pl.record(owner, rej, "t2", run_ref="run2b")  # a different task says so too
         out.append(r.confirmed)
         await pl.record(owner, pl.reading({"status": "allowed"}), "t2", run_ref="run3")
         r = await pl.record(owner, rej, "t3", run_ref="run4", confirmed=True)  # limit sentence
         out.append((r.confirmed, r.task_id))
         return out
 
-    assert asyncio.run(go()) == [False, False, True, (True, "t3")]
+    assert asyncio.run(go()) == [False, False, False, True, (True, "t3")]
 
 
 def test_raw_capped_at_2kb():

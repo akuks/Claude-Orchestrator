@@ -901,7 +901,7 @@ class WorkerManager:
         plan_hit = self._plan_limit_hit(ctx, result, "".join(stderr_buf)) if failed else None
         plan_owner_ = (ctx.get("plan") or {}).get("owner") or {}
         if plan_hit == "strong" and plan_owner_ and not plan_owner_.get("api_key"):
-            row = await self._plan_record_hit(ctx, result)
+            row = await self._plan_record_hit(ctx, result, "".join(stderr_buf))
             if planlimits.is_holding(row):
                 hits = await self._count_plan_hit(task_id)
                 if hits >= planlimits.REQUEUE_MAX:
@@ -1717,20 +1717,22 @@ class WorkerManager:
         plan-limit sentence in an error result), "weak" (an api_retry / assistant ``rate_limit`` error or
         the stderr rate-limit markers: the old backoff only), or None."""
         plan = ctx.get("plan") or {}
-        if plan.get("rejected") or (result.get("is_error") and planlimits.limit_text_in(result.get("result_text"))):
+        if (plan.get("rejected") or planlimits.limit_text_in(stderr)
+                or (result.get("is_error") and planlimits.limit_text_in(result.get("result_text")))):
             return "strong"
         if plan.get("rate_limited") or planlimits.stderr_says_limit(stderr):
             return "weak"
         return None
 
-    async def _plan_record_hit(self, ctx, result: dict):
+    async def _plan_record_hit(self, ctx, result: dict, stderr: str = ""):
         """A strong hit: the owner's row says ``rejected`` until the reset time of the run's last rejected
         event (else its last allowed_warning event; never an allowed one), confirmed by a limit sentence in
         the error result. No reset time from this run: the owner's row as stored. Returns the row."""
         plan = ctx.get("plan") or {}
         owner = plan.get("owner")
         resets = plan.get("rejected_reset") or plan.get("warning_reset")
-        sentence = bool(result.get("is_error") and planlimits.limit_text_in(result.get("result_text")))
+        sentence = bool((result.get("is_error") and planlimits.limit_text_in(result.get("result_text")))
+                        or planlimits.limit_text_in(stderr))
         if resets is not None and resets > _now():
             raw = None if plan.get("last_status") == planlimits.REJECTED else {"noticed_by": "run_end"}
             return await planlimits.record(owner, {"status": planlimits.REJECTED, "resets_at": resets,
@@ -1792,6 +1794,17 @@ class WorkerManager:
         self._wait_then_submit(task_id, min(planlimits.CHECK_EVERY, (start - _now()).total_seconds()),
                                priority, created_at)
 
+    @staticmethod
+    async def _keeps_own_wait(s, who) -> bool:
+        """A task waiting for its own reset time keeps waiting unless the owner's row is gone ("Try now"),
+        the credential changed since the row was written, or it is an API key."""
+        if not who or who.get("api_key"):
+            return False
+        row = await planlimits.get_row(s, who["owner"])
+        if row is None:
+            return False
+        return not (row.credential_ref and who.get("ref") and row.credential_ref != who["ref"])
+
     async def _plan_wait(self, task_id: str, emit) -> bool:
         """Before a queued task starts (and every CHECK_EVERY seconds while it waits): True when its
         credential's plan holds work now - it stays queued with the paused sentence and a timer checks
@@ -1803,8 +1816,17 @@ class WorkerManager:
                 if t is None or t.status != Status.QUEUED:
                     return False
                 now = _now()
-                row = await planlimits.hold_for_user(s, t.created_by, now)
+                who = await planlimits.credential_owner(s, t.created_by)
+                row = await planlimits.hold_for(s, who, now)
+                own = planlimits._aware(t.not_before)
+                priority, created_at = t.priority, t.created_at
                 if row is None:
+                    if own is not None and own > now and t.wait_reason and await self._keeps_own_wait(s, who):
+                        # its own reset time is still ahead and the owner's row only moved on (e.g. an
+                        # allowed event from another model's task): it keeps waiting, checked again
+                        self._wait_then_submit(task_id, min(planlimits.CHECK_EVERY, (own - now).total_seconds()),
+                                               priority, created_at)
+                        return True
                     if t.not_before is not None or t.wait_reason is not None:
                         t.not_before = t.wait_reason = None
                         await s.commit()
@@ -1815,7 +1837,6 @@ class WorkerManager:
                 new_event = text != t.wait_reason
                 t.not_before, t.wait_reason = start, text
                 await s.commit()
-                priority, created_at = t.priority, t.created_at
                 resets = planlimits._aware(row.resets_at)
             if new_event:
                 await emit(planlimits.EVENT, {"paused": True, "text": text, "resets_at": resets.isoformat(),

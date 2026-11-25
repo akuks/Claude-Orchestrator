@@ -222,8 +222,8 @@ def row_out(row: PlanLimitStatus | None, now: datetime | None = None) -> dict | 
 
 def hold_until(row: PlanLimitStatus | None) -> datetime | None:
     """Until when a rejected row holds work: its reset time, but at most 6 hours after it was seen unless
-    the hold is confirmed (a limit sentence in an error result, or rejected events from two different
-    runs); it is checked again then. None: not a rejected row with a reset time."""
+    the hold is confirmed (a limit sentence, or rejected events from two different tasks); it is checked
+    again then. None: not a rejected row with a reset time."""
     if row is None or row.status != REJECTED:
         return None
     resets = _aware(row.resets_at)
@@ -265,8 +265,7 @@ def banner(row: PlanLimitStatus | None, now: datetime | None = None) -> dict | N
 async def record(owner: dict, read: dict, task_id: str | None, run_ref: str | None = None,
                  confirmed: bool = False) -> PlanLimitStatus | None:
     """Latest wins: one row per owner, updated in place. A ``rejected`` reading is confirmed by
-    ``confirmed`` (a limit sentence in an error result) or by the owner's row already being rejected by a
-    different run (``run_ref``); ``raw`` None keeps the stored raw. Returns the stored row (detached), or
+    ``confirmed`` (a limit sentence) or by the owner's row already being rejected by a different task; ``raw`` None keeps the stored raw. Returns the stored row (detached), or
     None. Never raises."""
     if not owner or not owner.get("owner"):
         return None
@@ -277,8 +276,10 @@ async def record(owner: dict, read: dict, task_id: str | None, run_ref: str | No
                     PlanLimitStatus.credential_owner == owner["owner"]))).scalar_one_or_none()
                 rejected = read["status"] == REJECTED
                 before_rejected = row is not None and row.status == REJECTED
-                other_run = (before_rejected and run_ref is not None and row.run_ref is not None
-                             and row.run_ref != run_ref)
+                # a second confirming rejected must come from a different task (a re-run of the same
+                # task could repeat a forged line)
+                other_run = (before_rejected and task_id is not None and row.task_id is not None
+                             and row.task_id != task_id)
                 was_confirmed = bool(before_rejected and row.confirmed and run_ref is not None
                                      and row.run_ref == run_ref)
                 if row is None:
