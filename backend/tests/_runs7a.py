@@ -28,7 +28,9 @@ async def make_run(stages, pids=(), budget=None, status="pending", current=0, st
         return run.id
 
 
-def approval(name="Approve plan", ahead=None):
+def approval(name="Approve plan", ahead=True):
+    """An approval step; ahead=True (the default here) opts in to approving ahead, None leaves
+    the key out (refused, like False)."""
     st = {"name": name, "kind": "approval", "message": "ok?", "before": []}
     if ahead is not None:
         st["ahead"] = ahead

@@ -64,7 +64,7 @@ def test_two_approved_ahead_in_a_row_and_last_step(fakes, agents):
 def test_refused_on_release_step_reached_step_and_non_approval(fakes, agents):
     async def go():
         rid = await make_run([approval("Approve plan"), agent("Build", agents[0]),
-                              approval("Approve release", ahead=False)])
+                              approval("Approve release", ahead=False), approval("Old step", ahead=None)])
         r = WorkflowRunner(FakeWorker(), 999)
         await r.start_run(rid)
         assert (await _run(rid)).stage_state["0"]["status"] == "waiting_approval"
@@ -72,6 +72,8 @@ def test_refused_on_release_step_reached_step_and_non_approval(fakes, agents):
             await r.approve_ahead(rid, 0, ANN)  # the step the run is on now
         with pytest.raises(ValueError, match=AHEAD_REFUSED):
             await r.approve_ahead(rid, 2, ANN)
+        with pytest.raises(ValueError, match=AHEAD_REFUSED):
+            await r.approve_ahead(rid, 3, ANN)  # no flag (a workflow saved before 7a): opt-in, so refused
         with pytest.raises(ValueError, match="not an approval step"):
             await r.approve_ahead(rid, 1, ANN)
         await r.approve_stage(rid, 0, ANN)
@@ -175,10 +177,10 @@ def test_spec_accepts_ahead_on_approval_only(client):
         {"name": "A", "kind": "approval", "ahead": False},
         {"name": "B", "kind": "approval", "ahead": True},
         {"name": "C", "kind": "approval"},
-        {"name": "D", "items": [{"agent": "x", "prompt": "p"}], "ahead": False},
+        {"name": "D", "items": [{"agent": "x", "prompt": "p"}], "ahead": True},
     ])
-    assert out[0]["ahead"] is False
-    assert "ahead" not in out[1] and "ahead" not in out[2] and "ahead" not in out[3]
+    assert out[1]["ahead"] is True  # opt-in: only true is kept
+    assert "ahead" not in out[0] and "ahead" not in out[2] and "ahead" not in out[3]
     with pytest.raises(ValueError, match="ahead must be true or false"):
         _validate([{"name": "A", "kind": "approval", "ahead": "no"}])
 
@@ -250,7 +252,7 @@ def test_api_needs_manage_role(client, fakes, agents, monkeypatch, tmp_path):
 
 
 def _held_ahead_run():
-    held = {"name": "Release", "kind": "approval", "message": "ok?", "before": ["clean tree"]}
+    held = {"name": "Release", "kind": "approval", "message": "ok?", "before": ["clean tree"], "ahead": True}
     return [approval("First"), held]
 
 

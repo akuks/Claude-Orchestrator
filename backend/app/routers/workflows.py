@@ -22,7 +22,7 @@ from ..gates import executor, spec, test_results, totals
 from ..models import Agent, Project, Task, Workflow, WorkflowGateRun, WorkflowRun
 from ..redaction import clean_text, env_values, mask_values
 from .. import workflow_templates as wft
-from ..workflow_runner import ACTIVE_RUN, gate_status_text
+from ..workflow_runner import ACTIVE_RUN, _spent as _run_spent, gate_status_text
 from ..schemas import (
     BudgetRaise,
     LiveItemOut,
@@ -576,6 +576,9 @@ async def _held_others(s, p, run: WorkflowRun, visible) -> tuple[list[str], int]
     return seen[:_OTHERS_MAX], max(0, len(seen) - _OTHERS_MAX)
 
 
+GATE_ROWS_MAX = 200  # gate rows the run detail loads (newest first)
+
+
 @router.get("/runs/{run_id}")
 async def get_run(run_id: str, request: Request):
     """Run detail + its tasks grouped by stage (the board). Only the stage tasks
@@ -600,7 +603,7 @@ async def get_run(run_id: str, request: Request):
                 select(WorkflowGateRun)
                 .where(WorkflowGateRun.run_id == run.id)
                 .order_by(WorkflowGateRun.started_at.desc(), WorkflowGateRun.id.desc())
-                .limit(200)
+                .limit(GATE_ROWS_MAX)
             )
         ).scalars().all()
         hidden = {
@@ -629,7 +632,7 @@ async def get_run(run_id: str, request: Request):
             kind = spec.stage_kind(st)
             if str(i) in stage_state:
                 e = stage_state[str(i)]
-                e.pop("lock_wait", None)  # internal: held for the project's check lock
+                e["_lock_wait"] = bool(e.pop("lock_wait", None))  # internal; read by _status_word below
                 if isinstance(e.get("ahead"), dict):  # who approved ahead, by name only
                     e["ahead"] = {"by_name": e["ahead"].get("by_name"), "at": e["ahead"].get("at")}
                 elif "ahead" in e:
@@ -638,6 +641,7 @@ async def get_run(run_id: str, request: Request):
                 if str(i) in stage_state:
                     stage_state[str(i)].pop("expects", None)  # internal: task ids -> output names
                     word = _status_word(kind, stage_state[str(i)], False, run_active and i == run.current_stage, False)
+                    stage_state[str(i)].pop("_lock_wait", None)
                     if word:
                         stage_state[str(i)]["status_word"] = word
                 continue
@@ -648,6 +652,7 @@ async def get_run(run_id: str, request: Request):
                 entry["status_text"] = gate_status_text(st, entry, lv)
             word = _status_word(kind, entry, bool(lv), run_active and i == run.current_stage,
                                 kind == "gate" and task_alive(i))
+            entry.pop("_lock_wait", None)
             if word:
                 entry["status_word"] = word
             if i in hidden:
@@ -657,9 +662,12 @@ async def get_run(run_id: str, request: Request):
                 entry["hidden"] = True
             elif entry.get("status") == "held" and others is not None:
                 entry["others"], entry["others_more"] = others
-        tot = await totals.compute(s, run)
+        # The total and the per-step figures count the same tasks: the ones this viewer may see.
+        tot = await totals.compute(s, run, tasks)
         tot["line"] = totals.line(tot)
-        step_usage = await totals.per_step(s, run, tasks, grows, hidden)
+        step_usage = await totals.per_step(s, run, tasks, grows, hidden,
+                                           gates_complete=len(grows) < GATE_ROWS_MAX)
+        spent = await _run_spent(s, run)
     out = run_out.model_dump()
     out["stage_state"] = stage_state
     return {
@@ -669,7 +677,8 @@ async def get_run(run_id: str, request: Request):
         "gate_runs": gate_runs,
         "live": live,
         "totals": tot,
-        "budget": {"spent": tot["cost_usd"], "budget_usd": run_out.budget_usd},
+        # The spending limit counts every task of the run, as the runner does.
+        "budget": {"spent": spent, "budget_usd": run_out.budget_usd},
         "log": out["log"],
         "step_usage": step_usage,
     }
@@ -684,7 +693,8 @@ def _status_word(kind: str, entry: dict, live: bool, current: bool, working: boo
     if live or (working and status in ("waiting", "running")):
         return "Running"
     if status == "held":
-        return "Waiting its turn"
+        # Only a wait for another run's checks; a pre-flight hold keeps the screen's own words.
+        return "Waiting its turn" if entry.get("_lock_wait") else None
     if status in ("waiting_approval", "needs_approval"):
         return "Waiting for approval"
     if status == "failed":

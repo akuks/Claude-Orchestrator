@@ -22,7 +22,8 @@ from datetime import datetime, timezone
 
 from sqlalchemy import select
 
-from ..models import Task
+from ..models import Task, WorkflowGateRun
+from .spec import stage_kind
 
 
 def _parse(v):
@@ -43,11 +44,13 @@ def _tok(t) -> int:
     return (t.input_tokens or 0) + (t.output_tokens or 0)
 
 
-async def compute(s, run) -> dict:
+async def compute(s, run, tasks=None) -> dict:
+    """`tasks`: the run's tasks to count (a viewer's visible ones); None reads every task."""
     stages = run.stages or []
     state = run.stage_state or {}
     now = datetime.now(timezone.utc)
-    tasks = (await s.execute(select(Task).where(Task.workflow_run_id == run.id))).scalars().all()
+    if tasks is None:
+        tasks = (await s.execute(select(Task).where(Task.workflow_run_id == run.id))).scalars().all()
     per: dict[int, list] = {}
     for t in tasks:
         if t.stage_index is not None:
@@ -125,13 +128,15 @@ def line(t: dict) -> str:
     return out
 
 
-async def per_step(s, run, tasks, gate_rows, hidden=frozenset()) -> list[dict | None]:
+async def per_step(s, run, tasks, gate_rows, hidden=frozenset(), gates_complete: bool = True) -> list[dict | None]:
     """Time and spend per step for its newest attempt (F66), computed on read, for one viewer:
     {"cost_usd", "input_tokens", "output_tokens", "seconds"}, or None for a step that has not
-    started, a gate step in `hidden` (a project the viewer cannot see) or a step whose tasks of
-    that attempt are all hidden from the viewer.
+    started, a gate step in `hidden` (a project the viewer cannot see) or an agent step whose tasks
+    of that attempt are all hidden from the viewer (a visible gate step still shows its time).
     `tasks` are the run's tasks the viewer may see and `gate_rows` the run's WorkflowGateRun rows,
-    both already loaded by the caller; only the (stage, attempt) of every task is read here.
+    both already loaded by the caller; only the (stage, attempt) of every task is read here. When
+    `gate_rows` was cut (gates_complete False), a step that needs gate durations and has no loaded
+    row reads its own rows (durations only).
     Cost and tokens sum the visible tasks of that attempt (None counts as 0). Seconds:
     started_at -> finished_at; while the run is on the step, up to now; for a step that ended
     without a finish time (a failure), its gate runs' durations or its tasks' last completion."""
@@ -152,7 +157,8 @@ async def per_step(s, run, tasks, gate_rows, hidden=frozenset()) -> list[dict | 
             attempt = 0
         mine = [t for t in tasks if t.stage_index == i and (t.stage_attempt or 0) == attempt]
         a, b = _parse(st.get("started_at")), _parse(st.get("finished_at"))
-        if i in hidden or ((i, attempt) in have and not mine) or (not a and not mine):
+        agent_hidden = stage_kind(stages[i]) == "agent" and (i, attempt) in have and not mine
+        if i in hidden or agent_hidden or (not a and not mine):
             out.append(None)
             continue
         seconds = 0.0
@@ -161,9 +167,13 @@ async def per_step(s, run, tasks, gate_rows, hidden=frozenset()) -> list[dict | 
         elif a and live and i == run.current_stage:
             seconds = (now - a).total_seconds()
         else:
-            rows = [g for g in gate_rows if g.stage_index == i and (g.attempt or 0) == attempt]
-            if rows:
-                seconds = sum((g.duration_ms or 0) for g in rows) / 1000.0
+            ms = [g.duration_ms for g in gate_rows if g.stage_index == i and (g.attempt or 0) == attempt]
+            if not ms and not gates_complete and stage_kind(stages[i]) == "gate":
+                ms = (await s.execute(select(WorkflowGateRun.duration_ms).where(
+                    WorkflowGateRun.run_id == run.id, WorkflowGateRun.stage_index == i,
+                    WorkflowGateRun.attempt == attempt))).scalars().all()
+            if ms:
+                seconds = sum((x or 0) for x in ms) / 1000.0
             elif a:
                 ends = [_aware(t.completed_at) for t in mine if t.completed_at]
                 if ends:

@@ -73,10 +73,10 @@ def test_file_name_pattern_refuses_a_trailing_newline():
     assert not FILE_RE.fullmatch("good.md\n")
 
 
-def test_release_approvals_cannot_be_approved_ahead():
-    """Phase 7a: every release approval carries ahead: false; "Approve plan" stays allowed."""
+def test_only_approve_plan_opts_in_to_approving_ahead():
+    """Phase 7a: approving ahead is opt-in; only "Approve plan" carries ahead: true, release
+    approvals carry no flag (refused)."""
     by = {(k, st["name"]): st for k, t in TEMPLATES.items() for st in t["stages"] if st.get("kind") == "approval"}
     assert set(by) == {("planned", "Approve plan"), ("planned", "Approve release"), ("ui", "Approve")}
-    assert by[("planned", "Approve release")]["ahead"] is False
-    assert by[("ui", "Approve")]["ahead"] is False
-    assert "ahead" not in by[("planned", "Approve plan")]
+    assert by[("planned", "Approve plan")]["ahead"] is True
+    assert "ahead" not in by[("planned", "Approve release")] and "ahead" not in by[("ui", "Approve")]

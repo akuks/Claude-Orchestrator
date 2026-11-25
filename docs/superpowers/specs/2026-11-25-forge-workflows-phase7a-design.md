@@ -12,16 +12,19 @@ Sources: `docs/research/jspark-forge-delta-v0.7-v0.8.md` (F123, F126–F129, F13
 
 - A person who may approve a run (`_require_run(manage=True)`: creator, admin, or maintainer of a project the run
   touches) may approve an **approval step that has not been reached yet**, and withdraw that early approval.
-- A stage dict may carry `"ahead": false`. Such a step can never be approved ahead (409, "This step can only be
-  approved when the run reaches it."). The templates set `ahead: false` on every release approval ("Approve
-  release", and the ui template's final "Approve"); "Approve plan" stays allowed. Missing key = allowed.
+- Approving ahead is **opt-in per step**: only an approval step whose stage dict carries `"ahead": true` may be
+  approved ahead. A missing key or `false` is refused (409, "This step can only be approved when the run reaches
+  it."). The templates set `ahead: true` on "Approve plan" only; release approvals ("Approve release", the ui
+  template's final "Approve") carry no flag. (Ruling, final review: the editor did not keep `ahead: false` and
+  workflows saved before this phase have no flag, so "missing = allowed" left release approvals unprotected.
+  Runs keep the stage snapshot they started with, so runs started before this change cannot be approved ahead.)
 - Stored in `stage_state[str(i)]["ahead"] = {"by": user_id, "by_name": str, "at": iso}`. Only for a future step
   (`i > current_stage`) whose kind is approval, while the run is `running` or `paused`.
 - When the run reaches that step it is approved at once: same effect as Approve, `decided_by` = the early approver,
   summary "Approved ahead by <name>", one log line "Approve plan: approved ahead by <name>".
 - An early approval is dropped (and a log line says so) when the run is cancelled, fails, or is restarted from an
   earlier step (§3). It survives a server restart (it is in the database).
-- API: `POST /workflow-runs/{id}/stages/{i}/approve-ahead`, `DELETE /workflow-runs/{id}/stages/{i}/approve-ahead`.
+- API: `POST /workflows/runs/{id}/stages/{i}/approve-ahead`, `DELETE /workflows/runs/{id}/stages/{i}/approve-ahead`.
   The approve-ahead POST must be idempotent and must refuse a step already reached (409).
 
 ## 2. One check at a time per project (F126)

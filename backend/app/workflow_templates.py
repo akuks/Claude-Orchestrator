@@ -23,11 +23,11 @@ def _gate(name: str) -> dict:
     return {"name": name, "kind": "gate", "run": ["npm test"], "timeout_min": 60, "before": []}
 
 
-def _approval(name: str, message: str, ahead: bool = True) -> dict:
-    """An approval step; ahead=False (release approvals) can never be approved ahead."""
+def _approval(name: str, message: str, ahead: bool = False) -> dict:
+    """An approval step; only ahead=True may be approved before the run reaches it."""
     st = {"name": name, "kind": "approval", "message": message}
-    if not ahead:
-        st["ahead"] = False
+    if ahead:
+        st["ahead"] = True
     return st
 
 
@@ -50,14 +50,14 @@ TEMPLATES: dict[str, dict] = {
         "description": "Plan, approve the plan, build in parallel, run the tests, review, then approve the release.",
         "stages": [
             _agent("Plan", [("Planner", "Plan this change and write the briefs. Do not implement it.\n\nWork: {{input}}")]),
-            _approval("Approve plan", "Read the plan and approve it before anyone builds."),
+            _approval("Approve plan", "Read the plan and approve it before anyone builds.", ahead=True),
             _agent("Build", [
                 ("Builder", _build("Implement the first half of the plan, test first.\n\nPlan:\n{{stage1}}")),
                 ("Builder", _build("Implement the second half of the plan, test first.\n\nPlan:\n{{stage1}}")),
             ]),
             _gate("Test"),
             _agent("Review", [("Reviewer", "Review the change on this branch against the plan and rank your findings.\n\nPlan:\n{{stage1}}\n\nWork: {{input}}")]),
-            _approval("Approve release", "Check the review and approve the release.", ahead=False),
+            _approval("Approve release", "Check the review and approve the release."),
         ],
     },
     "documents": {
@@ -86,7 +86,7 @@ TEMPLATES: dict[str, dict] = {
             _gate("Test"),
             _agent("Build check", [("Checker", "Run the production build and report totals and errors, facts only.\n\nWork: {{input}}")]),
             _agent("Review", [("Reviewer", "Review the UI change for correctness and accessibility and rank your findings.\n\nWork: {{input}}")]),
-            _approval("Approve", "Look at the result and approve it.", ahead=False),
+            _approval("Approve", "Look at the result and approve it."),
         ],
     },
 }

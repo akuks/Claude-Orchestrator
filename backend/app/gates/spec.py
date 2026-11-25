@@ -199,7 +199,7 @@ async def validate_stages(s, stages: list[dict]) -> list[dict]:
         if kind == "approval" and ahead is not None:
             if not isinstance(ahead, bool):
                 raise ValueError(f"Step '{name}': ahead must be true or false")
-            if ahead is False:
-                st["ahead"] = False  # never approved before the run reaches it
+            if ahead is True:
+                st["ahead"] = True  # may be approved before the run reaches it (opt-in)
         out.append(st)
     return out

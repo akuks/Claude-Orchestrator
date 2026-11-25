@@ -500,7 +500,7 @@ async def _start_stage(s, run: WorkflowRun, stage_index: int, worker, pre: dict 
         return []
     if kind == "approval":
         ahead = old.get("ahead")
-        if isinstance(ahead, dict) and stage.get("ahead") is not False:
+        if isinstance(ahead, dict) and stage.get("ahead") is True:
             # Approved ahead (F123): the same effect as Approve, by the early approver.
             who = str(ahead.get("by_name") or "someone")
             st.update(status="approved", handout=uuid.uuid4().hex, ahead=ahead, decided_by=who,
@@ -904,7 +904,9 @@ class WorkflowRunner:
             raise ValueError("the run is not active")
         if not (0 <= i < len(run.stages or [])) or stage_kind(run.stages[i]) != "approval":
             raise ValueError(f"step {i + 1} is not an approval step")
-        if run.stages[i].get("ahead") is False:
+        if run.stages[i].get("ahead") is not True:
+            # Opt-in per step: only a step saved with "ahead": true (runs keep the snapshot
+            # they started with, so runs started before that flag existed never allow it).
             raise ValueError(AHEAD_REFUSED)
         if i <= run.current_stage:
             # A step reached but held (pre-flight) is still undecided: its early approval

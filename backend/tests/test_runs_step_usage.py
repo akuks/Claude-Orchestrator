@@ -217,3 +217,130 @@ def test_status_word_between_commands_stays_running(client, monkeypatch):
     finally:
         r._gates.clear()
         loop.close()
+
+
+# --- final fix wave ----------------------------------------------------------------------------
+
+
+def _two_projects(client):
+    import uuid as _uuid
+
+    seen = client.post("/projects", json={"name": f"r7a-{_uuid.uuid4().hex[:8]}"}).json()["id"]
+    unseen = client.post("/projects", json={"name": f"r7a-{_uuid.uuid4().hex[:8]}"}).json()["id"]
+    return seen, unseen
+
+
+def _viewer(client, pid):
+    import uuid as _uuid
+
+    from conftest import login_as
+    from test_gates_api import _grant
+
+    v = login_as(f"r7a-{_uuid.uuid4().hex[:8]}@test.local")
+    _grant(client, pid, v.user_id, "contributor")
+    return v
+
+
+def test_steps_add_up_to_the_total_for_a_viewer(client, monkeypatch):
+    """N-1: the run total counts the same (visible) tasks as the per-step figures."""
+    use_runner(monkeypatch, WorkflowRunner(FakeWorker(), 999))
+    seen, unseen = _two_projects(client)
+
+    async def setup():
+        stages = [{"name": "A", "items": [{"agent": "x", "prompt": "p"}]},
+                  {"name": "B", "items": [{"agent": "x", "prompt": "p"}]}]
+        state = {str(i): {"attempt": 0, "status": "done", "started_at": _iso(T),
+                          "finished_at": _iso(T + timedelta(seconds=5))} for i in range(2)}
+        rid = await make_run(stages, [seen, unseen], status="completed", current=1, state=state, budget=50.0)
+        async with SessionLocal() as s:
+            for i, pid, cost in ((0, seen, 0.5), (0, unseen, 4.0), (1, seen, 0.25), (1, unseen, 2.0)):
+                s.add(Task(title="t", prompt="p", status=Status.COMPLETED, workflow_run_id=rid, stage_index=i,
+                           stage_attempt=0, total_cost_usd=cost, input_tokens=10, output_tokens=5, project_id=pid))
+            await s.commit()
+        return rid
+
+    rid = asyncio.run(setup())
+    d = _viewer(client, seen).get(f"/workflows/runs/{rid}").json()
+    steps = [u for u in d["step_usage"] if u]
+    assert round(sum(u["cost_usd"] for u in steps), 4) == d["totals"]["cost_usd"] == 0.75
+    assert sum(u["input_tokens"] + u["output_tokens"] for u in steps) == d["totals"]["tokens"] == 30
+    assert d["budget"]["spent"] == 6.75  # the spending limit still counts the whole run
+    full = client.get(f"/workflows/runs/{rid}").json()
+    assert full["totals"]["cost_usd"] == 6.75
+
+
+def test_visible_gate_with_a_hidden_fix_task_keeps_its_time(client, monkeypatch):
+    """N-2: the "all tasks hidden" rule is for agent steps only."""
+    use_runner(monkeypatch, WorkflowRunner(FakeWorker(), 999))
+    seen, unseen = _two_projects(client)
+
+    async def setup():
+        from app.models import Project
+
+        async with SessionLocal() as s:
+            p = await s.get(Project, seen)
+            p.directory = p.directory or "/tmp"
+            await s.commit()
+        stages = [gate(seen)]
+        state = {"0": {"attempt": 0, "status": "passed", "started_at": _iso(T),
+                       "finished_at": _iso(T + timedelta(seconds=42))}}
+        rid = await make_run(stages, [seen], status="completed", current=0, state=state)
+        async with SessionLocal() as s:  # the fixer's task, in a project the viewer cannot see
+            s.add(Task(title="fix", prompt="p", status=Status.COMPLETED, workflow_run_id=rid, stage_index=0,
+                       stage_attempt=0, total_cost_usd=1.0, project_id=unseen))
+            await s.commit()
+        return rid
+
+    rid = asyncio.run(setup())
+    u = _viewer(client, seen).get(f"/workflows/runs/{rid}").json()["step_usage"][0]
+    assert u == {"cost_usd": 0.0, "input_tokens": 0, "output_tokens": 0, "seconds": 42}
+
+
+def test_failed_gate_time_read_past_the_row_cap(client, monkeypatch):
+    """N-3: when the loaded gate rows hit the cap, a step with none loaded reads its own."""
+    from app.routers import workflows as wf
+
+    use_runner(monkeypatch, WorkflowRunner(FakeWorker(), 999))
+    monkeypatch.setattr(wf, "GATE_ROWS_MAX", 2)
+
+    async def setup():
+        pid = await _project()
+        stages = [gate(pid, name="Old"), gate(pid, name="New")]
+        rid = await make_run(stages, [pid], status="failed", current=1, state={
+            "0": {"attempt": 0, "status": "failed", "started_at": _iso(T)},
+            "1": {"attempt": 0, "status": "failed", "started_at": _iso(T)}})
+        async with SessionLocal() as s:
+            s.add(WorkflowGateRun(run_id=rid, stage_index=0, attempt=0, handout="h", command="c", kind="full",
+                                  started_at=T, finished_at=T, duration_ms=7000, outcome="failed", exit_code=1))
+            for k in range(3):  # newer rows of step 1 fill the cap
+                at = T + timedelta(minutes=k + 1)
+                s.add(WorkflowGateRun(run_id=rid, stage_index=1, attempt=0, handout="h", command="c", kind="full",
+                                      started_at=at, finished_at=at, duration_ms=1000, outcome="failed", exit_code=1))
+            await s.commit()
+        return rid
+
+    rid = asyncio.run(setup())
+    d = client.get(f"/workflows/runs/{rid}").json()
+    assert len(d["gate_runs"]) == 2
+    assert d["step_usage"][0]["seconds"] == 7
+    assert d["step_usage"][1]["seconds"] == 2  # only the loaded rows: it has some
+
+
+def test_preflight_hold_has_no_status_word(client, monkeypatch):
+    """M-4: "Waiting its turn" only for the project lock; a pre-flight hold gets no word."""
+    use_runner(monkeypatch, WorkflowRunner(FakeWorker(), 999))
+
+    async def setup():
+        pid = await _project()
+        pre = await make_run([{"name": "Dev", "items": [{"agent": "x", "prompt": "p"}]}, gate(pid)], [pid],
+                             status="running", state={"0": {"status": "held", "reason": "not clean"}})
+        lock = await make_run([gate(pid)], [pid], status="running",
+                              state={"0": {"status": "held", "reason": "x", "lock_wait": True}})
+        gpre = await make_run([gate(pid)], [pid], status="running", state={"0": {"status": "held", "reason": "y"}})
+        return pre, lock, gpre
+
+    pre, lock, gpre = asyncio.run(setup())
+    assert "status_word" not in client.get(f"/workflows/runs/{pre}").json()["stage_state"]["0"]
+    assert "status_word" not in client.get(f"/workflows/runs/{gpre}").json()["stage_state"]["0"]
+    st = client.get(f"/workflows/runs/{lock}").json()["stage_state"]["0"]
+    assert st["status_word"] == "Waiting its turn" and "lock_wait" not in st and "_lock_wait" not in st
