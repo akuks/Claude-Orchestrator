@@ -321,12 +321,35 @@ def test_other_persons_list_never_reaches_my_task_or_my_followup(client, ground_
 def test_secret_looking_preference_is_refused(client):
     m = login_as(f"pf-sec-{_uid()}@test.local")
     secret = "sk-ant-api03-" + "Q" * 40
-    for text in (f"Use key {secret} for the API", "password: hunter2hunter2"):
-        r = m.put("/me/preferences", json={"enabled": True, "items": [{"text": text, "on": True}]})
+    for text in (f"Use key {secret} for the API", "db is postgres://bob:hunter2pass@db.local/x",
+                 "ghp_" + "a1B2" * 9, "AKIA" + "ABCDEFGHIJKLMNOP"):
+        r = m.put("/me/preferences", json={"enabled": True, "items": [{"text": "fine", "on": True},
+                                                                       {"text": text, "on": True}]})
         assert r.status_code == 422, r.text
-        assert r.json()["detail"] == prefs.SECRET_MSG
-        assert secret not in r.text and "hunter2" not in r.text
+        assert r.json()["detail"] == f"Preference 2: {prefs.SECRET_MSG}"
+        assert secret not in r.text and "hunter2" not in r.text and "a1B2" not in r.text
     assert m.get("/me/preferences").json()["items"] == []
+
+
+ORDINARY = ["Use Bearer authentication everywhere", "Always pass --api-key explicitly",
+            "token: reviewers expect JSDoc", "secret: rotations happen quarterly",
+            "Name refresh tokens accessToken: camelCase", "In mysql use -protocol=tcp",
+            "password: hunter2hunter2 is a bad example, never use it"]
+
+
+def test_ordinary_advice_about_keys_is_accepted(client):
+    m = login_as(f"pf-ord-{_uid()}@test.local")
+    got = _put(m, [{"text": t, "on": True} for t in ORDINARY])
+    assert [i["text"] for i in got["items"]] == ORDINARY
+
+
+def test_errors_name_the_preference(client):
+    m = login_as(f"pf-num-{_uid()}@test.local")
+    for bad, msg in (("a\nb", "Preference 2: it must be one line (no line breaks)"),
+                     ("x" * 241, "Preference 2: it is longer than 240 characters"),
+                     ("  ", "Preference 2: it is empty"), (5, "Preference 2: it must be text")):
+        r = m.put("/me/preferences", json={"enabled": True, "items": [{"text": "ok"}, {"text": bad}]})
+        assert r.status_code == 422 and r.json()["detail"] == msg, r.text
 
 
 def _store(user_id, items, enabled=True):

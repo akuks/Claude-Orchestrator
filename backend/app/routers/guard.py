@@ -1267,7 +1267,7 @@ async def put_org_settings(body: OrgSettingsIn, request: Request):
         patterns = list(dict.fromkeys(x.strip() for x in body.dev_db_patterns))
     for attempt in range(2):
         async with SessionLocal() as s:
-            row = await s.get(GuardOrgSettings, 1)
+            row = await s.get(GuardOrgSettings, 1, with_for_update=True)  # the merge reads what it writes
             if row is None:
                 row = GuardOrgSettings(id=1, disabled_rules=[], dev_db_patterns=[])
                 s.add(row)

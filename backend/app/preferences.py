@@ -2,8 +2,8 @@
 (``/me/preferences``), added to the main session's system prompt of every task they start.
 
 * ``validate(body)`` checks a PUT body (ValueError -> the router's 422): at most ``MAX_ITEMS`` items, each text
-  1-``TEXT_MAX`` characters after ``clean``; no newlines; nothing that looks like a secret (``SECRET_MSG``: the
-  text would change under token-shape redaction).
+  1-``TEXT_MAX`` characters after ``clean``; no newlines; no real-looking key or URL password
+  (``looks_like_secret``). Each item error starts "Preference {n}: " (1-based).
 * ``paragraph(enabled, items, secrets)`` is the exact text added (None when nothing would be added); each item is
   redacted with the run's secrets.
 * ``load_paragraph(user_id, secrets)`` reads the person's row in its own short session: ``(text, count)``."""
@@ -15,7 +15,7 @@ import uuid
 
 from .database import SessionLocal
 from .models import UserPreferences
-from .redaction import clean_text, redact
+from .redaction import TOKEN_SHAPES, URL_USERINFO, clean_text, redact
 
 MAX_ITEMS = 12
 TEXT_MAX = 240
@@ -24,7 +24,7 @@ HEADING = "# Preferences of the person who started this task"
 INTRO = ("They set these themselves. Follow them unless the task, the project's instructions or a recorded decision "
          "says otherwise.")
 
-SECRET_MSG = "This looks like a password or key — leave secrets out of your preferences."
+SECRET_MSG = "This looks like a password or key — leave secrets out of your preferences."  # after "Preference {n}: "
 # any line break: a preference is one line and can never start a new line (heading) in the prompt
 _NEWLINES = re.compile("[\n\r\u000b\u000c\u0085  ]")
 _SPACES = re.compile(r"\s+")
@@ -34,10 +34,17 @@ _ID = re.compile(r"^[A-Za-z0-9_-]{1," + str(ID_MAX) + r"}$")
 def clean(text) -> str:
     """One line: ValueError for a line break; hidden/bidi characters stripped, whitespace collapsed, trimmed."""
     if not isinstance(text, str):
-        raise ValueError("a preference must be text")
+        raise ValueError("it must be text")
     if _NEWLINES.search(text):
-        raise ValueError("a preference is one line (no line breaks)")
+        raise ValueError("it must be one line (no line breaks)")
     return _SPACES.sub(" ", clean_text(text)).strip()
+
+
+def looks_like_secret(text: str) -> bool:
+    """A real-looking key (``TOKEN_SHAPES``) or a ``user:password@`` URL. Not the labelled-value or Bearer rules
+    of ``redact``: ordinary advice ("token: reviewers expect JSDoc") must save. Injection still runs the full
+    ``redact``."""
+    return bool(TOKEN_SHAPES.search(text) or URL_USERINFO.search(text))
 
 
 def validate(body) -> tuple[bool, list[dict]]:
@@ -56,17 +63,20 @@ def validate(body) -> tuple[bool, list[dict]]:
     items, seen = [], set()
     for n, it in enumerate(raw, 1):
         if not isinstance(it, dict):
-            raise ValueError(f"preference {n} must be an object")
+            raise ValueError(f"Preference {n}: must be an object")
         on = it.get("on", True)
         if not isinstance(on, bool):
-            raise ValueError(f"preference {n}: on must be true or false")
-        text = clean(it.get("text"))
+            raise ValueError(f"Preference {n}: on must be true or false")
+        try:
+            text = clean(it.get("text"))
+        except ValueError as e:
+            raise ValueError(f"Preference {n}: {e}") from None
         if not text:
-            raise ValueError(f"preference {n} is empty")
+            raise ValueError(f"Preference {n}: it is empty")
         if len(text) > TEXT_MAX:
-            raise ValueError(f"preference {n} is longer than {TEXT_MAX} characters")
-        if redact(text, []) != text:  # token shapes, user:password@ URLs, labelled values: never stored
-            raise ValueError(SECRET_MSG)
+            raise ValueError(f"Preference {n}: it is longer than {TEXT_MAX} characters")
+        if looks_like_secret(text):
+            raise ValueError(f"Preference {n}: {SECRET_MSG}")
         pid = it.get("id")
         if not isinstance(pid, str) or not _ID.match(pid) or pid in seen:
             pid = uuid.uuid4().hex[:12]
