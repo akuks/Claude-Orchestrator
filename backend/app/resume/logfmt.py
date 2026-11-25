@@ -6,7 +6,10 @@ is not worth a line. ``ev`` is ``{"type", "payload", "created_at"}`` (a
 TaskEvent as a dict). The detail is redacted (token shapes; the payload was
 already redacted with the run's secrets when it was stored), cleaned of hidden
 characters and then cut to ``DETAIL_MAX``. A helper's (subagent's) line is
-prefixed ``[helper] ``."""
+prefixed ``[helper] ``. A helper call names its org tier when known (phase 7e,
+F102): ``AGENT+ <kind> [<tier>]: <description>`` - the tier from the call's
+event, else from the later ``subagent_start`` event (``all_lines`` / ``tail``
+join them)."""
 
 from __future__ import annotations
 
@@ -20,6 +23,7 @@ LOG_TAIL_LINES = 30
 LOG_TAIL_CHARS = 4000
 DETAIL_MAX = 160
 
+_TIERS = ("strongest", "standard", "light")  # app.tiers.TIERS
 _EDIT = {"Edit", "MultiEdit"}
 _WRITE = {"Write", "NotebookEdit"}
 
@@ -44,7 +48,7 @@ def bash_what(inp: dict) -> str:
     return f"{desc} :: {cmd}" if desc else cmd
 
 
-def _tool_use(p: dict) -> tuple[str, str] | None:
+def _tool_use(p: dict, tiers: dict | None = None) -> tuple[str, str] | None:
     name = str(p.get("name") or "")
     inp = p.get("input") if isinstance(p.get("input"), dict) else {}
     if name == "Bash":
@@ -56,9 +60,12 @@ def _tool_use(p: dict) -> tuple[str, str] | None:
     if name.startswith("mcp__"):
         return "MCP", name
     if name in ("Agent", "Task"):
-        kind = inp.get("subagent_type") or "helper"
+        kind = str(inp.get("subagent_type") or "helper")
         desc = inp.get("description") or ""
-        return "AGENT+", f"{kind}: {desc}" if desc else str(kind)
+        tier = p.get("tier") if p.get("tier") in _TIERS else (tiers or {}).get(str(p.get("id")))
+        if tier in _TIERS:
+            kind = f"{kind} [{tier}]"
+        return "AGENT+", f"{kind}: {desc}" if desc else kind
     return None
 
 
@@ -83,13 +90,13 @@ def _band(p: dict) -> tuple[str, str]:
     return "BAND", f"{band} ${value:.2f}"
 
 
-def _kind(ev: dict) -> tuple[str, str] | None:
+def _kind(ev: dict, tiers: dict | None = None) -> tuple[str, str] | None:
     etype = ev.get("type")
     p = ev.get("payload") if isinstance(ev.get("payload"), dict) else {}
     if etype == "text_output":
         return "SAY", p.get("text") or ""
     if etype == "tool_use":
-        return _tool_use(p)
+        return _tool_use(p, tiers)
     if etype == "tool_result":
         content = p.get("content")
         content = content if isinstance(content, str) else str(content or "")
@@ -123,10 +130,11 @@ def _kind(ev: dict) -> tuple[str, str] | None:
     return None
 
 
-def line(ev: dict) -> str | None:
+def line(ev: dict, tiers: dict | None = None) -> str | None:
+    """``tiers``: helper call id -> tier learnt from a later ``subagent_start`` event (``helper_tiers``)."""
     if not isinstance(ev, dict):
         return None
-    k = _kind(ev)
+    k = _kind(ev, tiers)
     if k is None:
         return None
     kind, detail = k
@@ -137,8 +145,20 @@ def line(ev: dict) -> str | None:
     return f"{out} {detail}" if detail else out
 
 
+def helper_tiers(events) -> dict:
+    """helper call id -> tier, from the ``subagent_start`` events (the helper's first message's model)."""
+    out = {}
+    for e in events or []:
+        p = e.get("payload") if isinstance(e, dict) and isinstance(e.get("payload"), dict) else None
+        if p and e.get("type") == "subagent_start" and p.get("tier") in _TIERS and p.get("tool_use_id"):
+            out.setdefault(str(p["tool_use_id"]), p["tier"])
+    return out
+
+
 def all_lines(events) -> list[str]:
-    return [ln for ln in (line(e) for e in events or []) if ln]
+    events = list(events or [])
+    tiers = helper_tiers(events)
+    return [ln for ln in (line(e, tiers) for e in events) if ln]
 
 
 def tail(events, lines: int = LOG_TAIL_LINES, chars: int = LOG_TAIL_CHARS) -> str:

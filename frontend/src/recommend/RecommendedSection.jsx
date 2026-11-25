@@ -43,7 +43,10 @@ function Item({ it, project, isAdmin, reload }) {
   return (
     <div className="co-surface co-rec-item" data-testid={`rec-item-${it.key}`}>
       <div className="co-rec-head">
-        <span className="co-rec-name">{it.name}</span>
+        <span className="co-rec-name">
+          {it.name}
+          {it.mark && <Tag color="orange" style={{ marginLeft: 8 }} data-testid="rec-mark">{it.mark}</Tag>}
+        </span>
         <span>{action}</span>
       </div>
       <div className="co-rec-why">{it.why}</div>

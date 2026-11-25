@@ -1046,3 +1046,21 @@ def test_empty_caution_stays_a_note():
 
     text, cs = handoff.split_cautions("Caution: | measured: x\nplain note")
     assert cs == [] and text == "Caution: | measured: x\nplain note"
+
+
+def test_handoff_texts_drop_url_queries(tmp_path, monkeypatch):
+    """Phase 7e (F90b): handoff texts keep a link's scheme, host and path, never its query or fragment."""
+    from app.guard import runtime as guard_runtime
+    from app.resume import handoff
+
+    steps = [_step("user", "fetch https://h.example/a?key=zz1&b=2 please",
+                   result_text="done, see https://h.example/r?sig=abc#top")]
+    evs = [use("Bash", {"command": "curl 'https://h.example/dl?token=t0p'"})]
+    content = handoff.build(_input(steps=steps, step_events=evs))
+    text = json.dumps(content)
+    assert "https://h.example/a" in content["task"] and "key=zz1" not in text
+    assert content["last_reply"].endswith("https://h.example/r") and "sig=" not in text
+    assert "token=t0p" not in text
+    monkeypatch.setattr(guard_runtime, "task_dir", lambda tid: tmp_path)
+    assert handoff.write_file("T", "go to https://h.example/x?q=1 now", [])
+    assert (tmp_path / handoff.HANDOFF_FILE).read_text() == "go to https://h.example/x now"

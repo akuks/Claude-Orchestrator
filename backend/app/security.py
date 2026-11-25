@@ -9,7 +9,9 @@ category) so the same issue is tracked across scans — new / recurring / fixed.
 import asyncio
 import hashlib
 import json
+import os
 import re
+import shutil
 from datetime import datetime, timezone
 
 from sqlalchemy import select
@@ -18,6 +20,7 @@ from .agent_env import agent_env_or_none
 from .config import settings
 from .database import SessionLocal
 from .models import Finding, Project, Task
+from .security_config import claude_config_findings
 
 _SEV = {"critical", "high", "medium", "low", "info"}
 
@@ -90,8 +93,47 @@ def is_security_task(task: Task) -> bool:
     return bool(task.tags) and "vapt" in [str(t).lower() for t in task.tags]
 
 
-def build_security_prompt(branch: str, base: str = "main", scope: str = "changed") -> str:
-    """VAPT/STQC security-review prompt (read-only) — mirrors the dashboard form."""
+SCANNERS = ("gitleaks", "osv-scanner", "trivy", "semgrep", "bandit", "pip-audit")
+NOT_SCANNED = "Run the scanners listed. If none could run, say 'Not scanned' — never call the code clean."
+
+
+def available_scanners(project_dir: str | None = None) -> list[str]:
+    """Scanners on PATH, plus ``npm audit`` when the project has a package-lock.json. Only looks; never runs one."""
+    found = [n for n in SCANNERS if shutil.which(n)]
+    if project_dir and shutil.which("npm") and _has_regular_file(project_dir, "package-lock.json"):
+        found.append("npm audit")
+    return found
+
+
+def _has_regular_file(folder: str, name: str) -> bool:
+    try:
+        d = os.open(folder, os.O_RDONLY | os.O_DIRECTORY)
+    except OSError:
+        return False
+    try:
+        import stat
+
+        fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=d)
+        try:
+            return stat.S_ISREG(os.fstat(fd).st_mode)
+        finally:
+            os.close(fd)
+    except OSError:
+        return False
+    finally:
+        os.close(d)
+
+
+def build_security_prompt(branch: str, base: str = "main", scope: str = "changed",
+                          project_dir: str | None = None) -> str:
+    """VAPT/STQC security-review prompt (read-only) — mirrors the dashboard form. With a ``project_dir`` it also
+    lists the scanners found and the project's unsafe Claude settings."""
+    scanners = available_scanners(project_dir)
+    config = claude_config_findings(project_dir)
+    extra = f"Scanners found on this machine: {', '.join(scanners) if scanners else 'none'}. {NOT_SCANNED}\n\n"
+    if config:
+        extra += ("Unsafe Claude settings found in this project (include them in the report):\n"
+                  + "\n".join(f"- {f['title']} ({f['file']}): {f['description']}" for f in config) + "\n\n")
     if scope == "full":
         gather = (
             "1. git fetch --all --quiet\n"
@@ -116,9 +158,10 @@ def build_security_prompt(branch: str, base: str = "main", scope: str = "changed
         "XSS/path), broken auth & access control (IDOR), crypto failures, hardcoded "
         "secrets, sensitive-data exposure, SSRF/XXE/deserialization, security "
         "misconfiguration, input-validation gaps, and vulnerable dependencies.\n\n"
+        + extra +
         "Produce a report:\n## Summary\n- Overall risk rating and counts by severity.\n"
         "## Findings\nFor each: Severity | OWASP/CWE | file:line | Description | Impact | "
-        "Remediation.\nIf none, say so and list what you inspected. Report only."
+        "Remediation.\nIf reading the code finds none, say so and list what you inspected. Report only."
     )
 
 
@@ -149,17 +192,22 @@ async def extract_findings(task_id: str, user_id: str | None) -> None:
         report = task.result_text
         full_scan = "(full)" in (task.title or "")
         project = await s.get(Project, project_id)
+        project_dir = project.directory if project else None
         env = await agent_env_or_none(
             s, user_id, project_env=project.env if project else None,
             purpose="findings extraction",
         )
-    if env is None:
+    # The unsafe-settings scan is plain file reading: it counts even when Claude cannot be called.
+    config_items = await asyncio.to_thread(claude_config_findings, project_dir)
+    items = []
+    if env is not None:
+        data = await _extract_json(
+            _EXTRACT_PROMPT + report[:12000], settings.memory_model, env
+        )
+        items = data.get("findings", []) if isinstance(data, dict) else []
+    elif not config_items:
         return
-
-    data = await _extract_json(
-        _EXTRACT_PROMPT + report[:12000], settings.memory_model, env
-    )
-    items = data.get("findings", []) if isinstance(data, dict) else []
+    items = [*items, *config_items]
 
     now = _now()
     seen_fps: set[str] = set()
@@ -211,7 +259,7 @@ async def extract_findings(task_id: str, user_id: str | None) -> None:
                 )
 
         # Auto-resolve: on a FULL scan, open findings not seen this run are fixed.
-        if full_scan:
+        if full_scan and env is not None:  # no Claude answer this time: nothing was looked at, so nothing is "fixed"
             open_rows = (
                 await s.execute(
                     select(Finding).where(

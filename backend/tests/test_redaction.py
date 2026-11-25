@@ -148,10 +148,16 @@ def test_url_userinfo_masked():
             "DATABASE=postgres://***:***@db.local:5432/x",
         "remote https://x-access-token:abc123def@github.com/o/r.git ok":
             "remote https://***:***@github.com/o/r.git ok",
-        "redis://:onlypass@cache:6379": "redis://:onlypass@cache:6379",  # no user: kept
+        # final review I2: an empty user and raw @ in the password are masked too
+        "redis://:onlypass@cache:6379": "redis://***:***@cache:6379",
+        "REDIS_URL=redis://:R3disPassw0rd@redis:6379/0": "REDIS_URL=redis://***:***@redis:6379/0",
+        "git clone https://deploy:Pa@55@w0rd@git.example.com/r.git":
+            "git clone https://***:***@git.example.com/r.git",
+        "a https://u:p@h/x?e=a@b.com b": "a https://***:***@h/x?e=a@b.com b",
     }
     for raw, want in cases.items():
         assert redaction.redact(raw, []) == want, raw
+        assert co_hook.redact(raw, None) == want, raw
 
 
 def test_finish_redacts_and_tolerates_non_str_result(client):
@@ -444,3 +450,182 @@ def test_redaction_stays_linear_on_long_input():
     with time_limit(3.0):
         redaction.redact(blob, [])
         co_hook.redact(blob, None)
+
+
+# ---- phase 7e (F90b): strip_query, redact_head, the workspace's .env values ----------------
+
+QUERY_CASES = [
+    ("see https://h.example/a/b?token=abc&x=1#frag now", "see https://h.example/a/b now"),
+    ("https://h.example/p#only-frag", "https://h.example/p"),
+    ("(https://h.example/x?a=1).", "(https://h.example/x)."),
+    ("git clone ssh://git@h.example/r.git?ref=main", "git clone ssh://git@h.example/r.git"),
+    ('"http://127.0.0.1:8000/api?q=1"', '"http://127.0.0.1:8000/api"'),
+    ("no url here? really#not", "no url here? really#not"),
+    ("https://h.example/plain", "https://h.example/plain"),
+    ("two https://a.example/?a=1 and https://b.example/c?d=2", "two https://a.example/ and https://b.example/c"),
+    ("", ""),
+    # review M1: glued to a word, many letters before the scheme, JSON-escaped
+    ("foo_https://h/x?token=a", "foo_https://h/x"),
+    ("2https://h/x?token=a", "2https://h/x"),
+    ("a" * 40 + "https://h/x?token=a", "a" * 40 + "https://h/x"),
+    (r'{"u":"https:\/\/h\/x?token=abc"}', r'{"u":"https:\/\/h\/x"}'),
+    # review C1: a ? or # inside user:password@ is not a query
+    ("https://u:p?w#d@h.example/x?t=1", "https://u:p?w#d@h.example/x"),
+    ("https://h.example?x=1", "https://h.example"),
+]
+
+
+PASSWORDS = ["Pa55w0rd#Zq81x", "Pa55?w0rd", "pa#ss?wd#9"]
+
+
+@pytest.mark.parametrize("pw", PASSWORDS)
+@pytest.mark.parametrize("known", [True, False])
+def test_url_password_with_query_chars_never_leaks(pw, known, monkeypatch):
+    """Review C1: redact first, then strip - no part of a #/? password survives, known secret or not."""
+    from app.resume import handoff
+    from app.worker import WorkerManager, _short
+
+    text = f"git clone https://deploy:{pw}@git.example.com/x?t=1 done"
+    secrets = [pw] if known else []
+    parts = [p for p in re.split(r"[#?]", pw) if p]
+    outs = [_short(text, secrets), redaction.strip_query(redaction.redact_head(text, secrets)),
+            WorkerManager.guard_payload({"summary": text}, secrets)["summary"],
+            handoff.build(_handoff_input(text, secrets))["task"]]
+    for k in list(os.environ):
+        if co_hook._SECRET_NAME.search(k):
+            monkeypatch.delenv(k)
+    if known:
+        monkeypatch.setenv("GIT_PASSWORD", pw)
+    outs.append(co_hook.strip_query(co_hook.redact(text)))
+    for out in outs:
+        assert not any(p in out for p in parts), out
+        assert "git.example.com/x" in out and "t=1" not in out
+
+
+def _handoff_input(prompt, secrets):
+    from datetime import datetime, timezone
+
+    from app.resume import handoff
+
+    now = datetime(2026, 11, 25, tzinfo=timezone.utc)
+    step = {"id": "s1", "title": "t", "prompt": prompt, "origin": "user", "status": "completed", "created_at": now,
+            "started_at": now, "completed_at": now, "result_text": None, "notes": None, "notes_updated_at": None}
+    return handoff.HandoffInput(
+        steps=[step], step_events=[], facts=None, outside={"commits": [], "rewritten": False}, sources=[], waiting=[],
+        children={}, others=[], trust="own", workspace="/w", project_dir="/w", policy={"project_dir": "/w"},
+        now=now, reason="run ended", secrets=secrets)
+
+
+@pytest.mark.parametrize("text,want", QUERY_CASES)
+def test_strip_query_server_and_hook_agree(text, want):
+    assert redaction.strip_query(text) == want
+    assert co_hook.strip_query(text) == want
+
+
+def test_redact_head_server_and_hook_agree(monkeypatch):
+    """Review Focus 2: the hook's copies behave exactly like the server's (no env secrets on either side)."""
+    for k in list(os.environ):
+        if co_hook._SECRET_NAME.search(k):
+            monkeypatch.delenv(k)
+    texts = [f"token: {'q' * 30} " + "x" * 5000, "ghp_" + "a" * 36 + " tail", "short", "a" * 4000, "a" * 4001,
+             "https://u:pw@h.example/a?k=v"]
+    for t in texts:
+        for n in (10, 100, 4000):
+            assert redaction.redact_head(t, [], n) == co_hook.redact_head(t, n)
+        assert redaction.redact_head(t, []) == co_hook.redact_head(t)
+        assert len(redaction.redact_head(t, [])) <= 4000
+    # redact first, then cut: no secret prefix survives the cut
+    sec = "S" * 20
+    assert redaction.redact_head("ab" + sec, [sec], 10) == "ab***"
+    assert co_hook._STRIP_URL.pattern == redaction.STRIP_URL.pattern
+    assert co_hook._URL_TAIL.pattern == redaction._URL_TAIL.pattern
+
+
+def test_strip_query_stays_linear():
+    blob = "x://" * 50_000 + "?" + "a" * 50_000
+    with time_limit(3.0):
+        redaction.strip_query(blob)
+        co_hook.strip_query(blob)
+
+
+def test_dotenv_values(tmp_path):
+    (tmp_path / ".env").write_text(
+        "# a comment\nAPI_KEY=abc123xyz789\nexport DB_PASSWORD='hunter2hunter2'\nDEBUG=true\nPORT=8000\n"
+        "PIN=123456\nSHORT_TOKEN=abc\nAPP_SECRET=\"dq-value-1\"  # trailing\nURL=postgres://u:pw99@h/db # note\n"
+        "EMPTY=\nNAME=frontend-app-2\nPLAIN=ghp_" + "g" * 36 + "\n")
+    (tmp_path / ".env.local").write_text("LOCAL_TOKEN=local-token-9\n")
+    for skipped in (".envrc", ".env.example", ".env.sample", ".env.template", ".env.dist"):
+        (tmp_path / skipped).write_text("RC_SECRET=rc-secret-77\n")
+    (tmp_path / "other.env").write_text("NOT_TOP_TOKEN=not-read-001\n")
+    sub = tmp_path / "sub"
+    sub.mkdir()
+    (sub / ".env").write_text("DEEP_TOKEN=deep-value-002\n")
+    outside = tmp_path.parent / f"outside-{uuid.uuid4().hex[:6]}.env"
+    outside.write_text("LINKED_TOKEN=linked-value-003\n")
+    (tmp_path / ".env.link").symlink_to(outside)
+    (tmp_path / ".env.big").write_text("BIG_TOKEN=big-value-0004\n" + "#" * (64 * 1024))
+    (tmp_path / ".env.dir").mkdir()
+    vals = redaction.dotenv_values(tmp_path)
+    assert set(vals) == {"abc123xyz789", "hunter2hunter2", "dq-value-1", "postgres://u:pw99@h/db", "local-token-9",
+                         "ghp_" + "g" * 36}
+    assert vals == sorted(vals, key=len, reverse=True)
+    assert redaction.dotenv_values(tmp_path / "missing") == []
+    assert redaction.dotenv_values(None) == []
+
+
+def test_dotenv_ordinary_values_are_not_secrets(tmp_path):
+    """Review I1: words people and agents need verbatim never become run secrets."""
+    (tmp_path / ".env").write_text(
+        "DB_USER=postgres\nDB_PASSWORD=password\nDB_HOST=postgres\nAPP_DIR=frontend\nHOST=db.internal.example\n"
+        "BIND=0.0.0.0\nAPI_URL=http://localhost:8000\nSECRET_PATH=/opt/Projects_UI/canonizer\nAPI_TOKEN=changeme\n"
+        "SECRET_KEY=your-secret-here\nAPI_SECRET=change_me_please_now\nAUTH_PORT=127.0.0.1:5432\nTOKEN_TTL=3600000\nDEBUG_TOKEN=false\n")
+    assert redaction.dotenv_values(tmp_path) == []
+
+
+def test_dotenv_final_review_cases(tmp_path):
+    """Final review I2/M6: an empty-user Redis URL, a long plain word under a secret key, a DSN with a key in its
+    userinfo count; a short plain word and a DSN-less URL do not."""
+    (tmp_path / ".env").write_text(
+        "REDIS_URL=redis://:R3disPassw0rd@redis:6379\nADMIN_PASSWORD=adminadminadmin\n"
+        "SENTRY_DSN=https://abc123key@o1.ingest.sentry.io/1\nDB_PASSWORD=adminadmin\n"
+        "API_URL=https://api.example.com/v1\nAPP_NAME=averylongappname\n")
+    assert set(redaction.dotenv_values(tmp_path)) == {
+        "redis://:R3disPassw0rd@redis:6379", "adminadminadmin", "https://abc123key@o1.ingest.sentry.io/1"}
+
+
+def test_dotenv_cap_ranks_real_files_and_secret_keys_first(tmp_path):
+    """Final review M7: junk in a committed .env.0 cannot push .env / .env.local secrets out of the cap."""
+    (tmp_path / ".env.0").write_text("".join(f"X{i}=ghp_{i:036d}\n" for i in range(300)))
+    (tmp_path / ".env.local").write_text("LOCAL_TOKEN=local-token-9\n")
+    (tmp_path / ".env").write_text("NOTE=ghp_" + "n" * 36 + "\nAPI_KEY=abc123xyz789\n")
+    vals = redaction.dotenv_values(tmp_path)
+    assert len(vals) == redaction.DOTENV_MAX_VALUES
+    assert "local-token-9" in vals and "abc123xyz789" in vals and "ghp_" + "n" * 36 in vals
+
+
+def test_dotenv_caps(tmp_path):
+    """Review I2: at most 200 values and 16 KB in all."""
+    (tmp_path / ".env").write_text("".join(f"K{i}_TOKEN=val{i:05d}x\n" for i in range(1000)))
+    assert len(redaction.dotenv_values(tmp_path)) == redaction.DOTENV_MAX_VALUES
+    (tmp_path / ".env").write_text("".join(f"K{i}_TOKEN={i:03d}{'z' * 1000}\n" for i in range(40)))
+    vals = redaction.dotenv_values(tmp_path)
+    assert sum(map(len, vals)) <= redaction.DOTENV_MAX_CHARS and len(vals) == 16
+
+
+def test_run_masks_workspace_dotenv_values(client, tmp_path):
+    """A value from the project folder's .env never reaches a stored tool result."""
+    d = tmp_path / f"dotenv-{_uid()}"
+    d.mkdir()
+    (d / ".env").write_text("SERVICE_PASSWORD=dotenv-secret-7e7e\n")
+    r = client.post("/projects", json={"name": f"rd-{_uid()}", "directory": str(d)})
+    assert r.status_code == 201, r.text
+    r = client.post("/tasks", json={"prompt": "go [stream-fixture:dotenv_echo]", "project_id": r.json()["id"]})
+    assert r.status_code == 201, r.text
+    done = wait_task(client, r.json()["id"])
+    assert done["status"] == "completed", done.get("error")
+    evs = _events(done["id"])
+    res = [e.payload for e in evs if e.type == "tool_result"][0]
+    assert "dotenv-secret-7e7e" not in json.dumps([e.payload for e in evs])
+    assert "***" in res["content"]
+    # stored tool results lose URL queries
+    assert "https://h.example/download" in res["content"] and "sig=" not in res["content"]

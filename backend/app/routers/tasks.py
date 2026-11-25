@@ -30,6 +30,7 @@ from ..guard import runtime as guard_runtime
 from .. import reports
 from ..launch import store as launch_store
 from ..models import ActionGrant, LaunchItem, Artifact, DecisionProposal, Project, RunAsk, Task, TaskEvent, TaskHandoff, TaskQuestion, TaskUsage
+from ..resume import copydoc
 from ..resume import handoff as resume_handoff
 from ..resume.texts import CONTINUE_PROMPT
 from ..task_service import brief_422, build_task
@@ -294,7 +295,7 @@ async def get_thread(task_id: str, request: Request):
 
 @router.get("/{task_id}/usage")
 async def get_usage(task_id: str, request: Request):
-    """Token care: this step's figures, the thread's totals so far and up to three tips."""
+    """Token care: this step's figures, the thread's totals so far and up to four tips."""
     async with SessionLocal() as s:
         p = request.state.principal
         task = await require_task(s, p, task_id)
@@ -868,6 +869,32 @@ async def refresh_handoff(task_id: str, request: Request):
     if row is None:
         raise HTTPException(404, "Task not found")
     return _handoff_out(row)
+
+
+@router.post("/{task_id}/outside-docs/copy")
+async def copy_outside_doc(task_id: str, payload: dict, request: Request):
+    """Copy a temp-folder document the thread recorded ("may vanish") into the project. Whoever may
+    manage the task. Never overwrites (409)."""
+    p = request.state.principal
+    async with SessionLocal() as s:
+        task = await require_task(s, p, task_id)
+        await _require_manage(s, p, task, need_contributor=True)
+        row = await _thread_handoff(s, task)
+        pid = await effective_project_id(s, task)
+        proj = await s.get(Project, pid) if pid else None
+    recorded = (row.content or {}).get("outside_docs") if row is not None else None
+    workspace = task.workspace_dir or str(settings.workspaces_dir / task.id)
+    project_dir = str(Path((proj.directory if proj is not None else None) or workspace).resolve())
+    policy = {"project_dir": project_dir, "home": guard_runtime.real_home(), "tmpdir": os.environ.get("TMPDIR")}
+    base = workspace if os.path.isdir(workspace) else project_dir
+    path, dest = payload.get("path"), payload.get("dest")
+    try:
+        done = await asyncio.to_thread(
+            copydoc.copy_doc, path, dest, recorded, policy, base, [workspace, project_dir])
+    except copydoc.CopyError as e:
+        raise HTTPException(e.status, e.text) from None
+    await request.app.state.worker.emit_offline(task_id, "doc_copied", {"from": path, "to": done})
+    return {"ok": True, "dest": done}
 
 
 @router.post("/{task_id}/handoff/close")

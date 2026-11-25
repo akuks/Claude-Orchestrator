@@ -62,7 +62,12 @@ async def _handshake(proc) -> dict:
             tools.append(
                 {"name": t.get("name"), "description": (t.get("description") or "")[:200]}
             )
-    return {"ok": True, "tools": tools, "error": None}
+    info = (init.get("result") or {}).get("serverInfo") if isinstance(init.get("result"), dict) else None
+    info = info if isinstance(info, dict) else {}
+    ver, name = info.get("version"), info.get("name")
+    return {"ok": True, "tools": tools, "error": None,
+            "server_name": name[:120] if isinstance(name, str) and name.strip() else None,
+            "server_version": ver.strip()[:64] if isinstance(ver, str) and ver.strip() else None}
 
 
 async def probe_stdio(

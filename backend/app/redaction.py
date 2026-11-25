@@ -64,8 +64,10 @@ TOKEN_SHAPES = re.compile(
         )
     )
 )
-# user:password in URL-style values (postgres://u:p@host, https://x:tok@github.com).
-URL_USERINFO = re.compile(r"://[^/\s:@]+:[^/\s@]+@")
+# user:password in URL-style values (postgres://u:p@host, https://x:tok@github.com), also an empty user
+# (redis://:pw@host) and a raw @ in the password (up to the last @ before the host). co_hook.py keeps a copy.
+URL_USERINFO = re.compile(r"://[^/\s:@]*:[^\s/]*@")
+_URL_HAS_USERINFO = re.compile(r"://[^/\s@]+@")  # any userinfo: user:password@ or a DSN key@
 # Labelled secrets: the label (group 1) stays, the value becomes MASK.
 # Forge's LABELLED set, widened to keys that CONTAIN a secret word
 # (DB_PASSWORD=, aws_secret_access_key:, accessToken:) but not where the word
@@ -125,6 +127,138 @@ def redact(text: str, secrets: list[str]) -> str:
     for pattern in LABELLED:
         text = pattern.sub(lambda m: m.group(1) + MASK, text)
     return text
+
+
+# A URL token (scheme:// or JSON-escaped scheme:\/\/, up to whitespace, a quote or a bracket); strip_query cuts it
+# at its first ? or # after the authority. Run it AFTER redact (a ? or # in a password must not hide it from
+# URL_USERINFO). No \b anchor; the scheme is bounded, the token always matches whole: the scan stays linear.
+# co_hook.py keeps a copy.
+STRIP_URL = re.compile(r"""([A-Za-z][A-Za-z0-9+.\-]{0,30}:\\?/\\?/)([^\s'"<>`]*)""")
+_URL_TAIL = re.compile(r"[).,;:!\]}]+$")
+
+
+def _strip_one(m) -> str:
+    """One URL: cut at its first ? or # AFTER the authority (a ? or # inside user:password@ is not a query)."""
+    head, rest = m.group(1), m.group(2)
+    slash = rest.find("/")
+    start = rest.rfind("@", 0, len(rest) if slash < 0 else slash) + 1
+    cut = min((i for i in (rest.find("?", start), rest.find("#", start)) if i >= 0), default=-1)
+    if cut < 0:
+        return m.group(0)
+    tail = _URL_TAIL.search(rest[cut:])  # sentence punctuation after the link stays
+    return head + rest[:cut] + (tail.group(0) if tail else "")
+
+
+def strip_query(text) -> str:
+    """URLs keep scheme, host and path; their query and fragment are dropped (phase 7e, F90b)."""
+    return STRIP_URL.sub(_strip_one, "" if text is None else str(text))
+
+
+def redact_head(text, secrets: list[str], n: int = 4000) -> str:
+    """Redact, then cut to ``n`` characters (so no secret prefix survives the cut)."""
+    return redact(str(text or ""), secrets)[:n]
+
+
+DOTENV_MAX_BYTES = 64 * 1024
+DOTENV_MAX_FILES = 20
+DOTENV_VALUE_MIN = 6
+DOTENV_MAX_VALUES = 200  # a hostile repo cannot make every redact() slow
+DOTENV_MAX_CHARS = 16 * 1024
+# templates hold placeholders, .envrc holds shell code: never read
+DOTENV_SKIP_SUFFIXES = (".example", ".sample", ".template", ".dist")
+_DOTENV_LINE = re.compile(r"^\s*(?:export\s+)?([A-Za-z_][A-Za-z0-9_.\-]*)\s*=\s*(.*)$")
+_PLAIN_WORD = re.compile(r"^[A-Za-z][A-Za-z_\-]*$")
+_PLACEHOLDER = re.compile(r"^(?:your|change|replace|example|placeholder|insert|enter|put)[_\-]?", re.IGNORECASE)
+DOTENV_LONG_WORD = 12  # under a secret-named key a plain word this long counts (ADMIN_PASSWORD=adminadminadmin)
+DOTENV_FIRST = (".env", ".env.local")  # read first: the real ones
+_HOST_OR_IP = re.compile(r"^[A-Za-z0-9\-]+(?:\.[A-Za-z0-9\-]+)+(?::\d{1,5})?$")
+_NUMBER = re.compile(r"^[+-]?[\d.,_]+$")
+_ANY_URL = re.compile(r"^[A-Za-z][A-Za-z0-9+.\-]{0,30}://")
+_NOT_SECRET = frozenset({"true", "false", "yes", "no", "on", "off", "null", "none"})
+
+
+def _dotenv_value(raw: str) -> str:
+    raw = raw.strip()
+    if raw[:1] in ("'", '"'):
+        end = raw.find(raw[0], 1)
+        return raw[1:end] if end > 0 else raw[1:]
+    return re.split(r"\s+#", raw, maxsplit=1)[0].strip()
+
+
+def _not_a_secret(v: str) -> bool:
+    """Paths, plain words shorter than 12 characters or placeholders (your-secret-here), hostnames, IPs, URLs without userinfo, booleans and
+    numbers."""
+    return (v.lower() in _NOT_SECRET or v.startswith(("/", "./", "../", "~"))
+            or (bool(_PLAIN_WORD.match(v)) and (len(v) < DOTENV_LONG_WORD or bool(_PLACEHOLDER.match(v))))
+            or bool(_HOST_OR_IP.match(v)) or bool(_NUMBER.match(v))
+            or (bool(_ANY_URL.match(v)) and not _URL_HAS_USERINFO.search(v)))
+
+
+def _dotenv_secret(key: str, v: str) -> bool:
+    """A .env value is a secret when the VALUE looks like a token (``TOKEN_SHAPES``, a URL with user:password@), or
+    its KEY looks secret (``is_sensitive_name``) and the value is not an obvious non-secret."""
+    if len(v) < DOTENV_VALUE_MIN:
+        return False
+    if TOKEN_SHAPES.search(v) or URL_USERINFO.search(v):
+        return True
+    return is_sensitive_name(key) and not _not_a_secret(v)
+
+
+def dotenv_values(folder) -> list[str]:
+    """Secret values of the folder's top-level ``.env*`` files (not templates or ``.envrc``), longest first;
+    at most DOTENV_MAX_VALUES values and DOTENV_MAX_CHARS characters in all (the rest is dropped and logged).
+    Each file is opened with no links followed, must be a regular file of at most 64 KB; any problem skips
+    that file. Phase 7e (F90b): they join the run's secrets."""
+    import logging
+    import os
+    import stat
+
+    if not folder:
+        return []
+    found: dict[str, bool] = {}  # value -> its key is secret-named (in reading order)
+    try:
+        entries = sorted((e.name for e in os.scandir(folder) if e.name.startswith(".env")
+                          and e.name != ".envrc" and not e.name.lower().endswith(DOTENV_SKIP_SUFFIXES)),
+                         key=lambda n: (DOTENV_FIRST.index(n) if n in DOTENV_FIRST else len(DOTENV_FIRST), n))
+    except OSError:
+        return []
+    for name in entries[:DOTENV_MAX_FILES]:
+        try:
+            fd = os.open(os.path.join(folder, name), os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+                         | getattr(os, "O_NONBLOCK", 0))
+        except OSError:
+            continue
+        try:
+            st = os.fstat(fd)
+            if not stat.S_ISREG(st.st_mode) or st.st_size > DOTENV_MAX_BYTES:
+                continue
+            data = os.read(fd, DOTENV_MAX_BYTES + 1)
+        except OSError:
+            continue
+        finally:
+            os.close(fd)
+        if len(data) > DOTENV_MAX_BYTES:
+            continue
+        for line in data.decode("utf-8", errors="replace").splitlines():
+            m = _DOTENV_LINE.match(line)
+            if not m:
+                continue
+            v = _dotenv_value(m.group(2))
+            if _dotenv_secret(m.group(1), v):
+                found[v] = found.get(v, False) or is_sensitive_name(m.group(1))
+    # the cap keeps secret-named keys' values first, then the rest (each in reading order: .env, .env.local, ...)
+    vals: list[str] = []
+    total = 0
+    capped = False
+    for v in [v for v, named in found.items() if named] + [v for v, named in found.items() if not named]:
+        if len(vals) >= DOTENV_MAX_VALUES or total + len(v) > DOTENV_MAX_CHARS:
+            capped = True
+            continue
+        vals.append(v)
+        total += len(v)
+    if capped:
+        logging.getLogger(__name__).warning("dotenv values: cap reached in %s (%d values kept)", folder, len(vals))
+    return sorted(vals, key=len, reverse=True)
 
 
 ENV_VALUE_MIN = 6  # project env values at least this long are scrubbed from gate output

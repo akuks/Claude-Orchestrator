@@ -6,7 +6,7 @@ vi.mock('../api', () => ({ api: { systemHealth: vi.fn(), retention: vi.fn(), sav
 
 import { api } from '../api'
 import SystemHealthView from './SystemHealthView'
-import { detailRows, overallLine, sortChecks } from './health'
+import { detailRows, overallLine, shownStatus, sortChecks } from './health'
 
 const mk = (id, status, extra = {}) => ({ id, title: `Title ${id}`, status, summary: `Summary ${id}`, ...extra })
 const DATA = {
@@ -53,6 +53,27 @@ describe('health helpers', () => {
   })
   it('sorts problems, then attention, then ok, keeping order inside a group', () => {
     expect(sortChecks(DATA.checks).map((c) => c.id)).toEqual(['c', 'e', 'b', 'a', 'd'])
+  })
+  it('writes tool versions and code-map errors one per line', () => {
+    const rows = detailRows({
+      servers: [{ name: 'fs', status: 'healthy', version: '1.2.0', pinned: '1.3.0', version_differs: true }],
+      projects: [{ project: 'Shop', status: 'failed', error: 'engine crashed', failures: 2 }],
+      engine_warning: null,
+    })
+    expect(rows).toEqual([
+      ['servers', 'fs: healthy, version 1.2.0, expected 1.3.0 (differs)'],
+      ['projects', 'Shop: failed, 2 failed refreshes, last error: engine crashed'],
+    ])
+  })
+  it('writes the details of the newer checks as sentences', () => {
+    expect(detailRows({ version: 'v22.22.1', major: 22, needed: 20 }, 'node')).toEqual([['Installed', '22.22.1 (needs 20 or newer)']])
+    expect(detailRows({ projects: [], tool_added: true, engines: ['cm'], engine_warning: null }, 'code_map')).toEqual([
+      ['Connected tool added', 'yes'],
+      ['Engines set up', 'cm'],
+    ])
+    expect(detailRows({ available: false }, 'guard_plugin')).toEqual([])
+    expect(shownStatus({ id: 'guard_plugin', status: 'ok', detail: { available: false } })).toBe('info')
+    expect(shownStatus({ id: 'guard_plugin', status: 'ok', detail: { available: true } })).toBe('ok')
   })
   it('turns details into rows', () => {
     expect(detailRows({ free_gb: 12, servers: [{ name: 'x', status: 'healthy' }] })).toEqual([

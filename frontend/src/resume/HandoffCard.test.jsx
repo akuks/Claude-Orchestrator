@@ -4,7 +4,7 @@ import { flush, render } from '../home/testRender'
 import { when } from '../time'
 
 vi.mock('../api', () => ({
-  api: { getHandoff: vi.fn(), refreshHandoff: vi.fn(), closeHandoff: vi.fn() },
+  api: { getHandoff: vi.fn(), refreshHandoff: vi.fn(), closeHandoff: vi.fn(), copyOutsideDoc: vi.fn() },
 }))
 import { api } from '../api'
 import HandoffCard from './HandoffCard'
@@ -65,6 +65,8 @@ describe('HandoffCard', () => {
     expect(q(c, 'handoff-waiting').textContent).toContain('approval for rm')
     expect(q(c, 'handoff-files').textContent).toContain('src/a.js')
     expect(q(c, 'handoff-temp').textContent).toContain('may vanish')
+    expect(q(c, 'handoff-temp-name').textContent).toBe('plan.md')
+    expect(q(c, 'handoff-temp-path').textContent).toContain('/tmp/plan.md')
     expect(q(c, 'handoff-commits').textContent).toContain('abc123 fix x')
     expect(q(c, 'handoff-notes-at').textContent).toContain(when(H.content.notes.at).format('MMM D, HH:mm'))
     expect(onHandoff).toHaveBeenCalledWith(H)
@@ -163,5 +165,26 @@ describe('HandoffCard', () => {
     const c = await mount()
     expect(q(c, 'handoff-empty')).not.toBeNull()
     expect(q(c, 'handoff-error')).toBeNull()
+  })
+
+  it('copies a temp file into the project, with plain errors and a success line', async () => {
+    const c = await mount()
+    await click(q(c, 'handoff-copy-open'))
+    const input = q(c, 'handoff-copy-dest')
+    expect(input.value).toBe('docs/plan.md')
+    api.copyOutsideDoc.mockRejectedValueOnce(Object.assign(new Error('A file with that name already exists.'), { status: 409 }))
+    await click(q(c, 'handoff-copy-go'))
+    await flush()
+    expect(q(c, 'handoff-copy-error').textContent).toBe('A file with that name already exists.')
+    api.copyOutsideDoc.mockResolvedValueOnce({ ok: true, dest: 'docs/plan.md' })
+    await click(q(c, 'handoff-copy-go'))
+    await flush()
+    expect(api.copyOutsideDoc).toHaveBeenLastCalledWith('t1', '/tmp/plan.md', 'docs/plan.md')
+    expect(q(c, 'handoff-copy-done').textContent).toBe('Copied to docs/plan.md')
+    expect(q(c, 'handoff-copy-open')).toBeNull()
+  })
+  it('offers no copy button to people who cannot edit', async () => {
+    const c = await mount({ canManage: false })
+    expect(q(c, 'handoff-copy-open')).toBeNull()
   })
 })

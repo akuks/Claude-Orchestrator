@@ -5,7 +5,7 @@ import dayjs from 'dayjs'
 import relativeTime from 'dayjs/plugin/relativeTime'
 import { api } from '../api'
 import { when } from '../time'
-import { STATUS_WORD, detailRows, overallLine, overallOf, sortChecks, tidyPreviewLine } from './health'
+import { STATUS_WORD, detailRows, shownStatus, overallLine, overallOf, sortChecks, tidyPreviewLine } from './health'
 import './health.css'
 
 dayjs.extend(relativeTime)
@@ -50,13 +50,13 @@ function RecloneActions({ projects, onDone }) {
 }
 
 export function HealthCard({ check, onChanged }) {
-  const rows = detailRows(check.detail)
+  const rows = detailRows(check.detail, check.id)
   const reclone = check.id === 'repo_roots' && Array.isArray(check.detail?.projects) ? check.detail.projects : []
   const hasMore = rows.length > 0 || !!check.fix
   return (
     <div className="co-surface co-health-card" data-testid={`health-${check.id}`} data-status={check.status}>
       <div className="co-health-head">
-        <Dot status={check.status} />
+        <Dot status={shownStatus(check)} />
         <span>{check.title}</span>
       </div>
       <p className="co-health-summary">{check.summary}</p>

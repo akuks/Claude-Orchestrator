@@ -68,6 +68,10 @@ def hooks_json() -> dict:
     hooks = {
         "PreToolUse": entry("PreToolUse", co_hook.HOOK_TIMEOUT, co_hook.TOOL_MATCHER),
         "PostToolUse": entry("PostToolUse", _OTHER_TIMEOUT, co_hook.TOOL_MATCHER),
+        # phase 7e (F80): a failed call's done line. Known to the CLI versions that also know ConfigChange; an older
+        # CLI that does not know the event name could reject this hooks.json as a whole (all hooks off) - System
+        # health's "Guard plugin" check (`claude plugin validate`) is how to catch that.
+        "PostToolUseFailure": entry("PostToolUseFailure", _OTHER_TIMEOUT, co_hook.TOOL_MATCHER),
     }
     for ev in ("SessionStart", "Stop", "SessionEnd", "SubagentStart", "SubagentStop"):
         hooks[ev] = entry(ev, _OTHER_TIMEOUT)

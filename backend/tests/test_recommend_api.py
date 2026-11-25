@@ -149,3 +149,45 @@ def test_slow_detect_answers_no_ui(client, tmp_path, monkeypatch):
     monkeypatch.setattr(detect_mod, "detect", lambda _d: time.sleep(0.6) or detect_mod.Detected(has_ui=True))
     b = _get(client, p["id"])
     assert b["has_ui"] is False and b["items"] == []
+
+
+def test_old_node_marks_browser_tools(client, tmp_path, monkeypatch):
+    from app.recommend import panel
+
+    p, d = _project(client, tmp_path)
+    (d / "index.html").write_text("<p>")
+
+    async def old():
+        return True
+
+    async def new():
+        return False
+
+    monkeypatch.setattr(panel, "node_too_old", old)
+    by = {i["key"]: i for i in _get(client, p["id"])["items"]}
+    assert by["browser-playwright"]["mark"] == "Needs Node 20" and by["browser-devtools"]["mark"] == "Needs Node 20"
+    assert by["frontend-design"]["mark"] is None
+    monkeypatch.setattr(panel, "node_too_old", new)
+    assert all(i["mark"] is None for i in _get(client, p["id"])["items"])
+
+
+def test_node_answer_is_cached(monkeypatch):
+    import asyncio
+
+    from app.health import checks
+    from app.recommend import panel
+
+    calls = []
+
+    async def fake(argv, timeout=8):
+        calls.append(argv)
+        return 0, "v18.0.0"
+
+    monkeypatch.setattr(checks, "run_argv", fake)
+    monkeypatch.setattr(panel, "_node_cache", None)
+    assert asyncio.run(panel.node_too_old()) is True
+    assert asyncio.run(panel.node_too_old()) is True
+    assert len(calls) == 1
+    monkeypatch.setattr(panel, "_node_cache", (panel.time.monotonic() - panel.NODE_TTL - 1, True))
+    asyncio.run(panel.node_too_old())
+    assert len(calls) == 2

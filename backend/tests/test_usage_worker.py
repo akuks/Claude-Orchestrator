@@ -49,7 +49,8 @@ def test_run_stores_usage_row_and_final_cost(client):
     assert row.bands == []
     b = row.breakdown
     assert b["messages"] == 2  # u1 arrived twice: counted once, with its last usage
-    assert b["main"] == {"messages": 2, "input": 30, "cache_write": 1200, "cache_read": 11000, "output": 47}
+    assert b["main"] == {"messages": 2, "input": 30, "cache_write": 1200, "cache_read": 11000, "output": 47,
+                         "reread_per_step": 5500}
     assert b["models"]["claude-opus-5-5"]["output"] == 47
     assert b["largest_results"][0] == {"tool": "Read", "chars": 3000, "id": "tuU"}  # before _short's cut
     # usage.json, as the mock found it while the run was live

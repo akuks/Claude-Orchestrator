@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import re
+import time
 
 from sqlalchemy import select
 
@@ -30,6 +31,30 @@ ITEMS = (
 _NAMES = {"browser-playwright": "Browser (Playwright)", "browser-devtools": "Browser inspector (DevTools)",
           "ui-shadcn": "Interface parts (shadcn)", "frontend-design": "Frontend design skill"}
 SKILL = "frontend-design"
+
+
+NEEDS_NODE = {"browser-playwright", "browser-devtools"}
+NEEDS_NODE_MARK = "Needs Node 20"
+
+
+NODE_TTL = 300  # seconds: `node --version` is asked at most this often
+_node_cache: tuple[float, bool] | None = None
+
+
+async def node_too_old() -> bool:
+    """True when `node --version` answers and says below 20 (a missing or unreadable Node is the health page's job).
+    The answer is kept for 5 minutes."""
+    global _node_cache
+    from ..health import checks
+
+    now = time.monotonic()
+    if _node_cache is not None and now - _node_cache[0] < NODE_TTL:
+        return _node_cache[1]
+    code, line = await checks.run_argv(["node", "--version"])
+    major = checks.node_major(line) if code == 0 else None
+    old = major is not None and major < checks.NODE_MIN
+    _node_cache = (now, old)
+    return old
 
 
 def ui_skills_text(project, detected: Detected) -> str | None:
@@ -86,6 +111,7 @@ async def build(s, project, detected: Detected) -> dict:
     packs = list((await s.execute(select(SkillPack).where(SkillPack.enabled.is_(True)))).scalars().all())
     presets = {p["key"]: p for p in PRESETS}
     items = []
+    old_node = await node_too_old() if detected.has_ui else False
     for key, kind, when, why, package in ITEMS:
         if not detected.has_ui or (when == "react" and not detected.react):
             continue
@@ -96,7 +122,7 @@ async def build(s, project, detected: Detected) -> dict:
             present = packs_have_skill(packs, project)
             preset = None
         items.append({"key": key, "name": _NAMES[key], "why": why, "kind": kind, "present": present,
-                      "preset": preset})
+                      "preset": preset, "mark": NEEDS_NODE_MARK if old_node and key in NEEDS_NODE else None})
     brand = project.brand_skill if valid_brand(project.brand_skill) else None
     return {"has_ui": detected.has_ui, "react": detected.react, "ui_skills": bool(project.ui_skills),
             "brand_skill": brand, "brand_skill_found": detected.brand_skill_found, "items": items}

@@ -107,7 +107,7 @@ async def github_webhook(
 
         task = await build_task(
             s,
-            prompt=build_security_prompt(branch, base, "changed"),
+            prompt=build_security_prompt(branch, base, "changed", project.directory),
             title=f"Security review: PR #{number} ({branch})",
             project_id=project.id,
             model="opus",

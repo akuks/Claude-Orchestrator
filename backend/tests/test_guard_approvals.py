@@ -721,6 +721,19 @@ def test_guard_payload_redacts_before_cutting():
     assert "SECRE" not in out["summary"] and out["summary"].endswith("***")
 
 
+def test_guard_payload_summary_drops_url_queries_and_short_strips_results():
+    """Phase 7e (F90b): stored guard summaries and tool results lose URL queries; other fields are kept."""
+    from app.worker import WorkerManager, _short
+
+    rec = {"event": "PreToolUse", "summary": "curl https://h.example/p?sig=s3&x=1", "reason": "see https://r.example/?a=1"}
+    out = WorkerManager.guard_payload(rec, [])
+    assert out["summary"] == "curl https://h.example/p" and out["reason"] == "see https://r.example/?a=1"
+    secret = "S" * 30
+    got = _short("x" * 1990 + secret + " https://h.example/z?q=1", [secret])
+    assert secret[:5] not in got and len(got) <= 2000 and got.startswith("x" * 1990 + "***")
+    assert _short("get https://h.example/z?q=1#f", []) == "get https://h.example/z"
+
+
 def test_approved_report_of_a_long_multiline_command_dedupes_with_the_spool(world, task, monkeypatch):
     """Final fix wave 1: the card stores the full command, the hook's spool line
     keeps its short hit summary; the approved decision still shows once."""

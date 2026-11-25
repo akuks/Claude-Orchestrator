@@ -2,7 +2,10 @@
 
 export const STATUS_ORDER = { problem: 0, attention: 1, ok: 2 }
 
-export const STATUS_WORD = { ok: 'Fine', attention: 'Needs attention', problem: 'Problem' }
+export const STATUS_WORD = { ok: 'Fine', attention: 'Needs attention', problem: 'Problem', info: 'Not checked' }
+
+// A check that could not run here, which is not a fault: shown grey.
+export const shownStatus = (c) => (c?.id === 'guard_plugin' && c?.detail?.available === false ? 'info' : c?.status)
 
 // Problems first, then attention, then ok; the server's order within a group.
 export function sortChecks(checks = []) {
@@ -36,9 +39,64 @@ export function detailText(v) {
   return String(v)
 }
 
-export function detailRows(detail) {
+// One line per connected tool or code-map project, in plain words (the rest of the detail stays generic).
+const SERVER_LINE = (x) =>
+  `${x.name}: ${x.status || 'unknown'}${x.version ? `, version ${x.version}` : ''}${
+    x.pinned ? `, expected ${x.pinned}${x.version_differs ? ' (differs)' : ''}` : ''}`
+const PROJECT_LINE = (x) =>
+  `${x.project}: ${x.status}${x.failures ? `, ${x.failures} failed refresh${x.failures === 1 ? '' : 'es'}` : ''}${
+    x.error ? `, last error: ${x.error}` : ''}`
+const isList = (v, key) => Array.isArray(v) && v.length > 0 && v.every((x) => x && typeof x === 'object' && key in x)
+
+const yn = (v) => (v ? 'yes' : 'no')
+const list = (v) => (Array.isArray(v) && v.length ? v.join(', ') : 'none')
+
+// Details written as sentences for the checks that have a plain form; null means "use the generic rows".
+function plainRows(id, d) {
+  if (id === 'node' && d.version) {
+    const needed = d.needed ? ` (needs ${d.needed} or newer)` : ''
+    return [['Installed', `${String(d.version).replace(/^v/, '')}${needed}`]]
+  }
+  if (id === 'code_map') {
+    const rows = []
+    if (isList(d.projects, 'failures')) rows.push(['Projects', d.projects.map(PROJECT_LINE).join('\n')])
+    if ('tool_added' in d) rows.push(['Connected tool added', yn(d.tool_added)])
+    if (Array.isArray(d.engines)) rows.push(['Engines set up', list(d.engines)])
+    if (d.engine_warning) rows.push(['Warning', d.engine_warning])
+    return rows
+  }
+  if (id === 'mcp') {
+    const rows = []
+    if (isList(d.servers, 'version_differs')) rows.push(['Connected tools', d.servers.map(SERVER_LINE).join('\n')])
+    if ('start_in_project' in d) rows.push(['Started in the project folder', String(d.start_in_project)])
+    return rows
+  }
+  if (id === 'agent_tokens' && 'accepted_for_its_task' in d) {
+    return [
+      ['Works for its own task', yn(d.accepted_for_its_task)],
+      ['Works for another task', yn(d.accepted_for_another_task)],
+      ['Refused after it is revoked', yn(d.refused_after_revoke)],
+    ]
+  }
+  if (id === 'guard_plugin') {
+    if (d.available === false) return []
+    return [['Exit code', d.exit_code == null ? '–' : String(d.exit_code)], ['Answer', d.answer || '–']].filter(([, v]) => v !== '–')
+  }
+  return null
+}
+
+export function detailRows(detail, id) {
   if (!detail || typeof detail !== 'object') return []
-  return Object.entries(detail).map(([k, v]) => [k.replace(/_/g, ' '), detailText(v)])
+  const plain = id ? plainRows(id, detail) : null
+  if (plain) return plain
+  return Object.entries(detail)
+    .filter(([k, v]) => !(k === 'engine_warning' && !v))
+    .map(([k, v]) => {
+      const label = k.replace(/_/g, ' ')
+      if (k === 'servers' && isList(v, 'version_differs')) return [label, v.map(SERVER_LINE).join('\n')]
+      if (k === 'projects' && isList(v, 'failures')) return [label, v.map(PROJECT_LINE).join('\n')]
+      return [label, detailText(v)]
+    })
 }
 
 // "12 MB", "340 KB" (decimal, rounded) for the tidying preview.

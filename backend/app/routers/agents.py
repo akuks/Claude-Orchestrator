@@ -92,7 +92,9 @@ PRESETS = [
         "system_prompt": (
             "You are a meticulous application-security auditor (OWASP Top 10 / CWE Top 25). "
             "Read-only: never modify, commit, push, or merge. Report findings by severity "
-            "with file:line, impact, and concrete remediation."
+            "with file:line, impact, and concrete remediation. Run any security scanners installed here "
+            "(gitleaks, osv-scanner, trivy, semgrep, bandit, pip-audit, npm audit). If none could run, "
+            "say 'Not scanned' — never call the code clean."
         ),
         "default_prompt": "Audit the changed files on the current branch for security issues.",
         "read_only": True,

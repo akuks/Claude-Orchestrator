@@ -216,8 +216,8 @@ MAX_GRANT_IDS = 50
 # rule ids a request names (the server's cap): beyond it the first 50 are sent and the
 # request is once-only (no grant_key, no tool_input), never refused for its size
 MAX_RULE_IDS = 50
-EVENTS = ("PreToolUse", "PostToolUse", "SessionStart", "Stop", "SessionEnd", "SubagentStart", "SubagentStop",
-          "ConfigChange")
+EVENTS = ("PreToolUse", "PostToolUse", "PostToolUseFailure", "SessionStart", "Stop", "SessionEnd", "SubagentStart",
+          "SubagentStop", "ConfigChange")
 # Ruling R17: every tool goes through the hook; rules.evaluate decides by tool name.
 TOOL_MATCHER = ".*"
 CONFIG_MATCHER = "user_settings|project_settings|local_settings"
@@ -240,7 +240,7 @@ _TOKEN_SHAPES = re.compile("|".join((
     r"\beyJ[A-Za-z0-9_\-]+\.eyJ[A-Za-z0-9_\-]+\.[A-Za-z0-9_\-]*",
     r"-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----[\s\S]*?(?:-----END [A-Z0-9 ]*PRIVATE KEY-----|\Z)",
 )))
-_URL_USERINFO = re.compile(r"://[^/\s:@]+:[^/\s@]+@")
+_URL_USERINFO = re.compile(r"://[^/\s:@]*:[^\s/]*@")
 _VALUE_END = r"""[\s&;'",]"""
 # The value after a label: quoted -> everything to the closing quote (any
 # length, but not a bare $VAR / $( reference); unquoted -> at least 8
@@ -289,6 +289,33 @@ def redact(text, limit=SUMMARY_MAX):
     for pattern in _LABELLED:
         text = pattern.sub(lambda m: m.group(1) + "***", text)
     return text if limit is None or len(text) <= limit else text[:limit - 1] + "…"
+
+
+# Local copies of app.redaction.strip_query / redact_head (a test keeps them alike).
+_STRIP_URL = re.compile(r"""([A-Za-z][A-Za-z0-9+.\-]{0,30}:\\?/\\?/)([^\s'"<>`]*)""")
+_URL_TAIL = re.compile(r"[).,;:!\]}]+$")
+
+
+def _strip_one(m):
+    """One URL: cut at its first ? or # AFTER the authority (a ? or # inside user:password@ is not a query)."""
+    head, rest = m.group(1), m.group(2)
+    slash = rest.find("/")
+    start = rest.rfind("@", 0, len(rest) if slash < 0 else slash) + 1
+    cut = min((i for i in (rest.find("?", start), rest.find("#", start)) if i >= 0), default=-1)
+    if cut < 0:
+        return m.group(0)
+    tail = _URL_TAIL.search(rest[cut:])  # sentence punctuation after the link stays
+    return head + rest[:cut] + (tail.group(0) if tail else "")
+
+
+def strip_query(text):
+    """URLs keep scheme, host and path; their query and fragment are dropped."""
+    return _STRIP_URL.sub(_strip_one, "" if text is None else str(text))
+
+
+def redact_head(text, n=4000):
+    """Redact (the env's secrets and token shapes), then cut to n characters."""
+    return redact(str(text or ""), None)[:n]
 
 
 # --- glob matcher: keep in sync with app/decisions/globmatch.py ---
@@ -1199,7 +1226,7 @@ def pre_tool_use(payload, policy, started):
     ids = [h.rule_id for h in verdict.hits]
     summary = verdict.hits[0].summary if verdict.hits else tool
     reason = "; ".join(f"{h.reason} ({h.rule_id})" for h in verdict.hits) or "blocked"
-    base = {"event": "PreToolUse", "tool": tool, "rule_ids": ids, "summary": redact(summary),
+    base = {"event": "PreToolUse", "tool": tool, "rule_ids": ids, "summary": strip_query(redact(summary)),
             "tool_use_id": payload.get("tool_use_id"), "agent_id": payload.get("agent_id")}
     if verdict.decision != "approve":
         rec = dict(base, decision="deny", reason=redact(reason))
@@ -2036,6 +2063,12 @@ def post_tool_use(payload, policy):
 
 
 def other_event(event, payload):
+    if event == "PostToolUseFailure":
+        # phase 7e (F80): a failed call gets the same done line, so it never stays "in flight" after a crash
+        tid = payload.get("tool_use_id")
+        if tid:
+            _spool({"event": "PostToolUse", "tool_use_id": tid, "done": True})
+        return None
     if event == "PostToolUse":
         tid = payload.get("tool_use_id")
         if tid:

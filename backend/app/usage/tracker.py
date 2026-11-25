@@ -7,6 +7,8 @@ id: it counts once, with the LAST usage seen (output grows). An event with
 ``Agent``/``Task`` call; its kind is the call's ``subagent_type`` (else
 ``description``, else "helper"). Missing ids, usage or numbers are tolerated.
 Context size = input + cache write + cache read of the latest main message.
+Phase 7e (F96): each bucket also gives ``reread_per_step`` (cache read / messages,
+rounded) and each helper kind ``starts`` (its main-thread Agent/Task calls).
 """
 
 import json
@@ -23,6 +25,12 @@ _FIELDS = ("input", "cache_write", "cache_read", "output")
 
 def _n(v) -> int:
     return int(v) if isinstance(v, (int, float)) and not isinstance(v, bool) and v > 0 else 0
+
+
+def reread_per_step(b: dict) -> int:
+    """Tokens of earlier conversation re-read per step (cache read / messages), 0 without messages."""
+    msgs = _n((b or {}).get("messages"))
+    return round(_n((b or {}).get("cache_read")) / msgs) if msgs else 0
 
 
 def _bucket() -> dict:
@@ -144,6 +152,13 @@ class UsageTracker:
             b["messages"] += 1
             for f, v in zip(_FIELDS, m["u"]):
                 b[f] += v
+        starts: dict[str, int] = {}
+        for kind in self._helper_kinds.values():
+            starts[kind] = starts.get(kind, 0) + 1
+        for b in (main, *helpers.values()):
+            b["reread_per_step"] = reread_per_step(b)
+        for kind, b in helpers.items():
+            b["starts"] = starts.get(kind, 0)
         return {"main": main, "helpers": helpers, "models": self._per_model(),
                 "largest_results": [dict(r) for r in self._largest],
                 "injected_chars": self.injected_chars, "messages": len(self._msgs)}

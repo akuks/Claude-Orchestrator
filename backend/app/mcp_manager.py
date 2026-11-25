@@ -405,6 +405,7 @@ async def probe_and_store(server_id: str, seed_policies: bool = True) -> dict:
             srv.status = "healthy"
             srv.status_detail = f"{len(result['tools'])} tools"
             srv.tools = result["tools"]
+            srv.server_version = result.get("server_version")  # refreshed on every probe; None if not told
         else:
             srv.status = "disconnected"
             srv.status_detail = (result.get("error") or "probe failed")[:500]

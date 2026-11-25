@@ -69,7 +69,8 @@ For EACH finding, include:
 - Impact — how it could be exploited
 - Remediation — a concrete, actionable fix
 
-If no security issues are found, say so explicitly and list what you inspected.
+If you find no issues by reading the code, say so and list what you inspected.
+Run any security scanners available in the project (for example npm audit, pip-audit, gitleaks, semgrep). If none could run, say 'Not scanned' — never call the code clean.
 Reminder: report only — make no code changes and no GitHub writes.`
 }
 

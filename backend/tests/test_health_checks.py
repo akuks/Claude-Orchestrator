@@ -4,6 +4,8 @@ runner (budget, scrub, overall lines, cache) and the real guard self-test."""
 import asyncio
 import os
 import pwd
+import sys
+import time
 from collections import namedtuple
 from pathlib import Path
 
@@ -27,8 +29,9 @@ def by_id(cid):
 def test_check_ids_and_titles_are_exact():
     assert [(c.id, c.title) for c in checks.CHECKS] == [
         ("claude", "Claude is installed"), ("python", "Python"), ("git", "Git"), ("node", "Node"),
-        ("guard_files", "The guard is intact"), ("guard_selftest", "The guard blocks what it should"),
-        ("guard_errors", "Guard errors in the last 7 days"), ("folders", "The app can write its folders"),
+        ("guard_files", "The guard is intact"), ("guard_plugin", "Guard plugin"),
+        ("guard_selftest", "The guard blocks what it should"),
+        ("guard_errors", "Guard errors in the last 7 days"), ("agent_tokens", "Agent tokens"), ("folders", "The app can write its folders"),
         ("database", "Database is up to date"), ("mcp", "Connected tools"), ("skill_packs", "Skill packs"),
         ("code_map", "Code map"), ("repo_roots", "Project folders"),
         ("docker", "Docker (for 'wait until ready' checks)"), ("disk", "Free disk space")]
@@ -230,7 +233,8 @@ def test_mcp(db):
     try:
         r = run(by_id("mcp").fn(db))
         assert r.status == ATTENTION and "hc-disconnected" in r.summary
-        assert {"name": "hc-disconnected", "status": "disconnected"} in r.detail["servers"]
+        assert any(m["name"] == "hc-disconnected" and m["status"] == "disconnected" and m["version"] is None
+                   for m in r.detail["servers"])
     finally:
         run(rm(i))
 
@@ -499,3 +503,272 @@ def _code_map_cases(db, McpServer, Project, ProjectIndex):
     assert (r.status, r.summary) == (ATTENTION, "1 project's code map is failing")
     r = check(True, ["ok", "running", "never"])
     assert (r.status, r.summary) == (OK, "3 projects keep a code map; 1 not built yet, 1 building")
+
+
+# -- phase 7e: versions, code-map errors, Node floor, self-tests ---------------
+def test_node_floor(monkeypatch):
+    _fake_argv(monkeypatch, lambda argv: (0, "v18.19.1"))
+    r = run(by_id("node").fn(None))
+    assert r.status == ATTENTION
+    assert r.summary == "Node 18.19.1 is too old for the browser tools (they need 20 or newer)."
+    assert r.detail["major"] == 18
+    for line in ("v20.0.0", "v22.3.1"):
+        _fake_argv(monkeypatch, lambda argv, line=line: (0, line))
+        assert run(by_id("node").fn(None)).status == OK
+    _fake_argv(monkeypatch, lambda argv: (0, "something odd"))  # does not parse: no warning
+    assert run(by_id("node").fn(None)).status == OK
+    assert checks.node_major("v9.1.0") == 9 and checks.node_major("") is None
+
+
+def _mcp_rows(db, specs):
+    from app.models import McpServer
+
+    async def go():
+        async with db() as s:
+            ids = []
+            for name, args, version in specs:
+                m = McpServer(name=name, command="npx", args=args, server_version=version, status="healthy")
+                s.add(m)
+                await s.flush()
+                ids.append(m.id)
+            await s.commit()
+        return ids
+
+    async def rm(ids):
+        async with db() as s:
+            for i in ids:
+                await s.delete(await s.get(McpServer, i))
+            await s.commit()
+
+    return go, rm
+
+
+def test_mcp_versions_and_pin_mismatch(db):
+    go, rm = _mcp_rows(db, [("hv-same", ["-y", "@playwright/mcp@0.0.86"], "0.0.86"),
+                            ("hv-off", ["-y", "chrome-devtools-mcp@1.13.0"], "1.14.0"),
+                            ("hv-nopin", ["-y", "other-tool@2.0.0"], "9.9.9"),
+                            ("hv-latest", ["-y", "shadcn@latest", "mcp"], "4.0.0"),
+                            ("hv-noinfo", ["-y", "codebase-memory-mcp@0.12.1"], None),
+                            ("hv-old", ["-y", "shadcn@4.0.0", "mcp"], "4.0.0")])
+    ids = run(go())
+    try:
+        r = run(by_id("mcp").fn(db))
+    finally:
+        run(rm(ids))
+    by = {m["name"]: m for m in r.detail["servers"]}
+    assert r.status == ATTENTION and "hv-off is at 1.14.0, expected 1.13.0." in r.summary
+    assert by["hv-same"]["version"] == "0.0.86" and by["hv-same"]["version_differs"] is False
+    assert by["hv-off"]["pinned"] == "1.13.0" and by["hv-off"]["version_differs"] is True
+    for n in ("hv-nopin", "hv-latest", "hv-noinfo"):  # no certain pin, or no version told: no warning
+        assert by[n]["version_differs"] is False and by[n]["pinned"] is None
+    assert by["hv-noinfo"]["version"] is None
+    assert by["hv-old"]["pinned"] == "4.23.0" and by["hv-old"]["version_differs"] is True  # the preset moved on
+    assert "hv-old is at 4.0.0, expected 4.23.0." in r.summary
+    assert summary_only(r.summary, "hv-nopin") and summary_only(r.summary, "hv-noinfo")
+
+
+def summary_only(summary, name):
+    return f"{name} is at" not in summary
+
+
+def test_handshake_keeps_server_info(tmp_path):
+    from app.mcp_client import probe_stdio
+
+    def script(name, info):
+        f = tmp_path / name
+        f.write_text("import sys, json\n"
+                     "for line in sys.stdin:\n"
+                     "    m = json.loads(line)\n"
+                     "    if m.get('method') == 'initialize':\n"
+                     f"        print(json.dumps({{'jsonrpc': '2.0', 'id': m['id'], 'result': {{'protocolVersion': '2024-11-05', 'capabilities': {{}}{info}}}}}), flush=True)\n"
+                     "    elif m.get('method') == 'tools/list':\n"
+                     "        print(json.dumps({'jsonrpc': '2.0', 'id': m['id'], 'result': {'tools': []}}), flush=True)\n")
+        return str(f)
+
+    r = run(probe_stdio(sys.executable, [script("a.py", ", 'serverInfo': {'name': 'x', 'version': '1.2.3'}")], None, timeout=10))
+    assert r["ok"] and r["server_version"] == "1.2.3" and r["server_name"] == "x"
+    r = run(probe_stdio(sys.executable, [script("b.py", "")], None, timeout=10))  # no serverInfo at all
+    assert r["ok"] and r["server_version"] is None
+    r = run(probe_stdio(sys.executable, [script("c.py", ", 'serverInfo': 'oops'")], None, timeout=10))
+    assert r["ok"] and r["server_version"] is None
+
+
+def test_code_map_error_and_two_engines(db):
+    from sqlalchemy import select
+
+    from app.models import McpServer, Project, ProjectIndex
+
+    async def go():
+        async with db() as s:
+            others = (await s.execute(select(McpServer).where(McpServer.enabled.is_(True)))).scalars().all()
+            off_ids = [m.id for m in others]
+            for m in others:
+                m.enabled = False
+            projs = (await s.execute(select(Project).where(Project.code_map.is_(True)))).scalars().all()
+            proj_ids = [p.id for p in projs]
+            for p in projs:
+                p.code_map = False
+            made = []
+            for n in ("hce-a", "hce-b"):
+                m = McpServer(name=n, command="npx", args=["-y", "codebase-memory-mcp@0.12.1"])
+                s.add(m)
+                await s.flush()
+                made.append((McpServer, m.id))
+            p = Project(name="hce-p", slug="hce-p", directory="/x", code_map=True)
+            s.add(p)
+            await s.flush()
+            s.add(ProjectIndex(project_id=p.id, status="failed", error="x" * 400, fail_count=3))
+            made.append((Project, p.id))
+            await s.commit()
+        return off_ids, proj_ids, made
+
+    async def undo(state):
+        off_ids, proj_ids, made = state
+        async with db() as s:
+            for model, i in made:
+                await s.delete(await s.get(model, i))
+            for i in off_ids:
+                (await s.get(McpServer, i)).enabled = True
+            for i in proj_ids:
+                (await s.get(Project, i)).code_map = True
+            await s.commit()
+
+    state = run(go())
+    try:
+        r = run(by_id("code_map").fn(db))
+    finally:
+        run(undo(state))
+    assert r.status == ATTENTION
+    assert "Two code-map engines are set up (hce-a, hce-b); only hce-a is used." in r.summary
+    row = r.detail["projects"][0]
+    assert row["error"] == "x" * 200 and row["failures"] == 3
+    assert r.detail["engines"] == ["hce-a", "hce-b"]
+
+
+def test_agent_tokens_self_test(db):
+    from sqlalchemy import func, select
+
+    from app.models import ApiToken
+
+    async def count():
+        async with db() as s:
+            return (await s.execute(select(func.count()).select_from(ApiToken))).scalar()
+
+    before = run(count())
+    r = run(by_id("agent_tokens").fn(db))
+    assert r.status == OK, r
+    if r.detail.get("tested") is not False:
+        assert r.detail == {"accepted_for_its_task": True, "accepted_for_another_task": False,
+                            "refused_after_revoke": True}
+    assert run(count()) == before  # nothing left behind
+
+
+def test_agent_tokens_fail_when_revoke_does_nothing(db, monkeypatch):
+    from app import auth
+
+    async def noop(s, task_id):
+        return None
+
+    monkeypatch.setattr(auth, "revoke_task_tokens", noop)
+    r = run(by_id("agent_tokens").fn(db))
+    if r.detail and r.detail.get("tested") is False:
+        pytest.skip("no user in this database")
+    assert r.status == PROBLEM and "revoked" in r.summary
+
+
+def _fake_claude(tmp_path, body):
+    f = tmp_path / "claude"
+    f.write_text("#!/bin/sh\n" + body)
+    f.chmod(0o755)
+    return str(f)
+
+
+@pytest.fixture
+def plugin_root(monkeypatch, tmp_path):
+    root = tmp_path / "plug"
+    root.mkdir()
+    monkeypatch.setattr(guard_runtime, "plugin_root", lambda: root)
+    return root
+
+
+def test_guard_plugin_validate(monkeypatch, tmp_path, plugin_root):
+    log = tmp_path / "calls.txt"
+    ok = _fake_claude(tmp_path, f'echo "$@" >> {log}\nif [ "$2" = "--help" ]; then printf "Commands:\\n  validate <path>\\n"; exit 0; fi\nexit 0\n')
+    monkeypatch.setattr(settings, "claude_bin", ok)
+    r = run(by_id("guard_plugin").fn(None))
+    assert (r.status, r.summary) == (OK, "Claude accepts the guard plugin")
+    assert f"plugin validate {plugin_root.resolve()}" in log.read_text()
+    bad = _fake_claude(tmp_path, 'if [ "$2" = "--help" ]; then echo "validate"; exit 0; fi\necho "manifest broken"; exit 1\n')
+    monkeypatch.setattr(settings, "claude_bin", bad)
+    r = run(by_id("guard_plugin").fn(None))
+    assert r.status == ATTENTION and r.detail["answer"] == "manifest broken"
+
+
+def test_guard_plugin_command_missing_is_ok_and_never_run(monkeypatch, tmp_path, plugin_root):
+    log = tmp_path / "calls.txt"
+    old = _fake_claude(tmp_path, f'echo "$@" >> {log}\nif [ "$2" = "--help" ]; then echo "Usage: claude [prompt]"; exit 0; fi\nexit 2\n')
+    monkeypatch.setattr(settings, "claude_bin", old)
+    r = run(by_id("guard_plugin").fn(None))
+    assert r.status == OK and "no validate command" in r.summary
+    assert "validate" not in log.read_text()  # an old CLI never gets the validate call (it could take it as a prompt)
+
+
+def test_guard_plugin_hang_is_bounded(monkeypatch, tmp_path, plugin_root):
+    hang = _fake_claude(tmp_path, 'if [ "$2" = "--help" ]; then echo validate; exit 0; fi\nexec sleep 30\n')
+    monkeypatch.setattr(settings, "claude_bin", hang)
+    monkeypatch.setattr(checks, "PLUGIN_VALIDATE_TIMEOUT", 0.5)
+    started = time.monotonic()
+    r = run(by_id("guard_plugin").fn(None))
+    assert r.status == ATTENTION and "did not answer in time" in r.summary
+    assert time.monotonic() - started < 10
+    assert by_id("guard_plugin").budget > checks.PLUGIN_HELP_TIMEOUT + checks.PLUGIN_VALIDATE_TIMEOUT
+    monkeypatch.setattr(settings, "claude_bin", str(tmp_path / "nope"))
+    assert run(by_id("guard_plugin").fn(None)).status == ATTENTION
+
+
+def test_agent_tokens_scope_is_really_tested(db, monkeypatch):
+    from app import auth
+
+    async def everything(s, tok, task_id):
+        return True
+
+    monkeypatch.setattr(auth, "_agent_may_read", everything)  # a token that fits every task is a failure
+    r = run(by_id("agent_tokens").fn(db))
+    if r.detail and r.detail.get("tested") is False:
+        pytest.skip("no user in this database")
+    assert r.status == PROBLEM and "another task" in r.summary
+
+
+def test_guard_plugin_help_needs_a_validate_line(monkeypatch, tmp_path, plugin_root):
+    log = tmp_path / "calls.txt"
+    old = _fake_claude(tmp_path, f'echo "$@" >> {log}\nif [ "$2" = "--help" ]; then echo "Usage: claude [prompt]  (see validate docs)"; exit 0; fi\nexit 2\n')
+    monkeypatch.setattr(settings, "claude_bin", old)
+    assert run(by_id("guard_plugin").fn(None)).status == OK
+    assert "plugin validate" not in log.read_text()
+
+
+def test_guard_plugin_env_is_minimal(monkeypatch, tmp_path, plugin_root):
+    out = tmp_path / "env.txt"
+    fake = _fake_claude(tmp_path, f'env > {out}\nif [ "$2" = "--help" ]; then echo "validate"; fi\nexit 0\n')
+    monkeypatch.setattr(settings, "claude_bin", fake)
+    monkeypatch.setenv("CO_SECRET_THING", "hunter2")
+    run(by_id("guard_plugin").fn(None))
+    assert "hunter2" not in out.read_text() and "CO_SECRET_THING" not in out.read_text()
+
+
+def test_guard_plugin_result_is_remembered_until_check_again(monkeypatch, tmp_path, plugin_root):
+    log = tmp_path / "calls.txt"
+    fake = _fake_claude(tmp_path, f'if [ "$1" = "--version" ]; then echo "9.9.9 (Claude Code)"; exit 0; fi\necho "$@" >> {log}\nif [ "$2" = "--help" ]; then echo validate; fi\nexit 0\n')
+    monkeypatch.setattr(settings, "claude_bin", fake)
+    checks.PLUGIN_CACHE.clear()
+    assert run(by_id("guard_plugin").fn(None)).status == OK
+    assert run(by_id("guard_plugin").fn(None)).status == OK
+    assert log.read_text().count("plugin validate") == 1
+    from app.health import runner
+
+    async def again():
+        await runner.run_all(force=True)
+
+    run(again())
+    assert log.read_text().count("plugin validate") == 2  # "Check again" validated afresh
+    checks.PLUGIN_CACHE.clear()
