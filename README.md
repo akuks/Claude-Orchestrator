@@ -1999,6 +1999,11 @@ recorded decisions for the files an answer names, and labels for old code.
 ### To know
 
 - Tidying is off until switched on; once on, it cannot bring back what it replaced. Continuing a thread whose history was tidied rebuilds its handoff from the summary only — files touched and step progress start empty.
+- The first start after this update builds an index on the task history table; on a large history it can
+  take a few minutes.
+- After tidying, the database reuses the freed space but the disk file does not shrink.
+- Shallow clones are not checked for re-clones (their oldest commit moves with every fetch), so they get no
+  warning and nothing is stored.
 - The code-map note is worked out at task start, so within a long session it can be up to one
   task old.
 - The re-clone check looks at the folder when a task starts and when System health is opened; it

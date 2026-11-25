@@ -77,18 +77,64 @@ def test_first_commit_helper(tmp_path):
     assert rootcommit.first_commit_sync(empty) is None  # no commits
 
 
-def test_shallow_clone_without_a_root_stores_nothing(tmp_path):
+def test_shallow_clone_is_never_checked(client, tmp_path):
+    """A shallow clone's oldest commit is only the cut-off and moves with every fetch: nothing stored, no warning,
+    before and after a later deepening fetch."""
     src = tmp_path / "src"
     make_repo(src)
-    (src / "b.txt").write_text("2")
-    git(src, "add", "-A")
-    git(src, "commit", "-q", "-m", "second")
+    for n in "23":
+        (src / f"{n}.txt").write_text(n)
+        git(src, "add", "-A")
+        git(src, "commit", "-q", "-m", n)
     shallow = tmp_path / "shallow"
     subprocess.run(["git", "clone", "-q", "--depth", "1", f"file://{src}", str(shallow)], env=ENV, check=True,
                    capture_output=True)
-    # a shallow clone's oldest commit is the grafted root: still a single stable hex value or nothing, never an error
-    v = rootcommit.first_commit_sync(shallow)
-    assert v is None or len(v) == 40
+    assert rootcommit.first_commit_sync(shallow) is None
+    pid = _project(client, shallow)
+    assert _stored(pid) is None
+    assert run(rootcommit.at_task_start(pid, str(shallow))) is None
+    git(shallow, "fetch", "-q", "--depth", "2")
+    assert rootcommit.first_commit_sync(shallow) is None
+    assert run(rootcommit.at_task_start(pid, str(shallow))) is None
+    assert _stored(pid) is None
+    git(shallow, "fetch", "-q", "--unshallow")  # full history again: the real first commit
+    assert rootcommit.first_commit_sync(shallow) == git(src, "rev-list", "--max-parents=0", "HEAD")
+
+
+def test_lookup_is_cached_by_folder_and_head(tmp_path, monkeypatch):
+    sha = make_repo(tmp_path / "c")
+    assert rootcommit.first_commit_sync(tmp_path / "c") == sha
+    calls = []
+    real = rootcommit._git
+    monkeypatch.setattr(rootcommit, "_git", lambda d, *a: (calls.append(a), real(d, *a))[1])
+    assert rootcommit.first_commit_sync(tmp_path / "c") == sha
+    assert ("rev-list", "--max-parents=0", "HEAD") not in calls
+
+
+def test_health_check_is_bounded_and_lists_slow_folders(client, tmp_path, monkeypatch):
+    from app.database import SessionLocal
+
+    d = tmp_path / "slow"
+    make_repo(d)
+    pid = _project(client, d)
+    quick = tmp_path / "quick"
+    make_repo(quick, "q")
+    qid = _project(client, quick)
+    _set(qid, "c" * 40)
+    real = rootcommit.first_commit
+
+    async def slow(directory):
+        if str(directory).endswith("slow"):
+            await asyncio.sleep(60)
+        return await real(directory)
+
+    monkeypatch.setattr(rootcommit, "first_commit", slow)
+    import time
+    t0 = time.monotonic()
+    r = run(checks.check_repo_roots(SessionLocal))
+    assert time.monotonic() - t0 < 9
+    assert qid in [c["id"] for c in r.detail["projects"]]  # the quick one is still judged
+    assert any(n.endswith("") for n in r.detail["not_checked"]) and r.detail["not_checked"]
 
 
 def test_stored_on_create_and_on_folder_change(client, tmp_path):

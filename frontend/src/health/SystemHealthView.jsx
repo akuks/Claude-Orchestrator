@@ -168,7 +168,7 @@ export function RunHistoryCard() {
           <p className="co-health-summary" data-testid="tidy-preview">
             {tidyPreviewLine(r)}
           </p>
-          <p className="co-health-summary" style={{ fontSize: 12, opacity: 0.7 }} data-testid="tidy-note">
+          <p className="co-health-summary" style={{ fontSize: 13 }} data-testid="tidy-note">
             The database reuses this space; the disk file doesn't shrink.
           </p>
           {r.last_run && (
@@ -178,12 +178,14 @@ export function RunHistoryCard() {
           )}
           <Popconfirm
             title={`Tidy now? Older run history of ${r.tasks} finished ${r.tasks === 1 ? 'task' : 'tasks'} will be replaced by short summaries. This can't be undone.`}
+            placement="bottomRight"
+            overlayStyle={{ maxWidth: 320 }}
             okText="Tidy now"
             cancelText="Cancel"
             onConfirm={tidyNow}
             disabled={!r.enabled || running || !r.tasks}
           >
-            <Button disabled={!r.enabled || running || !r.tasks} loading={running} data-testid="tidy-now">
+            <Button disabled={!r.enabled || running || !r.tasks} loading={running} data-testid="tidy-now" style={{ marginTop: 8 }}>
               Tidy now
             </Button>
           </Popconfirm>

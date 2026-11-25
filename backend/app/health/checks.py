@@ -379,7 +379,7 @@ async def check_code_map(s) -> Result:
 
 async def check_repo_roots(s) -> Result:
     """A project folder whose repository's first commit differs from the one stored (it may have been cloned again).
-    A folder that is not a git repository (or has no root) is never a warning. Bounded: 40 projects, 3 s each."""
+    A folder that is not a git repository (or has no root) is never a warning. Bounded: 40 projects, four at a time, one 6 s deadline; slow ones are listed as not checked."""
     from .. import rootcommit
     from ..models import Project
 
@@ -387,19 +387,31 @@ async def check_repo_roots(s) -> Result:
         rows = (await sess.execute(
             select(Project.id, Project.name, Project.directory, Project.root_commit)
             .where(Project.archived.is_(False), Project.root_commit.is_not(None)).order_by(Project.name).limit(40))).all()
-    changed = []
-    for pid, name, directory, stored in rows:
-        try:
-            now = await asyncio.wait_for(rootcommit.first_commit(directory), 3)
-        except Exception:  # noqa: BLE001
-            now = None
+    changed, skipped = [], []
+    gate = asyncio.Semaphore(4)
+
+    async def one(pid, name, directory, stored):
+        async with gate:
+            now = await rootcommit.first_commit(directory)
         if now is not None and now != stored:
             changed.append({"id": pid, "project": name})
-    detail = {"projects": changed}
+
+    tasks = {asyncio.ensure_future(one(*r)): r[1] for r in rows}
+    if tasks:
+        done, pending = await asyncio.wait(tasks, timeout=6.0)  # one deadline, below the check's 10 s
+        for f in pending:
+            f.cancel()
+            skipped.append(tasks[f])
+        for f in done:
+            if f.exception() is not None:
+                skipped.append(tasks[f])
+    detail = {"projects": changed, "not_checked": sorted(skipped)}
     if changed:
         names = ", ".join(c["project"] for c in changed[:3]) + (f" and {len(changed) - 3} more" if len(changed) > 3 else "")
         return Result(ATTENTION, f"{names}: the folder now holds a different repository than before", detail,
                       "If the folder was cloned again on purpose, press 'This is expected'. Otherwise check the folder: decisions and the code map may not apply.")
+    if skipped:
+        return Result(OK, f"{len(skipped)} project folder{'s' if len(skipped) != 1 else ''} not checked (too slow to answer)", detail)
     return Result(OK, "Project folders hold the repositories they did before", detail)
 
 

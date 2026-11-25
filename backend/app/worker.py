@@ -781,7 +781,7 @@ class WorkerManager:
         # A folder that holds another repository than before (cloned again): a notice; the first start stores it.
         try:
             if proj is not None:
-                changed = await asyncio.wait_for(rootcommit.at_task_start(proj.id, proj.directory), 10)
+                changed = await asyncio.wait_for(rootcommit.at_task_start(proj.id, proj.directory), 6)
                 if changed:
                     await emit("repo_changed", {"message": changed})
         except Exception:  # noqa: BLE001 - never stops a run

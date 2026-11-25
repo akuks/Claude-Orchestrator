@@ -3,6 +3,7 @@ was cloned again (a different repository now sits there) is noticed. Git only th
 
 import asyncio
 import logging
+import os
 import re
 
 from . import gitsafe
@@ -11,24 +12,48 @@ from .models import Project
 
 log = logging.getLogger(__name__)
 
-TIMEOUT = 5.0
+TIMEOUT = 2.0
+_CACHE: dict = {}  # (folder, HEAD) -> first commit or None; a commit's first commit never changes
+_CACHE_MAX = 256
 NOTICE = ("This folder now holds a different repository than before (it may have been cloned again). "
           "Decisions and the code map may not apply.")
 _HEX = re.compile(r"^[0-9a-f]{40}$")
 
 
-def first_commit_sync(directory) -> str | None:
-    """The repository's first commit (40 hex), or None: not a git repository, no git, no commits, or a shallow
-    clone whose history has no root. With several roots the first line (stable for a given repository)."""
+def _git(directory, *args):
     try:
-        r = gitsafe.run_git(directory, "rev-list", "--max-parents=0", "HEAD", timeout=TIMEOUT)
+        r = gitsafe.run_git(directory, *args, timeout=TIMEOUT)
     except Exception:  # noqa: BLE001
         return None
-    if not r.ok:
+    return r.out if r.ok else None
+
+
+def first_commit_sync(directory) -> str | None:
+    """The repository's first commit (40 hex), or None: not a git repository, no git, no commits, or a shallow
+    clone (its oldest commit is only the cut-off and moves with every fetch, so it says nothing). With several
+    roots the smallest (stable for a given repository). Answers are cached by (folder, HEAD)."""
+    gdir = _git(directory, "rev-parse", "--git-dir")
+    if not gdir:
         return None
-    lines = sorted(x.strip().lower() for x in r.out.splitlines() if x.strip())
+    gdir = gdir.splitlines()[0]
+    full = gdir if os.path.isabs(gdir) else os.path.join(str(directory), gdir)
+    if os.path.exists(os.path.join(full, "shallow")):
+        return None
+    head = _git(directory, "rev-parse", "HEAD")
+    key = (str(directory), head.strip() if head else "")
+    if head and key in _CACHE:
+        return _CACHE[key]
+    out = _git(directory, "rev-list", "--max-parents=0", "HEAD")
+    if out is None:
+        return None
+    lines = sorted(x.strip().lower() for x in out.splitlines() if x.strip())
     first = lines[0] if lines else ""
-    return first if _HEX.match(first) else None
+    sha = first if _HEX.match(first) else None
+    if head:
+        if len(_CACHE) >= _CACHE_MAX:
+            _CACHE.clear()
+        _CACHE[key] = sha
+    return sha
 
 
 async def first_commit(directory) -> str | None:
