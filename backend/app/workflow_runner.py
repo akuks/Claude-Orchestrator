@@ -523,6 +523,17 @@ def _drop_ahead(run, why: str, start: int | None = None, only: set | None = None
         run.stage_state = state
 
 
+def _settle_soon(run_id: str) -> None:
+    """Decision track record (phase 8a): settle the outcomes of the run's showing tasks in the background.
+    Never raises, never waits."""
+    try:
+        from .decisions import track
+
+        track.spawn_settle_run(run_id)
+    except Exception:  # noqa: BLE001
+        log.exception("workflow runner: settling the decision track record of run %s failed", run_id)
+
+
 def _fail_run(run, why: str = "the run failed", release: bool = True) -> None:
     """Every failure of a run goes through here: the run is failed, its early approvals are
     dropped (with a log line) and its project check locks are let go (cancel lets go only
@@ -1351,6 +1362,7 @@ class WorkflowRunner:
             break
         await self._run_post(run_id, post)
         if post is not None and post.failed:
+            _settle_soon(run_id)  # a step failed: its showings settle (decision track record, 8a)
             await self._stop_others(run_id)
 
     async def _stop_others(self, run_id: str) -> None:
@@ -2072,6 +2084,7 @@ class WorkflowRunner:
         if not advance:
             # Ended here (dropped, held, refused or errored), not by a restart.
             self._ended[key] = handout
+        _settle_soon(run_id)  # the gate passed, failed or went fixing: settle the run's showings (8a)
         if advance:
             try:
                 await self._advance(run_id)

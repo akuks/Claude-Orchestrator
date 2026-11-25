@@ -1034,6 +1034,17 @@ class DecisionSupersede(BaseModel):
     by: int
 
 
+class DecisionTrack(BaseModel):
+    """What happened after agents were shown a decision (phase 8a), last 90 days."""
+    shown: int
+    passed: int
+    completed: int
+    fixed: int
+    failed: int
+    last_shown_at: Optional[datetime] = None
+    trouble: bool
+
+
 class DecisionOut(BaseModel):
     id: str
     number: int
@@ -1055,6 +1066,7 @@ class DecisionOut(BaseModel):
     updated_at: datetime
     stale_flagged_at: Optional[datetime] = None
     stale_reason: Optional[str] = None
+    track: Optional[DecisionTrack] = None  # decisions list only, active decisions (phase 8a)
 
 
 class ProposalIn(BaseModel):

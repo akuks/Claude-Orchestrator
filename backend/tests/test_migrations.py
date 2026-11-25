@@ -12,7 +12,7 @@ from sqlalchemy.orm import Session
 from app import models
 from app.database import _alembic_cfg, _baseline_metadata, run_migrations
 
-HEAD = "0023"  # the latest revision
+HEAD = "0024"  # the latest revision
 
 
 def _tables(db) -> set[str]:
@@ -862,3 +862,63 @@ def test_migration_0023_upgrade_downgrade(scratch_url):
         return sc.exec_driver_sql("SELECT name FROM mcp_servers WHERE id='m23'").scalar()
 
     assert _inspect(url, check_down) == "old"
+
+
+def test_migration_0024_upgrade_downgrade(scratch_url):
+    import pathlib
+
+    from alembic import command
+
+    src = (pathlib.Path(__file__).parent.parent / "migrations" / "versions" / "0024_decision_showings.py").read_text()
+    assert "autocommit_block" not in src and 'down_revision = "0023"' in src
+    url = scratch_url
+    command.upgrade(_alembic_cfg(url), "0023")
+
+    def old_rows(sc, insp):  # a project and a task from before 0024 (real booleans)
+        sc.exec_driver_sql(
+            "INSERT INTO projects (id, name, slug, directory, default_model, env, memory, memory_enabled, archived,"
+            " auto_review_prs, created_at) VALUES ('p24', 'p24', 'p24', '/x', 'sonnet', '{}', '', true, false,"
+            " false, CURRENT_TIMESTAMP)")
+        sc.exec_driver_sql(
+            "INSERT INTO tasks (id, title, prompt, status, priority, tags, model, max_turns, attempt, allow_remote,"
+            " read_only, requires_approval, risk, created_at, origin, recoveries, auto_continued, stage_attempt,"
+            " plan_requeues) VALUES ('t24', 'old', 'p', 'completed', 'normal', '[]', '', 25, 0, true, false, false,"
+            " 'info', CURRENT_TIMESTAMP, 'user', 0, false, 0, 0)")
+
+    _inspect(url, old_rows)
+    command.upgrade(_alembic_cfg(url), "0024")
+
+    def check(sc, insp):
+        assert "decision_showings" in insp.get_table_names()
+        cols = {c["name"]: c for c in insp.get_columns("decision_showings")}
+        assert {"id", "project_id", "decision_number", "task_id", "shown_at", "outcome", "retried",
+                "settled_at"} <= set(cols)
+        assert cols["outcome"]["nullable"] and cols["settled_at"]["nullable"]
+        idx = {i["name"]: i["column_names"] for i in insp.get_indexes("decision_showings")}
+        assert idx.get("ix_decision_showings_project_number") == ["project_id", "decision_number"]
+        uqs = [u["column_names"] for u in insp.get_unique_constraints("decision_showings")]
+        assert ["task_id", "decision_number"] in uqs
+        sc.exec_driver_sql("INSERT INTO decision_showings (project_id, decision_number, task_id, shown_at)"
+                           " VALUES ('p24', 1, 't24', CURRENT_TIMESTAMP)")
+        dup = False
+        try:
+            with sc.begin_nested():
+                sc.exec_driver_sql("INSERT INTO decision_showings (project_id, decision_number, task_id, shown_at)"
+                                   " VALUES ('p24', 1, 't24', CURRENT_TIMESTAMP)")
+        except Exception:  # noqa: BLE001 - the unique (task, number)
+            dup = True
+        assert dup
+        return (sc.exec_driver_sql("SELECT retried FROM decision_showings WHERE task_id='t24'").scalar(),
+                sc.exec_driver_sql("SELECT version_num FROM alembic_version").scalar())
+
+    retried, ver = _inspect(url, check)
+    assert not retried and ver == "0024"
+    command.upgrade(_alembic_cfg(url), "0024")  # again: nothing to do
+    command.downgrade(_alembic_cfg(url), "0023")
+
+    def check_down(sc, insp):
+        assert "decision_showings" not in insp.get_table_names()
+        return (sc.exec_driver_sql("SELECT title FROM tasks WHERE id='t24'").scalar(),
+                sc.exec_driver_sql("SELECT version_num FROM alembic_version").scalar())
+
+    assert _inspect(url, check_down) == ("old", "0023")
