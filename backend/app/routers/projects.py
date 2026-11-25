@@ -12,7 +12,7 @@ from pydantic import BaseModel
 from sqlalchemy import delete, func, select, update
 
 from .. import licence as licence_mod
-from .. import memory
+from .. import memory, rootcommit
 from ..agent_env import MissingCredential
 from ..config import settings
 from ..constants import VALID_MODELS, Status
@@ -311,6 +311,7 @@ async def create_project(payload: ProjectCreate, request: Request):
             quarantine=trust == "external",
             licence=await licence_mod.for_directory(str(directory.resolve())),
         )
+        project.root_commit = await rootcommit.first_commit(project.directory)
         s.add(project)
         await s.commit()
         await s.refresh(project)
@@ -485,6 +486,7 @@ async def import_projects(payload: ImportRequest, request: Request):
                 trust=trust,
                 quarantine=trust == "external",
                 licence=await licence_mod.for_directory(d),
+                root_commit=await rootcommit.first_commit(d),
             )
             s.add(project)
             existing_dirs.add(d)
@@ -557,6 +559,7 @@ async def update_project(project_id: str, payload: ProjectUpdate, request: Reque
             project.directory = str(d.resolve())
             if dir_changed:
                 project.licence = await licence_mod.for_directory(project.directory)
+                project.root_commit = await rootcommit.first_commit(project.directory)  # a new folder: its own first commit
         else:
             dir_changed = False
         # A moved folder re-checks the stored paths and references (M3).
@@ -603,6 +606,21 @@ async def refresh_licence(project_id: str, request: Request):
         await s.refresh(project)
         counts = await _counts(s, [project_id])
     return _to_out(project, *counts.get(project_id, (0, 0.0)), role=role, admin=principal.is_admin)
+
+
+@router.post("/{project_id}/root-commit/accept")
+async def accept_root_commit(project_id: str, request: Request):
+    """"This is expected" on the re-clone warning (maintainers): the folder's current first commit becomes the stored one."""
+    async with SessionLocal() as s:
+        await require_project_role(s, request.state.principal, project_id, "maintainer")
+        project = await _get_or_404(s, project_id)
+        directory = project.directory
+    sha = await rootcommit.first_commit(directory)
+    async with SessionLocal() as s:
+        project = await _get_or_404(s, project_id)
+        project.root_commit = sha
+        await s.commit()
+    return {"ok": True}
 
 
 @router.delete("/{project_id}", status_code=204)

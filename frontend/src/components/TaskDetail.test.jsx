@@ -581,3 +581,11 @@ describe('TaskDetail: launch item and risk', () => {
     expect(view.container.querySelector('.co-terminal').textContent).toContain('Marked critical: critical path src/billing')
   })
 })
+
+describe('summary run-log line', () => {
+  it('is one plain line, never JSON', () => {
+    const l = renderLine({ type: 'summary', payload: { events: 30, counts: { text_output: 30 }, lines: ['a'], kept_days: 60 } })
+    expect(l.text).toBe('Older run history kept as a summary (30 events).')
+    expect(l.text).not.toContain('{')
+  })
+})

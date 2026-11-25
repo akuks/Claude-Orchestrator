@@ -73,3 +73,10 @@ describe('canContinue', () => {
     expect(canContinue({ ...task, status: 'completed' }, owner, []).resume).toBe(true)
   })
 })
+
+describe('repo_changed notice', () => {
+  it('shows the plain re-clone warning', () => {
+    const out = notices({}, [{ type: 'repo_changed', payload: { message: 'This folder now holds a different repository than before (it may have been cloned again). Decisions and the code map may not apply.' } }], null)
+    expect(out).toEqual([{ kind: 'repo_changed', text: 'This folder now holds a different repository than before (it may have been cloned again). Decisions and the code map may not apply.' }])
+  })
+})

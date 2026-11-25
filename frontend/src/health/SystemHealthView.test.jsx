@@ -2,7 +2,7 @@ import { act } from 'react'
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
 import { flush, render } from '../home/testRender'
 
-vi.mock('../api', () => ({ api: { systemHealth: vi.fn() } }))
+vi.mock('../api', () => ({ api: { systemHealth: vi.fn(), retention: vi.fn(), saveRetention: vi.fn(), runRetention: vi.fn(), acceptRootCommit: vi.fn() } }))
 
 import { api } from '../api'
 import SystemHealthView from './SystemHealthView'
@@ -21,6 +21,7 @@ const DATA = {
   ],
 }
 
+const RET = { enabled: false, days: 60, choices: [30, 60, 90], tasks: 12, bytes: 12400000, last_run: null, last_count: null, running: false }
 let view
 beforeAll(() => {
   window.matchMedia ||= () => ({ matches: false, addListener() {}, removeListener() {}, addEventListener() {}, removeEventListener() {} })
@@ -28,6 +29,7 @@ beforeAll(() => {
 beforeEach(() => {
   vi.clearAllMocks()
   api.systemHealth.mockResolvedValue(DATA)
+  api.retention.mockResolvedValue(RET)
 })
 afterEach(async () => {
   await view?.unmount()
@@ -107,3 +109,76 @@ describe('SystemHealthView', () => {
     expect(c.textContent).toContain('boom')
   })
 })
+
+describe('Run history card', () => {
+  const click = async (el) => {
+    await act(async () => {
+      el.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+    })
+    await flush()
+  }
+  it('is off by default, says what could be tidied, and Tidy now is disabled', async () => {
+    const c = await mount()
+    const card = q(c, 'health-run-history')
+    expect(card.textContent).toContain('Tidy old run history')
+    expect(card.textContent).toContain('Keep full history for:')
+    expect(q(c, 'tidy-preview').textContent).toBe('12 tasks could be tidied (about 12 MB)')
+    expect(q(c, 'tidy-switch').getAttribute('aria-checked')).toBe('false')
+    expect(q(c, 'tidy-now').disabled).toBe(true)
+    expect(card.textContent).not.toMatch(/\{|retention|payload/)
+  })
+  it('the switch saves, and shows the last run', async () => {
+    api.saveRetention.mockResolvedValue({ ...RET, enabled: true, last_run: '2026-11-20T10:00:00+00:00', last_count: 3 })
+    const c = await mount()
+    await click(q(c, 'tidy-switch'))
+    expect(api.saveRetention).toHaveBeenCalledWith({ enabled: true })
+    expect(q(c, 'tidy-last').textContent).toBe('Last tidied 20 Nov 2026: 3 tasks')
+    expect(q(c, 'tidy-now').disabled).toBe(false)
+  })
+  it('Tidy now asks first, posts, and polls until it is not running', async () => {
+    vi.useFakeTimers()
+    try {
+      api.retention.mockResolvedValue({ ...RET, enabled: true })
+      api.runRetention.mockResolvedValue({ running: true })
+      const c = await mount()
+      await click(q(c, 'tidy-now'))
+      expect(document.body.textContent).toContain(
+        "Tidy now? Older run history of 12 finished tasks will be replaced by short summaries. This can't be undone.",
+      )
+      expect(api.runRetention).not.toHaveBeenCalled()
+      api.retention.mockResolvedValueOnce({ ...RET, enabled: true, running: true })
+      api.retention.mockResolvedValue({ ...RET, enabled: true, tasks: 0, last_run: '2026-11-25T10:00:00+00:00', last_count: 12 })
+      const ok = [...document.querySelectorAll('.ant-popover button')].find((b) => b.textContent.trim() === 'Tidy now')
+      await click(ok)
+      expect(api.runRetention).toHaveBeenCalledTimes(1)
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(2500)
+      })
+      await flush()
+      expect(q(c, 'tidy-last').textContent).toBe('Last tidied 25 Nov 2026: 12 tasks')
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+})
+
+describe('re-clone warning', () => {
+  it('shows "This is expected" for each folder and refreshes after it', async () => {
+    api.systemHealth.mockResolvedValue({
+      checked_at: DATA.checked_at,
+      overall: 'attention',
+      checks: [mk('repo_roots', 'attention', { summary: 'Shop: the folder now holds a different repository than before', detail: { projects: [{ id: 'p1', project: 'Shop' }] } })],
+    })
+    api.acceptRootCommit.mockResolvedValue({ ok: true })
+    const c = await mount()
+    const btn = q(c, 'reclone-accept-p1')
+    expect(btn.textContent).toBe('This is expected')
+    await act(async () => {
+      btn.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+    })
+    await flush()
+    expect(api.acceptRootCommit).toHaveBeenCalledWith('p1')
+    expect(api.systemHealth).toHaveBeenLastCalledWith(true)
+  })
+})
+

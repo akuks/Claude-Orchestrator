@@ -180,6 +180,8 @@ class Project(Base):
     name: Mapped[str] = mapped_column(String(200))
     slug: Mapped[str] = mapped_column(String(120), unique=True, index=True)
     directory: Mapped[str] = mapped_column(String(500))
+    # The repository's first commit when last seen (phase 7d): a different one later means the folder was cloned again.
+    root_commit: Mapped[str | None] = mapped_column(String(40), nullable=True)
 
     # Dashboard-managed project instructions (injected into task context, not
     # written into the repo, to avoid clobbering a real CLAUDE.md).

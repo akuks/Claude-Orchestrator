@@ -67,6 +67,7 @@
   border-left: 3px solid var(--co-danger);
 }
 .co-resume-notice-history_rewritten,
+.co-resume-notice-repo_changed,
 .co-resume-notice-no_commits,
 .co-resume-notice-temp_files {
   border-left: 3px solid var(--co-warning);

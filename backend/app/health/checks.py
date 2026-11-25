@@ -377,6 +377,32 @@ async def check_code_map(s) -> Result:
     return Result(OK, head + ("; " + ", ".join(parts) if parts else "; all up to date"), detail)
 
 
+async def check_repo_roots(s) -> Result:
+    """A project folder whose repository's first commit differs from the one stored (it may have been cloned again).
+    A folder that is not a git repository (or has no root) is never a warning. Bounded: 40 projects, 3 s each."""
+    from .. import rootcommit
+    from ..models import Project
+
+    async with s() as sess:
+        rows = (await sess.execute(
+            select(Project.id, Project.name, Project.directory, Project.root_commit)
+            .where(Project.archived.is_(False), Project.root_commit.is_not(None)).order_by(Project.name).limit(40))).all()
+    changed = []
+    for pid, name, directory, stored in rows:
+        try:
+            now = await asyncio.wait_for(rootcommit.first_commit(directory), 3)
+        except Exception:  # noqa: BLE001
+            now = None
+        if now is not None and now != stored:
+            changed.append({"id": pid, "project": name})
+    detail = {"projects": changed}
+    if changed:
+        names = ", ".join(c["project"] for c in changed[:3]) + (f" and {len(changed) - 3} more" if len(changed) > 3 else "")
+        return Result(ATTENTION, f"{names}: the folder now holds a different repository than before", detail,
+                      "If the folder was cloned again on purpose, press 'This is expected'. Otherwise check the folder: decisions and the code map may not apply.")
+    return Result(OK, "Project folders hold the repositories they did before", detail)
+
+
 async def check_disk(s) -> Result:
     free = await asyncio.to_thread(disk_free_bytes, Path(settings.workspaces_dir))
     gb = free / GB
@@ -401,6 +427,7 @@ CHECKS: list[Check] = [
     Check("mcp", "Connected tools", check_mcp),
     Check("skill_packs", "Skill packs", check_skill_packs),
     Check("code_map", "Code map", check_code_map),
+    Check("repo_roots", "Project folders", check_repo_roots),
     Check("docker", "Docker (for 'wait until ready' checks)", check_docker),
     Check("disk", "Free disk space", check_disk),
 ]

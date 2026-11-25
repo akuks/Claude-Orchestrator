@@ -31,6 +31,13 @@ export function notices(task, events, handoff) {
             '. The agent was told what was running.',
         })
       }
+    } else if (e.type === 'repo_changed') {
+      out.push({
+        kind: 'repo_changed',
+        text:
+          p.message ||
+          'This folder now holds a different repository than before (it may have been cloned again). Decisions and the code map may not apply.',
+      })
     } else if (e.type === 'fresh_session' && p.credentials_changed === true) {
       out.push({
         kind: 'credentials_changed',

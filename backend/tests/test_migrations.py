@@ -775,6 +775,7 @@ def test_migration_0022_upgrade_downgrade(scratch_url):
 
     def check(sc, insp):
         assert "retention" in {c["name"] for c in insp.get_columns("guard_org_settings")}
+        assert "root_commit" in {c["name"] for c in insp.get_columns("projects")}
         idx = {i["name"]: i["column_names"] for i in insp.get_indexes("task_events")}
         assert idx.get("ix_task_events_created_at") == ["created_at"]
         assert idx.get("ix_task_events_task_id") == ["task_id"]
@@ -788,6 +789,7 @@ def test_migration_0022_upgrade_downgrade(scratch_url):
 
     def check_down(sc, insp):
         assert "retention" not in {c["name"] for c in insp.get_columns("guard_org_settings")}
+        assert "root_commit" not in {c["name"] for c in insp.get_columns("projects")}
         idx = {i["name"] for i in insp.get_indexes("task_events")}
         assert "ix_task_events_created_at" not in idx and "ix_task_events_task_id" in idx
         return (sc.exec_driver_sql("SELECT type FROM task_events WHERE task_id='t22'").scalar(),

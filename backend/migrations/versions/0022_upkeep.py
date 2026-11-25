@@ -20,6 +20,8 @@ def _indexes() -> set[str]:
 def upgrade() -> None:
     with op.batch_alter_table("guard_org_settings") as b:
         b.add_column(sa.Column("retention", sa.JSON(), nullable=False, server_default="{}"))
+    with op.batch_alter_table("projects") as b:
+        b.add_column(sa.Column("root_commit", sa.String(40), nullable=True))
     have = _indexes()
     if "ix_task_events_created_at" not in have:
         op.create_index("ix_task_events_created_at", "task_events", ["created_at"])
@@ -31,5 +33,7 @@ def downgrade() -> None:
     # ix_task_events_task_id belongs to the baseline: it stays
     if "ix_task_events_created_at" in _indexes():
         op.drop_index("ix_task_events_created_at", table_name="task_events")
+    with op.batch_alter_table("projects") as b:
+        b.drop_column("root_commit")
     with op.batch_alter_table("guard_org_settings") as b:
         b.drop_column("retention")

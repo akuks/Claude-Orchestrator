@@ -313,6 +313,12 @@ export const api = {
   guardHealth: () => req('GET', '/guard/health'),
   // admin: the system health checks (refresh skips the server's 30 s cache)
   systemHealth: (refresh) => req('GET', `/admin/health${refresh ? '?refresh=true' : ''}`),
+  // admin: tidying old run history (phase 7d)
+  retention: () => req('GET', '/admin/health/retention'),
+  saveRetention: (payload) => req('PATCH', '/admin/health/retention', payload),
+  runRetention: () => req('POST', '/admin/health/retention/run'),
+  // maintainer: "This is expected" on the re-clone warning
+  acceptRootCommit: (id) => req('POST', `/projects/${encodeURIComponent(id)}/root-commit/accept`),
   saveGuardOrgSettings: (payload) => req('PUT', '/guard/org-settings', payload),
   projectRulesFile: (id) => req('GET', `/projects/${encodeURIComponent(id)}/guard/rules-file`),
 

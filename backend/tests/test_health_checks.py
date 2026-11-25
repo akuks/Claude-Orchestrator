@@ -30,7 +30,7 @@ def test_check_ids_and_titles_are_exact():
         ("guard_files", "The guard is intact"), ("guard_selftest", "The guard blocks what it should"),
         ("guard_errors", "Guard errors in the last 7 days"), ("folders", "The app can write its folders"),
         ("database", "Database is up to date"), ("mcp", "Connected tools"), ("skill_packs", "Skill packs"),
-        ("code_map", "Code map"),
+        ("code_map", "Code map"), ("repo_roots", "Project folders"),
         ("docker", "Docker (for 'wait until ready' checks)"), ("disk", "Free disk space")]
 
 
