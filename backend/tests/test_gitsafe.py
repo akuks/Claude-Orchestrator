@@ -53,3 +53,45 @@ def test_commit_check_accepted(rev):
 def test_commit_check_near_misses_rejected(args):
     with pytest.raises(ValueError):
         gitsafe.check_args(args)
+
+
+# ---- phase 7d: the code map freshness reads and the root commit, each exact ----------------------
+
+
+def test_freshness_forms_accepted():
+    gitsafe.check_args(("diff", "--name-only", SHA, "HEAD"))
+    gitsafe.check_args(("diff", "--name-only", SHA[:7], "HEAD"))
+    gitsafe.check_args(("rev-list", "--max-parents=0", "HEAD"))
+    gitsafe.check_args(("merge-base", "--is-ancestor", SHA, SHA[:12]))
+
+
+@pytest.mark.parametrize("args", [
+    ("diff", "--name-only", "HEAD"),
+    ("diff", "--name-only", SHA),
+    ("diff", "--name-only", "HEAD", SHA),
+    ("diff", SHA, "HEAD", "--name-only"),
+    ("diff", "--name-only", SHA, "HEAD", "--output=x"),
+    ("diff", "--name-only", SHA, "HEAD", "--", "a.py"),
+    ("diff", "--name-only", f"{SHA}..HEAD"),
+    ("diff", "--name-only", SHA.upper(), "HEAD"),
+    ("diff", "--name-only", SHA[:6], "HEAD"),
+    ("diff", "--name-only", "main", "HEAD"),
+    ("diff", "--name-only", SHA + "\n", "HEAD"),
+    ("diff", "--name-status", SHA, "HEAD"),
+    ("diff", "--name-only", SHA, SHA),
+    ("diff", "--name-only", "--ext-diff", SHA, "HEAD"),
+    ("rev-list", "--max-parents=0"),
+    ("rev-list", "--max-parents=0", "--all"),
+    ("rev-list", "--max-parents=0", SHA),
+    ("rev-list", "--max-parents=1", "HEAD"),
+    ("rev-list", "HEAD", "--max-parents=0"),
+    ("log", "--max-parents=0", "HEAD"),
+    ("rev-list", "--max-parents=0", "HEAD", "--format=%GS"),
+    ("merge-base", SHA, SHA),
+    ("merge-base", "--is-ancestor", SHA, "HEAD"),
+    ("merge-base", "--is-ancestor", SHA),
+    ("merge-base", "--octopus", SHA, SHA),
+])
+def test_freshness_near_misses_rejected(args):
+    with pytest.raises(ValueError):
+        gitsafe.check_args(args)

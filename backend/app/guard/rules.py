@@ -20,7 +20,9 @@ the temp folders below (a file strictly inside one can vanish).
 ``Verdict{decision, hits}``  ``decision`` is ``"deny"`` if any hit is hard
 (``hard`` = never approvable) or is ``mcp-block``; else ``"approve"`` (a person
 must approve it live) if there is any hit; else ``"allow"``. Hits are listed
-hard first, then confirmable, de-duplicated by rule id.
+hard first, then confirmable, de-duplicated by rule id. ``writes`` (phase 7d): for an
+allowed Bash/Monitor command, the files the parse found it writing (absolute real
+paths, sorted, the first ``WRITES_MAX``; ``/dev/...`` left out); empty for anything else.
 
 ``Hit{rule_id, reason, hard, summary}``  ``reason`` is a plain sentence for
 people and the agent; ``summary`` is the command, file path or MCP call
@@ -682,13 +684,19 @@ class Hit:
         return asdict(self)
 
 
+WRITES_MAX = 50  # files of an allowed shell command returned with its verdict (phase 7d)
+
+
 @dataclass
 class Verdict:
     decision: str  # "allow" | "deny" | "approve"
     hits: list = field(default_factory=list)
+    # phase 7d: an allowed shell command's written files (absolute real paths, sorted, the first WRITES_MAX) -
+    # what check_write recorded, for the hook's decision notes; empty otherwise
+    writes: list = field(default_factory=list)
 
     def to_dict(self):
-        return {"decision": self.decision, "hits": [h.to_dict() for h in self.hits]}
+        return {"decision": self.decision, "hits": [h.to_dict() for h in self.hits], "writes": list(self.writes)}
 
 
 def _short(text):
@@ -4366,6 +4374,7 @@ def _order(hits):
 def evaluate(tool_name, tool_input, policy, cwd):
     """Decide one tool call. See the module docstring."""
     tool_name = str(tool_name or "")
+    shell = None
     ctx = _Ctx(policy, cwd)
     start = _real(os.path.abspath(str(cwd))) if cwd else ctx.project
     ctx.start = start
@@ -4377,7 +4386,8 @@ def evaluate(tool_name, tool_input, policy, cwd):
     elif tool_name in _BASH_TOOLS:
         command = tool_input.get("command")
         command = command if isinstance(command, str) else ("" if command is None else str(command))
-        _Bash(ctx, command).run(command, start)
+        shell = _Bash(ctx, command)
+        shell.run(command, start)
     elif tool_name in _UNSUPPORTED_SHELLS:
         ctx.hit("unsupported-shell", True, f"{tool_name}: {_short(str(tool_input.get('command', '')))}")
     elif tool_name in _FILE_TOOLS:
@@ -4418,7 +4428,10 @@ def evaluate(tool_name, tool_input, policy, cwd):
         decision = "approve"
     else:
         decision = "allow"
-    return Verdict(decision, hits)
+    writes = []
+    if decision == "allow" and shell is not None:
+        writes = sorted(p for p in shell.written if isinstance(p, str) and not p.startswith("/dev/"))[:WRITES_MAX]
+    return Verdict(decision, hits, writes)
 
 
 def _main():

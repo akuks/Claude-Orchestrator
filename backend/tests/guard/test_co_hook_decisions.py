@@ -116,9 +116,13 @@ def test_write_multiedit_notebook_get_notes(drun):
     assert [r["ids"] for r in notes(drun)] == [[20]] * 3
 
 
-def test_bash_gets_no_note(drun):
-    assert drun(bash("cat src/billing.py > src/billing.py")) is None
+def test_bash_read_gets_no_note_but_a_write_does(drun):
+    """Phase 7d (F45): a shell command that only reads gets nothing; one that writes a covered file gets the
+    same note as an edit (tests/guard/test_shell_decisions.py has the rest)."""
+    assert drun(bash("cat src/billing.py | wc -l")) is None
     assert notes(drun) == []
+    out = drun(bash("cat src/billing.py > src/billing.py"))
+    assert FRAME in str(out) and len(notes(drun)) == 1
 
 
 def test_denied_edit_gets_no_note(drun):

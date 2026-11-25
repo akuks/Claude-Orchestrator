@@ -52,6 +52,9 @@ remote's lazy fetch of a missing object), so every such call goes through
 * the gate code-state hash's two reads: ``diff`` with exactly
   ``--no-ext-diff --no-textconv --binary HEAD`` and ``ls-files`` with exactly
   ``--others --exclude-standard -z`` (each any order, nothing else);
+* the code map freshness check (phase 7d): ``diff --name-only <hex> HEAD``, exactly that order (the caller
+  bounds it with its timeout and reads only what it needs), and the repository's first commit: ``rev-list
+  --max-parents=0 HEAD``, exactly;
 * the typed stage outputs' commit check: ``rev-parse --verify --quiet
   <hex>^{commit}``, exactly that order (hex is 7-40 lowercase digits).
 
@@ -150,6 +153,11 @@ def check_args(args) -> None:
     if cmd == "ls-files" and sorted(rest) == sorted(LS_FILES_OTHERS_OPTIONS):
         return
     if cmd == "diff" and sorted(rest) == sorted(DIFF_OPTIONS):
+        return
+    if cmd == "diff" and len(rest) == 3 and rest[0] == "--name-only" and _SHA_RE.fullmatch(rest[1]) \
+            and rest[2] == "HEAD":
+        return
+    if cmd == "rev-list" and rest == ["--max-parents=0", "HEAD"]:
         return
     if cmd == "merge-base" and len(rest) == 3 and rest[0] == "--is-ancestor" and all(_SHA_RE.match(a) for a in rest[1:]):
         return
