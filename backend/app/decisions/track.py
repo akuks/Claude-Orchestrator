@@ -25,6 +25,7 @@ import logging
 from datetime import datetime, timedelta, timezone
 
 from sqlalchemy import and_, case, exists, func, or_, select, update
+from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import aliased
 
 from .. import flowgraph
@@ -93,16 +94,22 @@ async def record_shown(task_id: str, numbers: list[int], shown_at: datetime | No
     if not numbers:
         return False
     try:
-        async with SessionLocal() as s:
+        async with SessionLocal() as s:  # reads
             task = await s.get(Task, task_id)
             project_id = await effective_project_id(s, task) if task is not None else None
-            if not project_id:
-                return False
-            at = shown_at or _now()
-            await _add_rows(s, [{"project_id": project_id, "decision_number": n, "task_id": task_id,
-                                 "shown_at": at, "retried": False} for n in numbers])
-            await s.commit()
-            return True
+        if not project_id:
+            return False
+        at = shown_at or _now()
+        rows = [{"project_id": project_id, "decision_number": n, "task_id": task_id, "shown_at": at,
+                 "retried": False} for n in numbers]
+
+        async def write():
+            async with SessionLocal() as s:  # one short write
+                await _add_rows(s, rows)
+                await s.commit()
+
+        await _retry_locked(write)
+        return True
     except Exception as e:  # noqa: BLE001 - the track record never stops a run
         log.warning("decision track: recording a showing failed for %s: %s", task_id, e)
         return False
@@ -186,15 +193,66 @@ _COLS = (Task.id, Task.status, Task.attempt, Task.workflow_run_id, Task.stage_in
          Task.tags)
 
 
-async def _write(s, rows, run: WorkflowRun | None, fix_tasks: set) -> None:
+LOCK_RETRIES = 3  # SQLite "database is locked": tries again this many times, then gives up
+LOCK_BACKOFF = 0.05  # seconds, doubled each time
+
+
+def _locked_error(e: Exception) -> bool:
+    return isinstance(e, OperationalError) and "locked" in str(e).lower()
+
+
+async def _retry_locked(fn):
+    """Run ``fn`` (one short write transaction); on SQLite "database is locked" try again up to LOCK_RETRIES
+    times with a short backoff, then raise (callers log and give up)."""
+    for k in range(LOCK_RETRIES + 1):
+        try:
+            return await fn()
+        except Exception as e:  # noqa: BLE001
+            if not _locked_error(e) or k == LOCK_RETRIES:
+                raise
+            await asyncio.sleep(LOCK_BACKOFF * (2 ** k))
+
+
+def _changes(rows, current: dict, run: WorkflowRun | None, fix_tasks: set) -> dict[str, dict]:
+    """task id -> the values to write, only for tasks whose showings would change (pure: no database).
+    ``current``: task id -> [(outcome, retried)] of its showings."""
+    out: dict[str, dict] = {}
+    for t in rows:
+        new = outcome_of(t, run, fix_tasks)
+        retried = _int(t.attempt) > 0
+        have = current.get(t.id) or []
+        if all((new is None or o == new) and bool(r) == retried for o, r in have):
+            continue
+        values = {"retried": retried}
+        if new is not None:
+            values["outcome"] = new
+        out[t.id] = values
+    return out
+
+
+async def _apply(changes: dict[str, dict]) -> None:
+    """One short write transaction: only the UPDATE statements, in task id order, then commit at once."""
     now = _now()
-    for t in sorted(rows, key=lambda r: r.id):  # one order: concurrent writers never deadlock
-        out = outcome_of(t, run, fix_tasks)
-        values = {"retried": _int(t.attempt) > 0}
-        if out is not None:
-            values.update(outcome=out, settled_at=now)
-        await s.execute(update(DecisionShowing).where(DecisionShowing.task_id == t.id).values(**values)
-                        .execution_options(synchronize_session=False))
+
+    async def go():
+        async with SessionLocal() as s:
+            for tid in sorted(changes):  # one order: concurrent writers never deadlock
+                values = dict(changes[tid])
+                if "outcome" in values:
+                    values["settled_at"] = now
+                await s.execute(update(DecisionShowing).where(DecisionShowing.task_id == tid).values(**values)
+                                .execution_options(synchronize_session=False))
+            await s.commit()
+
+    await _retry_locked(go)
+
+
+async def _current(s, where) -> dict[str, list]:
+    cur: dict[str, list] = {}
+    for tid, o, r in (await s.execute(select(DecisionShowing.task_id, DecisionShowing.outcome,
+                                             DecisionShowing.retried).where(where))).all():
+        cur.setdefault(tid, []).append((o, r))
+    return cur
 
 
 def _has_showing():
@@ -202,20 +260,25 @@ def _has_showing():
 
 
 async def _settle_run_now(run_id: str) -> None:
+    """Decide with reads only (a run without showings stops here), then write only what changes."""
     async with SessionLocal() as s:
+        in_run = DecisionShowing.task_id.in_(select(Task.id).where(Task.workflow_run_id == run_id))
+        current = await _current(s, in_run)
+        if not current:
+            return
         run = await s.get(WorkflowRun, run_id)
         rows = (await s.execute(select(*_COLS).where(Task.workflow_run_id == run_id).order_by(Task.id))).all()
-        fix_tasks = {(r.stage_index, _int(r.stage_attempt)) for r in rows
-                     if r.stage_index is not None and isinstance(r.tags, list) and "fix" in r.tags}
-        shown = set((await s.execute(select(DecisionShowing.task_id).join(Task, Task.id == DecisionShowing.task_id)
-                                     .where(Task.workflow_run_id == run_id))).scalars().all())
-        await _write(s, [r for r in rows if r.id in shown], run, fix_tasks)
-        await s.commit()
+    fix_tasks = {(r.stage_index, _int(r.stage_attempt)) for r in rows
+                 if r.stage_index is not None and isinstance(r.tags, list) and "fix" in r.tags}
+    changes = _changes([r for r in rows if r.id in current], current, run, fix_tasks)
+    if changes:
+        await _apply(changes)
 
 
 async def settle_run(run_id: str) -> None:
-    """Settle every showing task of a workflow run. Serialized per run: one in flight, at most one waiting
-    (it reads the newest state after the one in flight); further calls meanwhile are dropped. Never raises."""
+    """Settle every showing task of a workflow run. Serialized per run (the lock is taken before any session is
+    opened): one in flight, at most one waiting (it reads the newest state after the one in flight); further
+    calls meanwhile are dropped. Never raises."""
     if _RUN_QUEUED.get(run_id, 0) >= 2:
         return
     _RUN_QUEUED[run_id] = _RUN_QUEUED.get(run_id, 0) + 1
@@ -235,18 +298,23 @@ async def settle_run(run_id: str) -> None:
 
 
 async def settle_tasks(task_ids: list[str]) -> None:
-    """Settle the showings of these tasks (a workflow task: its whole run, once per run). Never raises."""
+    """Settle the showings of these tasks (a workflow task: its whole run, once per run). Reads first (tasks
+    without showings: nothing is written), then one short write per chunk with changes. Never raises."""
     if not task_ids:
         return
     run_ids: set[str] = set()
     try:
-        async with SessionLocal() as s:
-            for k in range(0, len(task_ids), SETTLE_CHUNK):
-                rows = (await s.execute(select(*_COLS).where(Task.id.in_(task_ids[k:k + SETTLE_CHUNK]),
-                                                             _has_showing()).order_by(Task.id))).all()
+        for k in range(0, len(task_ids), SETTLE_CHUNK):
+            chunk = task_ids[k:k + SETTLE_CHUNK]
+            async with SessionLocal() as s:
+                rows = (await s.execute(select(*_COLS).where(Task.id.in_(chunk), _has_showing())
+                                        .order_by(Task.id))).all()
                 run_ids |= {r.workflow_run_id for r in rows if r.workflow_run_id}
-                await _write(s, [r for r in rows if not r.workflow_run_id], None, set())
-            await s.commit()
+                plain = [r for r in rows if not r.workflow_run_id]
+                current = await _current(s, DecisionShowing.task_id.in_([r.id for r in plain])) if plain else {}
+            changes = _changes(plain, current, None, set())
+            if changes:
+                await _apply(changes)
     except Exception as e:  # noqa: BLE001
         log.warning("decision track: settling failed for %s: %s", task_ids[:3], e)
     for rid in sorted(run_ids):
@@ -338,27 +406,33 @@ async def backfill(project_id: str) -> int:
     added, last_id = 0, 0
     touched: set[str] = set()
     while True:
-        async with SessionLocal() as s:
+        async with SessionLocal() as s:  # reads
             events = (await s.execute(
                 select(TaskEvent.id, TaskEvent.task_id, TaskEvent.payload, TaskEvent.created_at)
                 .join(Task, Task.id == TaskEvent.task_id)
                 .outerjoin(root, root.id == Task.root_id)
                 .where(TaskEvent.type == "decision_note", TaskEvent.id > last_id, in_project)
                 .order_by(TaskEvent.id).limit(BATCH))).all()
-            if not events:
-                break
-            last_id = events[-1].id
-            first: dict[tuple[str, int], datetime] = {}
-            for _, tid, payload, at in events:
-                for n in clean_ids(payload.get("ids") if isinstance(payload, dict) else None):
-                    if (tid, n) not in first:  # ordered by id: the earliest of this batch
-                        first[(tid, n)] = at
-            touched |= {t for t, _ in first}
-            if first:
-                added += await _add_rows(s, [
-                    {"project_id": project_id, "decision_number": n, "task_id": t, "shown_at": at or _now(),
-                     "retried": False} for (t, n), at in first.items()])
-            await s.commit()
+        if not events:
+            break
+        last_id = events[-1].id
+        first: dict[tuple[str, int], datetime] = {}
+        for _, tid, payload, at in events:
+            for n in clean_ids(payload.get("ids") if isinstance(payload, dict) else None):
+                if (tid, n) not in first:  # ordered by id: the earliest of this batch
+                    first[(tid, n)] = at
+        touched |= {t for t, _ in first}
+        if first:
+            rows = [{"project_id": project_id, "decision_number": n, "task_id": t, "shown_at": at or _now(),
+                     "retried": False} for (t, n), at in first.items()]
+
+            async def write(rows=rows):
+                async with SessionLocal() as s:  # one short write per batch
+                    n = await _add_rows(s, rows)
+                    await s.commit()
+                    return n
+
+            added += await _retry_locked(write)
         if len(events) < BATCH:
             break
     await settle_tasks(sorted(touched))

@@ -167,7 +167,8 @@ async def _wf(pid, gate_state: dict, extra_stages=0) -> tuple[str, list[str]]:
     """A run [agent (two tasks), gate] with the gate in `gate_state`; both agent tasks completed and shown D-1."""
     stages = [{"name": "Dev", "items": [{"agent": "a", "prompt": "x"}, {"agent": "b", "prompt": "y"}]}, _gate(pid)]
     async with SessionLocal() as s:
-        run = WorkflowRun(workflow_id="w", name="tr", input="", stages=stages, project_ids=[pid], status="running",
+        # not an active run: the app's own runner (ticking in the background) leaves it alone
+        run = WorkflowRun(workflow_id="w", name="tr", input="", stages=stages, project_ids=[pid], status="completed",
                           current_stage=1, stage_state={"0": {"status": "done"}, "1": gate_state})
         s.add(run)
         await s.commit()
@@ -681,3 +682,125 @@ def test_record_shown_true_only_after_commit(client, monkeypatch):
     assert [r.decision_number for r in _run(_rows(tid2))] == [3]
     assert 3 in w._usage_spool[tid2]["recorded"]
     guard_runtime.remove_task_dir(tid2)
+
+
+# ---- settles never hold SQLite write locks ----------------------------------------------------------------
+
+
+def test_settle_decides_with_reads_and_writes_only_changes(client, monkeypatch):
+    """No showings -> no write at all; a second settle with nothing new -> no write."""
+    writes = []
+    real = track._apply
+
+    async def spy(changes):
+        writes.append(sorted(changes))
+        await real(changes)
+
+    monkeypatch.setattr(track, "_apply", spy)
+
+    async def go():
+        pid = await _project()
+        bare = await _task(pid, status=Status.COMPLETED)  # no showings
+        async with SessionLocal() as s:
+            run = WorkflowRun(workflow_id="w", name="tr", input="", stages=[_gate(pid)], project_ids=[pid],
+                              status="completed", current_stage=0, stage_state={"0": {"status": "passed"}})
+            s.add(run)
+            await s.commit()
+            empty_run = run.id
+        await track.settle_tasks([bare])
+        await track.settle_run(empty_run)
+        assert writes == []
+        rid, tids = await _wf(pid, {"status": "passed"})
+        await track.settle_run(rid)
+        await track.settle_run(rid)  # nothing changed
+        return tids
+
+    tids = _run(go())
+    assert writes == [sorted(tids)]
+
+
+def test_locked_database_is_retried_then_given_up(client, monkeypatch, caplog):
+    import logging
+
+    from sqlalchemy.exc import OperationalError
+
+    monkeypatch.setattr(track, "LOCK_BACKOFF", 0.001)
+    calls = [0]
+
+    def locked():
+        return OperationalError("UPDATE", {}, Exception("database is locked"))
+
+    async def go(fail_times):
+        calls[0] = 0
+
+        async def fn():
+            calls[0] += 1
+            if calls[0] <= fail_times:
+                raise locked()
+            return "ok"
+
+        return await track._retry_locked(fn)
+
+    assert _run(go(3)) == "ok" and calls[0] == 4
+    with pytest.raises(OperationalError):
+        _run(go(9))
+    assert calls[0] == 4  # 1 try + 3 retries
+
+    async def other():
+        raise ValueError("not a lock")
+
+    with pytest.raises(ValueError):
+        _run(track._retry_locked(other))
+
+    # a settle that keeps hitting the lock logs and gives up (never raises)
+    async def always_locked(changes):
+        async def fn():
+            raise locked()
+        await track._retry_locked(fn)
+
+    monkeypatch.setattr(track, "_apply", always_locked)
+
+    async def settle():
+        pid = await _project()
+        rid, tids = await _wf(pid, {"status": "passed"})
+        await track.settle_run(rid)
+        return tids
+
+    with caplog.at_level(logging.WARNING):
+        tids = _run(settle())
+    assert _run(_outcome(tids[0])) == [(1, None, False)]
+    assert any("settling run" in r.getMessage() for r in caplog.records)
+
+
+def test_settles_running_alongside_another_writer_never_break_it(client):
+    """A writer doing read-then-write transactions while settles of the same run keep writing: every one of
+    its commits succeeds."""
+
+    async def go():
+        pid = await _project()
+        rid, tids = await _wf(pid, {"status": "passed"})
+        states = [{"status": "fixing", "fix_round": 1}, {"status": "passed"}, {"status": "failed", "reason": "x"}]
+        errors = []
+
+        async def writer():
+            for k in range(30):
+                try:
+                    async with SessionLocal() as s:
+                        run = await s.get(WorkflowRun, rid)  # read first, then write: the risky shape
+                        run.stage_state = {"0": {"status": "done"}, "1": states[k % 3]}
+                        t = await s.get(Task, tids[0])
+                        t.result_text = f"w{k}"
+                        await s.commit()
+                except Exception as e:  # noqa: BLE001
+                    errors.append(repr(e))
+                track.spawn_settle_run(rid)
+                track.spawn_settle_task(tids[1])
+                await asyncio.sleep(0)
+
+        await asyncio.gather(writer(), *(track.settle_run(rid) for _ in range(5)))
+        await track.drain()
+        return errors, await _outcome(tids[0])
+
+    errors, out = _run(go())
+    assert errors == []
+    assert out[0][1] in ("fixed", "failed", "passed")
