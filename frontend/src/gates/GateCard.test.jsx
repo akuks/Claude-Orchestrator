@@ -156,3 +156,13 @@ describe('GateCard', () => {
     expect(c.querySelector('[data-testid="gate-fix-attempts"]')).toBeNull()
   })
 })
+
+describe('gateLead status words', () => {
+  it('uses the server word for a lock wait and an interrupted check, and its own words without one', () => {
+    expect(gateLead({ status: 'held', status_word: 'Waiting its turn' }, []).text).toBe('Waiting its turn')
+    expect(gateLead({ status: 'running', status_word: 'Interrupted — will continue' }, []).text).toBe('Interrupted — will continue')
+    expect(gateLead({ status: 'running', status_word: 'Running' }, []).text).toBe('Running')
+    expect(gateLead({ status: 'held' }, []).text).toBe('On hold — waiting until it is ready to run')
+    expect(gateLead({ status: 'running' }, []).text).toBe('Running the check…')
+  })
+})

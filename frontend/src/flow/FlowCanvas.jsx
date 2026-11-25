@@ -33,7 +33,7 @@ export const ADD_CHOICES = [
   { kind: 'approval', label: 'Ask a person', icon: <UserOutlined /> },
 ]
 
-function Box({ kind, title, sub, mono, retry, handsOver, outputs, status, selected, error, label, onClick, mini, step, item, small }) {
+function Box({ aheadMark, word, kind, title, sub, mono, retry, handsOver, outputs, status, selected, error, label, onClick, mini, step, item, small }) {
   const cls = [
     'co-flow-box',
     `co-flow-k-${kind}`,
@@ -46,7 +46,7 @@ function Box({ kind, title, sub, mono, retry, handsOver, outputs, status, select
     .filter(Boolean)
     .join(' ')
   const badges = mini ? [] : badgeWords(kind, { retry, outputs: outputs || [] })
-  const words = [label, status ? STATUS_WORD[status] : null, error ? 'needs attention' : null, ...badges.map((b) => b.toLowerCase())]
+  const words = [label, word || (status ? STATUS_WORD[status] : null), error ? 'needs attention' : null, aheadMark ? 'approved ahead' : null, ...badges.map((b) => b.toLowerCase())]
     .filter(Boolean)
     .join(', ')
   const retryWord = badges.find((b) => !b.startsWith('Hands over'))
@@ -83,13 +83,18 @@ function Box({ kind, title, sub, mono, retry, handsOver, outputs, status, select
           {STATUS_ICON[status] || null}
         </span>
       )}
+      {aheadMark && (!status || status === 'next') && (
+        <span className="co-flow-dot co-flow-dot-ahead" data-testid="flow-ahead" aria-hidden="true">
+          <CheckOutlined />
+        </span>
+      )}
       {error && <span className="co-flow-errdot" aria-hidden="true" title="Needs attention" />}
     </>
   )
   const data = { 'data-testid': 'flow-box', 'data-step': step, 'data-item': item == null ? '' : item, 'data-kind': kind, 'data-status': status || undefined }
   if (!onClick)
     return (
-      <div className={cls} title={label} {...data}>
+      <div className={cls} title={word || label} {...data}>
         {body}
       </div>
     )
@@ -232,6 +237,9 @@ export default function FlowCanvas({
   pulseAdd = false,
   label = 'Workflow steps',
   center = false,
+  usageOf,
+  wordOf,
+  aheadOf,
 }) {
   const mini = size === 'mini'
   const edit = mode === 'edit' && !mini
@@ -263,19 +271,22 @@ export default function FlowCanvas({
     }
   }, [model.length])
 
-  // Keep the focused step (the run's current step, or the one being edited) in view.
+  // Keep the focused or selected step fully in view (with room for its badge and the edge
+  // fade). Only the canvas scrolls, never the page.
+  const keepStep = selected && selected.step != null ? selected.step : focusStep
   useEffect(() => {
-    if (focusStep == null || mini) return
+    if (keepStep == null || mini) return
     const sc = scroller.current
-    const col = sc?.querySelector(`[data-col="${focusStep}"]`)
+    const col = sc?.querySelector(`[data-col="${keepStep}"]`)
     if (!sc || !col) return
+    const room = 24
     const left = col.offsetLeft
     const w = col.offsetWidth
-    if (left >= sc.scrollLeft && left + w <= sc.scrollLeft + sc.clientWidth) return
-    const to = Math.max(0, left - (sc.clientWidth - w) / 2)
+    if (left - room >= sc.scrollLeft && left + w + room <= sc.scrollLeft + sc.clientWidth) return
+    const to = Math.max(0, left + w / 2 - sc.clientWidth / 2)
     if (typeof sc.scrollTo === 'function') sc.scrollTo({ left: to, behavior: 'smooth' })
     else sc.scrollLeft = to
-  }, [focusStep, mini, model.length])
+  }, [keepStep, mini, model.length])
 
   const stepStatus = (i) => (run && statusOf ? statusOf(i) : null)
   const linkState = (i) => {
@@ -327,7 +338,7 @@ export default function FlowCanvas({
       aria-label={label}
       data-testid="flow-canvas"
     >
-      <div className="co-flow-track" style={mini ? undefined : { paddingTop: 14 + geo.padTop, paddingBottom: 14 + geo.padBottom }} data-testid="flow-track">
+      <div className="co-flow-track" style={mini ? undefined : { paddingTop: 14 + geo.padTop, paddingBottom: 14 + geo.padBottom + (run && usageOf ? 22 : 0) }} data-testid="flow-track">
         {input ? (
           <Tooltip title={`Running on: ${input}`}>
             <span className="co-flow-pill-wrap" tabIndex={0} aria-label={`Start, running on: ${input}`}>
@@ -352,9 +363,12 @@ export default function FlowCanvas({
                     col.kind === 'agent'
                       ? `Step ${n}, ${many ? `Agent ${k + 1} of ${col.boxes.length}` : 'Agent'}: ${b.title}`
                       : `Step ${n}, ${KIND_WORD[col.kind]}: ${col.name}`
+                  const word = run && wordOf ? wordOf(i, b.item) : null
                   return (
                     <Box
                       key={k}
+                      word={word}
+                      aheadMark={run && aheadOf ? !!aheadOf(i) : false}
                       kind={col.kind}
                       mini={mini}
                       step={i}
@@ -373,6 +387,11 @@ export default function FlowCanvas({
                     />
                   )
                 })}
+                {run && !mini && usageOf && usageOf(i) && (
+                  <div className="co-flow-usage" data-testid="flow-usage">
+                    {usageOf(i)}
+                  </div>
+                )}
                 {col.kind === 'agent' && col.boxes.length > 0 && !mini && (
                   <div className="co-flow-colname" aria-hidden="true" title={col.name}>
                     {many ? `${col.name} · together` : col.name}

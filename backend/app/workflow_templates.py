@@ -23,8 +23,12 @@ def _gate(name: str) -> dict:
     return {"name": name, "kind": "gate", "run": ["npm test"], "timeout_min": 60, "before": []}
 
 
-def _approval(name: str, message: str) -> dict:
-    return {"name": name, "kind": "approval", "message": message}
+def _approval(name: str, message: str, ahead: bool = False) -> dict:
+    """An approval step; only ahead=True may be approved before the run reaches it."""
+    st = {"name": name, "kind": "approval", "message": message}
+    if ahead:
+        st["ahead"] = True
+    return st
 
 
 def _build(task: str) -> str:
@@ -46,7 +50,7 @@ TEMPLATES: dict[str, dict] = {
         "description": "Plan, approve the plan, build in parallel, run the tests, review, then approve the release.",
         "stages": [
             _agent("Plan", [("Planner", "Plan this change and write the briefs. Do not implement it.\n\nWork: {{input}}")]),
-            _approval("Approve plan", "Read the plan and approve it before anyone builds."),
+            _approval("Approve plan", "Read the plan and approve it before anyone builds.", ahead=True),
             _agent("Build", [
                 ("Builder", _build("Implement the first half of the plan, test first.\n\nPlan:\n{{stage1}}")),
                 ("Builder", _build("Implement the second half of the plan, test first.\n\nPlan:\n{{stage1}}")),

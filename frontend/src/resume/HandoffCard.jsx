@@ -4,6 +4,7 @@ import { CheckOutlined, DownOutlined, ReloadOutlined, RightOutlined } from '@ant
 import { api } from '../api'
 import { revealHidden } from '../guard/guard'
 import { stepLabel } from './resume'
+import { plainError } from '../runs/plainError'
 import { when } from '../time'
 import './resume.css'
 
@@ -23,6 +24,7 @@ function Row({ label, children, testid }) {
   )
 }
 
+const FILES_SHOWN = 5
 const ENDED = ['completed', 'failed', 'cancelled']
 
 // "Where it stands": the thread's handoff, above the run log. `status`: the
@@ -50,7 +52,11 @@ export default function HandoffCard({ taskId, onHandoff, canManage = false, stat
     api
       .getHandoff(taskId)
       .then((h) => live && apply(h))
-      .catch((e) => live && (setError(e.message), apply(null)))
+      .catch((e) => {
+        if (!live) return
+        if (e?.status !== 404) setError(plainError(e)) // 404: nothing saved yet, the normal state
+        apply(null)
+      })
     return () => {
       live = false
     }
@@ -80,7 +86,7 @@ export default function HandoffCard({ taskId, onHandoff, canManage = false, stat
     try {
       apply(await fn(taskId))
     } catch (e) {
-      setError(e.message)
+      setError(plainError(e))
     } finally {
       setBusy(false)
     }
@@ -93,6 +99,7 @@ export default function HandoffCard({ taskId, onHandoff, canManage = false, stat
   const running = list(c.running)
   const waiting = list(c.waiting)
   const files = list(c.files)
+  const cautions = list(c.notes?.cautions).filter((x) => x && x.text)
   const temp = list(c.outside_docs)
   const commits = list(c.outside_commits)
   const isDone = handoff?.status === 'done'
@@ -142,6 +149,16 @@ export default function HandoffCard({ taskId, onHandoff, canManage = false, stat
               {waiting.length > 0 && (
                 <Row label="Waiting" testid="handoff-waiting">{waiting.map(clean).join('; ')}</Row>
               )}
+              {cautions.length > 0 && (
+                <Row label="Re-check before acting" testid="handoff-cautions">
+                  {cautions.map((x, i) => (
+                    <div key={i} className="co-resume-caution" data-testid="handoff-caution">
+                      <div>{clean(x.text)}</div>
+                      {x.measured && <div className="co-resume-meta">{clean(x.measured)}</div>}
+                    </div>
+                  ))}
+                </Row>
+              )}
               {c.notes && c.notes.text && (
                 <Row label="Claude's notes" testid="handoff-notes">
                   {clean(c.notes.text)}
@@ -154,7 +171,18 @@ export default function HandoffCard({ taskId, onHandoff, canManage = false, stat
               )}
               {files.length > 0 && (
                 <Row label="Files" testid="handoff-files">
-                  <span className="co-resume-mono">{files.map(clean).join('\n')}</span>
+                  {files.length > FILES_SHOWN && (
+                    <div className="co-resume-meta" data-testid="handoff-files-count">
+                      {files.length} files touched. Newest {FILES_SHOWN}:
+                    </div>
+                  )}
+                  <span className="co-resume-mono">{files.slice(0, FILES_SHOWN).map(clean).join('\n')}</span>
+                  {files.length > FILES_SHOWN && (
+                    <details data-testid="handoff-files-rest">
+                      <summary className="co-resume-meta">The full list</summary>
+                      <span className="co-resume-mono">{files.map(clean).join('\n')}</span>
+                    </details>
+                  )}
                 </Row>
               )}
               {temp.length > 0 && (

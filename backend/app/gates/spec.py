@@ -149,6 +149,7 @@ async def validate_stages(s, stages: list[dict]) -> list[dict]:
                 items.append(item)
             st["items"] = items
             st.pop("fix", None)
+            st.pop("ahead", None)
             out.append(st)
             continue
         st["kind"] = kind
@@ -194,5 +195,11 @@ async def validate_stages(s, stages: list[dict]) -> list[dict]:
         st.pop("auto_retry", None)
         if kind != "gate":
             st.pop("fix", None)
+        ahead = st.pop("ahead", None)
+        if kind == "approval" and ahead is not None:
+            if not isinstance(ahead, bool):
+                raise ValueError(f"Step '{name}': ahead must be true or false")
+            if ahead is True:
+                st["ahead"] = True  # may be approved before the run reaches it (opt-in)
         out.append(st)
     return out

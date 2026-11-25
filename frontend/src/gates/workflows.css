@@ -601,3 +601,19 @@ input.co-wf-step-name {
   border-color: var(--co-primary);
   outline: none;
 }
+
+.co-approval-muted {
+  font-size: 12px;
+  color: var(--co-text-muted);
+}
+.co-approval-ahead {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+/* The failure reason keeps the normal text colour so it stays readable on the dark red box. */
+.co-gate .ant-alert-error .ant-alert-message,
+.co-gate .ant-alert-error .ant-alert-description {
+  color: var(--co-text);
+}

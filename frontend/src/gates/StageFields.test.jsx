@@ -40,6 +40,15 @@ describe('StageFields', () => {
     expect(v.container.querySelector('[data-testid="agent-items"]')).toBeTruthy()
     await v.unmount()
   })
+  it('approval has a "Can be approved ahead" switch, off by default', async () => {
+    const v = await render(<Harness stage={{ name: 'a', kind: 'approval', message: 'ok?' }} />)
+    const sw = v.container.querySelector('[data-testid="approval-ahead-switch"]')
+    expect(sw.getAttribute('aria-checked')).toBe('false')
+    expect(v.container.textContent).toContain('Can be approved ahead')
+    expect(v.container.textContent).toContain('Leave off for release approvals.')
+    await v.unmount()
+  })
+
   it('approval shows message', async () => {
     const v = await render(<Harness stage={{ name: 'a', kind: 'approval', message: 'ok?' }} />)
     await flush()

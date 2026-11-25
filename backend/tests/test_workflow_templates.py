@@ -71,3 +71,12 @@ def test_file_name_pattern_refuses_a_trailing_newline():
     from app.workflow_templates import FILE_RE
     assert FILE_RE.fullmatch("good.md")
     assert not FILE_RE.fullmatch("good.md\n")
+
+
+def test_only_approve_plan_opts_in_to_approving_ahead():
+    """Phase 7a: approving ahead is opt-in; only "Approve plan" carries ahead: true, release
+    approvals carry no flag (refused)."""
+    by = {(k, st["name"]): st for k, t in TEMPLATES.items() for st in t["stages"] if st.get("kind") == "approval"}
+    assert set(by) == {("planned", "Approve plan"), ("planned", "Approve release"), ("ui", "Approve")}
+    assert by[("planned", "Approve plan")]["ahead"] is True
+    assert "ahead" not in by[("planned", "Approve release")] and "ahead" not in by[("ui", "Approve")]

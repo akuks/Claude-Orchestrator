@@ -62,7 +62,11 @@ def _run(pid, stages=None, state=None, status="running", current=0, created_by=N
         created_by=created_by,
     )
     _add(run)
+    _CREATED.append(run.id)
     return run.id
+
+
+_CREATED: list[str] = []
 
 
 def _gate_row(run_id, log_name=None, i=0):
@@ -104,6 +108,22 @@ def _quiet_runner(client, monkeypatch):
         return None
 
     monkeypatch.setattr(app.state.workflow_runner, "_tick", _no_tick)
+    yield
+    # End the fake runs this test left active, so the app's background runner (ticking again in
+    # later tests) never hands out their gates (they would wait for one project's check lock and
+    # run later, inside another test's fakes).
+    ids, _CREATED[:] = list(_CREATED), []
+
+    async def end():
+        async with SessionLocal() as s:
+            for rid in ids:
+                run = await s.get(WorkflowRun, rid)
+                if run is not None and run.status in ("pending", "running", "paused"):
+                    run.status = "failed"
+            await s.commit()
+
+    if ids:
+        asyncio.run(end())
 
 
 def _patch(monkeypatch, **kw):

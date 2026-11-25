@@ -1,6 +1,8 @@
 import { describe, expect, it } from 'vitest'
 import {
   addAgent,
+  plainDuration,
+  usageLine,
   boxKey,
   boxOffsets,
   columnHeight,
@@ -173,5 +175,23 @@ describe('run statuses', () => {
     expect(out.map((o) => o.status)).toEqual(['waiting', 'waiting', 'done'])
     expect(out[0].items).toEqual(['waiting'])
     expect(out[2].fix).toBeNull()
+  })
+})
+
+describe('usageLine / plainDuration', () => {
+  it('uses short plain forms', () => {
+    expect(plainDuration(20)).toBe('under a minute')
+    expect(plainDuration(250)).toBe('4 min')
+    expect(plainDuration(3600)).toBe('1 h')
+    expect(plainDuration(7500)).toBe('2 h 5 min')
+    expect(plainDuration(null)).toBeNull()
+    expect(plainDuration(26 * 3600)).toBe('1 d 2 h')
+    expect(plainDuration(48 * 3600)).toBe('2 d')
+  })
+  it('joins time and cost, hides a zero cost, and nothing for a step not started', () => {
+    expect(usageLine({ seconds: 250, cost_usd: 0.123 })).toBe('4 min · $0.12')
+    expect(usageLine({ seconds: 250, cost_usd: 0 })).toBe('4 min')
+    expect(usageLine({ seconds: 0, cost_usd: 0 })).toBe('under a minute')
+    expect(usageLine(null)).toBeNull()
   })
 })

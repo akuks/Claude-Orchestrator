@@ -22,7 +22,7 @@ from ..gates import executor, spec, test_results, totals
 from ..models import Agent, Project, Task, Workflow, WorkflowGateRun, WorkflowRun
 from ..redaction import clean_text, env_values, mask_values
 from .. import workflow_templates as wft
-from ..workflow_runner import ACTIVE_RUN, gate_status_text
+from ..workflow_runner import ACTIVE_RUN, _spent as _run_spent, gate_status_text
 from ..schemas import (
     BudgetRaise,
     LiveItemOut,
@@ -576,6 +576,9 @@ async def _held_others(s, p, run: WorkflowRun, visible) -> tuple[list[str], int]
     return seen[:_OTHERS_MAX], max(0, len(seen) - _OTHERS_MAX)
 
 
+GATE_ROWS_MAX = 200  # gate rows the run detail loads (newest first)
+
+
 @router.get("/runs/{run_id}")
 async def get_run(run_id: str, request: Request):
     """Run detail + its tasks grouped by stage (the board). Only the stage tasks
@@ -600,7 +603,7 @@ async def get_run(run_id: str, request: Request):
                 select(WorkflowGateRun)
                 .where(WorkflowGateRun.run_id == run.id)
                 .order_by(WorkflowGateRun.started_at.desc(), WorkflowGateRun.id.desc())
-                .limit(200)
+                .limit(GATE_ROWS_MAX)
             )
         ).scalars().all()
         hidden = {
@@ -619,16 +622,39 @@ async def get_run(run_id: str, request: Request):
         others: tuple[list[str], int] | None = None
         if held:
             others = await _held_others(s, p, run, visible)
+        run_active = run.status in ACTIVE_RUN
+        gate_tasks = getattr(runner, "_gates", None) or {}
+
+        def task_alive(i: int) -> bool:
+            t = gate_tasks.get((run.id, i))
+            return t is not None and not t.done()
         for i, st in enumerate(run.stages or []):
             kind = spec.stage_kind(st)
+            if str(i) in stage_state:
+                e = stage_state[str(i)]
+                e["_lock_wait"] = bool(e.pop("lock_wait", None))  # internal; read by _status_word below
+                if isinstance(e.get("ahead"), dict):  # who approved ahead, by name only
+                    e["ahead"] = {"by_name": e["ahead"].get("by_name"), "at": e["ahead"].get("at")}
+                elif "ahead" in e:
+                    e.pop("ahead")
             if kind == "agent":
                 if str(i) in stage_state:
                     stage_state[str(i)].pop("expects", None)  # internal: task ids -> output names
+                    word = _status_word(kind, stage_state[str(i)], False, run_active and i == run.current_stage, False)
+                    stage_state[str(i)].pop("_lock_wait", None)
+                    if word:
+                        stage_state[str(i)]["status_word"] = word
                 continue
             entry = stage_state.setdefault(str(i), {})
+            lv = None
             if kind == "gate":
                 lv = live if live and live.get("stage_index") == i else None
                 entry["status_text"] = gate_status_text(st, entry, lv)
+            word = _status_word(kind, entry, bool(lv), run_active and i == run.current_stage,
+                                kind == "gate" and task_alive(i))
+            entry.pop("_lock_wait", None)
+            if word:
+                entry["status_word"] = word
             if i in hidden:
                 for k in ("summary", "hits", "reason", "others", "others_more", "flaky", "decided_by",
                           "fix_task", "fix_check", "fix_pending", "fix_round", "fail_reason"):
@@ -636,8 +662,12 @@ async def get_run(run_id: str, request: Request):
                 entry["hidden"] = True
             elif entry.get("status") == "held" and others is not None:
                 entry["others"], entry["others_more"] = others
-        tot = await totals.compute(s, run)
+        # The total and the per-step figures count the same tasks: the ones this viewer may see.
+        tot = await totals.compute(s, run, tasks)
         tot["line"] = totals.line(tot)
+        step_usage = await totals.per_step(s, run, tasks, grows, hidden,
+                                           gates_complete=len(grows) < GATE_ROWS_MAX)
+        spent = await _run_spent(s, run)
     out = run_out.model_dump()
     out["stage_state"] = stage_state
     return {
@@ -647,9 +677,31 @@ async def get_run(run_id: str, request: Request):
         "gate_runs": gate_runs,
         "live": live,
         "totals": tot,
-        "budget": {"spent": tot["cost_usd"], "budget_usd": run_out.budget_usd},
+        # The spending limit counts every task of the run, as the runner does.
+        "budget": {"spent": spent, "budget_usd": run_out.budget_usd},
         "log": out["log"],
+        "step_usage": step_usage,
     }
+
+
+def _status_word(kind: str, entry: dict, live: bool, current: bool, working: bool = False) -> str | None:
+    """Plain status words for the run view (F127). "Running" while this server has the gate's
+    process, or its gate task between commands (`working`); a gate marked running with
+    neither is "Interrupted — will continue" (the runner resumes it). None when the screen's
+    own word fits."""
+    status = entry.get("status")
+    if live or (working and status in ("waiting", "running")):
+        return "Running"
+    if status == "held":
+        # Only a wait for another run's checks; a pre-flight hold keeps the screen's own words.
+        return "Waiting its turn" if entry.get("_lock_wait") else None
+    if status in ("waiting_approval", "needs_approval"):
+        return "Waiting for approval"
+    if status == "failed":
+        return "Failed"
+    if kind == "gate" and status == "running" and current:
+        return "Interrupted — will continue"
+    return None
 
 
 def _gate_hidden(stage: dict, visible) -> bool:
@@ -719,6 +771,40 @@ async def allow_gate(run_id: str, i: int, request: Request):
     except ValueError as e:
         raise HTTPException(409, str(e)) from None
     return await _run_after(run_id)
+
+
+async def _stage_action(request: Request, run_id: str, i: int, call) -> WorkflowRunSummaryOut:
+    """A manage-role action on step i of a run: 404 for an unknown run or step, 403 without
+    the role, 409 with the runner's plain reason when the step is in the wrong state."""
+    p = request.state.principal
+    async with SessionLocal() as s:
+        _stage_at(await _require_run(s, p, run_id, manage=True), i)
+    try:
+        await call(p.user)
+    except ValueError as e:
+        raise HTTPException(409, str(e)) from None
+    return await _run_after(run_id)
+
+
+@router.post("/runs/{run_id}/stages/{i}/approve-ahead", response_model=WorkflowRunSummaryOut)
+async def approve_ahead(run_id: str, i: int, request: Request):
+    """Approve an approval step the run has not reached yet (idempotent)."""
+    runner = request.app.state.workflow_runner
+    return await _stage_action(request, run_id, i, lambda u: runner.approve_ahead(run_id, i, u))
+
+
+@router.delete("/runs/{run_id}/stages/{i}/approve-ahead", response_model=WorkflowRunSummaryOut)
+async def withdraw_ahead(run_id: str, i: int, request: Request):
+    """Withdraw an early approval (idempotent)."""
+    runner = request.app.state.workflow_runner
+    return await _stage_action(request, run_id, i, lambda u: runner.withdraw_ahead(run_id, i, u))
+
+
+@router.post("/runs/{run_id}/stages/{i}/rerun", response_model=WorkflowRunSummaryOut)
+async def rerun_from(run_id: str, i: int, request: Request):
+    """Run a completed or failed run again from step i."""
+    runner = request.app.state.workflow_runner
+    return await _stage_action(request, run_id, i, lambda u: runner.rerun_from(run_id, i, u))
 
 
 @router.post("/runs/{run_id}/budget", response_model=WorkflowRunSummaryOut)

@@ -38,7 +38,11 @@ HANDOFF_MAX_WORDS = 600
 FIELD_MAX = 200
 FILES_MAX = 50
 FILES_TRIMMED = 5
-FILES_SHOWN = 8  # files the injected text lists (forge v0.7.0); the card shows all FILES_MAX
+FILES_SHOWN = 5  # newest files the injected text names when there are more (forge v0.8.0 F129); the card shows all
+CAUTIONS_MAX = 6  # caution notes shown under "Re-check before acting" (3 from trim level 3)
+CAUTIONS_TRIMMED = 3
+CAUTION_TEXT_MAX = 160
+CAUTION_MEASURED_MAX = 120
 RECENT_ACTIONS = 8
 OTHERS_MAX = 2
 BEFORE_MAX = 4
@@ -360,6 +364,11 @@ def build(inp: HandoffInput) -> dict:
     noted.sort(key=lambda s: _aware(s["notes_updated_at"]))
     notes = noted[-1] if noted else None
     notes_text = clean_text(redact(notes["notes"], secrets)) if notes else None
+    cautions: list[dict] = []
+    if notes_text:
+        notes_text, cautions = split_cautions(notes_text)
+        cautions = [{"text": f(c["text"], CAUTION_TEXT_MAX), "measured": f(c["measured"], CAUTION_MEASURED_MAX)}
+                    for c in cautions]
 
     roots = [inp.project_dir, *(s.get("path") for s in inp.sources or [] if isinstance(s, dict))]
     sp = step_progress(events, inp.workspace, notes_text, notes["notes_updated_at"] if notes else None, roots)
@@ -418,7 +427,8 @@ def build(inp: HandoffInput) -> dict:
         "last_reply": reply or None,
         "elsewhere": fl(touched["elsewhere"]),
         "outside_docs": fl(touched["outside_docs"]),
-        "notes": {"text": f(notes_text, NOTES_MAX_CHARS), "at": _iso(notes["notes_updated_at"])} if notes else None,
+        "notes": ({"text": f(notes_text, NOTES_MAX_CHARS), "at": _iso(notes["notes_updated_at"])}
+                  | ({"cautions": cautions} if cautions else {})) if notes else None,
         "recent": fl(logfmt.all_lines(events)[-RECENT_ACTIONS:]),
         "files": fl(touched["files"]),
         "others": fl((inp.others or [])[:OTHERS_MAX]),
@@ -429,6 +439,35 @@ def build(inp: HandoffInput) -> dict:
 
 
 # ---- render ----------------------------------------------------------------------------------
+
+
+_CAUTION = re.compile(r"^\s*(?:[-*\u2022]\s+)?caution:\s*(.*)$", re.I)
+_MEASURED = re.compile(r"^measured:\s*(.*)$", re.I)
+
+
+def split_cautions(text: str) -> tuple[str, list[dict]]:
+    """Take caution lines out of the notes (F131). A line counts when it starts with ``Caution:`` (any case,
+    optionally bulleted) and holds ``measured:``; its form is ``Caution: <text> | measured: <what, when> |
+    check again before acting``. Returns the notes without those lines and the cautions as
+    ``{"text", "measured"}`` (at most CAUTIONS_MAX; further or empty ones stay in the notes). They are
+    things to verify, never instructions."""
+    keep, out = [], []
+    for line in (text or "").splitlines():
+        m = _CAUTION.match(line)
+        if not m or "measured:" not in line.lower():
+            keep.append(line)
+            continue
+        parts = [p.strip() for p in m.group(1).split("|")]
+        body, measured = parts[0], ""
+        for p in parts[1:]:
+            mm = _MEASURED.match(p)
+            if mm:
+                measured = mm.group(1).strip()
+        if body and len(out) < CAUTIONS_MAX:
+            out.append({"text": body, "measured": measured})
+        else:
+            keep.append(line)  # past the cap or empty: stays an ordinary note, never dropped
+    return "\n".join(keep).strip(), out
 
 
 def clean_notes(text, secrets=None) -> str:
@@ -489,6 +528,11 @@ def _render(c: dict, level: int) -> str:
     if notes.get("text"):
         text = _words(notes["text"], NOTES_TRIMMED) if level >= 3 else notes["text"]
         out.append(f"Claude's notes (written {notes.get('at')}; re-check any caution before acting on it): {text}")
+    cautions = [x for x in notes.get("cautions") or [] if isinstance(x, dict) and x.get("text")]
+    if cautions:
+        out.append("Re-check before acting:")
+        for x in cautions[:CAUTIONS_TRIMMED if level >= 3 else CAUTIONS_MAX]:
+            out.append(f"- {x['text']}" + (f" (measured: {x['measured']})" if x.get("measured") else ""))
     children = c.get("children") or {}
     if children:
         field_("Child tasks", ", ".join(f"{n} {k}" for k, n in sorted(children.items())))
@@ -501,9 +545,11 @@ def _render(c: dict, level: int) -> str:
     if level < 1:
         items("Recent actions:", c.get("recent"))
     files = c.get("files") or []
-    shown = files[:FILES_TRIMMED] if level >= 2 else files[:FILES_SHOWN]
-    items("Files touched (newest first):", shown + ([f"(and {len(files) - len(shown)} more)"]
-                                                    if len(files) > len(shown) else []))
+    if len(files) > FILES_SHOWN:
+        items(f"{len(files)} files touched. Newest {FILES_SHOWN}:", files[:FILES_SHOWN])
+        out.append("The full list is on the task page.")
+    else:
+        items("Files touched (newest first):", files)
     items("Files outside the workspace that may vanish:", c.get("outside_docs"))
     if c.get("history_rewritten"):
         out.append("Commits made outside this run: unknown (history changed since the last save).")
@@ -531,10 +577,10 @@ def _cut_words(text: str, n: int) -> str:
 
 
 def render(content: dict, level: int = 0) -> str:
-    """The injected text at trim ``level``. Files: the newest FILES_SHOWN (8),
-    FILES_TRIMMED (5) from level 2. Levels are cumulative: 1 drops recent
-    actions, 2 files down to FILES_TRIMMED, 3 notes to 60 and the last reply
-    to 35 words, 4 drops also active). Over HANDOFF_MAX_WORDS, the next level
+    """The injected text at trim ``level``. Files: all when at most FILES_SHOWN (5), else
+    "N files touched. Newest 5:" and where the full list is. Levels are cumulative: 1 drops
+    recent actions, 2 (kept for callers; files are already 5), 3 notes to 60 words, the last
+    reply to 35 and cautions to 3, 4 drops also active). Over HANDOFF_MAX_WORDS, the next level
     is tried, and the last one is cut to the limit."""
     text = ""
     for lv in range(max(0, level), 5):
