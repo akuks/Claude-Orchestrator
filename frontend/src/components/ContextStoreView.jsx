@@ -17,6 +17,7 @@ import {
 } from 'antd'
 import { DeleteOutlined, EditOutlined, EyeOutlined, PlusOutlined, ReloadOutlined } from '@ant-design/icons'
 import { api } from '../api'
+import { plainError } from '../plainError'
 
 function DocModal({ open, doc, projects, isAdmin, onClose, onSaved }) {
   const [form] = Form.useForm()
@@ -116,18 +117,50 @@ function DocModal({ open, doc, projects, isAdmin, onClose, onSaved }) {
   )
 }
 
+function BrandGuideModal({ open, projects, onClose, onCreated }) {
+  const [pid, setPid] = useState(projects[0]?.id)
+  const [busy, setBusy] = useState(false)
+  const [err, setErr] = useState('')
+  useEffect(() => {
+    if (open) { setErr(''); setPid((cur) => (projects.some((p) => p.id === cur) ? cur : projects[0]?.id)) }
+  }, [open])
+  const create = async () => {
+    setBusy(true)
+    setErr('')
+    try {
+      onCreated(await api.brandGuideDoc(pid))
+    } catch (e) {
+      setErr(e?.status === 409 ? 'This project already has a brand guide.' : plainError(e))
+    } finally {
+      setBusy(false)
+    }
+  }
+  return (
+    <Modal open={open} title="Start from a template: Brand guide" onCancel={onClose} footer={null}>
+      <p>A starting brand guide your agents read when they build screens. You can edit everything after it is added.</p>
+      <Space direction="vertical" style={{ width: '100%' }}>
+        <Select style={{ width: '100%' }} value={pid} onChange={setPid} aria-label="Project" options={projects.map((p) => ({ value: p.id, label: p.name }))} />
+        <Button type="primary" loading={busy} disabled={!pid} onClick={create} data-testid="brand-guide-create">Add brand guide</Button>
+        {err && <Typography.Text type="danger" data-testid="brand-guide-error">{err}</Typography.Text>}
+      </Space>
+    </Modal>
+  )
+}
+
 export default function ContextStoreView({ projects = [], isAdmin = false }) {
   const [docs, setDocs] = useState([])
   const [loading, setLoading] = useState(false)
   const [editing, setEditing] = useState(null) // null=closed, {}=new, doc=edit
   const [previewFor, setPreviewFor] = useState(undefined)
   const [preview, setPreview] = useState(null)
+  const [brandOpen, setBrandOpen] = useState(false)
 
   const projName = (id) => projects.find((p) => p.id === id)?.name
   // Global docs: admins only. Project docs: maintainers of that project.
   const canWrite = (doc) =>
     isAdmin ||
     (doc.scope === 'project' && projects.find((p) => p.id === doc.project_id)?.my_role === 'maintainer')
+  const brandProjects = projects.filter((p) => !p.archived && (isAdmin || p.my_role === 'maintainer'))
   const canAdd = isAdmin || projects.some((p) => !p.archived && p.my_role === 'maintainer')
 
   const refresh = useCallback(async () => {
@@ -232,6 +265,11 @@ export default function ContextStoreView({ projects = [], isAdmin = false }) {
             Add doc
           </Button>
         )}
+        {brandProjects.length > 0 && (
+          <Button onClick={() => setBrandOpen(true)} data-testid="brand-guide-start">
+            Start from a template: Brand guide
+          </Button>
+        )}
         <Button icon={<ReloadOutlined />} onClick={refresh}>
           Refresh
         </Button>
@@ -263,6 +301,13 @@ export default function ContextStoreView({ projects = [], isAdmin = false }) {
         dataSource={docs}
         pagination={false}
         locale={{ emptyText: 'No knowledge docs yet. Add a runbook or conventions doc.' }}
+      />
+
+      <BrandGuideModal
+        open={brandOpen}
+        projects={brandProjects}
+        onClose={() => setBrandOpen(false)}
+        onCreated={(doc) => { setBrandOpen(false); refresh(); setEditing(doc) }}
       />
 
       <DocModal

@@ -13,7 +13,8 @@ from ..models import McpServer, SkillPack
 from .detect import Detected, valid_brand
 
 UI_PARAGRAPH = ("This project has a user interface. Before changing anything a user sees, load the frontend-design "
-                "skill (frontend-design:frontend-design) if you have it. {brand}")
+                "skill (frontend-design:frontend-design) if you have it. {brand} "
+                "If the project's Context Store has a Brand guide, read it.")
 BRAND_SET = "Also load the brand skill `{name}`."
 BRAND_FOUND = "Also load the project's brand skill."
 BRAND_UNKNOWN = "If your skills list has a brand or style skill for this project, load it too."
