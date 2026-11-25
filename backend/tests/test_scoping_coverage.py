@@ -315,6 +315,7 @@ def _bodies(world) -> dict:
         ("POST", "/context-docs"): {"path": f"cov/{_uid()}.md", "scope": "project",
                                     "project_id": i["project_id"]},
         ("PATCH", "/context-docs/{doc_id}"): {"body": "hijack"},
+        ("POST", "/context-docs/templates/brand"): {"project_id": i["project_id"]},
         ("POST", "/mcp/servers"): {"name": f"cov-m-{_uid()}", "command": "true", "scope": "project",
                                    "project": p["name"]},
         ("PATCH", "/mcp/servers/{server_id}"): {"enabled": False},

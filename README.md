@@ -257,6 +257,14 @@ single process (no `--workers`, no replicas).
 - **No migration.** **System health** gains a **Capacity** card, and each project gets an **Activity** tab. Nothing
   to configure.
 
+### UI checks (phase 7f)
+
+- **No migration.** The built-in **ui** workflow template changed (see [Workflow templates](#workflow-templates)).
+  Workflows already saved from it are untouched.
+- **New in the Recommended tab:** **Set up UI checks**, which starts a task that adds screenshot, accessibility and
+  Lighthouse checks to the project.
+- **New in the Context Store:** **Start from a template: Brand guide**.
+
 ### Small gaps (phase 7e)
 
 - **Migration `0023` runs on start.** It adds `mcp_servers.server_version`, filled in the next time each connected
@@ -1747,6 +1755,16 @@ Reviewer, Checker) plus approval and gate stages.
   save. The server creates the workflow, then the UI opens it in the editor.
   Import never runs anything.
 
+### The ui template
+
+Seven stages: **Direction** (Planner), **Approve look** (approval, can be approved ahead), **Build** (Builder), **Test**
+(check: `npm test`), **Screens**, **Design review** (Reviewer) and **Approve**.
+
+- **Screens** is a check that runs the project's own scripts `npm run test:ui` (screenshots), `npm run test:a11y`
+  (accessibility) and `npm run test:lighthouse`, with a 60 minute limit. The server runs no `npx <package>` for it.
+- **It needs the UI checks in the project first.** Use **Set up UI checks** on the project's Recommended tab, and
+  **Node 20 or newer**. The editor shows this as a note when you start from the template.
+
 ### Not covered
 
 - **Writing into project directories.** The server never writes a workflow file into a
@@ -2111,6 +2129,21 @@ Projects without one do not show it (`GET /projects/{id}/recommended` says `has_
   up to 120). When on, and the project has a user interface, one paragraph is added to
   the main session's ground rules and to every helper's start text, asking it to load the
   frontend-design skill and a brand skill if it has them.
+
+### Set up UI checks
+
+On the Recommended tab, maintainers see a **UI checks** card with **Set up UI checks**. After a question ("Start a task
+that adds the UI checks to this project? It commits on the current branch and never overwrites files.") it starts an
+ordinary task, with the usual guard, approvals and review, that adds the screenshot, accessibility and Lighthouse
+checks and their scripts, commits on the current branch and does not push. The card then shows **Task started** with a
+link to the task. Others see "Ask a maintainer to set up UI checks."
+(`POST /projects/{id}/ui-checks/setup`, maintainer only.)
+
+### Brand guide template
+
+In the **Context Store**, **Start from a template: Brand guide** (for the project's maintainers and admins) adds a
+project doc `brand/brand.md` for the chosen project and opens it for editing. If the project already has one, you see
+"This project already has a brand guide." (`POST /context-docs/templates/brand`.)
 
 ### To know
 
@@ -2750,6 +2783,11 @@ are, treat what they show as unconfirmed. Tick them off on your first live runs.
 15. **Small gaps (7e):** that `claude plugin validate` exists and answers as the **Guard plugin** check expects, and
     that the CLI sends `PostToolUseFailure` for a failed tool call (the guard writes its "done" line from it).
     ([System health](#system-health))
+16. **UI checks (7f):** that the browsers are installed where the checks find them (set `PLAYWRIGHT_BROWSERS_PATH` in the
+    project's environment), and that the **Screens** step runs the three scripts on a real project.
+    Screenshot baselines depend on the operating system: record them on the system that runs the checks with
+    `npm run test:ui:update`. Lighthouse needs the app to start on port 3000. Scores close to the thresholds can flicker
+    from one run to the next. ([Workflow templates](#workflow-templates))
 
 ---
 

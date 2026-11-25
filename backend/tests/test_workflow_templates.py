@@ -4,6 +4,7 @@ import uuid
 from app.database import SessionLocal
 from app.models import Project
 from app.routers.agents import PRESETS
+from app import ui_checks
 from app.gates import spec
 from app.workflow_templates import COMMIT_NOTE, GATE_HINT, TEMPLATES
 
@@ -32,7 +33,7 @@ def test_templates_validate_with_project(client, tmp_path):
         stages = [dict(st) for st in t["stages"]]
         for st in stages:
             if st.get("kind") == "gate":
-                assert st["run"] == ["npm test"] and "project" not in st
+                assert st["run"] in (["npm test"], ui_checks.GATE_COMMANDS) and "project" not in st
                 st["project"] = pid
 
         async def go():
@@ -77,6 +78,7 @@ def test_only_approve_plan_opts_in_to_approving_ahead():
     """Phase 7a: approving ahead is opt-in; only "Approve plan" carries ahead: true, release
     approvals carry no flag (refused)."""
     by = {(k, st["name"]): st for k, t in TEMPLATES.items() for st in t["stages"] if st.get("kind") == "approval"}
-    assert set(by) == {("planned", "Approve plan"), ("planned", "Approve release"), ("ui", "Approve")}
-    assert by[("planned", "Approve plan")]["ahead"] is True
+    assert set(by) == {("planned", "Approve plan"), ("planned", "Approve release"),
+                      ("ui", "Approve look"), ("ui", "Approve")}
+    assert by[("planned", "Approve plan")]["ahead"] is True and by[("ui", "Approve look")]["ahead"] is True
     assert "ahead" not in by[("planned", "Approve release")] and "ahead" not in by[("ui", "Approve")]
