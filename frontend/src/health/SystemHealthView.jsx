@@ -195,6 +195,60 @@ export function RunHistoryCard() {
   )
 }
 
+const gb = (n) => `${(n / 1073741824).toFixed(1)} GB`
+const runs = (n) => `${n} more ${n === 1 ? 'run' : 'runs'}`
+
+// "Capacity": how many more runs fit at once, in plain words.
+export function CapacityCard() {
+  const [c, setC] = useState(null)
+  const [error, setError] = useState(null)
+  useEffect(() => {
+    let off = false
+    api.capacity().then((x) => !off && setC(x)).catch((e) => !off && setError(e.message || 'Could not load capacity'))
+    return () => {
+      off = true
+    }
+  }, [])
+  const counts = c ? `${c.running} running, ${c.queued} waiting` : ''
+  return (
+    <div className="co-surface co-health-card" data-testid="health-capacity">
+      <div className="co-health-head">
+        <span>Capacity</span>
+      </div>
+      {error && <p className="co-health-summary">{error}</p>}
+      {c && (
+        <>
+          <p className="co-health-summary">
+            {c.fits == null ? `${counts}. Free memory couldn't be read.` : `Room for about ${runs(c.fits)} at once (${counts}).`}
+          </p>
+          {(c.tips || []).map((t) => (
+            <p key={t} className="co-health-summary">{t}</p>
+          ))}
+          <details className="co-health-details">
+            <summary>Details</summary>
+            <dl>
+              <dt>Run slots</dt>
+              <dd>{c.slots}</dd>
+              {c.memory && (
+                <>
+                  <dt>Free memory</dt>
+                  <dd>{gb(c.memory.free)} of {gb(c.memory.total)}</dd>
+                </>
+              )}
+              {c.load && (
+                <>
+                  <dt>Load</dt>
+                  <dd>{c.load.one} (1 min), {c.load.five} (5 min), {c.load.cores} cores</dd>
+                </>
+              )}
+            </dl>
+          </details>
+        </>
+      )}
+    </div>
+  )
+}
+
 export default function SystemHealthView() {
   const [data, setData] = useState(null)
   const [loading, setLoading] = useState(true)
@@ -251,6 +305,7 @@ export default function SystemHealthView() {
         {sortChecks(checks).map((c) => (
           <HealthCard key={c.id} check={c} onChanged={() => load(true)} />
         ))}
+        <CapacityCard />
         <RunHistoryCard />
       </div>
     </div>

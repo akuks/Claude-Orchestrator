@@ -1,0 +1,8 @@
+.co-act-bar { display: flex; align-items: flex-end; gap: 2px; height: 64px; margin: 12px 0; }
+.co-act-bar > span { flex: 1; min-width: 2px; background: var(--ant-color-primary, #1677ff); border-radius: 2px 2px 0 0; }
+.co-act-bar > span.co-act-zero { background: var(--ant-color-border, #d9d9d9); }
+.co-act-day { margin-top: 12px; font-weight: 600; }
+.co-act-commit { padding: 6px 0; border-bottom: 1px solid var(--ant-color-border-secondary, #f0f0f0); }
+.co-act-sub { opacity: 0.7; font-size: 13px; }
+.co-act-table { border-collapse: collapse; margin-top: 8px; }
+.co-act-table th, .co-act-table td { padding: 2px 12px 2px 0; text-align: left; font-weight: normal; }

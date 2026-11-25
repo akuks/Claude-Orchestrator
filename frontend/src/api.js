@@ -315,6 +315,8 @@ export const api = {
   // admin: the system health checks (refresh skips the server's 30 s cache)
   systemHealth: (refresh) => req('GET', `/admin/health${refresh ? '?refresh=true' : ''}`),
   // admin: tidying old run history (phase 7d)
+  capacity: () => req('GET', '/admin/health/capacity'),
+  getActivity: (id, days = 30, minLines = 0) => req('GET', `/projects/${id}/activity?days=${days}&min_lines=${minLines}`),
   retention: () => req('GET', '/admin/health/retention'),
   saveRetention: (payload) => req('PATCH', '/admin/health/retention', payload),
   runRetention: () => req('POST', '/admin/health/retention/run'),
