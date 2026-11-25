@@ -385,11 +385,11 @@ def test_render_caps_and_trims():
     assert c["notes"]["text"] == _words(100, "word")  # the stored notes reach the handoff whole
     r0 = handoff.render(c)
     assert r0.splitlines()[0] == texts.HANDOFF_HEAD
-    assert "said 11" in r0 and "file3.py" in r0 and "Other run one" in r0
+    assert "said 11" in r0 and "file5.py" in r0 and "file4.py" not in r0 and "Other run one" in r0
     r1 = handoff.render(c, 1)
-    assert "said 11" not in r1 and "file3.py" in r1  # 1: recent actions dropped
+    assert "said 11" not in r1 and "file5.py" in r1  # 1: recent actions dropped
     r2 = handoff.render(c, 2)
-    assert "file9.py" in r2 and "file5.py" in r2 and "file4.py" not in r2  # 2: files down to 5 (newest)
+    assert "file9.py" in r2 and "file5.py" in r2 and "file4.py" not in r2  # files: always the newest 5
     assert len(c["notes"]["text"].split()) > 60 and len(c["last_reply"].split()) > 35
     r3 = handoff.render(c, 3)
     notes_line = [ln for ln in r3.splitlines() if ln.startswith("Claude's notes")][0]
@@ -405,29 +405,78 @@ def test_render_caps_and_trims():
     assert handoff.render(big).splitlines()[0] == texts.HANDOFF_HEAD
 
 
-def test_render_lists_newest_8_files():
-    """F111 (forge v0.7.0): render lists the newest FILES_SHOWN (8) files,
-    FILES_TRIMMED (5) from level 2; the stored list (the card's) stays whole."""
+def test_render_lists_count_and_newest_5_files():
+    """F129 (forge v0.8.0): more than 5 files -> "N files touched. Newest 5:", the 5 newest and
+    where the full list is; 5 or fewer are all named. The stored list (the card's) stays whole."""
     from app.resume import handoff
 
     evs = [use("Write", {"file_path": f"/work/ws/file{i}.py"}) for i in range(12)]
     c = handoff.build(_input(steps=[_step("user", "ask")], step_events=evs))
-    assert len(c["files"]) == 12 and handoff.FILES_SHOWN == 8
+    assert len(c["files"]) == 12
 
-    def listed(text):
+    def listed(text, head):
         lines = text.splitlines()
-        i = lines.index("Files touched (newest first):") + 1
+        i = lines.index(head) + 1
         out = []
         while i < len(lines) and lines[i].startswith("- ") and ".py" in lines[i]:
             out.append(lines[i])
             i += 1
-        return out
+        return out, lines[i] if i < len(lines) else None
 
-    r0 = handoff.render(c, 0)
-    assert [ln[2:].rsplit("/", 1)[-1] for ln in listed(r0)] == [f"file{i}.py" for i in range(11, 3, -1)]
-    assert "- (and 4 more)" in r0
-    r2 = handoff.render(c, 2)
-    assert len(listed(r2)) == 5 and "- (and 7 more)" in r2
+    for lv in (0, 2):
+        r = handoff.render(c, lv)
+        got, after = listed(r, "12 files touched. Newest 5:")
+        assert [ln[2:].rsplit("/", 1)[-1] for ln in got] == [f"file{i}.py" for i in range(11, 6, -1)]
+        assert after == "The full list is on the task page."
+        assert "more)" not in r
+
+    few = handoff.build(_input(steps=[_step("user", "ask")], step_events=evs[:5]))
+    r = handoff.render(few, 0)
+    got, _ = listed(r, "Files touched (newest first):")
+    assert len(got) == 5 and "The full list is on the task page." not in r
+
+
+def test_caution_notes_are_taken_out_and_listed_to_recheck():
+    """F131: `Caution: ... | measured: ... | check again before acting` lines leave the notes text
+    and are listed under "Re-check before acting" (text and card data)."""
+    from app.resume import handoff
+
+    notes = ("Step: 2 of 3\nWorking on the parser.\n"
+             "Caution: the API allows 10 calls a minute | measured: 14:02 from the headers | check again before acting\n"
+             "- caution: disk is 90% full | Measured: df at 14:10 | check again before acting\n"
+             "Caution: a line without a measurement stays in the notes\n"
+             "Done the lexer.")
+    steps = [_step("user", "ask", notes=notes, notes_updated_at=T0)]
+    c = handoff.build(_input(steps=steps))
+    assert c["notes"]["cautions"] == [
+        {"text": "the API allows 10 calls a minute", "measured": "14:02 from the headers"},
+        {"text": "disk is 90% full", "measured": "df at 14:10"},
+    ]
+    text = c["notes"]["text"]
+    assert "10 calls" not in text and "disk" not in text
+    assert "Working on the parser." in text and "without a measurement" in text and "Done the lexer." in text
+    r = handoff.render(c, 0)
+    lines = r.splitlines()
+    i = lines.index("Re-check before acting:")
+    assert lines[i + 1:i + 3] == [
+        "- the API allows 10 calls a minute (measured: 14:02 from the headers)",
+        "- disk is 90% full (measured: df at 14:10)",
+    ]
+    assert "check again before acting" not in r
+
+
+def test_cautions_capped_and_trimmed():
+    from app.resume import handoff
+
+    notes = "\n".join(f"Caution: c{i} {'x' * 300} | measured: m{i} {'y' * 300}" for i in range(9))
+    c = handoff.build(_input(steps=[_step("user", "ask", notes=notes, notes_updated_at=T0)]))
+    cs = c["notes"]["cautions"]
+    assert len(cs) == handoff.CAUTIONS_MAX
+    assert all(len(x["text"]) <= 160 and len(x["measured"]) <= 120 for x in cs)
+    assert not c["notes"]["text"]
+    r3 = handoff.render(c, 3)
+    assert sum(1 for ln in r3.splitlines() if ln.startswith("- c")) == 3
+    assert "Claude's notes" not in r3
 
 
 def test_handoff_redacted_and_cleaned():
