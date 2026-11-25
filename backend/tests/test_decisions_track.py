@@ -443,6 +443,7 @@ def test_fix_task_judged_by_its_gate_final_result(client, gate_state, want):
 @pytest.mark.parametrize("reason", [
     "the gate could not run (internal error)", "blocked by the guard: no network", "the fixer agent is not available",
     "the gate has no command to run", "the gate's project is missing or has no directory", "cancelled",
+    "the fix was cancelled",
 ])
 def test_gate_infrastructure_failure_is_not_counted(client, reason):
     async def go():
@@ -457,9 +458,14 @@ def test_gate_infrastructure_failure_is_not_counted(client, reason):
 def test_infra_reasons_match_the_runner():
     from app import workflow_runner as wr
 
-    exact, _ = track._infra_reasons()
-    assert {wr.GATE_ERROR_WORDS, wr.FIXER_GONE_WORDS} <= exact
+    exact, prefixes = track._infra_reasons()
+    assert {wr.GATE_ERROR_WORDS, wr.FIXER_GONE_WORDS, wr.FIX_CANCELLED_WORDS, wr.NO_COMMAND_WORDS,
+            wr.NO_FOLDER_WORDS, "cancelled"} == exact
+    assert prefixes == (wr.GUARD_BLOCKED_PREFIX,)
+    for reason in exact | {f"{wr.GUARD_BLOCKED_PREFIX}: nope"}:
+        assert not track._real_failure({"status": "failed", "reason": reason})
     assert track._real_failure({"status": "failed", "reason": wr.FIX_UNFINISHED_WORDS})
+    assert track._real_failure({"status": "failed", "reason": "pytest -q exited with code 1"})
 
 
 def test_older_step_attempt_takes_no_outcome(client):
@@ -471,11 +477,14 @@ def test_older_step_attempt_takes_no_outcome(client):
             run.stage_state = {"0": {"status": "done", "attempt": 1}, "1": {"status": "passed"}}
             await s.commit()
         new = await _task(pid, status=Status.COMPLETED, workflow_run_id=rid, stage_index=0, stage_attempt=1)
-        await track.record_shown(new, [1])
+        old_failed = await _task(pid, status=Status.FAILED, workflow_run_id=rid, stage_index=0, stage_attempt=0)
+        for t in (new, old_failed):
+            await track.record_shown(t, [1])
         await track.settle_run(rid)
-        return await _outcome(tids[0]), await _outcome(new)
+        return await _outcome(tids[0]), await _outcome(new), await _outcome(old_failed)
 
-    assert _run(go()) == ([(1, None, False)], [(1, "passed", False)])
+    # the older attempt is not counted even when its task failed (the attempt check comes first)
+    assert _run(go()) == ([(1, None, False)], [(1, "passed", False)], [(1, None, False)])
 
 
 async def _thread_step(pid, status="running"):
@@ -592,7 +601,7 @@ def test_repeat_notes_skip_the_database(client, monkeypatch):
 
     async def spy(tid, nums, shown_at=None):
         seen.append(list(nums))
-        await real(tid, nums, shown_at)
+        return await real(tid, nums, shown_at)
 
     monkeypatch.setattr(track, "record_shown", spy)
 
@@ -622,3 +631,53 @@ def test_repeat_notes_skip_the_database(client, monkeypatch):
     _run(w._ingest_usage_spool(tid, emit))  # the note left over and a repeat: no new write
     assert seen == [[8]]
     guard_runtime.remove_task_dir(tid)
+
+
+def test_record_shown_true_only_after_commit(client, monkeypatch):
+    """m3: True once committed; False with no project or on a database error, and then the worker tries again."""
+    from app import worker as worker_mod
+    from app.usage.tracker import UsageTracker
+
+    async def go():
+        pid = await _project()
+        tid = await _task(pid)
+        loose = uuid.uuid4().hex
+        async with SessionLocal() as s:
+            s.add(Task(id=loose, title="t", prompt="p", root_id=loose, status="running"))
+            await s.commit()
+        return tid, await track.record_shown(tid, [1]), await track.record_shown(loose, [1]), \
+            await track.record_shown(tid, [])
+
+    tid, ok, no_project, empty = _run(go())
+    assert (ok, no_project, empty) == (True, False, False)
+
+    real_add = track._add_rows
+    fail = [True]
+
+    async def flaky_add(s, rows):
+        if fail[0]:
+            fail[0] = False
+            raise RuntimeError("database away")
+        return await real_add(s, rows)
+
+    monkeypatch.setattr(track, "_add_rows", flaky_add)
+    tid2 = _run(_task(_run(_project())))
+    w = worker_mod.WorkerManager()
+    w._usage[tid2] = UsageTracker()
+    w._usage_spool[tid2] = w._new_usage_spool()
+
+    async def emit(etype, payload):
+        return None
+
+    d = guard_runtime.make_task_dir(tid2)
+    spool = d / guard_runtime.SPOOL_NAME
+    line = json.dumps({"event": "PreToolUse", "nudge": "decisions", "ids": [3], "path": "a.py"}) + "\n"
+    spool.write_text(line)
+    _run(w._ingest_usage_spool(tid2, emit))  # the write fails: not marked as recorded
+    assert _run(_rows(tid2)) == [] and 3 not in w._usage_spool[tid2].get("recorded", set())
+    with open(spool, "a", encoding="utf-8") as f:
+        f.write(line)
+    _run(w._ingest_usage_spool(tid2, emit))  # shown again: written this time
+    assert [r.decision_number for r in _run(_rows(tid2))] == [3]
+    assert 3 in w._usage_spool[tid2]["recorded"]
+    guard_runtime.remove_task_dir(tid2)

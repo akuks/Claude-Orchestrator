@@ -2092,9 +2092,8 @@ class WorkerManager:
                     # this run already recorded skip the database
                     recorded = state.setdefault("recorded", set())
                     shown = [i for i in shown if i not in recorded]
-                    if shown:
-                        await decision_track.record_shown(task_id, shown)
-                        recorded.update(shown)
+                    if shown and await decision_track.record_shown(task_id, shown):
+                        recorded.update(shown)  # only once committed: a failed write is tried again
             except Exception as e:  # noqa: BLE001 - usage bookkeeping never stops a run
                 log.warning("usage: band ingest failed for %s: %s", task_id, e)
 

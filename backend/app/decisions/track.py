@@ -16,7 +16,8 @@ gate after its step needed a fix-it round); ``passed`` (that gate passed with no
 outside a workflow, or a workflow step with no gate after it, that completed). A fix task (tagged ``fix``) is
 judged by its gate's final result: ``passed`` or ``failed``, never ``fixed``. No outcome (not counted): a
 cancelled task, a gate that has not settled, a gate stopped by cancel or by its own infrastructure (internal
-error, guard refusal, missing command/folder, fixer gone), and a task of an older stage attempt. A settled
+error, guard refusal, missing command/folder, fixer gone, fix cancelled), and a task of an older stage attempt
+(failed or not). A settled
 outcome is never cleared back to none."""
 
 import asyncio
@@ -84,24 +85,27 @@ async def _add_rows(s, rows: list[dict]) -> int:
     return added
 
 
-async def record_shown(task_id: str, numbers: list[int], shown_at: datetime | None = None) -> None:
+async def record_shown(task_id: str, numbers: list[int], shown_at: datetime | None = None) -> bool:
     """The task was shown these decision numbers: one row each (kept if already there), under its effective
-    project. Never raises."""
+    project. True only after a successful commit (False: nothing to record, no project, or an error). Never
+    raises."""
     numbers = clean_ids(numbers)
     if not numbers:
-        return
+        return False
     try:
         async with SessionLocal() as s:
             task = await s.get(Task, task_id)
             project_id = await effective_project_id(s, task) if task is not None else None
             if not project_id:
-                return
+                return False
             at = shown_at or _now()
             await _add_rows(s, [{"project_id": project_id, "decision_number": n, "task_id": task_id,
                                  "shown_at": at, "retried": False} for n in numbers])
             await s.commit()
+            return True
     except Exception as e:  # noqa: BLE001 - the track record never stops a run
         log.warning("decision track: recording a showing failed for %s: %s", task_id, e)
+        return False
 
 
 # ---- outcomes ---------------------------------------------------------------------------------------------
@@ -111,9 +115,9 @@ def _infra_reasons() -> tuple[set[str], tuple[str, ...]]:
     """Gate `failed` reasons that are not a real check failing: (exact reasons, prefixes)."""
     from .. import workflow_runner as wr
 
-    exact = {"cancelled", wr.GATE_ERROR_WORDS, wr.FIXER_GONE_WORDS, "the gate has no command to run",
-             "the gate's project is missing or has no directory"}
-    return exact, ("blocked by the guard",)
+    exact = {"cancelled", wr.GATE_ERROR_WORDS, wr.FIXER_GONE_WORDS, wr.FIX_CANCELLED_WORDS, wr.NO_COMMAND_WORDS,
+             wr.NO_FOLDER_WORDS}
+    return exact, (wr.GUARD_BLOCKED_PREFIX,)
 
 
 def _real_failure(st: dict) -> bool:
@@ -149,18 +153,17 @@ def outcome_of(t, run: WorkflowRun | None, fix_tasks: set[tuple[int, int]]) -> s
     """The outcome of a finished task (None: not counted / not settled yet). ``t`` needs status,
     workflow_run_id, stage_index, stage_attempt, tags. ``fix_tasks``: the run's (stage index, stage attempt)
     pairs that have a fix-tagged task."""
+    in_run = bool(t.workflow_run_id) and run is not None and t.stage_index is not None
+    stages = list(run.stages or []) if in_run else []
+    j = t.stage_index if in_run else None
+    if in_run and 0 <= j < len(stages) and _int(t.stage_attempt) != _int(_state(run, j).get("attempt")):
+        return None  # an older attempt of its step (even a failed one): not counted
     if t.status == Status.FAILED:
         return "failed"
     if t.status != Status.COMPLETED:
         return None  # cancelled or not finished
-    if not t.workflow_run_id or run is None or t.stage_index is None:
+    if not in_run or not (0 <= j < len(stages)):
         return "completed"
-    stages = list(run.stages or [])
-    j = t.stage_index
-    if not (0 <= j < len(stages)):
-        return "completed"
-    if _int(t.stage_attempt) != _int(_state(run, j).get("attempt")):
-        return None  # an older attempt of its step: the current gate result is not about it
     gates = _gates_for(stages, j)
     if not gates:
         return "completed"
@@ -274,9 +277,10 @@ def spawn_settle_run(run_id: str) -> None:
 
 
 async def drain() -> None:
-    """Wait for the background settle jobs (tests)."""
-    while _JOBS:
-        await asyncio.gather(*list(_JOBS), return_exceptions=True)
+    """Wait for this event loop's background settle jobs (tests; another loop's jobs are left alone)."""
+    loop = asyncio.get_running_loop()
+    while mine := [j for j in _JOBS if j.get_loop() is loop and not j.done()]:
+        await asyncio.gather(*mine, return_exceptions=True)
 
 
 # ---- score ------------------------------------------------------------------------------------------------

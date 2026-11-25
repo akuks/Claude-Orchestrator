@@ -897,6 +897,9 @@ def test_migration_0024_upgrade_downgrade(scratch_url):
         idx = {i["name"]: i["column_names"] for i in insp.get_indexes("decision_showings")}
         assert idx.get("ix_decision_showings_project_number") == ["project_id", "decision_number"]
         assert idx.get("ix_decision_showings_project_shown") == ["project_id", "shown_at"]
+        fks = {tuple(fk["constrained_columns"]): (fk["referred_table"], (fk.get("options") or {}).get("ondelete"))
+               for fk in insp.get_foreign_keys("decision_showings")}
+        assert fks == {("project_id",): ("projects", "CASCADE"), ("task_id",): ("tasks", "CASCADE")}
         uqs = [u["column_names"] for u in insp.get_unique_constraints("decision_showings")]
         assert ["task_id", "decision_number"] in uqs
         sc.exec_driver_sql("INSERT INTO decision_showings (project_id, decision_number, task_id, shown_at)"

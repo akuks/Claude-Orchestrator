@@ -26,8 +26,8 @@ after agents were shown it, and flag decisions that keep being followed by troub
 - A fix task (tagged `fix`) is judged by its gate's final result (design ruling, 2026-11-25): `passed` if the gate finally
   passed (the fix worked), `failed` if it finally failed; never `fixed`.
 - No outcome (not counted): cancelled tasks; a gate not settled yet; a gate stopped by cancel or by its own
-  infrastructure (internal error, guard refusal, missing command or folder, fixer not available); tasks of an
-  older attempt of their step.
+  infrastructure (internal error, guard refusal, missing command or folder, fixer not available, fix
+  cancelled); tasks of an older attempt of their step (failed or not).
 
 ## Score (computed on read)
 

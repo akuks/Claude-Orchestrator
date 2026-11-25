@@ -306,7 +306,7 @@ describe('elsewhere', () => {
   describe('track record', () => {
     const track = (o = {}) => ({ shown: 12, passed: 3, completed: 2, fixed: 4, failed: 3, last_shown_at: '2026-11-24T10:00:00Z', trouble: false, ...o })
     it('shows the grey tag, and the trouble tag when flagged', async () => {
-      api.listDecisions.mockResolvedValue([dec(1, { track: track() }), dec(2, { track: track({ trouble: true }) }), dec(3, { track: track({ shown: 1, fixed: 0, failed: 0 }) }), dec(4, { track: track({ shown: 0 }) }), dec(5, { track: null })])
+      api.listDecisions.mockResolvedValue([dec(1, { track: track() }), dec(2, { track: track({ trouble: true }) }), dec(3, { track: track({ shown: 1, fixed: 0, failed: 0 }) }), dec(4, { track: track({ shown: 0 }) }), dec(5, { track: null }), dec(6, { track: track({ shown: 3, fixed: 1, failed: 0 }) })])
       const c = await mount()
       expect(q(c, 'decision-1').textContent).toContain('Shown 12× · 7 needed fixes')
       expect(q(c, 'decision-1').textContent).not.toContain('Often followed by trouble')
@@ -315,6 +315,8 @@ describe('elsewhere', () => {
       expect(q(c, 'decision-3').textContent).not.toContain('needed fixes')
       expect(q(c, 'decision-4').textContent).not.toContain('Shown')
       expect(q(c, 'decision-5').textContent).not.toContain('Shown')
+      expect(q(c, 'decision-6').textContent).toContain('Shown 3× · 1 needed a fix')
+      expect(q(c, 'decision-6').textContent).not.toContain('needed fixes')
     })
     it('admin backfill confirms, calls the API and reports', async () => {
       api.backfillDecisionTrack.mockResolvedValue({ added: 5 })

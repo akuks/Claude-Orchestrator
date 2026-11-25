@@ -85,6 +85,10 @@ FLAKY_WORDS = "a flaky test is not a fixed test"
 GATE_ERROR_WORDS = "the gate could not run (internal error)"
 FIXER_GONE_WORDS = "the fixer agent is not available"
 FIX_UNFINISHED_WORDS = "the fix did not finish"
+FIX_CANCELLED_WORDS = "the fix was cancelled"
+NO_COMMAND_WORDS = "the gate has no command to run"
+NO_FOLDER_WORDS = "the gate's project is missing or has no directory"
+GUARD_BLOCKED_PREFIX = "blocked by the guard"
 UNCHANGED_WORDS = "failed then passed unchanged"
 GATE_LIVE = ("waiting", "running")  # gate states that want a live process
 # Phase 7b: a step is finished successfully in this state (per kind).
@@ -1791,10 +1795,11 @@ class WorkflowRunner:
             return _Post(spawns=[(i, handout)])
         if tstatus in (Status.FAILED, Status.CANCELLED):
             name = _stage_name(run, i)
-            st.update(status="failed", reason=FIX_UNFINISHED_WORDS,
-                      summary=f"Gate {name} failed: {FIX_UNFINISHED_WORDS}.")
+            # a cancelled fix is a stop, not a failed fix (the decision track record does not count it)
+            words = FIX_CANCELLED_WORDS if tstatus == Status.CANCELLED else FIX_UNFINISHED_WORDS
+            st.update(status="failed", reason=words, summary=f"Gate {name} failed: {words}.")
             _put_state(run, i, st)
-            runlog.append(run, f"{_label(run, i)} failed: {FIX_UNFINISHED_WORDS}")
+            runlog.append(run, f"{_label(run, i)} failed: {words}")
             _fail_run(run)
             await s.commit()
             return None
@@ -2178,12 +2183,12 @@ class WorkflowRunner:
                     await s.commit()
 
                 if plan is None:
-                    reason = "the gate has no command to run"
+                    reason = NO_COMMAND_WORDS
                     await fail(reason, f"{_label(run, i)} failed: {reason}", f"Gate {name} failed: {reason}.")
                     return None
                 idx, cmd, kind = plan
                 if not has_dir:
-                    reason = "the gate's project is missing or has no directory"
+                    reason = NO_FOLDER_WORDS
                     await fail(reason, f"{_label(run, i)} failed: {reason}", f"Gate {name} failed: {reason}.")
                     return None
                 if first and st.get("status") == "waiting" and pre_reason:
@@ -2202,7 +2207,7 @@ class WorkflowRunner:
                     ))
                     await s.flush()
                     await self._prune_rows(s, run_id, i)
-                    reason = f"blocked by the guard: {why}"
+                    reason = f"{GUARD_BLOCKED_PREFIX}: {why}"
                     st["hits"] = reasons
                     await fail(reason, f"{_label(run, i)} failed: {cmd}, blocked by the guard",
                                f"Gate {name} failed: {cmd} was {reason}.")

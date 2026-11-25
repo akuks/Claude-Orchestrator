@@ -66,7 +66,7 @@ function TrackTags({ track }) {
   return (
     <>
       <Tooltip title={tip}>
-        <Tag bordered={false} data-testid="decision-track">{`Shown ${track.shown}×${needed ? ` · ${needed} needed fixes` : ''}`}</Tag>
+        <Tag bordered={false} data-testid="decision-track">{`Shown ${track.shown}×${needed ? ` · ${needed} needed ${needed === 1 ? 'a fix' : 'fixes'}` : ''}`}</Tag>
       </Tooltip>
       {track.trouble && (
         <Tooltip title={tip}>
