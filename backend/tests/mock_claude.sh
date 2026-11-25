@@ -6,7 +6,7 @@
 #       tests/mock_claude.sh >"$DIR/claude" && chmod +x "$DIR/claude"
 # (CO_CLAUDE_BIN="$DIR/claude"). Seams, all keyed on the task prompt:
 #   [env-probe:KEY] [call-probe:KEY] [prompt-probe:KEY] [guard-spool] [guard-tool:MODE]
-#   [env-echo] [env-echo-fail] [stream-fixture:NAME] [hang] [usage-probe:KEY]
+#   [env-echo] [env-echo-fail] [stream-fixture:NAME] [hang] [usage-probe:KEY] [plan-limit:MODE:RESETS]
 #   (ask calls, `--output-format json`:) [ask-probe:KEY] [ask-raw] [ask-fail] [ask-sleep] [ask-iserror] [ask-budgetstop]
 args="$*"
 prompt="$(cat)"
@@ -30,6 +30,38 @@ fi
 # is written to PROBES/KEY.prompt.
 if [[ "$args" == *"stream-json"* && "$prompt" =~ \[prompt-probe:([A-Za-z0-9_-]+)\] ]]; then
   printf '%s' "$prompt" >"__PROBES__/${BASH_REMATCH[1]}.prompt"
+fi
+# [plan-limit:MODE:RESETS] (stream-json): Claude plan-limit runs (phase 7c); RESETS goes verbatim into
+# rate_limit_info.resetsAt ("none" leaves it out). MODE rejected: a rejected rate_limit_event, an
+# assistant error rate_limit, an error result, exit 1. textonly: an allowed_warning event (the reset time),
+# then only an error result whose text says the limit was hit, exit 1, nothing on stderr. warning: two
+# allowed_warning events, then success. allowed: an allowed event, then success. Each run appends a line to
+# PROBES/plan-runs.
+if [[ "$args" == *"stream-json"* && "$prompt" =~ \[plan-limit:([a-z]+):([0-9a-z.]+)\] ]]; then
+  mode="${BASH_REMATCH[1]}"; at="${BASH_REMATCH[2]}"
+  echo "$mode" >>"__PROBES__/plan-runs"
+  if [[ "$at" == "none" ]]; then ra=""; else ra=",\"resetsAt\":$at"; fi
+  printf '{"type":"system","subtype":"init","session_id":"plan-session"}\n'
+  case "$mode" in
+    rejected)
+      printf '{"type":"rate_limit_event","rate_limit_info":{"status":"rejected"%s,"utilization":1.0},"uuid":"u1","session_id":"plan-session"}\n' "$ra"
+      printf '{"type":"assistant","error":"rate_limit","message":{"id":"m1","model":"claude-test","content":[{"type":"text","text":"You'"'"'ve hit your session limit"}]}}\n'
+      printf '{"type":"result","subtype":"success","is_error":true,"api_error_status":429,"result":"You'"'"'ve hit your session limit","num_turns":1,"total_cost_usd":0}\n'
+      exit 1 ;;
+    textonly)
+      printf '{"type":"rate_limit_event","rate_limit_info":{"status":"allowed_warning"%s,"utilization":0.9},"uuid":"u1","session_id":"plan-session"}\n' "$ra"
+      printf '{"type":"result","subtype":"success","is_error":true,"result":"You\u2019ve hit your weekly limit","num_turns":1,"total_cost_usd":0}\n'
+      exit 1 ;;
+    warning)
+      printf '{"type":"rate_limit_event","rate_limit_info":{"status":"allowed_warning"%s,"utilization":0.85},"uuid":"u1","session_id":"plan-session"}\n' "$ra"
+      printf '{"type":"rate_limit_event","rate_limit_info":{"status":"allowed_warning"%s,"utilization":0.86},"uuid":"u2","session_id":"plan-session"}\n' "$ra"
+      ;;
+    *)
+      printf '{"type":"rate_limit_event","rate_limit_info":{"status":"allowed"%s},"uuid":"u1","session_id":"plan-session"}\n' "$ra"
+      ;;
+  esac
+  printf '{"type":"result","subtype":"success","is_error":false,"result":"done","num_turns":1,"total_cost_usd":0.001}\n'
+  exit 0
 fi
 # [stream-fixture:NAME]: print FIXTURES/NAME.jsonl verbatim; a {"__spool__": {...}}
 # line goes to $CO_TASK_DIR/spool.jsonl instead (the hook's record, as co-guard writes it).

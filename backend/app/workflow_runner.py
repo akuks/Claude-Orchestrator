@@ -63,7 +63,7 @@ from sqlalchemy import delete, func, select, update
 
 from .constants import Status
 from .database import SessionLocal
-from . import flowgraph, tiers
+from . import flowgraph, planlimits, tiers
 from .gates import codestate, executor, fixloop, outputs as typed_outputs, preflight, runlog, totals
 from .gates.spec import stage_kind
 from .gates.test_results import TestResult
@@ -380,6 +380,17 @@ async def _hold(s, run, i: int, st: dict, reason: str) -> None:
         run.status = RUN_RUNNING
 
 
+def _plan_hold(run, i: int, st: dict, row) -> None:
+    """Hold an agent step while the run owner's Claude plan is at its limit (7c): status "held" with the
+    paused sentence, never failed; _schedule tries it again and it starts after the reset time."""
+    reason = planlimits.paused_text(row.resets_at)
+    if st.get("status") != "held" or st.get("reason") != reason:
+        runlog.append(run, f"Step {_stage_name(run, i)} held: {planlimits.STEP_HELD}")
+    _put_state(run, i, {**st, "status": "held", "reason": reason, "plan_wait": True})
+    if run.status == RUN_PAUSED:
+        run.status = RUN_RUNNING
+
+
 def _label(run, i: int) -> str:
     """A step named once in log lines (F128): "Step Test (gate)", but "Step gate" when the
     name is the kind itself (any case). Agent steps carry no kind."""
@@ -630,6 +641,10 @@ async def _start_stage(s, run: WorkflowRun, stage_index: int, worker, pre: dict 
             return []
         if old.get("status") == "budget" and run.status == RUN_PAUSED:
             run.status = RUN_RUNNING  # the cap was raised: resume
+        plan_row = await planlimits.hold_for_user(s, run.created_by)
+        if plan_row is not None:
+            _plan_hold(run, stage_index, old, plan_row)
+            return []
 
     lines = list(stage.get("before") or [])
     reason = None
@@ -1603,12 +1618,20 @@ class WorkflowRunner:
                      dirs.get(t.project_id)) for t in todo
                 ]))
                 return
+            if st.pop("plan_wait", None):
+                st.pop("reason", None)
             st.update(status="done", finished_at=_iso())
             _put_state(run, i, st)
             _move_pointer(run)
             t = await totals.compute(s, run)
             runlog.append(run, f"Step {_stage_name(run, i)} done. {totals.line(t)}")
             return
+        # A task waiting for its Claude plan's reset (7c): the step shows the paused sentence, still at work.
+        waits = [t.wait_reason for t in tasks if t.status == Status.QUEUED and t.wait_reason]
+        if waits and (st.get("reason") != waits[0] or not st.get("plan_wait")):
+            _put_state(run, i, {**st, "reason": waits[0], "plan_wait": True})
+        elif not waits and st.get("plan_wait"):
+            _put_state(run, i, {k: v for k, v in st.items() if k not in ("reason", "plan_wait")})
         # Otherwise still running — make sure the run reflects that.
         if run.status == RUN_PAUSED:
             run.status = RUN_RUNNING
