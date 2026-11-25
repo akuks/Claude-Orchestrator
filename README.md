@@ -1338,8 +1338,9 @@ Phase 7a of the forge port. Four things on a workflow run, all on the run's own 
   a project it touches) can approve an "Ask a person" step before the run gets there, and
   withdraw that approval (`POST` / `DELETE /workflows/runs/{id}/stages/{i}/approve-ahead`).
   When the run reaches the step it goes straight past, and the step reads "Approved ahead by
-  <name>". A step set to `ahead: false` (the release approvals in the templates) can only be
-  approved when the run reaches it; its box says "Needs you when the run gets here". An early
+  <name>". Only steps marked "Can be approved ahead" (a switch in the step's form; the template's
+  "Approve plan") can be approved early; workflows saved before this update have none marked until
+  you switch it on. Any other approval step's card says "Needs you when the run gets here". An early
   approval is dropped when the run fails, is cancelled or is run again from an earlier step.
 - **One check at a time per project.** A check step takes a lock on the project folder before
   its first command and lets go when the step ends. If another run holds it, the step waits
@@ -1350,8 +1351,10 @@ Phase 7a of the forge port. Four things on a workflow run, all on the run's own 
   steps keep their results; later steps start over; old tasks stay in the history. The
   spending limit still applies. The failed-step Retry is unchanged.
 - **Time and spend per step.** Each run box shows a small line such as "4 min · $0.12"; tokens
-  are under the step's Details. Status words: Running, Waiting its turn, Waiting for approval,
-  Failed, Interrupted — will continue.
+  are under the step's Details. A check step's card leads with "Waiting its turn" (another run's
+  checks hold the folder) or "Interrupted — will continue" (its process is gone and it is about to
+  be resumed) when that is so; the step's tag and the run box's label use the server's word
+  (Running, Waiting its turn, Waiting for approval, Failed, Interrupted — will continue).
 
 The handoff card now lists "Re-check before acting" items (note lines of the form
 `Caution: … | measured: … | check again before acting`) and shows the newest 5 files, with the
