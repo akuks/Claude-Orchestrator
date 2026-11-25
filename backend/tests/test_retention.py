@@ -458,7 +458,11 @@ def test_preview_reads_no_payload_and_is_cached(client, monkeypatch):
         pre = run(retention.preview(days=60, only=ids))
     finally:
         sa_event.remove(engine.sync_engine, "before_cursor_execute", spy)
-    assert pre["tasks"] == 2 and pre["bytes"] == 8 * retention.ROW_ESTIMATE
+    assert pre["tasks"] == 2
+    if _POSTGRES:  # Postgres estimates from pg_class (average row size), not the fixed figure
+        assert pre["bytes"] > 0
+    else:
+        assert pre["bytes"] == 8 * retention.ROW_ESTIMATE
     assert seen and not any("payload" in st for st in seen)
     assert retention.PREVIEW_CACHE_SECONDS >= 600
     seen.clear()
