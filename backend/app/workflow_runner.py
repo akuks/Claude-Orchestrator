@@ -317,7 +317,10 @@ def _budget_hold(run, i: int, st: dict, spent: float, reason: str | None = None)
     if st.get("status") != "budget" or st.get("reason") != reason:
         runlog.append(run, f"Step {_stage_name(run, i)} held: {reason}")
     _put_state(run, i, {**st, "status": "budget", "reason": reason})
-    run.status = RUN_PAUSED
+    if reason != RESERVE_WORDS:
+        # Held for other steps' caps: another branch is at work by definition, so the run
+        # is not "waiting for you" (7b).
+        run.status = RUN_PAUSED
 
 
 def _unstart(run, i: int) -> None:
@@ -1980,6 +1983,7 @@ class WorkflowRunner:
                     advance = True
                     break
         except asyncio.CancelledError:
+            self._stop_after_gate.discard(run_id)  # killed: whoever killed it stops the rest
             raise
         except Exception as e:  # noqa: BLE001 - a broken gate fails its stage, never the loop
             log.exception("gate %s stage %s failed", run_id, i)

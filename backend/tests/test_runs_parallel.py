@@ -2,6 +2,7 @@
 Built on the fake task/gate machinery of test_gates_runner (no real command, no real CLI)."""
 
 import asyncio
+import dataclasses
 from datetime import datetime, timezone
 
 from app.constants import Status
@@ -653,11 +654,25 @@ def test_only_gates_waiting_for_allow_pause_the_run(fakes, agents):
     asyncio.run(go())
 
 
-def test_two_gates_of_one_run_in_one_folder_take_turns(fakes, agents):
+def test_two_gates_of_one_run_in_one_folder_take_turns(fakes, agents, monkeypatch):
+    from app.gates import executor
+
     a, b = agents
-    fakes.script["one"] = ["block"]
+    release = {}
+    plain = fakes.run_command
+
+    async def run_command(cmd, **kw):
+        if cmd in release:
+            fakes.calls.append(cmd)
+            await release[cmd].wait()
+            return dataclasses.replace(oc(), started_at=datetime.now(timezone.utc),
+                                       finished_at=datetime.now(timezone.utc))
+        return await plain(cmd, **kw)
+
+    monkeypatch.setattr(executor, "run_command", run_command)
 
     async def go():
+        release.update(one=asyncio.Event(), two=asyncio.Event())
         p = await _project()
         rid = await make_run([agent("A", a), gate(p, run=("one",), name="G1"),
                               after(gate(p, run=("two",), name="G2"), 0), after(agent("D", b), 1, 2)], [p])
@@ -665,19 +680,15 @@ def test_two_gates_of_one_run_in_one_folder_take_turns(fakes, agents):
         await r.start_run(rid)
         await _finish_tasks(rid, 0)
         await r._advance(rid)
-        await wait_for(lambda: (rid, 1) in r._procs)
-        for _ in range(30):
-            await asyncio.sleep(0.01)
+        # Whichever gate takes the folder first runs; the other waits its turn.
+        await wait_for(lambda: len(r._procs) == 1 and len([t for t in r._gates.values() if not t.done()]) == 1)
+        (_, first), = r._procs.keys()
+        other = 3 - first
         run = await _run(rid)
-        assert run.stage_state["2"]["status"] == "held" and run.stage_state["2"]["lock_wait"]
-        assert "two" not in fakes.calls
-        # G1's command ends (the fake now passes it): kill the block and run G1 again by hand.
-        fakes.script["one"] = [oc()]
-        await r._kill_gates(rid, record=False, stages={1})
-        wr.release_project_locks(rid, 1)
-        r._spawn_gate(rid, 1, run.stage_state["1"]["handout"])
-        await calm(r)
-        await r._advance(rid)
+        assert run.stage_state[str(other)]["status"] == "held" and run.stage_state[str(other)]["lock_wait"]
+        assert len(fakes.calls) == 1
+        release["one"].set()
+        release["two"].set()  # the first command ends; its own advance hands the other out
         await calm(r)
         run = await _run(rid)
         assert run.stage_state["1"]["status"] == "passed" and run.stage_state["2"]["status"] == "passed"
@@ -807,5 +818,97 @@ def test_completed_run_points_at_the_last_step(fakes, agents):
         await r._advance(rid)
         run = await _run(rid)
         assert run.status == "completed" and run.current_stage == 1
+
+    asyncio.run(go())
+
+
+async def _fixer_agent(pid) -> str:
+    from app.models import Agent
+
+    async with SessionLocal() as s:
+        fx = Agent(name="r7b-fix-" + pid[:8], system_prompt="x", default_prompt="x", project_id=pid, tags=[])
+        s.add(fx)
+        await s.commit()
+        return fx.id
+
+
+def test_fix_task_waits_for_the_branch_caps_and_the_run_stays_running(fakes, agents):
+    a, b = agents
+    fakes.script["chk"] = [FAIL("t"), oc()]
+
+    async def go():
+        p = await _project()
+        g = gate(p, run=("chk",), name="G")
+        g["fix"] = {"agent": await _fixer_agent(p), "rounds": 1}
+        rid = await make_run([agent("A", a), agent("B", b), after(g, 0)], [p], budget=3.0)
+        r = WorkflowRunner(FakeWorker(), 999)
+        await r.start_run(rid)
+        await _cost(rid, 0, 1.5)  # $1.50 left; B may spend all of it
+        await r._advance(rid)
+        await calm(r)
+        await r._advance(rid)
+        run = await _run(rid)
+        st = run.stage_state["2"]
+        assert st["status"] == "budget" and st["reason"] == wr.RESERVE_WORDS and st["fix_pending"] == 1
+        assert run.status == "running"  # B works: not "waiting for you"
+        assert [t.stage_index for t in await _tasks(rid)] == [0, 1]
+        await _cost(rid, 1, 0.5)
+        await r._advance(rid)
+        run = await _run(rid)
+        assert run.stage_state["2"]["status"] == "fixing" and run.status == "running"
+        assert [t.max_budget_usd for t in await _tasks(rid, 2)] == [1.0]
+
+    asyncio.run(go())
+
+
+def test_run_view_says_waiting_its_turn_for_an_allowed_gate_without_a_place(client, fakes, agents, monkeypatch):
+    from _runs7a import use_runner
+
+    a, b = agents
+    fakes.guard["risky"] = ("approve", ["why"])
+    r = WorkflowRunner(FakeWorker(), 999)
+    use_runner(monkeypatch, r)
+
+    async def go():
+        p = await _project()
+        st = [agent("A", a), gate(p, run=("risky",), name="G"), after(agent("C", b), 0)]
+        st[0]["max_parallel"] = 1
+        rid = await make_run(st, [p])
+        await r.start_run(rid)
+        await _finish_tasks(rid, 0)
+        await r._advance(rid)
+        await calm(r)
+        await r._advance(rid)
+        await r.allow_gate(rid, 1, ANN)
+        await calm(r)
+        return rid
+
+    loop = asyncio.new_event_loop()
+    try:
+        rid = loop.run_until_complete(go())
+        st = client.get(f"/workflows/runs/{rid}").json()["stage_state"]["1"]
+        assert st["status"] == "waiting" and st["status_word"] == "Waiting its turn"
+        assert "slot_wait" not in st and "_slot_wait" not in st
+        loop.run_until_complete(r.cancel_run(rid))
+    finally:
+        loop.close()
+
+
+def test_a_killed_gate_forgets_the_stop_request(fakes, agents):
+    a, _ = agents
+    fakes.script["one"] = ["block"]
+
+    async def go():
+        p = await _project()
+        rid = await make_run([agent("A", a), gate(p, run=("one",), name="G1")], [p])
+        r = WorkflowRunner(FakeWorker(), 999)
+        await r.start_run(rid)
+        await _finish_tasks(rid, 0)
+        await r._advance(rid)
+        await wait_for(lambda: (rid, 1) in r._procs)
+        r._stop_after_gate.add(rid)
+        await r._kill_gates(rid, record=False)
+        assert rid not in r._stop_after_gate
+        await r.cancel_run(rid)
 
     asyncio.run(go())

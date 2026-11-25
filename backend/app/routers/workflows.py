@@ -661,6 +661,7 @@ async def get_run(run_id: str, request: Request):
             if str(i) in stage_state:
                 e = stage_state[str(i)]
                 e["_lock_wait"] = bool(e.pop("lock_wait", None))  # internal; read by _status_word below
+                e["_slot_wait"] = bool(e.pop("slot_wait", None))  # allowed, waiting for a free place (7b)
                 if isinstance(e.get("ahead"), dict):  # who approved ahead, by name only
                     e["ahead"] = {"by_name": e["ahead"].get("by_name"), "at": e["ahead"].get("at")}
                 elif "ahead" in e:
@@ -671,6 +672,7 @@ async def get_run(run_id: str, request: Request):
                     word = _status_word(kind, stage_state[str(i)], False, run_active and (
                         i == run.current_stage or _in_flight(stage_state[str(i)].get("status"))), False)
                     stage_state[str(i)].pop("_lock_wait", None)
+                    stage_state[str(i)].pop("_slot_wait", None)
                     if word:
                         stage_state[str(i)]["status_word"] = word
                 continue
@@ -684,6 +686,7 @@ async def get_run(run_id: str, request: Request):
                                     i == run.current_stage or _in_flight(entry.get("status"))),
                                 kind == "gate" and task_alive(i))
             entry.pop("_lock_wait", None)
+            entry.pop("_slot_wait", None)
             if word:
                 entry["status_word"] = word
             if i in hidden:
@@ -723,6 +726,8 @@ def _status_word(kind: str, entry: dict, live: bool, current: bool, working: boo
     status = entry.get("status")
     if live or (working and status in ("waiting", "running")):
         return "Running"
+    if status == "waiting" and entry.get("_slot_wait"):
+        return "Waiting its turn"  # allowed; waits for a free place among the steps at once (7b)
     if status == "held":
         # Only a wait for another run's checks; a pre-flight hold keeps the screen's own words.
         return "Waiting its turn" if entry.get("_lock_wait") else None
