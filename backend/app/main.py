@@ -210,6 +210,7 @@ for _r in (
     launch.router,
     codemap_router.router,
     recommend_router.router,
+    recommend_router.checks_router,
     schema_router.router,
     templates.router,
     schedules.router,

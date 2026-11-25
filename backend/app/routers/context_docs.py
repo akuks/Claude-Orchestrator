@@ -1,11 +1,13 @@
 from fastapi import APIRouter, Depends, HTTPException, Request
 from sqlalchemy import or_, select, true
 
-from .. import context_store
+from .. import context_store, ui_checks
 from ..access import ALL, require_project_role, visible_project_ids
 from ..auth import Principal, current_principal, ensure_admin
 from ..database import SessionLocal
 from ..models import ContextDoc, Project
+from pydantic import BaseModel
+
 from ..schemas import ContextDocCreate, ContextDocOut, ContextDocUpdate
 
 router = APIRouter(prefix="/context-docs", tags=["context-docs"])
@@ -101,6 +103,26 @@ async def preview_index(request: Request, project_id: str | None = None):
         "docs": [{"id": d.id, "path": d.path, "scope": d.scope} for d in docs],
         "index": context_store.build_index(docs, root) if docs else "",
     }
+
+
+class TemplateIn(BaseModel):
+    project_id: str
+
+
+@router.post("/templates/brand", response_model=ContextDocOut, status_code=201)
+async def create_brand_template(payload: TemplateIn, p: Principal = Depends(current_principal)):
+    """Start a project's Brand guide from the template (phase 7f). 409 when brand/brand.md already exists."""
+    async with SessionLocal() as s:
+        await _require_write(s, p, "project", payload.project_id)
+        project_id = await _validate(s, "project", payload.project_id)
+        await _check_unique(s, ui_checks.BRAND_PATH, "project", project_id)
+        doc = ContextDoc(path=ui_checks.BRAND_PATH, title=ui_checks.BRAND_TITLE, abstract=ui_checks.BRAND_ABSTRACT,
+                         body=ui_checks.BRAND_BODY, scope="project", project_id=project_id, enabled=True,
+                         created_by=p.user.id)
+        s.add(doc)
+        await s.commit()
+        await s.refresh(doc)
+        return ContextDocOut.model_validate(doc)
 
 
 @router.get("/{doc_id}", response_model=ContextDocOut)

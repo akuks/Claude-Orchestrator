@@ -6,13 +6,15 @@ import os
 import re
 import stat
 
-from app import flowgraph
+from app import flowgraph, ui_checks
 
 MAX_IMPORT_BYTES = 64 * 1024
 MAX_REPO_FILES = 20
 REPO_DIR = (".claude-orchestrator", "workflows")
 FILE_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,80}\.md$")
 GATE_HINT = "Set the project's own test command in the gate."
+SCREENS_HINT = ("Needs the UI checks in the project first (Project \u2192 Recommended \u2192 Set up UI checks) "
+                "and Node 20 or newer.")
 COMMIT_NOTE = "Commit on the current branch. Do not merge or push."
 _JSON_BLOCK = re.compile(r"^```json[ \t]*\r?\n(.*?)\r?\n```[ \t]*$", re.S | re.M)
 
@@ -21,8 +23,8 @@ def _agent(name: str, items: list[tuple[str, str]]) -> dict:
     return {"name": name, "items": [{"agent": a, "prompt": p} for a, p in items]}
 
 
-def _gate(name: str) -> dict:
-    return {"name": name, "kind": "gate", "run": ["npm test"], "timeout_min": 60, "before": []}
+def _gate(name: str, run: list[str] | None = None) -> dict:
+    return {"name": name, "kind": "gate", "run": list(run or ["npm test"]), "timeout_min": 60, "before": []}
 
 
 def _approval(name: str, message: str, ahead: bool = False) -> dict:
@@ -82,12 +84,14 @@ TEMPLATES: dict[str, dict] = {
     },
     "ui": {
         "name": "UI change",
-        "description": "Build the screen, run the tests, check the production build, review, then approve.",
+        "description": "Plan the look, approve it, build the screen, run the tests and the UI checks, review, then approve.",
         "stages": [
-            _agent("Build", [("Builder", _build("Implement this UI change, test first."))]),
+            _agent("Direction", [("Planner", "Describe what the screens should look like: layout, states, copy and how it fits the product's brand. Do not implement it.\n\nWork: {{input}}")]),
+            _approval("Approve look", "Read the direction and approve the look before anyone builds.", ahead=True),
+            _agent("Build", [("Builder", _build("Implement this UI change, test first.\n\nDirection:\n{{stage1}}"))]),
             _gate("Test"),
-            _agent("Build check", [("Checker", "Run the production build and report totals and errors, facts only.\n\nWork: {{input}}")]),
-            _agent("Review", [("Reviewer", "Review the UI change for correctness and accessibility and rank your findings.\n\nWork: {{input}}")]),
+            _gate("Screens", ui_checks.GATE_COMMANDS),
+            _agent("Design review", [("Reviewer", "Review the UI change for correctness and accessibility: check the screenshots, accessibility and Lighthouse results, and rank your findings.\n\nDirection:\n{{stage1}}\n\nWork: {{input}}")]),
             _approval("Approve", "Look at the result and approve it."),
         ],
     },
@@ -101,7 +105,8 @@ def templates_out() -> list[dict]:
         out.append({
             "key": key, "name": t["name"], "description": t["description"],
             "stages": json.loads(json.dumps(t["stages"])),
-            "hint": GATE_HINT if has_gate else None,
+            "hint": (GATE_HINT if not any(st.get("name") == "Screens" for st in t["stages"])
+                     else GATE_HINT + " " + SCREENS_HINT) if has_gate else None,
         })
     return out
 
