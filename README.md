@@ -29,7 +29,7 @@ port map is in
 - **Tasks and threads:** [Resume and handoff](#resume-and-handoff) ·
   [Token care and questions](#token-care-and-questions) ·
   [Claude plan limits](#claude-plan-limits) · [Ask about this run](#ask-about-this-run)
-- **Memory and decisions:** [Decision memory](#decision-memory) · [Personal preferences](#personal-preferences) ·
+- **Memory and decisions:** [Decision memory](#decision-memory) · [Personal preferences](#personal-preferences) · [Team decisions in your editor](#team-decisions-in-your-editor) ·
   [Suggested decisions](#suggested-decisions) ·
   [Helper tiers and briefs](#helper-tiers-and-briefs)
 - **Workflows:** [Command gates](#command-gates) ·
@@ -251,6 +251,13 @@ migrations run on start (`alembic upgrade head`; SQLite and Postgres), in order,
 a server that skipped several releases runs each of them in turn. **Take your usual
 database backup first** whenever an entry names a migration. The server must stay a
 single process (no `--workers`, no replicas).
+
+### Editor connections (phase 8c)
+
+- **Migration `0026` runs on start.** It adds the table that holds editor keys. Take your usual database backup
+  first.
+- **Off by default.** Nothing changes until an admin turns on **Editor connections** under Agent guard → Ground
+  rules. See [Team decisions in your editor](#team-decisions-in-your-editor).
 
 ### Personal preferences (phase 8b)
 
@@ -1177,6 +1184,32 @@ server start is marked failed (*interrupted*). Settings (`backend/.env`):
 disallowed tools are really off, are checked on the first live use. Try one
 ask on a real run and look at its answer and cost before you rely on it.
 Live steering of a running session is not part of this phase.
+
+---
+
+## Team decisions in your editor
+
+Let Claude Code or Cursor on your own computer read your team's recorded decisions. It is read-only.
+
+- **Turn it on (admin):** Agent guard → Ground rules, **Editor connections**. It is off by default, because it lets
+  project data leave the server. While it is off, no key can be created and the editor endpoint answers "Editor
+  connections are turned off by an admin."
+- **Create a key:** user menu → **Connect my editor** → New key. Give it a name, choose 30, 90 (default) or 365 days,
+  and choose every project you can see or only some. The key is shown once; copy it then. You can have 5 active
+  keys.
+- **Paste the setup:** the window shows a ready command for Claude Code
+  (`claude mcp add --transport http team-decisions <address>/mcp --header "Authorization: Bearer <key>"`) and a
+  snippet for Cursor's `mcp.json`. Paste it on your own computer.
+- **What it can see:** decisions only (active by default; retired or replaced ones on request). No code, task logs or
+  context documents. Only projects you can see right now: if you lose access to a project, the key loses it at once.
+  Secrets are blanked, and the text is marked as information, not instructions.
+- **Turning keys off:** **Turn off** next to a key in the same window; an admin can turn off anyone's key under
+  Agent guard → Editor keys. Disabling a person, or an admin resetting their password, turns off all their keys.
+  Switching **Editor connections** off stops every key at once (the keys stay listed).
+- **Who can manage keys:** only someone signed in to the app in the browser. API tokens cannot create keys.
+- **Limits:** 60 requests a minute per key, and 20 wrong-key attempts a minute per address.
+- **Reverse proxy:** when the UI and the API are on one address, the proxy must pass `POST /mcp` to the API.
+  Editors send no `Origin` header; a request that has one is refused.
 
 ---
 
@@ -2841,6 +2874,10 @@ are, treat what they show as unconfirmed. Tick them off on your first live runs.
     from one run to the next. ([Workflow templates](#workflow-templates))
 17. **Personal preferences:** whether the installed Claude Code CLI accepts the system prompt from a file, so it no
     longer appears in the start command. ([Personal preferences](#personal-preferences))
+18. **Editor connections:** connect a real Claude Code and a real Cursor with a new key and run each of the four tools
+    (list projects, list decisions, decisions for a path, get a decision). Check that Cursor accepts a decision number
+    given as a number or as "D-003", and that neither editor sends an `Origin` header (the server refuses one).
+    ([Team decisions in your editor](#team-decisions-in-your-editor))
 
 ---
 
