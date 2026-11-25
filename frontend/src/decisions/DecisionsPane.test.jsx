@@ -11,6 +11,7 @@ vi.mock('../api', () => ({
     verifyDecision: vi.fn(),
     retireDecision: vi.fn(),
     supersedeDecision: vi.fn(),
+    backfillDecisionTrack: vi.fn(),
     listProposals: vi.fn(),
     acceptProposal: vi.fn(),
     rejectProposal: vi.fn(),
@@ -300,5 +301,35 @@ describe('elsewhere', () => {
   it('ground rules list the decisions switch', () => {
     const s = GROUND_SWITCHES.find(([k]) => k === 'decisions')
     expect(s[2]).toMatch(/recorded project decisions/)
+  })
+
+  describe('track record', () => {
+    const track = (o = {}) => ({ shown: 12, passed: 3, completed: 2, fixed: 4, failed: 3, last_shown_at: '2026-11-24T10:00:00Z', trouble: false, ...o })
+    it('shows the grey tag, and the trouble tag when flagged', async () => {
+      api.listDecisions.mockResolvedValue([dec(1, { track: track() }), dec(2, { track: track({ trouble: true }) }), dec(3, { track: track({ shown: 1, fixed: 0, failed: 0 }) }), dec(4, { track: track({ shown: 0 }) }), dec(5, { track: null })])
+      const c = await mount()
+      expect(q(c, 'decision-1').textContent).toContain('Shown 12× · 7 needed fixes')
+      expect(q(c, 'decision-1').textContent).not.toContain('Often followed by trouble')
+      expect(q(c, 'decision-2').textContent).toContain('Often followed by trouble')
+      expect(q(c, 'decision-3').textContent).toContain('Shown 1×')
+      expect(q(c, 'decision-3').textContent).not.toContain('needed fixes')
+      expect(q(c, 'decision-4').textContent).not.toContain('Shown')
+      expect(q(c, 'decision-5').textContent).not.toContain('Shown')
+    })
+    it('admin backfill confirms, calls the API and reports', async () => {
+      api.backfillDecisionTrack.mockResolvedValue({ added: 5 })
+      const c = await mount({ isAdmin: true })
+      await click(q(c, 'track-backfill'))
+      expect(document.body.textContent).toContain('Fill the track record from past runs still in the history? Only adds records; nothing is changed or removed.')
+      const ok = [...document.querySelectorAll('.ant-popover button')].find((b) => /^(OK|Build)/.test(b.textContent.trim()))
+      await click(ok)
+      await flush()
+      expect(api.backfillDecisionTrack).toHaveBeenCalledWith('p1')
+      expect(document.body.textContent).toContain('Added 5 showings from past runs.')
+    })
+    it('no backfill button for non-admins', async () => {
+      const c = await mount()
+      expect(q(c, 'track-backfill')).toBeNull()
+    })
   })
 })

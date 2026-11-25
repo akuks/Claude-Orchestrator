@@ -526,6 +526,7 @@ export function ProjectDrawer({ project, tab, onTab, currentUser, onClose, onSav
                   key={project.id}
                   project={project}
                   canEdit={canEditGuard(project, currentUser)}
+                  isAdmin={currentUser?.role === 'admin'}
                   onCount={setPendingProposals}
                   onMakeRule={(d) => {
                     setRuleDraft(d)
