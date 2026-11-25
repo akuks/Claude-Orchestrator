@@ -1,6 +1,6 @@
-import pytest
 """Phase 7e task 3 (spec §3): copy a temp-folder document the thread recorded into the project."""
 
+import pytest
 import asyncio
 import os
 import uuid
