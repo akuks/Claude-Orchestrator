@@ -330,9 +330,10 @@ async def _still_on(days: int) -> bool:
 async def tidy(days: int, only=None) -> dict:
     """One pass with ``days``, while the switch is on with those days: it is read again before each batch
     and before the handoffs, and the pass stops when it was switched off or the days changed. Each task is
-    tidied in its own transaction. ``only``: limit to these task ids (and handoffs of these thread roots).
-    ``{"tasks", "batches", "handoffs", "stopped"}``."""
-    out = {"tasks": 0, "batches": 0, "handoffs": 0, "stopped": False}
+    tidied in its own transaction; one that fails is logged and skipped (left as it was, counted in
+    ``skipped``) and the pass goes on. ``only``: limit to these task ids (and handoffs of these thread roots).
+    ``{"tasks", "skipped", "batches", "handoffs", "stopped"}``."""
+    out = {"tasks": 0, "skipped": 0, "batches": 0, "handoffs": 0, "stopped": False}
     cutoff = _now() - timedelta(days=days)
     if not await _still_on(days):
         out["stopped"] = True
@@ -348,8 +349,12 @@ async def tidy(days: int, only=None) -> dict:
                     return out
             out["batches"] += 1
             for tid in ids[i:i + BATCH]:
-                if await _summarise(tid, cutoff, days):
-                    out["tasks"] += 1
+                try:
+                    if await _summarise(tid, cutoff, days):
+                        out["tasks"] += 1
+                except Exception:  # noqa: BLE001 - a bad payload, a deadlock: that task waits for the next pass
+                    log.exception("retention: could not tidy task %s; skipped", tid)
+                    out["skipped"] += 1
         if not await _still_on(days):
             out["stopped"] = True
             return out
@@ -372,7 +377,8 @@ async def run_if_enabled() -> dict | None:
     try:
         out = await tidy(cfg["days"])
         await _record_run(out["tasks"])
-        log.info("retention: tidied %s task(s), %s handoff(s)", out["tasks"], out["handoffs"])
+        log.info("retention: tidied %s task(s), skipped %s, %s handoff(s)", out["tasks"], out["skipped"],
+                 out["handoffs"])
         return out
     finally:
         _state["running"] = False

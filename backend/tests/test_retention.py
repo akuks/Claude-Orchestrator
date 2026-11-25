@@ -436,3 +436,48 @@ def test_preview_reads_no_payload_and_is_cached(client, monkeypatch):
     finally:
         sa_event.remove(engine.sync_engine, "before_cursor_execute", spy)
     assert seen == []
+
+
+def test_one_failing_task_is_skipped_and_the_run_recorded(client, monkeypatch, caplog):
+    import logging
+
+    bad, good = mk(events=3), mk(events=3)
+    real = retention._summarise
+
+    async def flaky(tid, cutoff, days):
+        if tid == bad:
+            raise RuntimeError("bad payload")
+        return await real(tid, cutoff, days)
+
+    monkeypatch.setattr(retention, "_summarise", flaky)
+    monkeypatch.setattr(retention, "_eligible", lambda cutoff, only=None, _e=retention._eligible: _e(cutoff, [bad, good]))
+    run(retention.save_settings(enabled=True, days=60, by=None))
+    with caplog.at_level(logging.ERROR, logger="app.retention"):
+        out = run(retention.run_if_enabled())
+    assert out["tasks"] == 1 and out["skipped"] == 1
+    assert [e.type for e in events_of(good)] == ["summary"] and len(events_of(bad)) == 3
+    assert any(bad in r.getMessage() for r in caplog.records)
+    cfg = run(retention.load_settings())
+    assert cfg["last_run"] and cfg["last_count"] == 1
+
+
+def test_the_loop_logs_a_failed_pass(client, monkeypatch, caplog):
+    import logging
+
+    from app import main
+
+    calls = []
+
+    async def boom():
+        calls.append(1)
+        if len(calls) > 1:
+            raise asyncio.CancelledError
+        raise RuntimeError("db down")
+
+    monkeypatch.setattr(main.retention, "run_if_due", boom)
+    monkeypatch.setattr(main.settings, "retention_first_delay_seconds", 0)
+    monkeypatch.setattr(main.settings, "retention_check_interval_seconds", 0)
+    with caplog.at_level(logging.ERROR, logger="app.main"):
+        with pytest.raises(asyncio.CancelledError):
+            run(main._retention_loop())
+    assert any("tidying pass failed" in r.getMessage() for r in caplog.records)

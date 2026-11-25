@@ -1,4 +1,5 @@
 import asyncio
+import logging
 from contextlib import asynccontextmanager
 
 from fastapi import Depends, FastAPI, Request
@@ -126,8 +127,8 @@ async def _retention_loop():
     while True:
         try:
             await retention.run_if_due()
-        except Exception:  # noqa: BLE001
-            pass
+        except Exception:  # noqa: BLE001 - the loop goes on; the next check tries again
+            logging.getLogger(__name__).exception("retention: the tidying pass failed")
         await asyncio.sleep(settings.retention_check_interval_seconds)
 
 

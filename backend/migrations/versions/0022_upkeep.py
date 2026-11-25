@@ -1,9 +1,14 @@
-"""Upkeep (phase 7d): the tidying switch (guard_org_settings.retention: enabled, days, last run) and indexes on
-task_events.created_at (and task_id, when a database lacks it)
+"""Upkeep (phase 7d): the tidying switch (guard_org_settings.retention: enabled, days, last run),
+projects.root_commit, and indexes on task_events.created_at (and task_id, when a database lacks it)
+
+All in the migration's one transaction (migrations run at start, before the app serves): an interrupted start
+leaves nothing half-done, and each step is skipped when it is already there.
 
 Revision ID: 0022
 Revises: 0021
 """
+import logging
+
 from alembic import op
 import sqlalchemy as sa
 
@@ -12,50 +17,38 @@ down_revision = "0021"
 branch_labels = None
 depends_on = None
 
+log = logging.getLogger(__name__)
+INDEX_NOTE = "Building an index on the task history table; on a large history this can take a few minutes."
+
 
 def _indexes() -> set[str]:
     return {i["name"] for i in sa.inspect(op.get_bind()).get_indexes("task_events")}
 
 
-def _postgres() -> bool:
-    return op.get_bind().dialect.name == "postgresql"
-
-
-def _create_index(name: str, column: str) -> None:
-    """On Postgres built CONCURRENTLY (event writes go on while a large table is indexed), outside the
-    migration's transaction; plain elsewhere."""
-    if _postgres():
-        with op.get_context().autocommit_block():
-            op.create_index(name, "task_events", [column], postgresql_concurrently=True, if_not_exists=True)
-    else:
-        op.create_index(name, "task_events", [column])
-
-
-def _drop_index(name: str) -> None:
-    if _postgres():
-        with op.get_context().autocommit_block():
-            op.drop_index(name, table_name="task_events", postgresql_concurrently=True, if_exists=True)
-    else:
-        op.drop_index(name, table_name="task_events")
+def _columns(table: str) -> set[str]:
+    return {c["name"] for c in sa.inspect(op.get_bind()).get_columns(table)}
 
 
 def upgrade() -> None:
-    with op.batch_alter_table("guard_org_settings") as b:
-        b.add_column(sa.Column("retention", sa.JSON(), nullable=False, server_default="{}"))
-    with op.batch_alter_table("projects") as b:
-        b.add_column(sa.Column("root_commit", sa.String(40), nullable=True))
     have = _indexes()
     if "ix_task_events_created_at" not in have:
-        _create_index("ix_task_events_created_at", "created_at")
+        log.warning(INDEX_NOTE)
+        op.create_index("ix_task_events_created_at", "task_events", ["created_at"], if_not_exists=True)
     if "ix_task_events_task_id" not in have:  # the baseline has it; a repaired database might not
-        _create_index("ix_task_events_task_id", "task_id")
+        op.create_index("ix_task_events_task_id", "task_events", ["task_id"], if_not_exists=True)
+    if "retention" not in _columns("guard_org_settings"):
+        with op.batch_alter_table("guard_org_settings") as b:
+            b.add_column(sa.Column("retention", sa.JSON(), nullable=False, server_default="{}"))
+    if "root_commit" not in _columns("projects"):
+        with op.batch_alter_table("projects") as b:
+            b.add_column(sa.Column("root_commit", sa.String(40), nullable=True))
 
 
 def downgrade() -> None:
-    # ix_task_events_task_id belongs to the baseline: it stays
-    if "ix_task_events_created_at" in _indexes():
-        _drop_index("ix_task_events_created_at")
     with op.batch_alter_table("projects") as b:
         b.drop_column("root_commit")
     with op.batch_alter_table("guard_org_settings") as b:
         b.drop_column("retention")
+    # ix_task_events_task_id belongs to the baseline: it stays
+    if "ix_task_events_created_at" in _indexes():
+        op.drop_index("ix_task_events_created_at", table_name="task_events")

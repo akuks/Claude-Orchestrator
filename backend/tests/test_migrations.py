@@ -796,3 +796,38 @@ def test_migration_0022_upgrade_downgrade(scratch_url):
                 sc.exec_driver_sql("SELECT version_num FROM alembic_version").scalar())
 
     assert _inspect(url, check_down) == ("text_output", "0021")
+
+
+def test_migration_0022_is_one_transaction_and_skips_what_is_there(scratch_url, caplog):
+    """No autocommit / CONCURRENTLY step (all-or-nothing at start); a database that already has a 0022 column
+    or index (a hand fix, a repaired legacy DB) still upgrades; the index build is announced in the log."""
+    import logging
+    import pathlib
+
+    from alembic import command
+
+    src = (pathlib.Path(__file__).parent.parent / "migrations" / "versions" / "0022_upkeep.py").read_text()
+    assert "autocommit_block" not in src and "concurrently" not in src.lower()
+    url = scratch_url
+    command.upgrade(_alembic_cfg(url), "0021")
+
+    def partial(sc, insp):
+        sc.exec_driver_sql("ALTER TABLE projects ADD COLUMN root_commit VARCHAR(40)")
+        sc.exec_driver_sql("CREATE INDEX ix_task_events_created_at ON task_events (created_at)")
+
+    _inspect(url, partial)
+    with caplog.at_level(logging.WARNING):
+        command.upgrade(_alembic_cfg(url), "0022")
+    assert not any("task history table" in r.getMessage() for r in caplog.records)  # the index was there
+
+    def check(sc, insp):
+        assert "retention" in {c["name"] for c in insp.get_columns("guard_org_settings")}
+        assert "root_commit" in {c["name"] for c in insp.get_columns("projects")}
+        return sc.exec_driver_sql("SELECT version_num FROM alembic_version").scalar()
+
+    assert _inspect(url, check) == "0022"
+    command.downgrade(_alembic_cfg(url), "0021")
+    caplog.clear()
+    with caplog.at_level(logging.WARNING):
+        command.upgrade(_alembic_cfg(url), "0022")
+    assert any("task history table" in r.getMessage() for r in caplog.records)
