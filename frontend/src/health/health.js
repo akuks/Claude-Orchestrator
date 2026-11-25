@@ -52,9 +52,9 @@ export function sizeText(bytes) {
 
 const plural = (n, one, many) => `${n} ${n === 1 ? one : many}`
 
-// "3 tasks could be tidied (about 12 MB)" / "Nothing to tidy yet".
+// "3 tasks could be tidied (about 12 MB of history)" / "Nothing to tidy yet".
 export function tidyPreviewLine(r) {
   const n = Number(r?.tasks) || 0
   if (!n) return 'Nothing to tidy yet'
-  return `${plural(n, 'task', 'tasks')} could be tidied (about ${sizeText(r.bytes)})`
+  return `${plural(n, 'task', 'tasks')} could be tidied (about ${sizeText(r.bytes)} of history)`
 }

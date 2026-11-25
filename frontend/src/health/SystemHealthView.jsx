@@ -168,6 +168,9 @@ export function RunHistoryCard() {
           <p className="co-health-summary" data-testid="tidy-preview">
             {tidyPreviewLine(r)}
           </p>
+          <p className="co-health-summary" style={{ fontSize: 12, opacity: 0.7 }} data-testid="tidy-note">
+            The database reuses this space; the disk file doesn't shrink.
+          </p>
           {r.last_run && (
             <p className="co-health-summary" data-testid="tidy-last">
               Last tidied {when(r.last_run).format('D MMM YYYY')}: {r.last_count ?? 0} {r.last_count === 1 ? 'task' : 'tasks'}

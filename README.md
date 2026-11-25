@@ -1998,9 +1998,7 @@ recorded decisions for the files an answer names, and labels for old code.
 
 ### To know
 
-- Tidying is off until switched on; once on, it cannot bring back what it replaced. A Continue
-  of a tidied thread rebuilds from the summary, so things worked out from events (files touched,
-  step progress) start empty.
+- Tidying is off until switched on; once on, it cannot bring back what it replaced. Continuing a thread whose history was tidied rebuilds its handoff from the summary only — files touched and step progress start empty.
 - The code-map note is worked out at task start, so within a long session it can be up to one
   task old.
 - The re-clone check looks at the folder when a task starts and when System health is opened; it
