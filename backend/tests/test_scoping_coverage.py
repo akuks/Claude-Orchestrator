@@ -75,6 +75,7 @@ ADMIN_ONLY = {
     ("GET", "/projects/discover"),
     ("GET", "/admin/org-fallback"),
     ("GET", "/admin/health"),
+    ("GET", "/admin/health/capacity"),
     ("GET", "/admin/health/retention"),
     ("PATCH", "/admin/health/retention"),
     ("POST", "/admin/health/retention/run"),

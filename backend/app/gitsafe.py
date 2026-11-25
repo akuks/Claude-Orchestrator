@@ -55,6 +55,8 @@ remote's lazy fetch of a missing object), so every such call goes through
 * the code map freshness check (phase 7d): ``diff --name-only -z <hex> HEAD``, exactly that order (the caller
   bounds it with its timeout and reads only what it needs), and the repository's first commit: ``rev-list
   --max-parents=0 HEAD``, exactly;
+* the activity history (phase 7g): ``log --no-merges --numstat --format=<ACTIVITY_FORMAT> --since=<YYYY-MM-DD> -n
+  <1-5 digits>``, exactly that order (no patch text is produced; --numstat prints only counts and names);
 * the typed stage outputs' commit check: ``rev-parse --verify --quiet
   <hex>^{commit}``, exactly that order (hex is 7-40 lowercase digits).
 
@@ -127,6 +129,9 @@ STATUS_OPTIONS = ("--porcelain=v1", "-z", "--untracked-files=all", "--no-renames
 _HEX = r"[0-9a-f]{7,40}"
 _REV_RE = re.compile(rf"^(HEAD|{_HEX}(\.\.{_HEX})?)$")
 _SHA_RE = re.compile(rf"^{_HEX}$")
+ACTIVITY_FORMAT = "--format=%H%x1f%aI%x1f%an%x1f%ae%x1f%s"
+_ACTIVITY_SINCE_RE = re.compile(r"--since=\d{4}-\d{2}-\d{2}")
+_ACTIVITY_N_RE = re.compile(r"\d{1,5}")
 _COMMIT_REV_RE = re.compile(rf"{_HEX}\^\{{commit\}}")  # used with fullmatch
 
 
@@ -164,6 +169,10 @@ def check_args(args) -> None:
     if cmd == "symbolic-ref" and rest == ["-q", "--short", "HEAD"]:
         return
     if cmd == "config" and len(rest) == 2 and rest[0] == "--get":
+        return
+    if cmd == "log" and len(rest) == 6 and rest[0] == "--no-merges" and rest[1] == "--numstat" \
+            and rest[2] == ACTIVITY_FORMAT and _ACTIVITY_SINCE_RE.fullmatch(rest[3]) and rest[4] == "-n" \
+            and _ACTIVITY_N_RE.fullmatch(rest[5]):
         return
     if cmd in ("log", "rev-list"):
         for a in rest:
