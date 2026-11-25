@@ -61,6 +61,12 @@ export function stepWaitText(state, now = dayjs()) {
   return t ? `Paused — your Claude plan limit was reached. Starts again at ${t}.` : state.reason || null
 }
 
+// "Work starts again at 14:05" for a held status, from hold_until + 1 min (local time).
+export function startsAgainText(st, now) {
+  const t = localWhen(plus1(st?.hold_until || st?.resets_at), now)
+  return t ? `Work starts again at ${t}` : null
+}
+
 export const STATUS_WORDS = {
   allowed: 'Working normally',
   allowed_warning: 'Close to the limit',

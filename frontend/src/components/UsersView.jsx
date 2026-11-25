@@ -107,6 +107,7 @@ export default function UsersView({ currentUser, onFallbackChanged }) {
   }
   const tryNowButton = (owner, name) => (
     <Popconfirm
+      placement="left"
       title={`Let ${name}'s work start now? If the limit is still reached, it will pause again.`}
       onConfirm={() => tryNow(owner)}
     >

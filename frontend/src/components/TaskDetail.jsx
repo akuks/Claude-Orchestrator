@@ -467,6 +467,7 @@ export default function TaskDetail({ taskId, onClose, onChanged, onOpenTask, onO
       const ev = JSON.parse(e.data)
       if (ev.seq) lastSeqRef.current = Math.max(lastSeqRef.current, ev.seq)
       setEvents((prev) => [...prev, ev])
+      if (ev.type === 'plan_limit' && ev.payload?.paused) api.getTask(taskId).then((t) => !closed && setTask(t))
       if (ev.type === 'completed' || ev.type === 'error') {
         // The worker emits `completed` before it commits the terminal status: refetch until it is terminal.
         endRefresh(taskId, () => closed, setTask, () => {

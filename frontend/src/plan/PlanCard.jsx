@@ -4,7 +4,7 @@ import { api } from '../api'
 import dayjs from 'dayjs'
 import relativeTime from 'dayjs/plugin/relativeTime'
 import { when } from '../time'
-import { localWhen, STATUS_WORDS } from './plan'
+import { localWhen, STATUS_WORDS, startsAgainText } from './plan'
 
 dayjs.extend(relativeTime)
 
@@ -22,12 +22,13 @@ export default function PlanCard() {
   } else if (!st) {
     body = <Typography.Text>Nothing reported yet. It appears after the next task runs.</Typography.Text>
   } else {
-    const word = st.held ? STATUS_WORDS.rejected : STATUS_WORDS[st.status] || 'Working normally'
+    const word = st.held ? STATUS_WORDS.rejected : STATUS_WORDS[st.status] || 'Not known (see Details)'
     const reset = localWhen(st.resets_at)
     body = (
       <>
         <div data-testid="plan-status-word" style={{ fontSize: 16, fontWeight: 600 }}>{word}</div>
         {reset && <div>Resets at {reset}</div>}
+        {st.held && startsAgainText(st) && <div data-testid="plan-starts-again">{startsAgainText(st)}</div>}
         {st.seen_at && (
           <Typography.Text type="secondary">Last checked {when(st.seen_at).fromNow()}</Typography.Text>
         )}

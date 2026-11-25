@@ -358,6 +358,8 @@ describe('RunView', () => {
     const el = c.querySelector('[data-testid="run-stage-plan-wait"]')
     expect(el.textContent).toMatch(/^Paused — your Claude plan limit was reached\. Starts again at (tomorrow |\d+ \w+, )?\d{2}:\d{2}\.$/)
     expect(el.textContent).not.toContain('03:33')
+    expect(c.querySelector('[data-testid="run-stage-state"]').textContent).toBe('Waiting for plan limit')
+    expect(c.textContent).not.toContain('Not started yet')
   })
 
   it('earlier attempts are collapsed under "Earlier attempts (1)"', async () => {

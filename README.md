@@ -153,6 +153,9 @@ To know:
 - Not run against the real `claude` CLI. The event's exact shape and when it is sent come from the documentation.
 - There is no live "% of your 5-hour window" between events: the headless stream does not give one reliably.
 - No automatic fallback to the org key.
+- The 3rd limit hit in a row stops the task ("Stopped — the Claude plan limit was reached three times in a row.").
+- A hold that is not confirmed is capped at 6 hours and re-checked every few minutes.
+- API keys and the org fallback key are never held: plan limits do not apply to them.
 
 Owner checklist, on one real run with a subscription token:
 

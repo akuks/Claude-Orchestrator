@@ -105,6 +105,9 @@ describe('TaskDetail: plan limit pause', () => {
     const l = view.container.querySelector('[data-testid="plan-limit-line"]')
     expect(l.textContent).toMatch(/^Your Claude plan limit was reached\. Work starts again at/)
     expect(l.textContent).not.toMatch(/[{}"]/)
+    const calls = api.getTask.mock.calls.length
+    await act(async () => FakeSocket.all.at(-1).onmessage({ data: JSON.stringify({ seq: 2, type: 'plan_limit', payload: { paused: true, not_before: nb } }) }))
+    expect(api.getTask.mock.calls.length).toBe(calls + 1)
   })
 })
 
