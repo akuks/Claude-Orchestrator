@@ -1538,9 +1538,10 @@ limit creates it. The check is not re-run meanwhile.
 
 **When tries run out.** The check fails as in the earlier rounds (the failure
 line, the run fails) and **Retry** starts the step again with fresh tries. The run
-also fails, with "the fix did not finish", when the fix task fails or is
-cancelled, and with "the fixer agent is not available" when the agent is missing
-or has moved to another project. Cancelling the run while a fix is going cancels
+also fails, with "the fix did not finish", when the fix task fails, with "the fix
+was cancelled" when it is cancelled (not counted in the decision track record), and
+with "the fixer agent is not available" when the agent is missing or has moved to
+another project. Cancelling the run while a fix is going cancels
 it.
 
 **Approval of a fix task.** Its risk is judged on the check output after the fixed

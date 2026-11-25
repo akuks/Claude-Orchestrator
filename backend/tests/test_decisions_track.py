@@ -772,9 +772,9 @@ def test_locked_database_is_retried_then_given_up(client, monkeypatch, caplog):
     assert any("settling run" in r.getMessage() for r in caplog.records)
 
 
-def test_settles_running_alongside_another_writer_never_break_it(client):
-    """A writer doing read-then-write transactions while settles of the same run keep writing: every one of
-    its commits succeeds."""
+def test_smoke_settles_alongside_another_writer(client):
+    """Smoke test (it does not reproduce the earlier suite failure): a writer doing read-then-write transactions
+    while settles of the same run keep firing; every one of its commits succeeds."""
 
     async def go():
         pid = await _project()
@@ -804,3 +804,27 @@ def test_settles_running_alongside_another_writer_never_break_it(client):
     errors, out = _run(go())
     assert errors == []
     assert out[0][1] in ("fixed", "failed", "passed")
+
+
+def test_older_attempt_clears_a_settled_outcome(client):
+    """I1: a step's task fails and settles `failed`; the step is started again -> its showing no longer counts."""
+
+    async def go():
+        pid = await _project()
+        rid, tids = await _wf(pid, {"status": "passed"})
+        await _set(tids[0], status=Status.FAILED)
+        await track.settle_run(rid)
+        before = await _outcome(tids[0])
+        settled = (await _rows(tids[0]))[0].settled_at
+        async with SessionLocal() as s:
+            run = await s.get(WorkflowRun, rid)
+            run.stage_state = {"0": {"status": "running", "attempt": 1}, "1": {"status": "passed"}}
+            await s.commit()
+        await track.settle_run(rid)
+        row = (await _rows(tids[0]))[0]
+        return before, settled, (row.outcome, row.settled_at), await _outcome(tids[1])
+
+    before, settled, after, sibling = _run(go())
+    assert before == [(1, "failed", False)] and settled is not None
+    assert after == (None, None)
+    assert sibling == [(1, None, False)]

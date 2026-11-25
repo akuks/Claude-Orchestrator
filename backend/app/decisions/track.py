@@ -17,8 +17,8 @@ outside a workflow, or a workflow step with no gate after it, that completed). A
 judged by its gate's final result: ``passed`` or ``failed``, never ``fixed``. No outcome (not counted): a
 cancelled task, a gate that has not settled, a gate stopped by cancel or by its own infrastructure (internal
 error, guard refusal, missing command/folder, fixer gone, fix cancelled), and a task of an older stage attempt
-(failed or not). A settled
-outcome is never cleared back to none."""
+(failed or not). A settled outcome is never cleared back to none, except when the task's step is started again
+(its showings no longer count)."""
 
 import asyncio
 import logging
@@ -156,6 +156,15 @@ def _int(v) -> int:
         return 0
 
 
+def _older_attempt(t, run: WorkflowRun | None) -> bool:
+    """A workflow task whose step was started again since (its stage_attempt is not the step's current one)."""
+    if not t.workflow_run_id or run is None or t.stage_index is None:
+        return False
+    stages = list(run.stages or [])
+    j = t.stage_index
+    return 0 <= j < len(stages) and _int(t.stage_attempt) != _int(_state(run, j).get("attempt"))
+
+
 def outcome_of(t, run: WorkflowRun | None, fix_tasks: set[tuple[int, int]]) -> str | None:
     """The outcome of a finished task (None: not counted / not settled yet). ``t`` needs status,
     workflow_run_id, stage_index, stage_attempt, tags. ``fix_tasks``: the run's (stage index, stage attempt)
@@ -163,7 +172,7 @@ def outcome_of(t, run: WorkflowRun | None, fix_tasks: set[tuple[int, int]]) -> s
     in_run = bool(t.workflow_run_id) and run is not None and t.stage_index is not None
     stages = list(run.stages or []) if in_run else []
     j = t.stage_index if in_run else None
-    if in_run and 0 <= j < len(stages) and _int(t.stage_attempt) != _int(_state(run, j).get("attempt")):
+    if _older_attempt(t, run):
         return None  # an older attempt of its step (even a failed one): not counted
     if t.status == Status.FAILED:
         return "failed"
@@ -221,6 +230,11 @@ def _changes(rows, current: dict, run: WorkflowRun | None, fix_tasks: set) -> di
         new = outcome_of(t, run, fix_tasks)
         retried = _int(t.attempt) > 0
         have = current.get(t.id) or []
+        if _older_attempt(t, run):  # the one case an outcome is cleared: its step was started again
+            if all(o is None and bool(r) == retried for o, r in have):
+                continue
+            out[t.id] = {"retried": retried, "outcome": None, "settled_at": None}
+            continue
         if all((new is None or o == new) and bool(r) == retried for o, r in have):
             continue
         values = {"retried": retried}
@@ -238,7 +252,7 @@ async def _apply(changes: dict[str, dict]) -> None:
         async with SessionLocal() as s:
             for tid in sorted(changes):  # one order: concurrent writers never deadlock
                 values = dict(changes[tid])
-                if "outcome" in values:
+                if values.get("outcome") is not None:
                     values["settled_at"] = now
                 await s.execute(update(DecisionShowing).where(DecisionShowing.task_id == tid).values(**values)
                                 .execution_options(synchronize_session=False))
@@ -303,9 +317,9 @@ async def settle_tasks(task_ids: list[str]) -> None:
     if not task_ids:
         return
     run_ids: set[str] = set()
-    try:
-        for k in range(0, len(task_ids), SETTLE_CHUNK):
-            chunk = task_ids[k:k + SETTLE_CHUNK]
+    for k in range(0, len(task_ids), SETTLE_CHUNK):
+        chunk = task_ids[k:k + SETTLE_CHUNK]
+        try:  # each chunk on its own: one that fails does not stop the rest
             async with SessionLocal() as s:
                 rows = (await s.execute(select(*_COLS).where(Task.id.in_(chunk), _has_showing())
                                         .order_by(Task.id))).all()
@@ -315,8 +329,8 @@ async def settle_tasks(task_ids: list[str]) -> None:
             changes = _changes(plain, current, None, set())
             if changes:
                 await _apply(changes)
-    except Exception as e:  # noqa: BLE001
-        log.warning("decision track: settling failed for %s: %s", task_ids[:3], e)
+        except Exception as e:  # noqa: BLE001
+            log.warning("decision track: settling failed for %s: %s", chunk[:3], e)
     for rid in sorted(run_ids):
         await settle_run(rid)
 
