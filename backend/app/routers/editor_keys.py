@@ -28,11 +28,23 @@ admin_router = APIRouter(prefix="/admin/editor-keys", tags=["editor"])
 mcp_router = APIRouter(tags=["editor"])
 
 
+BROWSER_ONLY = "Editor keys are managed from a browser session"
+
+
 def _person(request: Request):
+    """A person in a browser session: agent tokens are refused (also by the allowlist) and so is any other API
+    token, like ``change_password`` (an editor key is made and turned off by the person, on screen)."""
     p = request.state.principal
     if p.is_agent:
         raise HTTPException(403, "Token not allowed for this route")
+    if p.token is not None:
+        raise HTTPException(403, BROWSER_ONLY)
     return p
+
+
+def _admin(request: Request):
+    _person(request)
+    ensure_admin(request.state.principal)
 
 
 async def _names(s, user: User) -> dict[str, str]:
@@ -59,7 +71,7 @@ def _base_url(request: Request) -> str:
 
 
 @router.post("", status_code=201)
-async def create_my_key(request: Request, data: Any = Body(None)):
+async def create_my_key(request: Request, response: Response, data: Any = Body(None)):
     p = _person(request)
     try:
         name, days, projects = keys_mod.validate_new(data)
@@ -74,7 +86,12 @@ async def create_my_key(request: Request, data: Any = Body(None)):
             row, raw = await keys_mod.create(s, p.user, name, days, projects)
         except ValueError as e:
             raise HTTPException(422, str(e)) from None
+        # the cap again, with this key in: a create that raced another past the first check is undone
+        if await keys_mod.live_count(s, p.user.id) > keys_mod.MAX_KEYS:
+            await s.rollback()
+            raise HTTPException(422, keys_mod.TOO_MANY)
         await s.commit()
+        response.headers["Cache-Control"] = "no-store"  # the key text is shown once; never kept by a cache
         return {"id": row.id, "name": row.name, "prefix": row.prefix, "key": raw, "url": _base_url(request),
                 "expires_at": keys_mod.iso(row.expires_at), "projects": row.projects}
 
@@ -98,7 +115,7 @@ async def revoke_my_key(key_id: str, request: Request):
 
 @admin_router.get("")
 async def list_all_keys(request: Request):
-    ensure_admin(request.state.principal)
+    _admin(request)
     async with SessionLocal() as s:
         rows = (await s.execute(select(EditorKey, User).join(User, User.id == EditorKey.user_id)
                                 .order_by(EditorKey.created_at.desc()))).all()
@@ -111,7 +128,7 @@ async def list_all_keys(request: Request):
 
 @admin_router.delete("/{key_id}", status_code=204)
 async def revoke_any_key(key_id: str, request: Request):
-    ensure_admin(request.state.principal)
+    _admin(request)
     async with SessionLocal() as s:
         await _revoke(s, await s.get(EditorKey, key_id))
     return Response(status_code=204)
@@ -150,16 +167,18 @@ async def editor_endpoint(request: Request):
     if "origin" in request.headers:
         raise HTTPException(403, protocol.ORIGIN_REFUSED)
     raw = _editor_bearer(request)
-    ip = _ip(request)
-    if keys_mod.ip_blocked(ip):
-        raise HTTPException(429, keys_mod.TOO_MANY_BAD)
     async with SessionLocal() as s:
+        # The key is looked up first: a valid key never meets the address limit (behind a reverse proxy every
+        # editor shares one address). Keys hold 256 random bits; the limit only keeps wrong-key load down.
         found = await keys_mod.resolve(s, raw)
         if found is None:
             if raw.startswith("co_"):  # an agent's API token is never an editor key (the agent allowlist's answer)
                 tok = await auth.resolve_token(s, raw)
                 if tok is not None and auth.Principal(*tok).is_agent:
                     raise HTTPException(403, "Token not allowed for this route")
+            ip = _ip(request)
+            if keys_mod.ip_blocked(ip):
+                raise HTTPException(429, keys_mod.TOO_MANY_BAD)
             keys_mod.note_bad(ip)
             raise HTTPException(401, protocol.NO_KEY, headers={"WWW-Authenticate": "Bearer"})
         user, key = found

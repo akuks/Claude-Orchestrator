@@ -7,7 +7,8 @@
   owner's **live** grants (``access.visible_project_ids``) intersected with the key's ``projects`` list when set,
   so losing access to a project removes it from the key at once.
 * In-memory limits, like the login throttle (single process): ``CALLS_PER_MINUTE`` per key and
-  ``BAD_PER_MINUTE`` wrong keys per client address. ``touch`` writes ``last_used_at``/``use_count`` at most once a
+  ``BAD_PER_MINUTE`` wrong keys per client address (checked only after a failed lookup, so a valid key never
+  meets it); each map holds at most ``TRACKED_MAX`` entries. ``touch`` writes ``last_used_at``/``use_count`` at most once a
   minute per key (the calls in between are counted in memory and added when it writes).
 
 Functions take an AsyncSession and never commit, except ``touch``."""
@@ -39,6 +40,7 @@ CALLS_PER_MINUTE = 60
 BAD_PER_MINUTE = 20
 WINDOW_SECONDS = 60.0
 TOUCH_SECONDS = 60
+TRACKED_MAX = 10_000  # entries per limit map (addresses, keys)
 
 SWITCH = "editor_connections"
 OFF = "Editor connections are turned off by an admin."
@@ -170,16 +172,37 @@ def ip_blocked(ip: str) -> bool:
     return len(_recent(_bad, ip)) >= BAD_PER_MINUTE
 
 
+def _bound(store: dict) -> None:
+    """Keep a limit map at most ``TRACKED_MAX`` entries: drop the ones with nothing in the window, then (an
+    attacker rotating addresses) the oldest-added."""
+    if len(store) < TRACKED_MAX:
+        return
+    for k in list(store):
+        _recent(store, k)
+    while len(store) >= TRACKED_MAX:
+        store.pop(next(iter(store)))
+
+
 def note_bad(ip: str) -> None:
+    if ip not in _bad:
+        _bound(_bad)
     _recent(_bad, ip)
     _bad[ip].append(time.monotonic())
 
 
 def allow_call(key_id: str) -> bool:
+    if key_id not in _calls:
+        _bound(_calls)
     if len(_recent(_calls, key_id)) >= CALLS_PER_MINUTE:
         return False
     _calls[key_id].append(time.monotonic())
     return True
+
+
+async def revoke_user_keys(s, user_id: str) -> None:
+    """Turn off every live key of a person (no commit): when an admin disables them or resets their password."""
+    await s.execute(update(EditorKey).where(EditorKey.user_id == user_id, EditorKey.revoked_at.is_(None))
+                    .values(revoked_at=_now()))
 
 
 async def touch(s, key: EditorKey) -> None:

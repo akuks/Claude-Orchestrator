@@ -247,6 +247,74 @@ def test_at_most_five_live_keys(client, switch_on):
     assert m.post("/me/editor-keys", json={"name": "k8"}).status_code == 422
 
 
+def test_personal_token_refused_on_key_routes(client, switch_on):
+    async def mint(uid):
+        async with SessionLocal() as s:
+            raw = await auth.mint_token(s, uid, "personal", None, 600)
+            await s.commit()
+            return raw
+
+    m = login_as(f"ed-{_uid()}@test.local")
+    mine = _new_key(m)
+    admin_id = client.get("/auth/me").json()["id"]
+    for uid in (m.user_id, admin_id):
+        t = TestClient(app)
+        t.headers["Authorization"] = f"Bearer {_run(mint(uid))}"
+        for method, url in (("GET", "/me/editor-keys"), ("POST", "/me/editor-keys"),
+                            ("DELETE", f"/me/editor-keys/{mine['id']}"), ("GET", "/admin/editor-keys"),
+                            ("DELETE", f"/admin/editor-keys/{mine['id']}")):
+            r = t.request(method, url, json={"name": "x"} if method == "POST" else None)
+            assert r.status_code == 403, (method, url, r.text)
+            if uid == m.user_id or "/admin/" not in url:
+                assert r.json()["detail"] == "Editor keys are managed from a browser session"
+    assert m.get("/me/editor-keys").json()["keys"][0]["revoked_at"] is None
+
+
+def test_create_answer_is_not_cached(client, switch_on):
+    m = login_as(f"ed-{_uid()}@test.local")
+    r = m.post("/me/editor-keys", json={"name": "k"})
+    assert r.status_code == 201 and r.headers["cache-control"] == "no-store"
+
+
+def test_cap_rechecked_after_insert(client, switch_on, monkeypatch):
+    m = login_as(f"ed-{_uid()}@test.local")
+    for i in range(5):
+        _new_key(m, name=f"k{i}")
+    real = keys_mod.live_count
+    calls = []
+
+    async def first_check_raced(s, user_id):  # the first check ran before a racing create committed
+        calls.append(1)
+        return 0 if len(calls) == 1 else await real(s, user_id)
+
+    monkeypatch.setattr(keys_mod, "live_count", first_check_raced)
+    r = m.post("/me/editor-keys", json={"name": "raced"})
+    assert r.status_code == 422 and r.json()["detail"] == keys_mod.TOO_MANY and len(calls) == 2
+    monkeypatch.setattr(keys_mod, "live_count", real)
+    assert len(m.get("/me/editor-keys").json()["keys"]) == 5  # rolled back
+
+
+def test_disable_and_password_reset_revoke_keys(client, switch_on):
+    ping = {"jsonrpc": "2.0", "id": 1, "method": "ping"}
+    m = login_as(f"ed-{_uid()}@test.local")
+    k1 = _new_key(m, name="one")
+    assert _mcp(k1["key"], ping).status_code == 200
+    assert client.patch(f"/users/{m.user_id}", json={"active": False}).status_code == 200
+    assert client.patch(f"/users/{m.user_id}", json={"active": True}).status_code == 200
+    assert _mcp(k1["key"], ping).status_code == 401  # re-enabling does not bring the key back
+    m = login_as(f"ed-{_uid()}@test.local")
+    k2 = _new_key(m, name="two")
+    other = login_as(f"ed-{_uid()}@test.local")
+    k3 = _new_key(other, name="other")
+    r = client.post(f"/users/{m.user_id}/reset-password", json={"password": "a-new-password-123"})
+    assert r.status_code == 204, r.text
+    assert _mcp(k2["key"], ping).status_code == 401
+    assert _mcp(k3["key"], ping).status_code == 200  # someone else's key is untouched
+    # a name/role change without disabling keeps the keys
+    assert client.patch(f"/users/{other.user_id}", json={"name": "renamed"}).status_code == 200
+    assert _mcp(k3["key"], ping).status_code == 200
+
+
 def test_agent_token_refused_on_key_routes(client, switch_on):
     m = login_as(f"ed-{_uid()}@test.local")
 
@@ -342,7 +410,7 @@ def test_expired_revoked_and_disabled_owner(client, switch_on):
         assert r.status_code == 401 and k3["key"] not in r.text
     finally:
         client.patch(f"/users/{m.user_id}", json={"active": True})
-    assert _mcp(k3["key"], ping).status_code == 200
+    assert _mcp(k3["key"], ping).status_code == 401  # disabling turned the key off for good
 
 
 # --------------------------------------------------------------------------- what a key can see
@@ -726,9 +794,41 @@ def test_bad_keys_per_ip_limit(world):
         assert _mcp(f"coe_wrong{i}", ping).status_code == 401
     r = _mcp("coe_wrong-again", ping)
     assert r.status_code == 429 and r.json()["detail"] == keys_mod.TOO_MANY_BAD
-    assert _mcp(world["every"], ping).status_code == 429  # the address waits a minute, whatever it sends
-    keys_mod.reset_limits()
+    # a valid key is looked up first and never meets the address limit (a proxy's address is everyone's)
     assert _mcp(world["every"], ping).status_code == 200
+    assert _mcp("coe_still-wrong", ping).status_code == 429
+
+
+def test_limit_maps_stay_bounded(monkeypatch):
+    monkeypatch.setattr(keys_mod, "TRACKED_MAX", 50)
+    for i in range(500):  # an attacker rotating addresses / many keys
+        keys_mod.note_bad(f"10.0.{i // 256}.{i % 256}")
+        keys_mod.allow_call(f"key-{i}")
+    assert len(keys_mod._bad) <= 50 and len(keys_mod._calls) <= 50
+    assert "10.0.1.243" in keys_mod._bad and "key-499" in keys_mod._calls  # the newest are kept
+
+
+def test_why_is_redacted_whole_before_lines(world, client):
+    w = world
+    pem_body = "MIIEvQIBADANBgkqhkiG9w0BAQEFAASC" + "A" * 40
+    why = f"keep this\n-----BEGIN PRIVATE KEY-----\n{pem_body}\n{pem_body}\n-----END PRIVATE KEY-----\nafter"
+
+    async def raw_insert():  # stored unredacted (as an older row or a direct write could be)
+        async with SessionLocal() as s:
+            top = (await s.execute(select(ProjectDecision.number).where(
+                ProjectDecision.project_id == w["a"]["id"]).order_by(ProjectDecision.number.desc()).limit(1))
+                   ).scalar() or 0
+            s.add(ProjectDecision(project_id=w["a"]["id"], number=top + 1, kind="decision", title="pem",
+                                  why=why, touches=[], status="active"))
+            await s.commit()
+            return top + 1
+
+    n = _run(raw_insert())
+    for tool, args in (("get_decision", {"project": w["a"]["id"], "number": n}),
+                       ("list_decisions", {"project": w["a"]["id"]})):
+        text, _ = _call(w["every"], tool, args)
+        assert pem_body not in text and "END PRIVATE KEY" not in text, tool
+        assert "keep this" in text, tool
 
 
 def test_use_count_and_last_used_at_most_once_a_minute(world):
@@ -811,3 +911,23 @@ def test_end_to_end_initialize_list_call(world):
     assert not err and "Use Postgres" in text and "Hidden secret plan" not in text
     text, err = _call(key, "get_decision", {"project": a["id"], "number": "D-001"})
     assert not err and "D-001 [decision] Use Postgres" in text.splitlines()
+
+
+def test_inactive_owner_refused_even_if_key_not_revoked(client, switch_on):
+    from app.models import User
+
+    m = login_as(f"ed-{_uid()}@test.local")
+    k = _new_key(m)
+    ping = {"jsonrpc": "2.0", "id": 1, "method": "ping"}
+
+    async def set_active(v):  # straight in the database: the key itself stays unrevoked
+        async with SessionLocal() as s:
+            await s.execute(update(User).where(User.id == m.user_id).values(active=v))
+            await s.commit()
+
+    _run(set_active(False))
+    try:
+        assert _mcp(k["key"], ping).status_code == 401
+    finally:
+        _run(set_active(True))
+    assert _mcp(k["key"], ping).status_code == 200
