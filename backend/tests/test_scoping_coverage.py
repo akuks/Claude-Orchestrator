@@ -19,7 +19,7 @@ from starlette.websockets import WebSocketDisconnect
 from app.database import SessionLocal
 from app.main import app
 from app.models import (
-    ActionApproval, ActionGrant, DecisionProposal, Finding, McpCall, Task, TaskHandoff, TaskQuestion,
+    ActionApproval, ActionGrant, DecisionProposal, EditorKey, Finding, McpCall, Task, TaskHandoff, TaskQuestion,
     WorkflowGateRun,
 )
 from conftest import login_as
@@ -58,6 +58,12 @@ NOT_PROJECT_BOUND = {
     # Personal preferences (phase 8b): always the caller's own list (no user id anywhere).
     ("GET", "/me/preferences"): "the caller's own preferences, never another user's",
     ("PUT", "/me/preferences"): "writes the caller's own preferences only",
+    # Editor keys (phase 8c): always the caller's own keys; a key's projects must be ones the caller can see
+    # (422 otherwise, tested in test_editor_mcp.py). POST /mcp takes an editor key, never a cookie (the
+    # outsider's session gets 401), and answers only for projects the key's owner can see right now.
+    ("GET", "/me/editor-keys"): "the caller's own editor keys (never the key text), no project data",
+    ("POST", "/me/editor-keys"): "creates the caller's own key; projects outside their view are refused (422)",
+    ("POST", "/mcp"): "editor-key endpoint, cookies refused (401); scoped to the key owner's live grants",
     # co-guard policy (Phase 2): org-wide, readable by every person by spec.
     ("GET", "/guard/builtins"): "the static built-in rule table (ids, reasons), no stored data",
     ("GET", "/guard/org-settings"): "org-wide disabled built-ins and dev DB patterns, no project data",
@@ -85,6 +91,8 @@ ADMIN_ONLY = {
     ("PUT", "/admin/org-fallback"),
     ("DELETE", "/admin/org-fallback"),
     ("PUT", "/guard/org-settings"),
+    ("GET", "/admin/editor-keys"),
+    ("DELETE", "/admin/editor-keys/{key_id}"),
 }
 
 # Writes that silently skip ids the caller may not decide: 200 with an empty list.
@@ -214,6 +222,11 @@ def world(client, tmp_path_factory):
         "reason": f"cov-reason-{tag}",
     }))
 
+    # The admin's editor key (phase 8c): the outsider may not turn it off.
+    (editor_key_id,) = _add(EditorKey(
+        user_id=client.get("/auth/me").json()["id"], name=f"cov-key-{tag}", key_hash=uuid.uuid4().hex * 2,
+        prefix="coe_cov0", created_at=now, expires_at=now + timedelta(days=30)))
+
     outsider = login_as(f"cov-out-{tag}@test.local")
     ids = {
         "project_id": pid,
@@ -240,6 +253,7 @@ def world(client, tmp_path_factory):
         "question_id": question_id,
         "proposal_id": proposal_id,
         "number": "1",
+        "key_id": editor_key_id,
     }
     # Strings that must never appear in a list the outsider gets back. Agents,
     # templates and workflows are global by spec, so their ids aren't secret.
@@ -411,6 +425,8 @@ def test_every_project_bound_route_enforces_membership(client, world):
     grants = client.get("/guard/grants", params={"root_id": ids["root_id"]}).json()
     assert [(g["id"], g["revoked_at"]) for g in grants] == [(ids["grant_id"], None)]
     assert out_404(world["outsider"].get("/guard/grants", params={"root_id": ids["root_id"]}))
+    key = next(k for k in client.get("/me/editor-keys").json()["keys"] if k["id"] == ids["key_id"])
+    assert key["revoked_at"] is None
     rules = client.get("/guard/rules", params={"project_id": ids["project_id"]}).json()
     assert [(r["id"], r["enabled"], r["pattern"].startswith("cov-pattern-")) for r in rules] == [
         (ids["rule_id"], True, True)]

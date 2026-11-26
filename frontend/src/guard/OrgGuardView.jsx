@@ -1,7 +1,8 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
-import { Alert, Button, Card, Checkbox, Input, Select, Space, Switch, Tag, Tooltip, Typography, message } from 'antd'
+import { Alert, Button, Card, Checkbox, Input, Popconfirm, Select, Space, Switch, Tag, Tooltip, Typography, message } from 'antd'
 import { LockOutlined, SafetyOutlined } from '@ant-design/icons'
 import { api } from '../api'
+import { day, relTime } from '../components/ConnectEditor'
 import { DEFAULT_TIERS, TIER_OPTIONS, isModelId } from '../agents/tiers'
 import DownloadRules from './DownloadRules'
 import RuleTable from './RuleTable'
@@ -72,10 +73,11 @@ export const GROUND_SWITCHES = [
   ['decisions', 'Decisions', 'Show recorded project decisions to agents before they edit the files they cover.'],
   ['local_first', 'Keep a copy in the project', 'Agents are told to keep the source of anything they publish elsewhere inside the project.'],
   ['personal_prefs', "People's own preferences", "Add each person's own preferences to the tasks they start."],
+  ['editor_connections', 'Editor connections', 'Let people connect their own Claude Code or Cursor to read decisions of projects they can see.'],
 ]
 export const GROUND_EXTRA_MAX = 2000
 const GROUND_DEFAULTS = {
-  grounding: true, short_answers: true, usage_care: true, notes: true, questions: true, decisions: true, local_first: true, personal_prefs: true, extra: '',
+  grounding: true, short_answers: true, usage_care: true, notes: true, questions: true, decisions: true, local_first: true, personal_prefs: true, editor_connections: false, extra: '',
 }
 
 // Ground rules: the standing instructions every run gets. Always saved whole
@@ -106,6 +108,7 @@ export function GroundRulesCard({ canEdit, initial, onSaved }) {
         decisions: !!cfg.decisions,
         local_first: !!cfg.local_first,
         personal_prefs: !!cfg.personal_prefs,
+        editor_connections: !!cfg.editor_connections,
         extra: cfg.extra || '',
       }
       const out = await api.saveGuardOrgSettings({ ground_rules: body })
@@ -164,6 +167,50 @@ export function GroundRulesCard({ canEdit, initial, onSaved }) {
         />
       </Space>
       {error && <Alert type="error" showIcon message={error} data-testid="ground-rules-error" style={{ marginTop: 12 }} />}
+    </Card>
+  )
+}
+
+// Editor keys: everyone's keys for connecting their own editor; an admin can turn any of them off.
+export function EditorKeysCard() {
+  const [rows, setRows] = useState(null)
+  const [error, setError] = useState(null)
+  const load = useCallback(() => api.adminEditorKeys().then(setRows).catch((e) => setError(e.message)), [])
+  useEffect(() => { load() }, [load])
+  const turnOff = async (id) => {
+    setError(null)
+    try {
+      await api.adminRevokeEditorKey(id)
+      await load()
+    } catch (e) {
+      setError(e.message)
+    }
+  }
+  const state = (k) => (k.revoked_at ? 'Turned off' : k.expires_at && new Date(k.expires_at).getTime() < Date.now() ? 'Expired' : 'On')
+  return (
+    <Card className="co-guard-panel" title="Editor keys" size="small" data-testid="editor-keys">
+      {rows && rows.length === 0 && <Typography.Text type="secondary">No editor keys yet.</Typography.Text>}
+      {(rows || []).map((k) => (
+        <div key={k.id} data-testid={`editor-key-${k.id}`} style={{ padding: '6px 0' }}>
+          <Space wrap>
+            <strong>{k.owner_name}</strong>
+            <span>{k.name}</span>
+            <Typography.Text type="secondary">starts with {k.prefix}…</Typography.Text>
+            <Tag>{state(k)}</Tag>
+          </Space>
+          <div>
+            <Typography.Text type="secondary">
+              Last used {relTime(k.last_used_at)} · Expires {day(k.expires_at)}
+            </Typography.Text>
+          </div>
+          {!k.revoked_at && (
+            <Popconfirm title="Turn off this key? Editors using it stop working right away." okText="Turn off" onConfirm={() => turnOff(k.id)}>
+              <Button size="small" danger data-testid={`editor-key-off-${k.id}`}>Turn off</Button>
+            </Popconfirm>
+          )}
+        </div>
+      ))}
+      {error && <Alert type="error" showIcon message={error} data-testid="editor-keys-error" style={{ marginTop: 8 }} />}
     </Card>
   )
 }
@@ -390,6 +437,7 @@ export default function OrgGuardView({ isAdmin = false }) {
         </Space>
       </Card>
       {ground && <GroundRulesCard canEdit={isAdmin} initial={ground} onSaved={setGround} />}
+      {isAdmin && <EditorKeysCard />}
       {tierMap && <ModelTiersCard canEdit={isAdmin} initial={tierMap} onSaved={setTierMap} />}
       {error && <Alert type="error" showIcon message={error} data-testid="org-guard-error" style={{ marginTop: 12 }} />}
     </div>

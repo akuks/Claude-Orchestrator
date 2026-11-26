@@ -29,7 +29,7 @@ port map is in
 - **Tasks and threads:** [Resume and handoff](#resume-and-handoff) ·
   [Token care and questions](#token-care-and-questions) ·
   [Claude plan limits](#claude-plan-limits) · [Ask about this run](#ask-about-this-run)
-- **Memory and decisions:** [Decision memory](#decision-memory) · [Personal preferences](#personal-preferences) ·
+- **Memory and decisions:** [Decision memory](#decision-memory) · [Personal preferences](#personal-preferences) · [Team decisions in your editor](#team-decisions-in-your-editor) ·
   [Suggested decisions](#suggested-decisions) ·
   [Helper tiers and briefs](#helper-tiers-and-briefs)
 - **Workflows:** [Command gates](#command-gates) ·
@@ -212,7 +212,7 @@ any other origin must be added, or live task streams are rejected.
 | `CO_ADMIN_EMAIL` / `CO_ADMIN_PASSWORD` | *(unset)* | Bootstrap first admin (else use the setup screen) |
 | `CO_BIND_HOST` | `127.0.0.1` | Interface `start.sh` binds the backend to (shell or `backend/.env`). Also co-guard's **approval address**: use a literal IP (a hostname is resolved once and must have exactly one address; `0.0.0.0` means loopback). Logged at startup |
 | `CO_BACKEND_PORT` | `8200` | Backend port (`start.sh` reads it from the shell or `backend/.env` and passes it on); the approval address's port |
-| `CO_PUBLIC_URL` | *(unset)* | The UI's public base URL, for links in notifications |
+| `CO_PUBLIC_URL` | *(unset)* | The UI's public base URL, for links in notifications and the editor setup address |
 | `CO_FORWARDED_ALLOW_IPS` | `127.0.0.1` | Reverse-proxy IP(s) trusted for `X-Forwarded-For` (read by `start.sh` from the shell or `backend/.env`; not by the app) |
 | `CO_CORS_ORIGINS` | localhost dev origins (`start.sh` sets it from `CO_FRONTEND_PORT` if unset) | JSON list; CORS **and** WebSocket Origin allowlist |
 | `CO_SESSION_TTL_DAYS` | `7` | Login session lifetime |
@@ -251,6 +251,13 @@ migrations run on start (`alembic upgrade head`; SQLite and Postgres), in order,
 a server that skipped several releases runs each of them in turn. **Take your usual
 database backup first** whenever an entry names a migration. The server must stay a
 single process (no `--workers`, no replicas).
+
+### Editor connections (phase 8c)
+
+- **Migration `0026` runs on start.** It adds the table that holds editor keys. Take your usual database backup
+  first.
+- **Off by default.** Nothing changes until an admin turns on **Editor connections** under Agent guard → Ground
+  rules. See [Team decisions in your editor](#team-decisions-in-your-editor).
 
 ### Personal preferences (phase 8b)
 
@@ -1177,6 +1184,36 @@ server start is marked failed (*interrupted*). Settings (`backend/.env`):
 disallowed tools are really off, are checked on the first live use. Try one
 ask on a real run and look at its answer and cost before you rely on it.
 Live steering of a running session is not part of this phase.
+
+---
+
+## Team decisions in your editor
+
+Let Claude Code or Cursor on your own computer read your team's recorded decisions. It is read-only.
+
+- **Turn it on (admin):** Agent guard → Ground rules, **Editor connections**. It is off by default, because it lets
+  project data leave the server. While it is off, no key can be created and the editor endpoint answers "Editor
+  connections are turned off by an admin."
+- **Create a key:** user menu → **Connect my editor** → New key. Give it a name, choose 30, 90 (default) or 365 days,
+  and choose every project you can see or only some. The key is shown once; copy it then. You can have 5 active
+  keys.
+- **Paste the setup:** the window shows a ready command for Claude Code
+  (`claude mcp add --scope user --transport http team-decisions <address>/mcp --header "Authorization: Bearer <key>"`) and a
+  snippet for Cursor's `mcp.json`. Paste it on your own computer. (`--scope user` makes it work in every folder.)
+  The key is saved in plain text in your editor's settings (and in your shell history for the Claude Code
+  command). If the computer is lost, turn the key off here.
+- **What it can see:** decisions only (active by default; retired or replaced ones on request). No code, task logs or
+  context documents. Only projects you can see right now: if you lose access to a project, the key loses it at once.
+  Secrets are blanked, and the text is marked as information, not instructions.
+- **Turning keys off:** **Turn off** next to a key in the same window; an admin can turn off anyone's key under
+  Agent guard → Editor keys. Disabling a person, an admin resetting their password, or the person changing their
+  own password turns off all their keys.
+  Switching **Editor connections** off stops every key at once (the keys stay listed).
+- **Who can manage keys:** only someone signed in to the app in the browser. API tokens cannot create keys.
+- **Limits:** 60 requests a minute per key, and 20 wrong-key attempts a minute per address.
+- **Reverse proxy:** when the UI and the API are on one address, the proxy must pass `POST /mcp` to the API. Set `CO_PUBLIC_URL` to the address people use, otherwise the
+  setup shows the internal address.
+  Editors send no `Origin` header; a request that has one is refused.
 
 ---
 
@@ -2841,6 +2878,10 @@ are, treat what they show as unconfirmed. Tick them off on your first live runs.
     from one run to the next. ([Workflow templates](#workflow-templates))
 17. **Personal preferences:** whether the installed Claude Code CLI accepts the system prompt from a file, so it no
     longer appears in the start command. ([Personal preferences](#personal-preferences))
+18. **Editor connections:** connect a real Claude Code and a real Cursor with a new key and run each of the four tools
+    (list projects, list decisions, decisions for a path, get a decision). Check that Cursor accepts a decision number
+    given as a number or as "D-003", and that neither editor sends an `Origin` header (the server refuses one).
+    ([Team decisions in your editor](#team-decisions-in-your-editor))
 
 ---
 

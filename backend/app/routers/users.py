@@ -7,6 +7,7 @@ from sqlalchemy.exc import IntegrityError
 
 from .. import auth
 from ..database import SessionLocal
+from ..editor_mcp import keys as editor_keys
 from ..models import User
 from ..schemas import PasswordResetIn, UserBrief, UserCreate, UserOut, UserPatch
 
@@ -96,6 +97,7 @@ async def update_user(user_id: str, body: UserPatch):
         u.active = new_active
         if disabling:
             await auth.revoke_user_sessions(s, u.id)
+            await editor_keys.revoke_user_keys(s, u.id)  # re-enabling never brings old editor keys back
         await s.commit()
         await s.refresh(u)
         return u
@@ -108,6 +110,7 @@ async def reset_password(user_id: str, body: PasswordResetIn):
         u = await _get(s, user_id)
         u.password_hash = auth.hash_password(body.password)
         await auth.revoke_user_sessions(s, u.id)
+        await editor_keys.revoke_user_keys(s, u.id)  # a key minted by whoever had the account goes too
         await s.commit()
 
 

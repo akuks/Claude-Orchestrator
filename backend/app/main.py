@@ -30,6 +30,7 @@ from .routers import (
     context_docs,
     credentials,
     decisions,
+    editor_keys,
     guard,
     health as health_router,
     findings,
@@ -197,6 +198,8 @@ app.include_router(webhooks.router)
 app.include_router(stream.router)
 # co-guard identity check (no auth by design, see the route).
 app.include_router(guard.router)
+# The editor endpoint (phase 8c): its own editor-key check, never a session cookie (routers/editor_keys.py).
+app.include_router(editor_keys.mcp_router)
 
 # Everything else requires a logged-in user or an API token.
 _authed = [Depends(current_principal)]
@@ -229,6 +232,8 @@ for _r in (
     credentials.router,
     credentials.admin_router,
     preferences_router.router,
+    editor_keys.router,
+    editor_keys.admin_router,
     health_router.router,
     guard.api,
 ):

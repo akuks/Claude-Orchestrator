@@ -174,7 +174,10 @@ def test_other_user_cannot_read(client):
         if p.startswith("/me/") or p == "/admin/org-fallback"
     ]
     assert cred_routes
-    assert all("{" not in p for _, p in cred_routes), cred_routes
+    # The one exception names a key, never a person: the handler acts only on the caller's own editor key (another
+    # person's key id is 404, tests/test_editor_mcp.py::test_delete_only_own_key_and_admin_revokes_any).
+    named = {(m, p) for m, p in cred_routes if "{" in p}
+    assert named == {("DELETE", "/me/editor-keys/{key_id}")}, cred_routes
     m = login_as(f"cred-o-{_uid()}@test.local")
     m.put("/me/credentials", json={"github_token": _fake("gh"), "git_name": "Only Mine"})
     other = login_as(f"cred-o2-{_uid()}@test.local")

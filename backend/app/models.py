@@ -1046,3 +1046,25 @@ class OrgSetting(Base):
     value_enc: Mapped[str] = mapped_column(Text)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now, onupdate=_now)
     updated_by: Mapped[str | None] = mapped_column(String(32), nullable=True)
+
+
+class EditorKey(Base):
+    """A person's key for their own editor (phase 8c): read-only access to the decisions of projects they can see,
+    over ``POST /mcp``. Only the sha256 of the key text is stored; ``prefix`` is its first 8 characters (shown).
+    ``projects`` is a list of project ids or None (every project the owner can see); access is always the owner's
+    live grants, intersected with that list."""
+
+    __tablename__ = "editor_keys"
+    __table_args__ = (UniqueConstraint("key_hash", name="uq_editor_keys_key_hash"),)
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=_uuid)
+    user_id: Mapped[str] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    name: Mapped[str] = mapped_column(String(60))
+    key_hash: Mapped[str] = mapped_column(String(64))
+    prefix: Mapped[str] = mapped_column(String(8))
+    projects: Mapped[list | None] = mapped_column(JSON, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    last_used_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    use_count: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
+    revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)

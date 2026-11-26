@@ -10,6 +10,7 @@ from sqlalchemy import func, select
 from .. import auth
 from ..config import settings
 from ..database import SessionLocal
+from ..editor_mcp import keys as editor_keys
 from ..models import AuthSession, User, _now
 from ..schemas import LoginIn, PasswordChangeIn, SetupIn, UserOut
 
@@ -210,5 +211,6 @@ async def change_password(
             raise HTTPException(422, str(e))
         user.password_hash = auth.hash_password(body.new_password)
         await auth.revoke_user_sessions(s, user.id, except_raw=raw)
+        await editor_keys.revoke_user_keys(s, user.id)  # a key someone else minted on this account goes too
         await s.commit()
     return Response(status_code=204)

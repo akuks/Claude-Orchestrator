@@ -127,6 +127,19 @@ def test_invalid_cookie_and_bad_bearer_are_401():
     assert _bearer("").get("/tasks").status_code == 401
 
 
+def test_editor_endpoint_needs_an_editor_key_never_a_cookie(client, member_client):
+    """POST /mcp (phase 8c) is outside the cookie dependency with its own key check: no key, a wrong key or a
+    logged-in session's cookie (with the CSRF header) are all 401; a request from a web page (Origin) is 403."""
+    ping = {"jsonrpc": "2.0", "id": 1, "method": "ping"}
+    assert TestClient(app).post("/mcp", json=ping).status_code == 401
+    assert _bearer("coe_" + "x" * 43).post("/mcp", json=ping).status_code == 401
+    assert _bearer("").post("/mcp", json=ping).status_code == 401
+    for c in (client, member_client):  # cookies only
+        assert c.post("/mcp", json=ping).status_code == 401
+    r = TestClient(app).post("/mcp", json=ping, headers={"Origin": "https://evil.example"})
+    assert r.status_code == 403
+
+
 def test_open_routes_stay_open(anon_client):
     assert anon_client.get("/health").status_code == 200
     assert anon_client.get("/auth/setup-status").status_code == 200

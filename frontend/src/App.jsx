@@ -44,6 +44,7 @@ import SetupPage from './auth/SetupPage'
 import ChangePasswordModal from './auth/ChangePasswordModal'
 import MyCredentials from './components/MyCredentials'
 import MyPreferences from './components/MyPreferences'
+import ConnectEditor from './components/ConnectEditor'
 import { useThemeMode } from './theme/ThemeModeContext.jsx'
 import { interceptHashLinks, redirectIfForbidden, returnTo, useRoute } from './shell/router'
 import { buildCommands, isPaletteShortcut } from './shell/commands'
@@ -133,6 +134,7 @@ function AppInner({ user, onLogout }) {
   const [pwOpen, setPwOpen] = useState(false)
   const [credsOpen, setCredsOpen] = useState(false)
   const [prefsOpen, setPrefsOpen] = useState(false)
+  const [editorOpen, setEditorOpen] = useState(false)
   const [tasks, setTasks] = useState([])
   const [stats, setStats] = useState(null)
   const [loading, setLoading] = useState(false)
@@ -292,6 +294,7 @@ function AppInner({ user, onLogout }) {
           toggleNight: () => setMode(mode === 'night' ? 'light' : 'night'),
           openCredentials: () => setCredsOpen(true),
           openPreferences: () => setPrefsOpen(true),
+          openConnectEditor: () => setEditorOpen(true),
         },
       }),
     [projects, tasks, paletteData, isAdmin, navigate, mode, setMode],
@@ -406,6 +409,7 @@ function AppInner({ user, onLogout }) {
           onOpenPalette={openPalette}
           onOpenCredentials={() => setCredsOpen(true)}
           onOpenPreferences={() => setPrefsOpen(true)}
+          onOpenConnectEditor={() => setEditorOpen(true)}
           onChangePassword={() => setPwOpen(true)}
           onLogout={onLogout}
         />
@@ -550,6 +554,7 @@ function AppInner({ user, onLogout }) {
       />
       <ChangePasswordModal open={pwOpen} onClose={() => setPwOpen(false)} />
       <MyPreferences open={prefsOpen} onClose={() => setPrefsOpen(false)} />
+      <ConnectEditor open={editorOpen} onClose={() => setEditorOpen(false)} />
       <MyCredentials open={credsOpen} onClose={() => setCredsOpen(false)} onChanged={onCredsChanged} />
       <TaskDetail
         currentUser={user}
