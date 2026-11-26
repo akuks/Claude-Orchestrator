@@ -931,3 +931,17 @@ def test_inactive_owner_refused_even_if_key_not_revoked(client, switch_on):
     finally:
         _run(set_active(True))
     assert _mcp(k["key"], ping).status_code == 200
+
+
+def test_own_password_change_turns_off_keys(client, switch_on):
+    ping = {"jsonrpc": "2.0", "id": 1, "method": "ping"}
+    m = login_as(f"ed-{_uid()}@test.local")
+    k = _new_key(m)
+    other = login_as(f"ed-{_uid()}@test.local")
+    ko = _new_key(other)
+    from conftest import ADMIN_PASSWORD
+    r = m.post("/auth/password", json={"current_password": ADMIN_PASSWORD, "new_password": "another-password-456"})
+    assert r.status_code == 204, r.text
+    assert _mcp(k["key"], ping).status_code == 401
+    assert m.get("/me/editor-keys").json()["keys"][0]["revoked_at"] is not None  # the session stays
+    assert _mcp(ko["key"], ping).status_code == 200

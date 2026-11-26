@@ -173,12 +173,8 @@ def ip_blocked(ip: str) -> bool:
 
 
 def _bound(store: dict) -> None:
-    """Keep a limit map at most ``TRACKED_MAX`` entries: drop the ones with nothing in the window, then (an
-    attacker rotating addresses) the oldest-added."""
-    if len(store) < TRACKED_MAX:
-        return
-    for k in list(store):
-        _recent(store, k)
+    """Keep a limit map under ``TRACKED_MAX`` entries before a new one is added: drop the oldest-added entries
+    (O(1) each, no scan; an attacker rotating addresses only pushes out the oldest)."""
     while len(store) >= TRACKED_MAX:
         store.pop(next(iter(store)))
 
