@@ -212,7 +212,7 @@ any other origin must be added, or live task streams are rejected.
 | `CO_ADMIN_EMAIL` / `CO_ADMIN_PASSWORD` | *(unset)* | Bootstrap first admin (else use the setup screen) |
 | `CO_BIND_HOST` | `127.0.0.1` | Interface `start.sh` binds the backend to (shell or `backend/.env`). Also co-guard's **approval address**: use a literal IP (a hostname is resolved once and must have exactly one address; `0.0.0.0` means loopback). Logged at startup |
 | `CO_BACKEND_PORT` | `8200` | Backend port (`start.sh` reads it from the shell or `backend/.env` and passes it on); the approval address's port |
-| `CO_PUBLIC_URL` | *(unset)* | The UI's public base URL, for links in notifications |
+| `CO_PUBLIC_URL` | *(unset)* | The UI's public base URL, for links in notifications and the editor setup address |
 | `CO_FORWARDED_ALLOW_IPS` | `127.0.0.1` | Reverse-proxy IP(s) trusted for `X-Forwarded-For` (read by `start.sh` from the shell or `backend/.env`; not by the app) |
 | `CO_CORS_ORIGINS` | localhost dev origins (`start.sh` sets it from `CO_FRONTEND_PORT` if unset) | JSON list; CORS **and** WebSocket Origin allowlist |
 | `CO_SESSION_TTL_DAYS` | `7` | Login session lifetime |
@@ -1198,17 +1198,21 @@ Let Claude Code or Cursor on your own computer read your team's recorded decisio
   and choose every project you can see or only some. The key is shown once; copy it then. You can have 5 active
   keys.
 - **Paste the setup:** the window shows a ready command for Claude Code
-  (`claude mcp add --transport http team-decisions <address>/mcp --header "Authorization: Bearer <key>"`) and a
-  snippet for Cursor's `mcp.json`. Paste it on your own computer.
+  (`claude mcp add --scope user --transport http team-decisions <address>/mcp --header "Authorization: Bearer <key>"`) and a
+  snippet for Cursor's `mcp.json`. Paste it on your own computer. (`--scope user` makes it work in every folder.)
+  The key is saved in plain text in your editor's settings (and in your shell history for the Claude Code
+  command). If the computer is lost, turn the key off here.
 - **What it can see:** decisions only (active by default; retired or replaced ones on request). No code, task logs or
   context documents. Only projects you can see right now: if you lose access to a project, the key loses it at once.
   Secrets are blanked, and the text is marked as information, not instructions.
 - **Turning keys off:** **Turn off** next to a key in the same window; an admin can turn off anyone's key under
-  Agent guard → Editor keys. Disabling a person, or an admin resetting their password, turns off all their keys.
+  Agent guard → Editor keys. Disabling a person, an admin resetting their password, or the person changing their
+  own password turns off all their keys.
   Switching **Editor connections** off stops every key at once (the keys stay listed).
 - **Who can manage keys:** only someone signed in to the app in the browser. API tokens cannot create keys.
 - **Limits:** 60 requests a minute per key, and 20 wrong-key attempts a minute per address.
-- **Reverse proxy:** when the UI and the API are on one address, the proxy must pass `POST /mcp` to the API.
+- **Reverse proxy:** when the UI and the API are on one address, the proxy must pass `POST /mcp` to the API. Set `CO_PUBLIC_URL` to the address people use, otherwise the
+  setup shows the internal address.
   Editors send no `Origin` header; a request that has one is refused.
 
 ---

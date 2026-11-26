@@ -75,7 +75,7 @@ describe('ConnectEditor', () => {
     expect(api.createEditorKey).toHaveBeenCalledWith({ name: 'N', days: 90 })
     expect(q('ce-key').value).toBe(KEY)
     expect(document.body.textContent).toContain("You won't see this key again.")
-    expect(q('ce-claude').textContent).toBe(`claude mcp add --transport http team-decisions https://co.example/mcp --header "Authorization: Bearer ${KEY}"`)
+    expect(q('ce-claude').textContent).toBe(`claude mcp add --scope user --transport http team-decisions https://co.example/mcp --header "Authorization: Bearer ${KEY}"`)
     await view.rerender(el(false))
     await flush()
     expect(document.body.textContent).not.toContain(KEY)
@@ -84,6 +84,19 @@ describe('ConnectEditor', () => {
     await flush()
     expect(document.body.textContent).not.toContain(KEY)
     expect(q('ce-created')).toBeNull()
+  })
+
+  it('says Copied, or that copying failed, without logging the key', async () => {
+    await mount()
+    await type(q('ce-name'), 'N')
+    await click(q('ce-create'))
+    await flush()
+    Object.assign(navigator, { clipboard: { writeText: vi.fn(async () => {}) } })
+    await click(q('ce-copy'))
+    expect(q('ce-copy-note').textContent).toBe('Copied')
+    navigator.clipboard.writeText = vi.fn(async () => { throw new Error('denied') })
+    await click(q('ce-copy'))
+    expect(q('ce-copy-note').textContent).toContain("Couldn't copy")
   })
 
   it('shows the server message plainly when creating fails', async () => {

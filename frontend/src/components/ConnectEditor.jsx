@@ -18,12 +18,13 @@ export function relTime(iso, now = Date.now()) {
 export const day = (iso) => (iso ? String(iso).slice(0, 10) : '')
 
 export const claudeCodeCommand = (url, key) =>
-  `claude mcp add --transport http team-decisions ${url}/mcp --header "Authorization: Bearer ${key}"`
+  `claude mcp add --scope user --transport http team-decisions ${url}/mcp --header "Authorization: Bearer ${key}"`
 export const cursorSnippet = (url, key) =>
   JSON.stringify({ mcpServers: { 'team-decisions': { url: `${url}/mcp`, headers: { Authorization: `Bearer ${key}` } } } }, null, 2)
 
-const copy = (text) => {
-  try { navigator.clipboard?.writeText(text) } catch { /* the text can still be selected by hand */ }
+const copyText = async (text) => {
+  if (!navigator.clipboard?.writeText) throw new Error('no clipboard')
+  await navigator.clipboard.writeText(text)
 }
 
 // "Connect my editor": personal read-only keys for Claude Code or Cursor on the person's own computer.
@@ -38,6 +39,16 @@ export default function ConnectEditor({ open, onClose }) {
   const [creating, setCreating] = useState(false)
   const [created, setCreated] = useState(null) // holds the key text; cleared when the modal closes
   const [error, setError] = useState(null)
+  const [copyNote, setCopyNote] = useState(null)
+
+  const copy = async (text) => {
+    try {
+      await copyText(text)
+      setCopyNote('Copied')
+    } catch {
+      setCopyNote("Couldn't copy — select the key and copy it yourself.")
+    }
+  }
 
   const reload = useCallback(async () => {
     const r = await api.myEditorKeys()
@@ -47,6 +58,7 @@ export default function ConnectEditor({ open, onClose }) {
   useEffect(() => {
     if (!open) {
       setCreated(null)
+      setCopyNote(null)
       setName('')
       setError(null)
       return
@@ -146,6 +158,7 @@ export default function ConnectEditor({ open, onClose }) {
                   <Input readOnly value={created.key} data-testid="ce-key" aria-label="Your new key" />
                   <Button icon={<CopyOutlined />} onClick={() => copy(created.key)} data-testid="ce-copy">Copy</Button>
                 </Space.Compact>
+                {copyNote && <Text data-testid="ce-copy-note">{copyNote}</Text>}
                 <Text type="warning">You won't see this key again.</Text>
                 <Tabs
                   size="small"
